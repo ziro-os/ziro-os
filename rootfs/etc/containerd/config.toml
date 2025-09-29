@@ -1,0 +1,20 @@
+# Ziro-OS containerd configuration
+
+version = 2
+
+[plugins]
+  [plugins."io.containerd.grpc.v1.cri"]
+    sandbox_image = "registry.k8s.io/pause:3.9"
+    
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      snapshotter = "overlayfs"
+      
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+          
+  [plugins."io.containerd.snapshotter.v1.overlayfs"]
+    root_path = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
