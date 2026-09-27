@@ -17,6 +17,9 @@
 #include <sys/stat.h>
 #include <sys/reboot.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <dirent.h>
 
 #define BANNER \
     "\n" \
@@ -114,7 +117,9 @@ static void init_hostname(void) {
 }
 
 static void init_network(void) {
-    printf("[init] configuring loopback networking...\n");
+    printf("[init] configuring networking (lo & ethernet interfaces)...\n");
+
+    // 1. Bring up loopback interface
     pid_t pid = fork();
     if (pid == 0) {
         if (access("/bin/ip", X_OK) == 0 || access("/sbin/ip", X_OK) == 0) {
@@ -131,6 +136,70 @@ static void init_network(void) {
     } else if (pid > 0) {
         int status;
         waitpid(pid, &status, 0);
+    }
+
+    // 2. Discover physical / virtual network interfaces in /sys/class/net
+    DIR *d = opendir("/sys/class/net");
+    if (d) {
+        struct dirent *dir;
+        while ((dir = readdir(d)) != NULL) {
+            if (dir->d_name[0] == '.' || strcmp(dir->d_name, "lo") == 0) {
+                continue;
+            }
+
+            // Only configure Ethernet interfaces (ARPHRD_ETHER = 1)
+            char type_path[320];
+            snprintf(type_path, sizeof(type_path), "/sys/class/net/%s/type", dir->d_name);
+            FILE *tf = fopen(type_path, "r");
+            if (tf) {
+                int if_type = 0;
+                if (fscanf(tf, "%d", &if_type) == 1 && if_type != 1) {
+                    fclose(tf);
+                    continue; // Skip non-ethernet devices (e.g. sit0, tun, dummy)
+                }
+                fclose(tf);
+            }
+
+            printf("[init] configuring network interface: %s\n", dir->d_name);
+
+            // Bring interface link up
+            pid = fork();
+            if (pid == 0) {
+                char *bin = access("/bin/ip", X_OK) == 0 ? "/bin/ip" : "/sbin/ip";
+                char *argv[] = {"ip", "link", "set", dir->d_name, "up", NULL};
+                execv(bin, argv);
+                _exit(1);
+            } else if (pid > 0) {
+                int status;
+                waitpid(pid, &status, 0);
+            }
+
+            // Launch background udhcpc for DHCP auto-configuration
+            pid = fork();
+            if (pid == 0) {
+                char log_path[320];
+                snprintf(log_path, sizeof(log_path), "/var/log/udhcpc.%s.log", dir->d_name);
+                int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (log_fd >= 0) {
+                    dup2(log_fd, STDOUT_FILENO);
+                    dup2(log_fd, STDERR_FILENO);
+                    close(log_fd);
+                }
+                char *udhcpc_bin = access("/bin/udhcpc", X_OK) == 0 ? "/bin/udhcpc" : "/sbin/udhcpc";
+                char pidfile[300];
+                snprintf(pidfile, sizeof(pidfile), "/run/udhcpc.%s.pid", dir->d_name);
+                char *argv[] = {
+                    "udhcpc", "-b", "-i", dir->d_name,
+                    "-s", "/usr/share/udhcpc/default.script",
+                    "-p", pidfile, NULL
+                };
+                execv(udhcpc_bin, argv);
+                _exit(1);
+            } else if (pid > 0) {
+                printf("[init] started background udhcpc for %s (PID: %d)\n", dir->d_name, pid);
+            }
+        }
+        closedir(d);
     }
 }
 
@@ -201,6 +270,37 @@ static void spawn_shell(void) {
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
+
+        // Detect active console device if available in sysfs
+        char dev_path[64] = "/dev/console";
+        FILE *f = fopen("/sys/class/tty/console/active", "r");
+        if (f) {
+            char active_tty[32];
+            if (fgets(active_tty, sizeof(active_tty), f)) {
+                char *p = active_tty;
+                while (*p && *p != ' ' && *p != '\n' && *p != '\r') p++;
+                *p = '\0';
+                if (strlen(active_tty) > 0) {
+                    snprintf(dev_path, sizeof(dev_path), "/dev/%s", active_tty);
+                }
+            }
+            fclose(f);
+        }
+
+        int fd = open(dev_path, O_RDWR);
+        if (fd < 0) {
+            fd = open("/dev/console", O_RDWR);
+        }
+        if (fd >= 0) {
+            dup2(fd, STDIN_FILENO);
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            if (fd > 2) close(fd);
+
+            ioctl(STDIN_FILENO, TIOCSCTTY, 1);
+            tcsetpgrp(STDIN_FILENO, getpid());
+        }
+
         setenv("TERM", "linux", 1);
         setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/sbin:/opt/cni/bin", 1);
         setenv("HOME", "/root", 1);

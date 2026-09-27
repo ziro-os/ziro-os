@@ -55,7 +55,12 @@ setup_layout() {
     # Copy tracked etc configuration skeleton
     cp -r "$REPO_ROOT/rootfs/etc/"* "$target/etc/"
     
-    # Initialize package manager database & architecture
+    # Copy tracked usr skeleton (e.g. udhcpc default script)
+    if [ -d "$REPO_ROOT/rootfs/usr" ]; then
+        mkdir -p "$target/usr"
+        cp -r "$REPO_ROOT/rootfs/usr/"* "$target/usr/"
+        chmod +x "$target/usr/share/udhcpc/default.script" 2>/dev/null || true
+    fi
     mkdir -p "$target/lib/apk/db" "$target/etc/apk"
     touch "$target/lib/apk/db/installed"
     touch "$target/etc/apk/world"
@@ -193,7 +198,7 @@ echo "✅ Minimal Base Rootfs archive: $MINIMAL_TAR ($MINIMAL_SIZE)"
 # --- 5. Install Musl-Native Container Runtime for Host OS ---
 echo "--- [5/5] Installing musl-native containerd, runc, and CNI plugins for Host OS ---"
 docker run --rm --platform "$DOCKER_PLATFORM" -v "$ROOTFS_FULL:/rootfs" alpine:latest sh -c '
-    apk --root /rootfs --initdb add --no-cache containerd runc cni-plugins
+    apk --root /rootfs --initdb add --no-cache ca-certificates containerd containerd-ctr runc cni-plugins
     mkdir -p /rootfs/opt/cni/bin
     if [ -d /rootfs/usr/libexec/cni ]; then
         cp -r /rootfs/usr/libexec/cni/* /rootfs/opt/cni/bin/ 2>/dev/null || true

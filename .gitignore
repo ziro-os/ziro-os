@@ -27,7 +27,8 @@ init/ziro-init-*
 /rootfs/bin/
 /rootfs/sbin/
 /rootfs/lib/
-/rootfs/usr/
+/rootfs/usr/*
+!/rootfs/usr/share
 /rootfs/opt/
 /rootfs/etc/init
 
