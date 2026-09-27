@@ -65,7 +65,7 @@ setup_layout() {
         cp -r "$REPO_ROOT/rootfs/usr/"* "$target/usr/"
         chmod +x "$target/usr/share/udhcpc/default.script" 2>/dev/null || true
     fi
-    mkdir -p "$target/lib/apk/db" "$target/etc/apk"
+    mkdir -p "$target/lib/apk/db" "$target/etc/apk/keys"
     touch "$target/lib/apk/db/installed"
     touch "$target/etc/apk/world"
     local apk_arch="x86_64"
@@ -73,6 +73,15 @@ setup_layout() {
         apk_arch="aarch64"
     fi
     echo "$apk_arch" > "$target/etc/apk/arch"
+
+    # Copy trusted Alpine signing keys and repository list
+    docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" alpine:latest sh -c '
+        mkdir -p /rootfs/etc/apk/keys
+        cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
+        if [ ! -f /rootfs/etc/apk/repositories ]; then
+            cp /etc/apk/repositories /rootfs/etc/apk/repositories 2>/dev/null || true
+        fi
+    '
 
     # Ensure TLS certificates exist for HTTPS package downloads
     mkdir -p "$target/etc/ssl/certs"
@@ -196,19 +205,42 @@ echo "✓ ziro-init supervisor installed"
 # --- 4. Package Minimal Docker Base Rootfs (< 10MB) ---
 echo "--- [4/5] Packaging Minimal Docker Base Rootfs ---"
 MINIMAL_TAR="$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz"
-(
-    cd "$ROOTFS_MINIMAL"
-    tar --exclude='./dev/*' -czf "$MINIMAL_TAR" .
-)
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+docker run --rm --platform "$DOCKER_PLATFORM" \
+    -v "$ROOTFS_MINIMAL:/rootfs" \
+    -v "$BUILD_DIR:/out" \
+    alpine:latest sh -c "
+        cd /rootfs
+        tar --exclude='./dev/*' -czf /out/ziro-rootfs-$TARGET_ARCH.tar.gz .
+        chown $HOST_UID:$HOST_GID /out/ziro-rootfs-$TARGET_ARCH.tar.gz
+        chmod 644 /out/ziro-rootfs-$TARGET_ARCH.tar.gz
+        chmod -R a+rX /rootfs 2>/dev/null || true
+    "
 MINIMAL_SIZE=$(du -h "$MINIMAL_TAR" | cut -f1)
 echo "✅ Minimal Base Rootfs archive: $MINIMAL_TAR ($MINIMAL_SIZE)"
 
 # --- 5. Install Musl-Native Container Runtime, SSH, and System Utilities for Host OS ---
 echo "--- [5/5] Installing musl-native containerd, nerdctl, runc, CNI plugins, and OpenSSH ---"
 docker run --rm --platform "$DOCKER_PLATFORM" -v "$ROOTFS_FULL:/rootfs" alpine:latest sh -c '
-    apk --root /rootfs --initdb add --no-cache \
+    mkdir -p /rootfs/etc/apk/keys
+    cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
+    if [ ! -f /rootfs/etc/apk/repositories ]; then
+        cp /etc/apk/repositories /rootfs/etc/apk/repositories 2>/dev/null || true
+    fi
+
+    apk --root /rootfs --initdb \
+        --keys-dir /etc/apk/keys \
+        --repositories-file /etc/apk/repositories \
+        --allow-untrusted \
+        add --no-cache \
         ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
         iptables iptables-legacy openssh-server openssh-client linux-pam
+
+    # Retain official keys and repositories inside rootfs for ziropkg
+    cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
+    cp /etc/apk/repositories /rootfs/etc/apk/repositories 2>/dev/null || true
+
     mkdir -p /rootfs/opt/cni/bin /rootfs/var/empty /rootfs/run/sshd /rootfs/etc/ssh
     chmod 0700 /rootfs/var/empty
     if [ -d /rootfs/usr/libexec/cni ]; then
@@ -251,12 +283,21 @@ if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
     exit 1
 fi
 
-# Package Full Host OS Initramfs
+# Package Full Host OS Initramfs via Docker container (runs as root, eliminating permission denied errors on /var/empty or lock files)
+echo "Packaging Full Container OS Initramfs via Docker container..."
 FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"
-(
-    cd "$ROOTFS_FULL"
-    find . | cpio -o -H newc | gzip -9 > "$FULL_INITRAMFS"
-)
+docker run --rm --platform "$DOCKER_PLATFORM" \
+    -v "$ROOTFS_FULL:/rootfs" \
+    -v "$BUILD_DIR:/out" \
+    alpine:latest sh -c "
+        rm -f /rootfs/lib/apk/db/lock /rootfs/var/run/*.pid /rootfs/run/*.pid
+        for f in /rootfs/usr/lib/xtables/*.so; do [ -e "$f" ] || rm -f "$f"; done
+        cd /rootfs
+        find . | cpio -o -H newc | gzip -9 > /out/ziro-initramfs-$TARGET_ARCH.cpio.gz
+        chown $HOST_UID:$HOST_GID /out/ziro-initramfs-$TARGET_ARCH.cpio.gz
+        chmod 644 /out/ziro-initramfs-$TARGET_ARCH.cpio.gz
+        chmod -R a+rX /rootfs 2>/dev/null || true
+    "
 INITRAMFS_SIZE=$(du -h "$FULL_INITRAMFS" | cut -f1)
 echo "✅ Full Container OS Initramfs: $FULL_INITRAMFS ($INITRAMFS_SIZE)"
 

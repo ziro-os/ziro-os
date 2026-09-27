@@ -192,7 +192,9 @@ static void init_cgroups(void) {
                 while (token) {
                     char enable_cmd[64];
                     snprintf(enable_cmd, sizeof(enable_cmd), "+%s", token);
-                    write(fd_subtree, enable_cmd, strlen(enable_cmd));
+                    if (write(fd_subtree, enable_cmd, strlen(enable_cmd)) < 0) {
+                        // ignore controller enable errors
+                    }
                     token = strtok(NULL, " \n");
                 }
                 close(fd_subtree);
@@ -211,7 +213,9 @@ static void init_hostname(void) {
         }
         fclose(f);
     }
-    sethostname(hostname, strlen(hostname));
+    if (sethostname(hostname, strlen(hostname)) != 0) {
+        // ignore if not permitted
+    }
     printf("[init] hostname set to: %s\n", hostname);
 }
 
@@ -349,12 +353,16 @@ static void start_sshd(void) {
 
     safe_mkdir("/var/empty", 0700);
     chmod("/var/empty", 0700);
-    chown("/var/empty", 0, 0);
+    if (chown("/var/empty", 0, 0) != 0) {
+        // ignore if not running as root
+    }
     safe_mkdir("/run/sshd", 0755);
     safe_mkdir("/etc/ssh", 0755);
     safe_mkdir("/root/.ssh", 0700);
     chmod("/root/.ssh", 0700);
-    chown("/root/.ssh", 0, 0);
+    if (chown("/root/.ssh", 0, 0) != 0) {
+        // ignore if not running as root
+    }
 
     // Auto-generate host keys if not present
     if (access("/etc/ssh/ssh_host_ed25519_key", F_OK) != 0) {
@@ -457,7 +465,9 @@ static void spawn_shell(void) {
         setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
         setenv("HOME", "/root", 1);
         setenv("USER", "root", 1);
-        chdir("/root");
+        if (chdir("/root") != 0) {
+            // ignore
+        }
 
         if (access("/bin/sh", X_OK) == 0) {
             char *argv[] = {"sh", NULL};
@@ -498,6 +508,8 @@ static void perform_shutdown(int is_reboot) {
 }
 
 int main(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
     if (getpid() != 1) {
         fprintf(stderr, "ziro-init: must be run as PID 1\n");
         return 1;
