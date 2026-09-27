@@ -59,58 +59,72 @@ static void safe_mkdir(const char *dir, mode_t mode) {
 }
 
 static void check_and_switch_root(void) {
-    struct statfs st;
-    if (statfs("/", &st) == 0 && (unsigned long)st.f_type == RAMFS_MAGIC) {
-        printf("[init] detected ramfs initramfs (pivot_root unsupported for OCI containers)\n");
-        printf("[init] migrating root filesystem to high-performance tmpfs...\n");
-
-        // 1. Mount devtmpfs on /dev first so we have /dev/console and /dev/null
-        safe_mkdir("/dev", 0755);
-        mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
-
-        // 2. Create /sysroot and mount tmpfs
-        safe_mkdir("/sysroot", 0755);
-        if (mount("tmpfs", "/sysroot", "tmpfs", 0, "mode=0755,size=100%") < 0) {
-            fprintf(stderr, "[init] failed to mount tmpfs on /sysroot: %s\n", strerror(errno));
-            return;
-        }
-
-        // 3. Copy rootfs contents into /sysroot
-        printf("[init] copying system files to tmpfs...\n");
-        pid_t cpid = fork();
-        if (cpid == 0) {
-            char *argv[] = {
-                "/bin/sh", "-c",
-                "for d in bin sbin etc home lib lib64 opt root usr var; do "
-                "  if [ -e \"/$d\" ]; then cp -a \"/$d\" /sysroot/ 2>/dev/null || true; fi; "
-                "done; "
-                "mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/run /sysroot/tmp /sysroot/mnt; "
-                "chmod 1777 /sysroot/tmp; "
-                "chmod 0700 /sysroot/root; "
-                "mknod -m 600 /sysroot/dev/console c 5 1 2>/dev/null || true; "
-                "mknod -m 666 /sysroot/dev/null c 1 3 2>/dev/null || true",
-                NULL
-            };
-            execv("/bin/sh", argv);
-            _exit(1);
-        } else if (cpid > 0) {
-            int status;
-            waitpid(cpid, &status, 0);
-        }
-
-        // Ensure device nodes exist in sysroot
-        safe_mkdir("/sysroot/dev", 0755);
-        mknod("/sysroot/dev/console", S_IFCHR | 0600, makedev(5, 1));
-        mknod("/sysroot/dev/null", S_IFCHR | 0666, makedev(1, 3));
-
-        // 4. Unmount /dev on old root before switch_root
-        umount("/dev");
-
-        printf("[init] performing switch_root to tmpfs...\n");
-        execl("/bin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
-        execl("/sbin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
-        fprintf(stderr, "[init] failed to switch_root: %s\n", strerror(errno));
+    if (access("/etc/.ziro_switched", F_OK) == 0) {
+        return; // Already running on tmpfs!
     }
+
+    struct statfs st;
+    memset(&st, 0, sizeof(st));
+    statfs("/", &st);
+    unsigned long ftype = (unsigned long)st.f_type & 0xffffffffUL;
+
+    // Skip switch if already running on a persistent filesystem (ext4, xfs, btrfs, overlayfs)
+    if (ftype == 0xef53UL || ftype == 0x58465342UL || ftype == 0x9123683eUL || ftype == 0x794c7630UL) {
+        printf("[init] root fs is persistent (0x%lx); skipping switch_root\n", ftype);
+        return;
+    }
+
+    printf("[init] migrating initramfs root to high-performance tmpfs...\n");
+
+    // 1. Mount devtmpfs on /dev first so we have /dev/console and /dev/null
+    safe_mkdir("/dev", 0755);
+    mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+
+    // 2. Create /sysroot and mount tmpfs
+    safe_mkdir("/sysroot", 0755);
+    if (mount("tmpfs", "/sysroot", "tmpfs", 0, "mode=0755,size=100%") < 0) {
+        fprintf(stderr, "[init] failed to mount tmpfs on /sysroot: %s\n", strerror(errno));
+        return;
+    }
+
+    // 3. Copy rootfs contents into /sysroot
+    printf("[init] copying system files to tmpfs...\n");
+    pid_t cpid = fork();
+    if (cpid == 0) {
+        char *argv[] = {
+            "/bin/sh", "-c",
+            "for d in bin sbin etc home lib lib64 opt root usr var; do "
+            "  if [ -e \"/$d\" ]; then cp -a \"/$d\" /sysroot/ 2>/dev/null || true; fi; "
+            "done; "
+            "mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/run /sysroot/tmp /sysroot/mnt; "
+            "chmod 1777 /sysroot/tmp; "
+            "chmod 0700 /sysroot/root; "
+            "touch /sysroot/etc/.ziro_switched; "
+            "mknod -m 600 /sysroot/dev/console c 5 1 2>/dev/null || true; "
+            "mknod -m 666 /sysroot/dev/null c 1 3 2>/dev/null || true",
+            NULL
+        };
+        execv("/bin/sh", argv);
+        _exit(1);
+    } else if (cpid > 0) {
+        int status;
+        waitpid(cpid, &status, 0);
+    }
+
+    // Ensure marker and device nodes exist in sysroot
+    safe_mkdir("/sysroot/dev", 0755);
+    mknod("/sysroot/dev/console", S_IFCHR | 0600, makedev(5, 1));
+    mknod("/sysroot/dev/null", S_IFCHR | 0666, makedev(1, 3));
+    int fd = open("/sysroot/etc/.ziro_switched", O_WRONLY | O_CREAT, 0644);
+    if (fd >= 0) close(fd);
+
+    // 4. Unmount /dev on old root before switch_root
+    umount("/dev");
+
+    printf("[init] performing switch_root to tmpfs...\n");
+    execl("/bin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
+    execl("/sbin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
+    fprintf(stderr, "[init] failed to switch_root: %s\n", strerror(errno));
 }
 
 static void mount_essential(const char *source, const char *target, const char *type, unsigned long flags, const void *data) {
@@ -127,11 +141,11 @@ static void mount_essential(const char *source, const char *target, const char *
 static void init_filesystems(void) {
     printf("[init] initializing virtual filesystems...\n");
 
-    // Ensure root mount propagation is shared for OCI container runtimes
-    if (mount(NULL, "/", NULL, MS_REC | MS_SHARED, NULL) < 0) {
-        mount(NULL, "/", NULL, MS_SHARED, NULL);
+    // Make root mount private recursively so runc pivot_root succeeds
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) {
+        mount(NULL, "/", NULL, MS_PRIVATE, NULL);
     }
-    printf("[init] marked root mount as shared (MS_SHARED)\n");
+    printf("[init] marked root mount as private (MS_PRIVATE for OCI pivot_root)\n");
 
     mount_essential("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
     mount_essential("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
