@@ -300,8 +300,13 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         for f in /rootfs/usr/lib/xtables/*.so; do
             [ -e "$f" ] || rm -f "$f"
         done
+        apk add --no-cache pigz >/dev/null 2>&1 || true
         cd /rootfs
-        find . | cpio -o -H newc | gzip -9 > "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+        if command -v pigz >/dev/null 2>&1; then
+            find . | cpio -o -H newc | pigz > "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+        else
+            find . | cpio -o -H newc | gzip > "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+        fi
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
         chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
         chmod -R a+rX /rootfs 2>/dev/null || true

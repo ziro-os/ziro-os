@@ -39,14 +39,8 @@ mkdir -p "$ISO_STAGING/boot/grub"
 # Verify kernel
 KERNEL_FILE="$BUILD_DIR/vmlinuz-$TARGET_ARCH"
 if [ ! -f "$KERNEL_FILE" ]; then
-    # Fallback to kernel/bzImage if matching
-    if [ -f "$REPO_ROOT/kernel/bzImage" ] && [ "$TARGET_ARCH" = "arm64" ]; then
-        KERNEL_FILE="$REPO_ROOT/kernel/bzImage"
-    else
-        echo "❌ Kernel image not found at $KERNEL_FILE"
-        echo "Build kernel first with: make kernel TARGET_ARCH=$TARGET_ARCH"
-        exit 1
-    fi
+    echo "Kernel not found at $KERNEL_FILE. Auto-provisioning kernel for $TARGET_ARCH..."
+    "$REPO_ROOT/kernel/build-kernel.sh" "$TARGET_ARCH"
 fi
 
 # Verify initramfs

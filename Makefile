@@ -87,7 +87,7 @@ kernel:
 	@./kernel/build-kernel.sh $(ARCH_NORMALIZED)
 
 # --- Virtualization & ISO ---
-image-iso: rootfs
+image-iso: kernel rootfs
 	@echo "Building bootable hybrid ISO..."
 	@./images/iso/build-iso.sh $(ARCH_NORMALIZED)
 

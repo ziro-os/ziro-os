@@ -62,10 +62,13 @@ jobs:
       with:
         fetch-depth: 0
       
-    - name: Run GitLeaks
-      uses: gitleaks/gitleaks-action@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Install and Run GitLeaks (Open Source)
+      run: |
+        GITLEAKS_VERSION="8.18.4"
+        echo "Installing Gitleaks v${GITLEAKS_VERSION}..."
+        curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
+        gitleaks version
+        gitleaks detect --verbose --redact
 
   code-security:
     name: Code Security Analysis
