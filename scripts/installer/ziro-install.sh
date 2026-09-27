@@ -696,8 +696,12 @@ EOF
         fi
     fi
 
-    # Install dedicated reboot, poweroff, and halt control scripts
-    mkdir -p "$TARGET_MNT/sbin"
+    # Install dedicated reboot, poweroff, halt, and shutdown control scripts
+    mkdir -p "$TARGET_MNT/sbin" "$TARGET_MNT/bin" "$TARGET_MNT/usr/bin"
+    rm -f "$TARGET_MNT/sbin/reboot" "$TARGET_MNT/sbin/poweroff" "$TARGET_MNT/sbin/halt" "$TARGET_MNT/sbin/shutdown"
+    rm -f "$TARGET_MNT/bin/reboot" "$TARGET_MNT/bin/poweroff" "$TARGET_MNT/bin/halt" "$TARGET_MNT/bin/shutdown"
+    rm -f "$TARGET_MNT/usr/bin/reboot" "$TARGET_MNT/usr/bin/poweroff" "$TARGET_MNT/usr/bin/shutdown"
+
     cat > "$TARGET_MNT/sbin/reboot" << 'EOF'
 #!/bin/sh
 sync
@@ -713,12 +717,36 @@ EOF
 sync
 kill -USR1 1 2>/dev/null || busybox halt -f
 EOF
-    chmod 755 "$TARGET_MNT/sbin/reboot" "$TARGET_MNT/sbin/poweroff" "$TARGET_MNT/sbin/halt"
+    cat > "$TARGET_MNT/sbin/shutdown" << 'EOF'
+#!/bin/sh
+case "$1" in
+    -r|--reboot|reboot) exec /sbin/reboot ;;
+    *) exec /sbin/poweroff ;;
+esac
+EOF
+    chmod 755 "$TARGET_MNT/sbin/reboot" "$TARGET_MNT/sbin/poweroff" "$TARGET_MNT/sbin/halt" "$TARGET_MNT/sbin/shutdown"
+    cp -f "$TARGET_MNT/sbin/reboot" "$TARGET_MNT/bin/reboot" 2>/dev/null || true
+    cp -f "$TARGET_MNT/sbin/reboot" "$TARGET_MNT/usr/bin/reboot" 2>/dev/null || true
+    cp -f "$TARGET_MNT/sbin/poweroff" "$TARGET_MNT/bin/poweroff" 2>/dev/null || true
+    cp -f "$TARGET_MNT/sbin/poweroff" "$TARGET_MNT/usr/bin/poweroff" 2>/dev/null || true
+    cp -f "$TARGET_MNT/sbin/halt" "$TARGET_MNT/bin/halt" 2>/dev/null || true
+    cp -f "$TARGET_MNT/sbin/shutdown" "$TARGET_MNT/bin/shutdown" 2>/dev/null || true
+    cp -f "$TARGET_MNT/sbin/shutdown" "$TARGET_MNT/usr/bin/shutdown" 2>/dev/null || true
 
-    # Also make them available in the live system immediately
+    # Verify and restore authentic BusyBox binary on target installation
+    if [ ! -f "$TARGET_MNT/bin/busybox" ] || [ -L "$TARGET_MNT/bin/busybox" ] || [ $(wc -c < "$TARGET_MNT/bin/busybox") -lt 100000 ]; then
+        echo "Restoring authentic BusyBox binary on target disk..."
+        if [ -f /bin/busybox ] && [ ! -L /bin/busybox ] && [ $(wc -c < /bin/busybox) -gt 100000 ]; then
+            cp -f /bin/busybox "$TARGET_MNT/bin/busybox"
+        fi
+    fi
+
+    # Also make control scripts available in live system immediately without clobbering symlinks
+    rm -f /sbin/reboot /sbin/poweroff /sbin/halt /sbin/shutdown
     cp "$TARGET_MNT/sbin/reboot" /sbin/reboot 2>/dev/null || true
     cp "$TARGET_MNT/sbin/poweroff" /sbin/poweroff 2>/dev/null || true
     cp "$TARGET_MNT/sbin/halt" /sbin/halt 2>/dev/null || true
+    cp "$TARGET_MNT/sbin/shutdown" /sbin/shutdown 2>/dev/null || true
 
     # Unmount system filesystems
     sync

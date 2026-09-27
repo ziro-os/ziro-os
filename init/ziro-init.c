@@ -78,6 +78,26 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
             return;
         }
 
+        // Fast resolution via findfs or blkid -L
+        char fcmd[512];
+        snprintf(fcmd, sizeof(fcmd), "findfs LABEL=%.128s 2>/dev/null || blkid -L %.128s 2>/dev/null", label, label);
+        FILE *fp = popen(fcmd, "r");
+        if (fp) {
+            char line[256];
+            if (fgets(line, sizeof(line), fp)) {
+                char *nl = strchr(line, '\n');
+                if (nl) *nl = '\0';
+                char *cr = strchr(line, '\r');
+                if (cr) *cr = '\0';
+                if (strlen(line) > 0 && access(line, F_OK) == 0) {
+                    snprintf(out_dev, max_len, "%.200s", line);
+                    pclose(fp);
+                    return;
+                }
+            }
+            pclose(fp);
+        }
+
         // Search common partition nodes directly
         static const char *prefixes[] = {"/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb", "/dev/nvme0n1p", "/dev/hda", NULL};
         for (int p = 0; prefixes[p] != NULL; p++) {
@@ -211,6 +231,8 @@ static void check_and_switch_root(void) {
                     umount("/sys");
 
                     printf("[init] switching root to persistent disk (%s)...\n", root_dev);
+                    execl("/sbin/switch_root", "switch_root", "/sysroot", "/sbin/init", NULL);
+                    execl("/bin/switch_root", "switch_root", "/sysroot", "/sbin/init", NULL);
                     execl("/bin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
                     execl("/sbin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
                     fprintf(stderr, "[init] switch_root to %s failed: %s\n", root_dev, strerror(errno));

@@ -122,17 +122,21 @@ install_busybox() {
     docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" alpine:latest sh -c '
         cd /rootfs/bin
         for app in $(./busybox --list); do
-            # Do NOT create init symlink in /bin
-            if [ "$app" != "init" ]; then
-                ln -sf busybox "$app"
-            fi
+            case "$app" in
+                init|reboot|poweroff|halt|shutdown|busybox)
+                    continue
+                    ;;
+                *)
+                    ln -sf busybox "$app"
+                    ;;
+            esac
         done
         cd /rootfs/sbin
-        # Note: init is intentionally excluded here so it never overwrites busybox!
-        for app in halt poweroff reboot ifconfig route sysctl ip insmod rmmod modprobe lsmod; do
+        # Note: init, reboot, poweroff, halt, shutdown are intentionally excluded here so they never point to or overwrite busybox!
+        for app in ifconfig route sysctl ip insmod rmmod modprobe lsmod; do
             ln -sf ../bin/busybox "$app"
         done
-        rm -f /rootfs/init /rootfs/sbin/init /rootfs/bin/init
+        rm -f /rootfs/init /rootfs/sbin/init /rootfs/bin/init /rootfs/sbin/reboot /rootfs/sbin/poweroff /rootfs/sbin/halt /rootfs/sbin/shutdown
     '
 }
 
@@ -215,6 +219,10 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e HOST_GID="$HOST_GID" \
     alpine:latest sh -c '
         mkdir -p /rootfs/sbin /rootfs/bin /rootfs/usr/bin
+        rm -f /rootfs/sbin/reboot /rootfs/sbin/poweroff /rootfs/sbin/halt /rootfs/sbin/shutdown
+        rm -f /rootfs/bin/reboot /rootfs/bin/poweroff /rootfs/bin/halt /rootfs/bin/shutdown
+        rm -f /rootfs/usr/bin/reboot /rootfs/usr/bin/poweroff /rootfs/usr/bin/shutdown
+
         cat > /rootfs/sbin/reboot << "SH_REBOOT"
 #!/bin/sh
 sync
@@ -239,7 +247,21 @@ esac
 SH_SHUTDOWN
         chmod 755 /rootfs/sbin/reboot /rootfs/sbin/poweroff /rootfs/sbin/halt /rootfs/sbin/shutdown
         cp -f /rootfs/sbin/reboot /rootfs/bin/reboot 2>/dev/null || true
+        cp -f /rootfs/sbin/reboot /rootfs/usr/bin/reboot 2>/dev/null || true
         cp -f /rootfs/sbin/poweroff /rootfs/bin/poweroff 2>/dev/null || true
+        cp -f /rootfs/sbin/poweroff /rootfs/usr/bin/poweroff 2>/dev/null || true
+        cp -f /rootfs/sbin/halt /rootfs/bin/halt 2>/dev/null || true
+        cp -f /rootfs/sbin/shutdown /rootfs/bin/shutdown 2>/dev/null || true
+        cp -f /rootfs/sbin/shutdown /rootfs/usr/bin/shutdown 2>/dev/null || true
+
+        # Validate that busybox is an authentic binary and not a script or symlink
+        if [ ! -f /rootfs/bin/busybox ] || [ -L /rootfs/bin/busybox ] || [ $(wc -c < /rootfs/bin/busybox) -lt 100000 ]; then
+            echo "❌ FATAL: /rootfs/bin/busybox is missing, truncated, or a symlink!"
+            exit 1
+        fi
+
+        # Validate that /bin/sh executes correctly
+        chroot /rootfs /bin/busybox sh -c "echo '\''✓ Minimal rootfs shell validated'\''"
 
         cd /rootfs
         tar --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" .
@@ -328,6 +350,10 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
 
     # Install dedicated reboot, poweroff, halt, and shutdown control scripts
     mkdir -p /rootfs/sbin /rootfs/bin /rootfs/usr/bin
+    rm -f /rootfs/sbin/reboot /rootfs/sbin/poweroff /rootfs/sbin/halt /rootfs/sbin/shutdown
+    rm -f /rootfs/bin/reboot /rootfs/bin/poweroff /rootfs/bin/halt /rootfs/bin/shutdown
+    rm -f /rootfs/usr/bin/reboot /rootfs/usr/bin/poweroff /rootfs/usr/bin/shutdown
+
     cat > /rootfs/sbin/reboot << "SH_REBOOT"
 #!/bin/sh
 sync
@@ -359,6 +385,12 @@ SH_SHUTDOWN
     cp -f /rootfs/sbin/shutdown /rootfs/bin/shutdown 2>/dev/null || true
     cp -f /rootfs/sbin/shutdown /rootfs/usr/bin/shutdown 2>/dev/null || true
 
+    # Validate that busybox is an authentic binary
+    if [ ! -f /rootfs/bin/busybox ] || [ -L /rootfs/bin/busybox ] || [ $(wc -c < /rootfs/bin/busybox) -lt 100000 ]; then
+        echo "❌ FATAL: /rootfs/bin/busybox is corrupt or overwritten in full rootfs!"
+        exit 1
+    fi
+
     # Fix permissions so non-root host user can manage files in rootfs
     chown -R "${HOST_UID}:${HOST_GID}" /rootfs 2>/dev/null || true
     chmod -R u+rwX /rootfs 2>/dev/null || true
@@ -378,6 +410,10 @@ chmod +x "$ROOTFS_FULL/usr/sbin/ziro-install" "$ROOTFS_FULL/bin/ziro-install"
 
 if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
     echo "❌ FATAL: /bin/busybox was overwritten by ziro-init!"
+    exit 1
+fi
+if [ ! -f "$ROOTFS_FULL/bin/busybox" ] || [ -L "$ROOTFS_FULL/bin/busybox" ] || [ $(wc -c < "$ROOTFS_FULL/bin/busybox") -lt 100000 ]; then
+    echo "❌ FATAL: /bin/busybox in full rootfs is corrupted or overwritten!"
     exit 1
 fi
 
