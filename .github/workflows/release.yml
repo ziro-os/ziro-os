@@ -111,7 +111,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          overwrite: true
+          make_latest: true
           overwrite_files: true
           files: |
             build/ziro-os-*.iso
@@ -122,38 +122,15 @@ jobs:
             bin/ziropkg-*
 
   deploy-pages:
-    name: Deploy Release Portal to GitHub Pages
+    name: Trigger Release Portal Deployment on Main
     needs: release
-    concurrency:
-      group: 'pages'
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      pages: write
-      id-token: write
+      actions: write
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v7
-
-      - name: Generate Release Download Portal
-        run: |
-          chmod +x scripts/generate-release-page.sh
-          ./scripts/generate-release-page.sh _site
+      - name: Trigger GitHub Pages Workflow on Main
         env:
-          GITHUB_REF_NAME: ${{ needs.release.outputs.tag }}
-
-      - name: Setup GitHub Pages
-        uses: actions/configure-pages@v6
-
-      - name: Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: '_site'
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Dispatching pages.yml on main branch to deploy release portal..."
+          gh workflow run pages.yml --ref main || true

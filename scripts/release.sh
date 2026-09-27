@@ -354,8 +354,8 @@ if [ "$PUSH_REMOTE" = true ]; then
         if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
             echo "Checking GitHub Actions release workflow status..."
             sleep 3
-            RUN_ID=$(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || echo "")
-            if [ -z "$RUN_ID" ]; then
+            RUN_STATUS=$(gh run list --workflow=release.yml --limit 1 --json status -q '.[0].status' 2>/dev/null || echo "")
+            if [ "$RUN_STATUS" != "in_progress" ] && [ "$RUN_STATUS" != "queued" ]; then
                 echo "Dispatching release workflow via GitHub CLI..."
                 gh workflow run release.yml -f version="$TAG" || true
             fi
