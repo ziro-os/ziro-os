@@ -1,2 +1,5 @@
-root:x:0:
+root:x:0:root
+wheel:x:10:root
+tty:x:5:
+sshd:x:22:
 nobody:x:65534:

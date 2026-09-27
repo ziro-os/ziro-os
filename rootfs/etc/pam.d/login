@@ -1,0 +1,6 @@
+# /etc/pam.d/login - Hardened local console login
+auth      required   pam_securetty.so
+auth      include    system-auth
+account   include    system-auth
+password  include    system-auth
+session   include    system-auth

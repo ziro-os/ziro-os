@@ -33,6 +33,7 @@
     " Ziro-OS Container Host (PID 1 Init)\n\n"
 
 static pid_t containerd_pid = 0;
+static pid_t sshd_pid = 0;
 static volatile sig_atomic_t shutdown_requested = 0;
 static volatile sig_atomic_t reboot_requested = 0;
 
@@ -66,6 +67,13 @@ static void init_filesystems(void) {
     mount_essential("run", "/run", "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755");
     safe_mkdir("/tmp", 0777);
     mount_essential("tmp", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+    safe_mkdir("/var", 0755);
+    mount_essential("var", "/var", "tmpfs", MS_NODEV, "mode=0755");
+    safe_mkdir("/var/log", 0755);
+    safe_mkdir("/var/lib", 0755);
+    safe_mkdir("/var/lib/containerd", 0755);
+    safe_mkdir("/var/lib/containers", 0755);
+    safe_mkdir("/var/empty", 0700);
 }
 
 static void init_cgroups(void) {
@@ -242,6 +250,56 @@ static void start_containerd(void) {
     }
 }
 
+static void start_sshd(void) {
+    if (access("/usr/sbin/sshd", X_OK) != 0 && access("/sbin/sshd", X_OK) != 0) {
+        printf("[init] sshd not found; skipping remote SSH daemon startup\n");
+        return;
+    }
+
+    safe_mkdir("/var/empty", 0700);
+    chmod("/var/empty", 0700);
+    chown("/var/empty", 0, 0);
+    safe_mkdir("/run/sshd", 0755);
+    safe_mkdir("/etc/ssh", 0755);
+    safe_mkdir("/root/.ssh", 0700);
+    chmod("/root/.ssh", 0700);
+    chown("/root/.ssh", 0, 0);
+
+    // Auto-generate host keys if not present
+    if (access("/etc/ssh/ssh_host_ed25519_key", F_OK) != 0) {
+        printf("[init] generating OpenSSH host keys...\n");
+        pid_t kpid = fork();
+        if (kpid == 0) {
+            char *keygen = access("/usr/bin/ssh-keygen", X_OK) == 0 ? "/usr/bin/ssh-keygen" : "/bin/ssh-keygen";
+            char *argv[] = {"ssh-keygen", "-A", NULL};
+            execv(keygen, argv);
+            _exit(1);
+        } else if (kpid > 0) {
+            int st;
+            waitpid(kpid, &st, 0);
+        }
+    }
+
+    printf("[init] starting hardened OpenSSH daemon...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *bin = access("/usr/sbin/sshd", X_OK) == 0 ? "/usr/sbin/sshd" : "/sbin/sshd";
+        char *argv[] = {bin, "-D", "-e", NULL};
+        int log_fd = open("/var/log/sshd.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
+        execv(bin, argv);
+        fprintf(stderr, "[init] failed to execute sshd: %s\n", strerror(errno));
+        _exit(1);
+    } else if (pid > 0) {
+        sshd_pid = pid;
+        printf("[init] OpenSSH daemon ready: port 22 (PID: %d)\n", pid);
+    }
+}
+
 static void sig_handler(int sig) {
     switch (sig) {
         case SIGINT:
@@ -262,6 +320,9 @@ static void reap_children(void) {
         if (pid == containerd_pid) {
             printf("[init] containerd (PID %d) exited with status %d\n", pid, status);
             containerd_pid = 0;
+        } else if (pid == sshd_pid) {
+            printf("[init] sshd (PID %d) exited with status %d\n", pid, status);
+            sshd_pid = 0;
         }
     }
 }
@@ -302,7 +363,7 @@ static void spawn_shell(void) {
         }
 
         setenv("TERM", "linux", 1);
-        setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/sbin:/opt/cni/bin", 1);
+        setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
         setenv("HOME", "/root", 1);
         setenv("USER", "root", 1);
         chdir("/root");
@@ -354,6 +415,11 @@ int main(int argc, char *argv[]) {
     printf(BANNER);
     printf("[init] starting Ziro-OS PID 1 init...\n");
 
+    // Standard system environment
+    setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
+    setenv("HOME", "/root", 1);
+    setenv("USER", "root", 1);
+
     // Signal setup
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -369,6 +435,7 @@ int main(int argc, char *argv[]) {
     init_hostname();
     init_network();
     start_containerd();
+    start_sshd();
 
     printf("\n[init] Ziro-OS initialization complete!\n");
     printf("[init] Type 'ziroctl help' for container OS commands.\n\n");

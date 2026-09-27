@@ -1,0 +1,5 @@
+# /etc/pam.d/su - Switch user service
+auth      sufficient pam_rootok.so
+auth      include    system-auth
+account   include    system-auth
+session   include    system-auth

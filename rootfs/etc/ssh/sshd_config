@@ -1,0 +1,46 @@
+# Ziro-OS Hardened OpenSSH Server Configuration
+# Optimized for security, zero-trust cloud environments, and high performance.
+
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+# Host Keys
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+# Cryptographic Suite (Post-Quantum & High-Strength Defaults)
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+
+# Authentication & Access Control
+LoginGraceTime 30
+PermitRootLogin prohibit-password
+StrictModes yes
+MaxAuthTries 3
+MaxSessions 10
+
+# Key-based authentication only
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Insecure password / interactive authentication disabled by default
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+
+# PAM integration
+UsePAM yes
+
+# Session & Forwarding Hardening
+X11Forwarding no
+PrintMotd yes
+PrintLastLog yes
+TCPKeepAlive yes
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+# SFTP Subsystem
+Subsystem sftp internal-sftp

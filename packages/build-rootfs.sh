@@ -54,6 +54,7 @@ setup_layout() {
 
     # Copy tracked etc configuration skeleton
     cp -r "$REPO_ROOT/rootfs/etc/"* "$target/etc/"
+    chmod 0600 "$target/etc/shadow" 2>/dev/null || true
     
     # Copy tracked usr skeleton (e.g. udhcpc default script)
     if [ -d "$REPO_ROOT/rootfs/usr" ]; then
@@ -195,13 +196,40 @@ MINIMAL_TAR="$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz"
 MINIMAL_SIZE=$(du -h "$MINIMAL_TAR" | cut -f1)
 echo "✅ Minimal Base Rootfs archive: $MINIMAL_TAR ($MINIMAL_SIZE)"
 
-# --- 5. Install Musl-Native Container Runtime for Host OS ---
-echo "--- [5/5] Installing musl-native containerd, runc, and CNI plugins for Host OS ---"
+# --- 5. Install Musl-Native Container Runtime, SSH, and System Utilities for Host OS ---
+echo "--- [5/5] Installing musl-native containerd, nerdctl, runc, CNI plugins, and OpenSSH ---"
 docker run --rm --platform "$DOCKER_PLATFORM" -v "$ROOTFS_FULL:/rootfs" alpine:latest sh -c '
-    apk --root /rootfs --initdb add --no-cache ca-certificates containerd containerd-ctr runc cni-plugins
-    mkdir -p /rootfs/opt/cni/bin
+    apk --root /rootfs --initdb add --no-cache \
+        ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
+        iptables iptables-legacy openssh-server openssh-client linux-pam
+    mkdir -p /rootfs/opt/cni/bin /rootfs/var/empty /rootfs/run/sshd /rootfs/etc/ssh
+    chmod 0700 /rootfs/var/empty
     if [ -d /rootfs/usr/libexec/cni ]; then
         cp -r /rootfs/usr/libexec/cni/* /rootfs/opt/cni/bin/ 2>/dev/null || true
+    fi
+
+    # Docker & Podman CLI compatibility symlinks
+    ln -sf nerdctl /rootfs/usr/bin/docker
+    ln -sf nerdctl /rootfs/usr/bin/podman
+    if [ -f /rootfs/usr/bin/runc ]; then
+        ln -sf /usr/bin/runc /rootfs/bin/runc
+        ln -sf /usr/bin/runc /rootfs/sbin/runc
+    fi
+    # Route iptables through legacy multi-binary for maximum compatibility with kernel netfilter
+    if [ -f /rootfs/usr/sbin/xtables-legacy-multi ]; then
+        ln -sf xtables-legacy-multi /rootfs/usr/sbin/iptables
+        ln -sf xtables-legacy-multi /rootfs/usr/sbin/iptables-save
+        ln -sf xtables-legacy-multi /rootfs/usr/sbin/iptables-restore
+        ln -sf xtables-legacy-multi /rootfs/usr/sbin/ip6tables
+        ln -sf xtables-legacy-multi /rootfs/usr/sbin/ip6tables-save
+        ln -sf xtables-legacy-multi /rootfs/usr/sbin/ip6tables-restore
+        ln -sf /usr/sbin/xtables-legacy-multi /rootfs/sbin/iptables
+        ln -sf /usr/sbin/xtables-legacy-multi /rootfs/bin/iptables
+        ln -sf /usr/sbin/xtables-legacy-multi /rootfs/usr/bin/iptables
+    elif [ -f /rootfs/usr/sbin/iptables ]; then
+        ln -sf /usr/sbin/iptables /rootfs/sbin/iptables
+        ln -sf /usr/sbin/iptables /rootfs/bin/iptables
+        ln -sf /usr/sbin/iptables /rootfs/usr/bin/iptables
     fi
 '
 

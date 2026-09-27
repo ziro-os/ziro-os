@@ -1,20 +1,44 @@
-# Ziro-OS containerd configuration
+# Ziro-OS Production-Grade Containerd Configuration
+# Tuned for high throughput, low latency, cgroups v2, and secure multitenancy.
 
 version = 2
+root = "/var/lib/containerd"
+state = "/run/containerd"
+oom_score = -999
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
+  uid = 0
+  gid = 0
+  max_recv_message_size = 16777216
+  max_send_message_size = 16777216
+
+[metrics]
+  address = "127.0.0.1:1338"
+  grpc_histogram = true
 
 [plugins]
   [plugins."io.containerd.grpc.v1.cri"]
     sandbox_image = "registry.k8s.io/pause:3.9"
-    
+    enable_selinux = false
+    enable_unprivileged_ports = true
+    enable_unprivileged_icmp = true
+
+    [plugins."io.containerd.grpc.v1.cri".cni]
+      bin_dir = "/opt/cni/bin"
+      conf_dir = "/etc/cni/net.d"
+      max_conf_num = 1
+
     [plugins."io.containerd.grpc.v1.cri".containerd]
       snapshotter = "overlayfs"
-      
-      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
-        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-          runtime_type = "io.containerd.runc.v2"
-          
+      default_runtime_name = "runc"
+
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+        runtime_type = "io.containerd.runc.v2"
+        privileged_without_host_devices = false
+
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+          SystemdCgroup = false
+
   [plugins."io.containerd.snapshotter.v1.overlayfs"]
     root_path = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"
-
-[grpc]
-  address = "/run/containerd/containerd.sock"
