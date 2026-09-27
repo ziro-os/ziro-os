@@ -21,4 +21,4 @@ LABEL org.opencontainers.image.title="Ziro-OS" \
       org.opencontainers.image.description="Ultra-lightweight, secure container-native base image" \
       org.opencontainers.image.authors="Ziro-OS Contributors" \
       org.opencontainers.image.url="https://github.com/ziro-os/ziro-os" \
-      org.opencontainers.image.version="1.0.3"
+      org.opencontainers.image.version="1.0.4"
