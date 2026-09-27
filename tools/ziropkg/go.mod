@@ -1,6 +1,6 @@
 module github.com/ziro-os/ziropkg
 
-go 1.21
+go 1.27.1
 
 require github.com/spf13/cobra v1.8.0
 

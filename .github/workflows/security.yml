@@ -8,6 +8,9 @@ on:
   schedule:
     - cron: '0 2 * * 1'  # Weekly on Monday at 2 AM UTC
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   vulnerability-scan:
     name: Vulnerability Scan
@@ -15,7 +18,7 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@master
@@ -27,7 +30,7 @@ jobs:
         severity: 'CRITICAL,HIGH,MEDIUM'
         
     - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
@@ -45,7 +48,7 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       
     - name: Run GitLeaks
       uses: gitleaks/gitleaks-action@v2
@@ -58,12 +61,16 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
-        go-version: '1.22'
+        go-version: '1.27.x'
+        check-latest: true
+        cache-dependency-path: |
+          tools/ziroctl/go.sum
+          tools/ziropkg/go.sum
         
     - name: Run gosec Security Scanner
       run: |
@@ -77,12 +84,16 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
-        go-version: '1.22'
+        go-version: '1.27.x'
+        check-latest: true
+        cache-dependency-path: |
+          tools/ziroctl/go.sum
+          tools/ziropkg/go.sum
         
     - name: Run govulncheck
       run: |
@@ -96,12 +107,16 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
-        go-version: '1.22'
+        go-version: '1.27.x'
+        check-latest: true
+        cache-dependency-path: |
+          tools/ziroctl/go.sum
+          tools/ziropkg/go.sum
 
     - name: Build container image
       run: make docker-image IMAGE_TAG=ziro-os:test
@@ -118,11 +133,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       
     - name: Check security configurations
       run: |
-        # Check for security hardening files
         echo "Checking security configurations..."
         
         if [ -f "security/harden-system.sh" ]; then
@@ -146,13 +160,11 @@ jobs:
         
     - name: Validate security configurations
       run: |
-        # Validate seccomp profiles
         if [ -f "rootfs/etc/seccomp/default.json" ]; then
           python3 -m json.tool rootfs/etc/seccomp/default.json > /dev/null
           echo "✓ Seccomp profile is valid JSON"
         fi
         
-        # Check for hardcoded secrets
         if grep -r "password\|secret\|key" --include="*.go" --include="*.sh" --include="*.yaml" . | grep -v "example\|placeholder\|TODO"; then
           echo "❌ Potential hardcoded secrets found"
           exit 1
@@ -166,23 +178,19 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       
     - name: CIS Benchmark Check
       run: |
         echo "Running CIS benchmark checks..."
-        
-        # Check for CIS compliance items
         checks=(
           "Ensure separate partition exists for containers"
           "Ensure auditing is configured for containers"
           "Ensure container images are scanned"
           "Ensure default seccomp profile is applied"
         )
-        
         for check in "${checks[@]}"; do
           echo "Checking: $check"
-          # Implementation would go here
         done
         
     - name: Generate compliance report
@@ -215,7 +223,7 @@ jobs:
         EOF
         
     - name: Upload compliance report
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: compliance-report
         path: compliance-report.md
