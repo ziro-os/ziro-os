@@ -58,35 +58,72 @@ echo "✓ Initramfs: $INITRAMFS_FILE"
 cp "$KERNEL_FILE" "$ISO_STAGING/boot/vmlinuz"
 cp "$INITRAMFS_FILE" "$ISO_STAGING/boot/initramfs.cpio.gz"
 
-# GRUB configuration for UEFI & BIOS
+# Bundle rootfs archive on ISO if available for fast offline disk installation
+mkdir -p "$ISO_STAGING/ziro"
+if [ -f "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" ]; then
+    cp "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" "$ISO_STAGING/ziro/rootfs.tar.gz"
+fi
+
+# GRUB configuration for UEFI & BIOS (SeaBIOS, OVMF, VMware, VirtualBox, Proxmox)
 cat > "$ISO_STAGING/boot/grub/grub.cfg" << EOF
+serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1
+terminal_input --append serial console
+terminal_output --append serial console
+
 set default=0
 set timeout=5
 
-menuentry "Ziro-OS Container Host" {
-    linux /boot/vmlinuz console=$CONSOLE console=tty0 rdinit=/init quiet
+menuentry "Ziro-OS Live Container Host & Installer" {
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init quiet
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Ziro-OS Live (Serial Console)" {
+    linux /boot/vmlinuz console=tty0 console=ttyS0,115200 rdinit=/init quiet
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Ziro-OS Automated Terminal Installer" {
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.autoinstall quiet
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Ziro-OS (Recovery Shell)" {
-    linux /boot/vmlinuz console=$CONSOLE console=tty0 rdinit=/bin/sh
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/bin/sh
     initrd /boot/initramfs.cpio.gz
 }
 EOF
 
-# Build ISO using Docker with xorriso and grub-efi
+# Determine bootloader packages based on architecture
+if [ "$TARGET_ARCH" = "x86_64" ]; then
+    GRUB_PACKAGES="grub-bios grub-efi"
+else
+    GRUB_PACKAGES="grub-efi"
+fi
+
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
+echo "Building true hybrid BIOS + UEFI ISO for $TARGET_ARCH with grub-mkrescue..."
 docker run --rm \
     -v "$ISO_STAGING:/iso" \
     -v "$BUILD_DIR:/out" \
-    alpine:latest sh -c "
-        apk add --no-cache xorriso mtools grub-efi >/dev/null 2>&1
-        grub-mkrescue -o /out/ziro-os-$TARGET_ARCH.iso /iso 2>/dev/null || \
-        xorriso -as mkisofs -R -J -volid 'ZIRO_OS' -o /out/ziro-os-$TARGET_ARCH.iso /iso
-    "
+    -e TARGET_ARCH="$TARGET_ARCH" \
+    -e GRUB_PACKAGES="$GRUB_PACKAGES" \
+    -e HOST_UID="$HOST_UID" \
+    -e HOST_GID="$HOST_GID" \
+    alpine:latest sh -c '
+        set -e
+        echo "Installing xorriso, mtools, and bootloader tools (${GRUB_PACKAGES})..."
+        apk add --no-cache xorriso mtools ${GRUB_PACKAGES} >/dev/null 2>&1
+        echo "Generating hybrid bootable ISO image with El Torito BIOS + UEFI catalogs..."
+        grub-mkrescue -o "/out/ziro-os-${TARGET_ARCH}.iso" /iso 2>&1
+        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-os-${TARGET_ARCH}.iso"
+    '
 
 ISO_SIZE=$(du -h "$OUTPUT_ISO" | cut -f1)
 echo "=================================================="
-echo "✅ Bootable ISO generated successfully!"
+echo "✅ Bootable Hybrid ISO generated successfully!"
 echo " Output: $OUTPUT_ISO ($ISO_SIZE)"
-echo " Usable in: VMware, VirtualBox, Proxmox, Bare Metal"
+echo " Usable in: Proxmox (SeaBIOS & OVMF), VMware, VirtualBox, Bare Metal"
 echo "=================================================="

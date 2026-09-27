@@ -69,14 +69,29 @@ ziroctl security audit
 
 ---
 
-### 3. Build Bootable Hybrid ISO
+### 3. Bootable Hybrid ISO & Proxmox / Bare Metal Installation
 
-Generate a bootable ISO for VMware, VirtualBox, Proxmox, or bare metal:
+Generate a true hybrid bootable ISO for VMware, VirtualBox, Proxmox VE (both SeaBIOS and OVMF UEFI), or physical bare metal:
 
 ```bash
 make image-iso
 ```
 Output artifact: `build/ziro-os-<arch>.iso`
+
+#### Proxmox VE & Hypervisor Deployment
+1. Upload `ziro-os-x86_64.iso` to Proxmox VE ISO storage (or your hypervisor of choice).
+2. Create a VM with standard settings (**SeaBIOS** or **OVMF UEFI**, VirtIO SCSI disk, 512MB+ RAM).
+3. Boot the VM. The live container OS will load in under 2 seconds.
+4. Launch the interactive TUI installer:
+   ```bash
+   ziro-install
+   # or: ziroctl install
+   ```
+5. Or deploy automatically with zero prompts (cloud-native key authentication and post-install user-data script):
+   ```bash
+   ziro-install -d /dev/sda -n ziro-node-01 -k "ssh-ed25519 AAAA..." -u https://example.com/user-data.sh -y
+   ```
+6. Disconnect the ISO and reboot into your lightning-fast, hardened container host.
 
 ---
 

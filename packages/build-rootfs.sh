@@ -232,13 +232,19 @@ docker run --rm --platform "$DOCKER_PLATFORM" -v "$ROOTFS_FULL:/rootfs" alpine:l
         cp /etc/apk/repositories /rootfs/etc/apk/repositories 2>/dev/null || true
     fi
 
+    GRUB_PKGS="grub-efi"
+    if [ "$TARGET_ARCH" = "x86_64" ]; then
+        GRUB_PKGS="grub-bios grub-efi"
+    fi
+
     apk --root /rootfs --initdb \
         --keys-dir /etc/apk/keys \
         --repositories-file /etc/apk/repositories \
         --allow-untrusted \
         add --no-cache \
         ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
-        iptables iptables-legacy openssh-server openssh-client linux-pam
+        iptables iptables-legacy openssh-server openssh-client linux-pam \
+        e2fsprogs dosfstools util-linux sfdisk parted curl $GRUB_PKGS
 
     # Retain official keys and repositories inside rootfs for ziropkg
     cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
@@ -280,6 +286,12 @@ rm -f "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/sbin/init"
 chmod +x "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init"
+
+# Install ziro-install script into rootfs
+mkdir -p "$ROOTFS_FULL/usr/sbin" "$ROOTFS_FULL/bin"
+cp "$REPO_ROOT/scripts/installer/ziro-install.sh" "$ROOTFS_FULL/usr/sbin/ziro-install"
+cp "$REPO_ROOT/scripts/installer/ziro-install.sh" "$ROOTFS_FULL/bin/ziro-install"
+chmod +x "$ROOTFS_FULL/usr/sbin/ziro-install" "$ROOTFS_FULL/bin/ziro-install"
 
 if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
     echo "❌ FATAL: /bin/busybox was overwritten by ziro-init!"

@@ -426,40 +426,51 @@ static void reap_children(void) {
     }
 }
 
+static void get_active_console(char *dev_path, size_t max_len) {
+    snprintf(dev_path, max_len, "/dev/console");
+    FILE *f = fopen("/sys/class/tty/console/active", "r");
+    if (f) {
+        char active_tty[128];
+        if (fgets(active_tty, sizeof(active_tty), f)) {
+            char *last_word = NULL;
+            char *token = strtok(active_tty, " \t\r\n");
+            while (token) {
+                last_word = token;
+                token = strtok(NULL, " \t\r\n");
+            }
+            if (last_word && strlen(last_word) > 0) {
+                snprintf(dev_path, max_len, "/dev/%s", last_word);
+            }
+        }
+        fclose(f);
+    }
+}
+
+static void setup_controlling_tty(void) {
+    setsid();
+
+    char dev_path[64];
+    get_active_console(dev_path, sizeof(dev_path));
+
+    int fd = open(dev_path, O_RDWR);
+    if (fd < 0) {
+        fd = open("/dev/console", O_RDWR);
+    }
+    if (fd >= 0) {
+        dup2(fd, STDIN_FILENO);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        if (fd > 2) close(fd);
+
+        ioctl(STDIN_FILENO, TIOCSCTTY, 1);
+        tcsetpgrp(STDIN_FILENO, getpid());
+    }
+}
+
 static void spawn_shell(void) {
     pid_t pid = fork();
     if (pid == 0) {
-        setsid();
-
-        // Detect active console device if available in sysfs
-        char dev_path[64] = "/dev/console";
-        FILE *f = fopen("/sys/class/tty/console/active", "r");
-        if (f) {
-            char active_tty[32];
-            if (fgets(active_tty, sizeof(active_tty), f)) {
-                char *p = active_tty;
-                while (*p && *p != ' ' && *p != '\n' && *p != '\r') p++;
-                *p = '\0';
-                if (strlen(active_tty) > 0) {
-                    snprintf(dev_path, sizeof(dev_path), "/dev/%s", active_tty);
-                }
-            }
-            fclose(f);
-        }
-
-        int fd = open(dev_path, O_RDWR);
-        if (fd < 0) {
-            fd = open("/dev/console", O_RDWR);
-        }
-        if (fd >= 0) {
-            dup2(fd, STDIN_FILENO);
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            if (fd > 2) close(fd);
-
-            ioctl(STDIN_FILENO, TIOCSCTTY, 1);
-            tcsetpgrp(STDIN_FILENO, getpid());
-        }
+        setup_controlling_tty();
 
         setenv("TERM", "linux", 1);
         setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
@@ -544,7 +555,30 @@ int main(int argc, char *argv[]) {
     start_sshd();
 
     printf("\n[init] Ziro-OS initialization complete!\n");
+    printf("[init] Type 'ziro-install' to install Ziro-OS to physical or virtual disk.\n");
     printf("[init] Type 'ziroctl help' for container OS commands.\n\n");
+
+    // Check if auto-installer was requested on kernel command line
+    FILE *cmdline = fopen("/proc/cmdline", "r");
+    if (cmdline) {
+        char buf[1024];
+        if (fgets(buf, sizeof(buf), cmdline)) {
+            if (strstr(buf, "ziro.autoinstall") != NULL) {
+                printf("[init] Launching Ziro-OS Terminal Installer (ziro.autoinstall requested)...\n\n");
+                pid_t ipid = fork();
+                if (ipid == 0) {
+                    setup_controlling_tty();
+                    char *iargs[] = {"/usr/sbin/ziro-install", NULL};
+                    execv(iargs[0], iargs);
+                    _exit(1);
+                } else if (ipid > 0) {
+                    int st;
+                    waitpid(ipid, &st, 0);
+                }
+            }
+        }
+        fclose(cmdline);
+    }
 
     // Interactive supervisor loop
     while (!shutdown_requested && !reboot_requested) {

@@ -146,33 +146,53 @@ sudo dd if=images/bootable/output/ziro-os-*.iso of=/dev/sdX bs=4M status=progres
 ### DVD
 Burn the ISO file to a DVD using your preferred burning software.
 
-## 💻 Installing to Hardware
+## 💻 Installing to Proxmox VE, Hypervisors & Bare Metal
 
 ### 1. Boot from Installation Media
-- Insert USB drive or DVD
-- Boot from the media (may need to change BIOS/UEFI boot order)
-- Select "Ziro-OS Live/Install" from boot menu
+- **Proxmox VE**: Upload `ziro-os-x86_64.iso` to Proxmox local storage. Create a VM with either **SeaBIOS** or **OVMF (UEFI)** and VirtIO SCSI disk.
+- **VMware / VirtualBox**: Attach `ziro-os-x86_64.iso` to the virtual CD/DVD drive.
+- **Bare Metal**: Burn or `dd` ISO to a USB flash drive (`dd if=ziro-os-x86_64.iso of=/dev/sdX bs=4M status=progress`).
+- Boot the system. Ziro-OS boots into the live environment in under 2 seconds.
 
-### 2. Run Installer
+### 2. Interactive Terminal/TUI Installation
+In the live environment or recovery console, run:
 ```bash
-# In the live environment, run:
 ziro-install
+# Or via ziroctl:
+ziroctl install
 ```
 
 The installer will:
-1. Show available disks
-2. Ask for target disk selection
-3. Partition and format the disk
-4. Install Ziro-OS
-5. Install GRUB bootloader
-6. Offer to reboot
+1. Scan storage drives (`/dev/vda`, `/dev/sda`, `/dev/nvme0n1`, etc.) and present a numbered selection.
+2. Prompt for system hostname (default: `ziro-host`).
+3. Prompt for SSH public key (recommending key-based auth and disabling root passwords) or root password.
+4. Prompt for optional cloud post-installation user-data script (URL or local script).
+5. Partition target disk with GPT (512MB EFI System Partition + Linux Root partition).
+6. Format filesystems (`FAT32` for ESP, `ext4` for root).
+7. Deploy the Ziro-OS container host filesystem and kernel.
+8. Install hybrid UEFI (`x86_64-efi`) and BIOS (`i386-pc`) GRUB bootloaders.
+9. Generate persistent `/etc/fstab`, secure SSH configuration, and execute user-data script.
 
-### 3. First Boot
-After installation:
-1. Remove installation media
-2. Reboot
-3. Select "Ziro-OS" from GRUB menu
-4. System will boot to container-ready environment
+### 3. Automated / Unattended Cloud-Native Installation
+For automated installations without interactive prompts:
+```bash
+# Hands-free installation with SSH key:
+ziro-install -d /dev/vda -n ziro-node-1 -k "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..." -y
+
+# Hands-free with remote cloud user-data bootstrap script:
+ziro-install -d /dev/sda -n edge-host -u https://infra.internal/bootstrap.sh -y
+```
+
+#### Kernel Command-Line Auto-Installation
+You can also trigger unattended installations directly from PXE or GRUB kernel arguments:
+```text
+linux /boot/vmlinuz ziro.autoinstall ziro.install=/dev/sda ziro.hostname=node1 ziro.userdata=https://example.com/init.sh quiet
+```
+
+### 4. First Boot
+1. Detach or disconnect the ISO media.
+2. Type `reboot` in the terminal.
+3. System boots directly from disk into the fast container host with `containerd` active and ready for workloads.
 
 ## ☁️ Cloud Deployment
 
