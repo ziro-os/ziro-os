@@ -1,5 +1,5 @@
 #!/bin/bash
-# Ziro-OS Docker Base Image Builder (Alpine-style)
+# Ziro-OS Docker Base Image Builder
 
 set -euo pipefail
 

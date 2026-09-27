@@ -19,7 +19,7 @@ Ziro-OS is an ultra-lightweight, container-native operating system built from fi
 
 ## 🚀 Quick Start
 
-### 1. Docker Base Image (Alpine-style)
+### 1. Docker Base Image
 
 Build and run the official Ziro-OS base container image locally:
 
