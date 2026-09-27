@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ziro-OS GitHub Pages Release & Download Catalog Generator
-# Generates a modern, static release portal for GitHub Pages.
+# Generates a modern, clean, engineering-focused static release portal for GitHub Pages.
 
 set -euo pipefail
 
@@ -9,16 +9,28 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${1:-$REPO_ROOT/public}"
 
 REPO_NAME="${GITHUB_REPOSITORY:-ziro-os/ziro-os}"
-RELEASE_VERSION="${GITHUB_REF_NAME:-v1.0.0}"
-# If not a tag, strip refs/heads/ or default to v1.0.0
+
+# Determine release version accurately
+RELEASE_VERSION="${GITHUB_REF_NAME:-}"
 RELEASE_VERSION="${RELEASE_VERSION#refs/tags/}"
 RELEASE_VERSION="${RELEASE_VERSION#refs/heads/}"
-if [[ "$RELEASE_VERSION" == "main" || "$RELEASE_VERSION" == "master" ]]; then
-    RELEASE_VERSION="v1.0.0"
+
+# If on main/master or empty, resolve from VERSION file or latest git tag
+if [[ -z "$RELEASE_VERSION" || "$RELEASE_VERSION" == "main" || "$RELEASE_VERSION" == "master" ]]; then
+    if [ -f "$REPO_ROOT/VERSION" ]; then
+        RELEASE_VERSION=$(tr -d ' \t\n\r' < "$REPO_ROOT/VERSION")
+    else
+        RELEASE_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "1.0.1")
+    fi
 fi
+
+# Ensure leading 'v'
+[[ "$RELEASE_VERSION" =~ ^v ]] || RELEASE_VERSION="v${RELEASE_VERSION}"
+VERSION_NUM="${RELEASE_VERSION#v}"
 
 DOWNLOAD_BASE="https://github.com/${REPO_NAME}/releases/download/${RELEASE_VERSION}"
 REGISTRY_IMAGE="ghcr.io/${REPO_NAME}:latest"
+REGISTRY_TAGGED="ghcr.io/${REPO_NAME}:${RELEASE_VERSION}"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -28,297 +40,616 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ziro-OS — Release & Download Catalog</title>
-  <meta name="description" content="Official releases, bootable ISOs, rootfs tarballs, and container base images for Ziro-OS.">
+  <title>Ziro-OS — Cloud-Native Container Operating System</title>
+  <meta name="description" content="Ultra-lightweight, container-native operating system designed for microVMs, containerd workloads, and edge infrastructure.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #090d16;
-      --card-bg: #111827;
-      --border: #1f2937;
-      --text: #f3f4f6;
-      --text-muted: #9ca3af;
+      --card-bg: #101522;
+      --card-hover: #151c2e;
+      --border: #1e2638;
+      --border-accent: rgba(56, 189, 248, 0.4);
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
       --primary: #38bdf8;
       --primary-hover: #0ea5e9;
       --accent: #10b981;
-      --mono: 'JetBrains Mono', monospace;
-      --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --code-bg: #05080f;
+      --font-mono: 'JetBrains Mono', monospace;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
     body {
       background-color: var(--bg);
+      background-image: 
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(56, 189, 248, 0.12), transparent),
+        radial-gradient(ellipse 60% 40% at 80% 80%, rgba(16, 185, 129, 0.05), transparent);
       color: var(--text);
-      font-family: var(--sans);
-      line-height: 1.6;
-      padding: 0 1.5rem;
+      font-family: var(--font-sans);
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
     }
-    .container {
-      max-width: 1100px;
+    .wrapper {
+      max-width: 1080px;
       margin: 0 auto;
-      padding: 3rem 0;
+      padding: 0 1.5rem;
+      width: 100%;
     }
-    header {
+    
+    /* Navigation Bar */
+    nav {
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      background: rgba(9, 13, 22, 0.85);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      padding: 0.875rem 0;
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      text-decoration: none;
+      color: var(--text);
+    }
+    .brand-icon {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--primary), #0284c7);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 0.9rem;
+      color: #04101e;
+    }
+    .brand-name {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .version-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 9999px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--accent);
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+    .version-pill::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      display: inline-block;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+    }
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: color 0.15s ease;
+    }
+    .nav-links a:hover {
+      color: var(--text);
+    }
+    
+    /* Hero Section */
+    .hero {
+      padding: 3.5rem 0 2rem 0;
       text-align: center;
+    }
+    .hero h1 {
+      font-size: clamp(2.25rem, 5vw, 3.5rem);
+      font-weight: 800;
+      letter-spacing: -0.035em;
+      line-height: 1.15;
+      margin-bottom: 0.875rem;
+    }
+    .hero-tagline {
+      font-size: clamp(1.05rem, 2vw, 1.25rem);
+      color: var(--text-muted);
+      max-width: 620px;
+      margin: 0 auto 2rem auto;
+      font-weight: 400;
+    }
+
+    /* Quick Run Bar */
+    .run-box {
+      max-width: 640px;
+      margin: 0 auto 3rem auto;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem 0.85rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      transition: border-color 0.2s ease;
+    }
+    .run-box:focus-within, .run-box:hover {
+      border-color: rgba(56, 189, 248, 0.4);
+    }
+    .run-code {
+      font-family: var(--font-mono);
+      font-size: 0.875rem;
+      color: #7dd3fc;
+      overflow-x: auto;
+      white-space: nowrap;
+      text-align: left;
+    }
+    .copy-btn {
+      background: #1e293b;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.4rem 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover {
+      background: #334155;
+      color: #fff;
+    }
+
+    /* Stats Strip */
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
       margin-bottom: 3.5rem;
     }
-    .badge {
-      display: inline-block;
-      padding: 0.35rem 0.85rem;
-      border-radius: 9999px;
-      background: rgba(56, 189, 248, 0.12);
-      color: var(--primary);
-      border: 1px solid rgba(56, 189, 248, 0.3);
-      font-size: 0.85rem;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      margin-bottom: 1rem;
+    .stat-item {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      text-align: center;
     }
-    h1 {
-      font-size: 3rem;
-      font-weight: 800;
-      letter-spacing: -0.03em;
-      margin-bottom: 0.75rem;
-      background: linear-gradient(135deg, #ffffff 40%, var(--primary) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    .lead {
+    .stat-val {
       font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+      font-family: var(--font-mono);
+    }
+    .stat-label {
+      font-size: 0.75rem;
       color: var(--text-muted);
-      max-width: 650px;
-      margin: 0 auto 1.5rem auto;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-top: 0.25rem;
     }
-    .header-links a {
-      color: var(--primary);
-      text-decoration: none;
-      margin: 0 0.75rem;
-      font-weight: 500;
-      font-size: 0.95rem;
+
+    /* Section Headings */
+    .section-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
     }
-    .header-links a:hover { text-decoration: underline; }
-    
+    .section-head h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .section-head span {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    /* Downloads Grid */
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 1.5rem;
-      margin-bottom: 3rem;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+      gap: 1.25rem;
+      margin-bottom: 3.5rem;
     }
     .card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 1.75rem;
+      border-radius: 10px;
+      padding: 1.35rem;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      transition: transform 0.2s ease, border-color 0.2s ease;
+      transition: all 0.15s ease;
     }
     .card:hover {
+      border-color: var(--border-accent);
+      background: var(--card-hover);
       transform: translateY(-2px);
-      border-color: rgba(56, 189, 248, 0.4);
     }
-    .card-title {
-      font-size: 1.35rem;
-      font-weight: 700;
-      margin-bottom: 0.5rem;
+    .card-top {
+      margin-bottom: 1rem;
+    }
+    .card-header-row {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .card-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+    .badge-arch {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      color: var(--primary);
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      font-weight: 500;
     }
     .card-desc {
       color: var(--text-muted);
-      font-size: 0.95rem;
-      margin-bottom: 1.25rem;
-      flex-grow: 1;
+      font-size: 0.825rem;
+      line-height: 1.4;
+    }
+    
+    .btn-group {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
     }
     .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 0.5rem;
+      gap: 0.4rem;
       background: var(--primary);
       color: #04101e;
-      font-weight: 700;
-      padding: 0.75rem 1.25rem;
-      border-radius: 8px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 0.5rem 0.85rem;
+      border-radius: 6px;
       text-decoration: none;
+      flex: 1;
+      min-width: 120px;
       transition: background 0.15s ease;
-      font-size: 0.95rem;
-      width: 100%;
+      white-space: nowrap;
     }
-    .btn:hover { background: var(--primary-hover); }
-    .btn-secondary {
-      background: #1f2937;
+    .btn:hover {
+      background: var(--primary-hover);
+    }
+    .btn-subtle {
+      background: #1e2638;
       color: var(--text);
-      margin-top: 0.5rem;
-    }
-    .btn-secondary:hover { background: #374151; }
-
-    .docker-box {
-      background: #0d131f;
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2rem;
-      margin-bottom: 3rem;
     }
-    .docker-box h2 {
-      font-size: 1.5rem;
-      margin-bottom: 1rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
+    .btn-subtle:hover {
+      background: #2a3449;
     }
-    pre {
-      background: #05080f;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem 1.25rem;
-      font-family: var(--mono);
-      font-size: 0.9rem;
-      overflow-x: auto;
-      color: #7dd3fc;
-      margin-bottom: 1rem;
-    }
-    .spec-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 1.5rem;
-    }
-    .spec-table th, .spec-table td {
-      text-align: left;
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border);
-      font-size: 0.9rem;
-    }
-    .spec-table th { color: var(--text-muted); font-weight: 600; }
-    .spec-table td code { font-family: var(--mono); color: var(--accent); }
 
-    footer {
-      text-align: center;
-      padding: 3rem 0 1rem 0;
-      border-top: 1px solid var(--border);
+    /* Commands Snippets Box */
+    .commands-container {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+      margin-bottom: 3.5rem;
+    }
+    .cmd-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.25rem;
+      margin-top: 1rem;
+    }
+    .cmd-item label {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 600;
       color: var(--text-muted);
-      font-size: 0.875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.4rem;
+    }
+    .cmd-item pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.65rem 0.85rem;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: #38bdf8;
+      overflow-x: auto;
+    }
+
+    /* Footer */
+    footer {
+      margin-top: auto;
+      border-top: 1px solid var(--border);
+      padding: 2rem 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+    footer a {
+      color: var(--text);
+      text-decoration: none;
+    }
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 768px) {
+      .stats-strip {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .nav-links {
+        gap: 0.75rem;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div class="badge">Official Release Catalog • ${RELEASE_VERSION}</div>
-      <h1>Ziro-OS</h1>
-      <p class="lead">Ultra-lightweight, container-native operating system designed for speed, security, and cloud scale.</p>
-      <div class="header-links">
-        <a href="https://github.com/${REPO_NAME}" target="_blank">GitHub Repository</a>
-        <a href="https://github.com/${REPO_NAME}/blob/main/community/docs/getting-started.md" target="_blank">Getting Started</a>
-        <a href="https://github.com/${REPO_NAME}/blob/main/community/CONTRIBUTING.md" target="_blank">Contributing</a>
-        <a href="https://github.com/${REPO_NAME}/releases" target="_blank">All Releases</a>
-      </div>
-    </header>
 
-    <div class="docker-box">
-      <h2>🐳 Multi-Architecture Container Base</h2>
-      <p class="card-desc">Pull the official minimal base container image built directly FROM scratch with musl libc, BusyBox, ziroctl, and ziropkg:</p>
-      <pre>docker pull ${REGISTRY_IMAGE}</pre>
-      <pre>docker run -it --rm ${REGISTRY_IMAGE} sh</pre>
-      <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem;">
-        ⚡ Built for both <code>linux/amd64</code> and <code>linux/arm64</code>. Typical footprint &lt; 15MB.
+  <!-- Navigation Bar -->
+  <nav>
+    <div class="wrapper nav-inner">
+      <a href="https://github.com/${REPO_NAME}" class="brand">
+        <div class="brand-icon">Z</div>
+        <span class="brand-name">Ziro-OS</span>
+        <span class="version-pill release-tag">${RELEASE_VERSION}</span>
+      </a>
+      <div class="nav-links">
+        <a href="https://github.com/${REPO_NAME}#readme" target="_blank">Docs</a>
+        <a href="https://github.com/${REPO_NAME}/releases" target="_blank">Releases</a>
+        <a href="https://github.com/${REPO_NAME}" target="_blank">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="wrapper">
+    <!-- Hero Header -->
+    <section class="hero">
+      <h1>Built for Containers.<br>Born for the Cloud.</h1>
+      <p class="hero-tagline">
+        Ultra-lightweight host OS for microVMs and container workloads. Minimal base, fast boot, pure clarity.
+      </p>
+
+      <!-- Instant Pull Box -->
+      <div class="run-box">
+        <span class="run-code" id="cmd-snippet">docker run -it --rm ${REGISTRY_IMAGE} sh</span>
+        <button class="copy-btn" id="copy-btn" onclick="copyCommand()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span id="copy-label">Copy</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Metrics Strip -->
+    <section class="stats-strip">
+      <div class="stat-item">
+        <div class="stat-val">&le; 15 MB</div>
+        <div class="stat-label">Core Base Image</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val">&lt; 1 sec</div>
+        <div class="stat-label">MicroVM Boot Time</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val">containerd</div>
+        <div class="stat-label">Native OCI Runtime</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val">x86_64 &amp; arm64</div>
+        <div class="stat-label">Multi-Architecture</div>
+      </div>
+    </section>
+
+    <!-- Downloads Grid -->
+    <section>
+      <div class="section-head">
+        <h2>Release Artifacts</h2>
+        <span class="release-tag-label">${RELEASE_VERSION} · <span class="release-date">Latest Release</span></span>
+      </div>
+
+      <div class="grid">
+        <!-- ISO Card -->
+        <div class="card">
+          <div class="card-top">
+            <div class="card-header-row">
+              <span class="card-title">💿 Hybrid Bootable ISO</span>
+              <span class="badge-arch">x86_64</span>
+            </div>
+            <p class="card-desc">Universal UEFI/BIOS bootable ISO for physical hardware, VMware, Proxmox, and VirtualBox.</p>
+          </div>
+          <div class="btn-group">
+            <a class="btn" data-asset="ziro-os-x86_64.iso" href="${DOWNLOAD_BASE}/ziro-os-x86_64.iso">Download ISO (138MB)</a>
+          </div>
+        </div>
+
+        <!-- Initramfs Card -->
+        <div class="card">
+          <div class="card-top">
+            <div class="card-header-row">
+              <span class="card-title">⚡ Host Initramfs</span>
+              <span class="badge-arch">Dual Arch</span>
+            </div>
+            <p class="card-desc">Complete container host image with ziro-init (PID 1), containerd 2.3, runc, and CNI plugins.</p>
+          </div>
+          <div class="btn-group">
+            <a class="btn" data-asset="ziro-initramfs-x86_64.cpio.gz" href="${DOWNLOAD_BASE}/ziro-initramfs-x86_64.cpio.gz">x86_64 (116MB)</a>
+            <a class="btn btn-subtle" data-asset="ziro-initramfs-arm64.cpio.gz" href="${DOWNLOAD_BASE}/ziro-initramfs-arm64.cpio.gz">arm64 (107MB)</a>
+          </div>
+        </div>
+
+        <!-- Rootfs Card -->
+        <div class="card">
+          <div class="card-top">
+            <div class="card-header-row">
+              <span class="card-title">📦 Minimal Rootfs</span>
+              <span class="badge-arch">Dual Arch</span>
+            </div>
+            <p class="card-desc">Stripped root filesystem archive for custom container builds and lightweight microVM roots.</p>
+          </div>
+          <div class="btn-group">
+            <a class="btn" data-asset="ziro-rootfs-x86_64.tar.gz" href="${DOWNLOAD_BASE}/ziro-rootfs-x86_64.tar.gz">x86_64 (12MB)</a>
+            <a class="btn btn-subtle" data-asset="ziro-rootfs-arm64.tar.gz" href="${DOWNLOAD_BASE}/ziro-rootfs-arm64.tar.gz">arm64 (12MB)</a>
+          </div>
+        </div>
+
+        <!-- ziroctl CLI -->
+        <div class="card">
+          <div class="card-top">
+            <div class="card-header-row">
+              <span class="card-title">🛠️ ziroctl CLI</span>
+              <span class="badge-arch">Binary</span>
+            </div>
+            <p class="card-desc">Statically linked CLI for system inspection, container lifecycles, and security auditing.</p>
+          </div>
+          <div class="btn-group">
+            <a class="btn" data-asset="ziroctl-x86_64" href="${DOWNLOAD_BASE}/ziroctl-x86_64">x86_64</a>
+            <a class="btn btn-subtle" data-asset="ziroctl-arm64" href="${DOWNLOAD_BASE}/ziroctl-arm64">arm64</a>
+          </div>
+        </div>
+
+        <!-- ziropkg CLI -->
+        <div class="card">
+          <div class="card-top">
+            <div class="card-header-row">
+              <span class="card-title">📦 ziropkg CLI</span>
+              <span class="badge-arch">Binary</span>
+            </div>
+            <p class="card-desc">Package manager CLI for installing verified packages (curl, jq, git, htop) on Ziro-OS.</p>
+          </div>
+          <div class="btn-group">
+            <a class="btn" data-asset="ziropkg-x86_64" href="${DOWNLOAD_BASE}/ziropkg-x86_64">x86_64</a>
+            <a class="btn btn-subtle" data-asset="ziropkg-arm64" href="${DOWNLOAD_BASE}/ziropkg-arm64">arm64</a>
+          </div>
+        </div>
+
+        <!-- SHA256SUMS -->
+        <div class="card">
+          <div class="card-top">
+            <div class="card-header-row">
+              <span class="card-title">🔒 Verification Checksums</span>
+              <span class="badge-arch">Manifest</span>
+            </div>
+            <p class="card-desc">Cryptographic SHA256 checksum manifest for verifying artifact integrity.</p>
+          </div>
+          <div class="btn-group">
+            <a class="btn btn-subtle" data-asset="SHA256SUMS" href="${DOWNLOAD_BASE}/SHA256SUMS">Download SHA256SUMS</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quick Usage -->
+    <section class="commands-container">
+      <div class="section-head" style="margin-bottom: 0.5rem;">
+        <h2>Quick Start</h2>
+        <span>CLI Reference</span>
+      </div>
+      <div class="cmd-grid">
+        <div class="cmd-item">
+          <label>Install Packages</label>
+          <pre>ziropkg install curl jq git</pre>
+        </div>
+        <div class="cmd-item">
+          <label>Container Management</label>
+          <pre>ziroctl container run -d -p 80:80 nginx</pre>
+        </div>
+        <div class="cmd-item">
+          <label>Security Audit</label>
+          <pre>ziroctl security audit</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrapper">
+      <p>
+        <strong>Ziro-OS</strong> &middot; Cloud-Native Container Operating System &middot; 
+        <a href="https://github.com/${REPO_NAME}" target="_blank">GitHub</a> &middot; 
+        <a href="https://github.com/${REPO_NAME}/blob/main/LICENSE" target="_blank">MIT License</a>
       </p>
     </div>
+  </footer>
 
-    <h2 style="font-size: 1.75rem; font-weight: 700; margin-bottom: 1.25rem;">💿 Output Images &amp; Binaries</h2>
+  <script>
+    function copyCommand() {
+      const code = document.getElementById('cmd-snippet').textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        const label = document.getElementById('copy-label');
+        label.textContent = 'Copied!';
+        setTimeout(() => { label.textContent = 'Copy'; }, 2000);
+      });
+    }
 
-    <div class="grid">
-      <!-- Bootable ISO -->
-      <div class="card">
-        <div>
-          <div class="card-title">💿 Bootable Hybrid ISO</div>
-          <p class="card-desc">Universal hybrid UEFI/BIOS bootable ISO image for bare-metal, VMware, Proxmox, and VirtualBox virtualization.</p>
-        </div>
-        <div>
-          <a class="btn" href="${DOWNLOAD_BASE}/ziro-os-x86_64.iso">Download x86_64 ISO</a>
-        </div>
-      </div>
-
-      <!-- Docker / Rootfs Tarball -->
-      <div class="card">
-        <div>
-          <div class="card-title">📦 Minimal Rootfs Archive</div>
-          <p class="card-desc">Stripped, minimal root filesystem archives for custom container images and lightweight microVM roots.</p>
-        </div>
-        <div>
-          <a class="btn" href="${DOWNLOAD_BASE}/ziro-rootfs-x86_64.tar.gz">Download x86_64 Rootfs</a>
-          <a class="btn btn-secondary" href="${DOWNLOAD_BASE}/ziro-rootfs-arm64.tar.gz">Download arm64 Rootfs</a>
-        </div>
-      </div>
-
-      <!-- Initramfs -->
-      <div class="card">
-        <div>
-          <div class="card-title">⚡ Full Host Initramfs</div>
-          <p class="card-desc">Complete standalone container host system containing ziro-init (PID 1), containerd, runc, and CNI networking plugins.</p>
-        </div>
-        <div>
-          <a class="btn" href="${DOWNLOAD_BASE}/ziro-initramfs-x86_64.cpio.gz">Download x86_64 Initramfs</a>
-          <a class="btn btn-secondary" href="${DOWNLOAD_BASE}/ziro-initramfs-arm64.cpio.gz">Download arm64 Initramfs</a>
-        </div>
-      </div>
-
-      <!-- ziroctl CLI -->
-      <div class="card">
-        <div>
-          <div class="card-title">🛠️ ziroctl Management CLI</div>
-          <p class="card-desc">Statically linked command-line utility for system inspection, container lifecycles, and security auditing.</p>
-        </div>
-        <div>
-          <a class="btn" href="${DOWNLOAD_BASE}/ziroctl-x86_64">Download ziroctl (x86_64)</a>
-          <a class="btn btn-secondary" href="${DOWNLOAD_BASE}/ziroctl-arm64">Download ziroctl (arm64)</a>
-        </div>
-      </div>
-
-      <!-- ziropkg CLI -->
-      <div class="card">
-        <div>
-          <div class="card-title">📦 ziropkg Package Manager</div>
-          <p class="card-desc">Official package manager CLI for installing verified packages (curl, jq, htop, git) on Ziro-OS hosts and containers.</p>
-        </div>
-        <div>
-          <a class="btn" href="${DOWNLOAD_BASE}/ziropkg-x86_64">Download ziropkg (x86_64)</a>
-          <a class="btn btn-secondary" href="${DOWNLOAD_BASE}/ziropkg-arm64">Download ziropkg (arm64)</a>
-        </div>
-      </div>
-
-      <!-- Verification Checksums -->
-      <div class="card">
-        <div>
-          <div class="card-title">🔒 SHA256 Checksums</div>
-          <p class="card-desc">Cryptographic hash manifest for verifying integrity of all release artifacts.</p>
-        </div>
-        <div>
-          <a class="btn" href="${DOWNLOAD_BASE}/SHA256SUMS">Download SHA256SUMS</a>
-        </div>
-      </div>
-    </div>
-
-    <div class="docker-box">
-      <h2>🚀 Quick Start with ziropkg</h2>
-      <p class="card-desc">Install additional packages into any Ziro-OS environment:</p>
-      <pre># Inside Ziro-OS container or host
-ziropkg install curl
-ziropkg install jq git htop
-ziropkg search redis
-ziroctl security audit</pre>
-    </div>
-
-    <footer>
-      <p>Ziro-OS — Minimal by design. Born for the cloud. MIT Licensed.</p>
-    </footer>
-  </div>
+    // Dynamic Live Release Resolution from GitHub API
+    (function fetchLiveRelease() {
+      const repo = "${REPO_NAME}";
+      fetch('https://api.github.com/repos/' + repo + '/releases/latest')
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (!data || !data.tag_name) return;
+          const tag = data.tag_name;
+          document.querySelectorAll('.release-tag').forEach(el => el.textContent = tag);
+          if (data.published_at) {
+            const dateStr = new Date(data.published_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            document.querySelectorAll('.release-date').forEach(el => el.textContent = dateStr);
+          }
+          if (data.assets && data.assets.length) {
+            data.assets.forEach(asset => {
+              const link = document.querySelector('[data-asset="' + asset.name + '"]');
+              if (link) {
+                link.href = asset.browser_download_url;
+              }
+            });
+          }
+        })
+        .catch(() => {});
+    })();
+  </script>
 </body>
 </html>
 EOF
 
-echo "✅ Generated GitHub Pages release portal at $OUTPUT_DIR/index.html"
+echo "=================================================="
+echo "✅ Generated clean Ziro-OS release portal for $RELEASE_VERSION"
+echo " Target: $OUTPUT_DIR/index.html"
+echo "=================================================="
