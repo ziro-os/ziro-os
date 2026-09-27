@@ -210,13 +210,16 @@ HOST_GID=$(id -g)
 docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ROOTFS_MINIMAL:/rootfs" \
     -v "$BUILD_DIR:/out" \
-    alpine:latest sh -c "
+    -e TARGET_ARCH="$TARGET_ARCH" \
+    -e HOST_UID="$HOST_UID" \
+    -e HOST_GID="$HOST_GID" \
+    alpine:latest sh -c '
         cd /rootfs
-        tar --exclude='./dev/*' -czf /out/ziro-rootfs-$TARGET_ARCH.tar.gz .
-        chown $HOST_UID:$HOST_GID /out/ziro-rootfs-$TARGET_ARCH.tar.gz
-        chmod 644 /out/ziro-rootfs-$TARGET_ARCH.tar.gz
+        tar --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" .
+        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
+        chmod 644 "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
         chmod -R a+rX /rootfs 2>/dev/null || true
-    "
+    '
 MINIMAL_SIZE=$(du -h "$MINIMAL_TAR" | cut -f1)
 echo "✅ Minimal Base Rootfs archive: $MINIMAL_TAR ($MINIMAL_SIZE)"
 
@@ -289,15 +292,20 @@ FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"
 docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ROOTFS_FULL:/rootfs" \
     -v "$BUILD_DIR:/out" \
-    alpine:latest sh -c "
+    -e TARGET_ARCH="$TARGET_ARCH" \
+    -e HOST_UID="$HOST_UID" \
+    -e HOST_GID="$HOST_GID" \
+    alpine:latest sh -c '
         rm -f /rootfs/lib/apk/db/lock /rootfs/var/run/*.pid /rootfs/run/*.pid
-        for f in /rootfs/usr/lib/xtables/*.so; do [ -e "$f" ] || rm -f "$f"; done
+        for f in /rootfs/usr/lib/xtables/*.so; do
+            [ -e "$f" ] || rm -f "$f"
+        done
         cd /rootfs
-        find . | cpio -o -H newc | gzip -9 > /out/ziro-initramfs-$TARGET_ARCH.cpio.gz
-        chown $HOST_UID:$HOST_GID /out/ziro-initramfs-$TARGET_ARCH.cpio.gz
-        chmod 644 /out/ziro-initramfs-$TARGET_ARCH.cpio.gz
+        find . | cpio -o -H newc | gzip -9 > "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+        chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
         chmod -R a+rX /rootfs 2>/dev/null || true
-    "
+    '
 INITRAMFS_SIZE=$(du -h "$FULL_INITRAMFS" | cut -f1)
 echo "✅ Full Container OS Initramfs: $FULL_INITRAMFS ($INITRAMFS_SIZE)"
 

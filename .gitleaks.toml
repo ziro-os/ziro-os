@@ -1,0 +1,7 @@
+[allowlist]
+description = "Global allowlist for public demo and test tokens"
+paths = [
+  '''public/index\.html\.json''',
+  '''_site/.*''',
+  '''\.gitleaksignore'''
+]
