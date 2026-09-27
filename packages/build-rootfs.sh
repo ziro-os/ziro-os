@@ -431,7 +431,22 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         for f in /rootfs/usr/lib/xtables/*.so; do
             [ -e "$f" ] || rm -f "$f"
         done
-        apk add --no-cache pigz >/dev/null 2>&1 || true
+        # Create essential static devnodes inside initramfs (critical for early boot and switch_root)
+        mkdir -p /rootfs/dev
+        mknod -m 600 /rootfs/dev/console c 5 1 2>/dev/null || true
+        mknod -m 666 /rootfs/dev/null c 1 3 2>/dev/null || true
+        mknod -m 666 /rootfs/dev/zero c 1 5 2>/dev/null || true
+        mknod -m 666 /rootfs/dev/tty c 5 0 2>/dev/null || true
+        mknod -m 666 /rootfs/dev/tty0 c 4 0 2>/dev/null || true
+        mknod -m 666 /rootfs/dev/tty1 c 4 1 2>/dev/null || true
+        mknod -m 660 /rootfs/dev/ttyS0 c 4 64 2>/dev/null || true
+        mknod -m 660 /rootfs/dev/urandom c 1 9 2>/dev/null || true
+
+        # Package full host OS archive for fast disk installation
+        tar --exclude="./proc/*" --exclude="./sys/*" -czf "/out/ziro-full-rootfs-${TARGET_ARCH}.tar.gz" .
+        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-full-rootfs-${TARGET_ARCH}.tar.gz"
+        chmod 644 "/out/ziro-full-rootfs-${TARGET_ARCH}.tar.gz"
+
         cd /rootfs
         if command -v pigz >/dev/null 2>&1; then
             find . | cpio -o -H newc | pigz > "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
@@ -442,8 +457,12 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
         chmod -R a+rX /rootfs 2>/dev/null || true
     '
+FULL_ROOTFS_TAR="$BUILD_DIR/ziro-full-rootfs-$TARGET_ARCH.tar.gz"
+FULL_ROOTFS_SIZE=$(du -h "$FULL_ROOTFS_TAR" | cut -f1)
+FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"
 INITRAMFS_SIZE=$(du -h "$FULL_INITRAMFS" | cut -f1)
-echo "✅ Full Container OS Initramfs: $FULL_INITRAMFS ($INITRAMFS_SIZE)"
+echo "✅ Full Host Rootfs:     $FULL_ROOTFS_TAR ($FULL_ROOTFS_SIZE)"
+echo "✅ Full OS Initramfs:    $FULL_INITRAMFS ($INITRAMFS_SIZE)"
 
 # Provide standard architecture alias symlinks for Docker buildx and release automation
 if [ "$TARGET_ARCH" = "x86_64" ]; then

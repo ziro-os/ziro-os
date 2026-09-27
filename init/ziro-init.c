@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <sys/vfs.h>
 #include <sys/sysmacros.h>
+#include <time.h>
 
 #ifndef MS_REC
 #define MS_REC 16384
@@ -98,10 +99,51 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
             pclose(fp);
         }
 
+        // Exhaustive partition scan via /proc/partitions
+        FILE *pf = fopen("/proc/partitions", "r");
+        if (pf) {
+            char pline[256];
+            while (fgets(pline, sizeof(pline), pf)) {
+                int maj = 0, min = 0;
+                long long blocks = 0;
+                char pname[128];
+                if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) == 4) {
+                    if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
+                    char devpath[256];
+                    snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
+                    if (access(devpath, F_OK) != 0) {
+                        mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
+                    }
+                    if (access(devpath, F_OK) == 0) {
+                        char bcmd[512];
+                        snprintf(bcmd, sizeof(bcmd), "blkid -s LABEL -o value %s 2>/dev/null", devpath);
+                        FILE *bfp = popen(bcmd, "r");
+                        if (bfp) {
+                            char blabel[128];
+                            if (fgets(blabel, sizeof(blabel), bfp)) {
+                                char *bnl = strchr(blabel, '\n');
+                                if (bnl) *bnl = '\0';
+                                char *bcr = strchr(blabel, '\r');
+                                if (bcr) *bcr = '\0';
+                                if (strcmp(blabel, label) == 0) {
+                                    snprintf(out_dev, max_len, "%s", devpath);
+                                    pclose(bfp);
+                                    fclose(pf);
+                                    return;
+                                }
+                            }
+                            pclose(bfp);
+                        }
+                    }
+                }
+            }
+            fclose(pf);
+        }
+
         // Search common partition nodes directly
         static const char *prefixes[] = {"/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb", "/dev/nvme0n1p", "/dev/hda", NULL};
         for (int p = 0; prefixes[p] != NULL; p++) {
-            for (int part = 1; part <= 4; part++) {
+            for (int part = 1; part <= 8; part++) {
                 char candidate[64];
                 snprintf(candidate, sizeof(candidate), "%s%d", prefixes[p], part);
                 if (access(candidate, F_OK) == 0) {
@@ -136,11 +178,56 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
             if (fgets(line, sizeof(line), fp)) {
                 char *nl = strchr(line, '\n');
                 if (nl) *nl = '\0';
-                if (strlen(line) > 0) {
+                char *cr = strchr(line, '\r');
+                if (cr) *cr = '\0';
+                if (strlen(line) > 0 && access(line, F_OK) == 0) {
                     snprintf(out_dev, max_len, "%.200s", line);
+                    pclose(fp);
+                    return;
                 }
             }
             pclose(fp);
+        }
+
+        // Exhaustive partition scan via /proc/partitions
+        FILE *pf = fopen("/proc/partitions", "r");
+        if (pf) {
+            char pline[256];
+            while (fgets(pline, sizeof(pline), pf)) {
+                int maj = 0, min = 0;
+                long long blocks = 0;
+                char pname[128];
+                if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) == 4) {
+                    if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
+                    char devpath[256];
+                    snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
+                    if (access(devpath, F_OK) != 0) {
+                        mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
+                    }
+                    if (access(devpath, F_OK) == 0) {
+                        char bcmd[512];
+                        snprintf(bcmd, sizeof(bcmd), "blkid -s UUID -o value %s 2>/dev/null", devpath);
+                        FILE *bfp = popen(bcmd, "r");
+                        if (bfp) {
+                            char buuid[128];
+                            if (fgets(buuid, sizeof(buuid), bfp)) {
+                                char *bnl = strchr(buuid, '\n');
+                                if (bnl) *bnl = '\0';
+                                char *bcr = strchr(buuid, '\r');
+                                if (bcr) *bcr = '\0';
+                                if (strcasecmp(buuid, uuid) == 0) {
+                                    snprintf(out_dev, max_len, "%s", devpath);
+                                    pclose(bfp);
+                                    fclose(pf);
+                                    return;
+                                }
+                            }
+                            pclose(bfp);
+                        }
+                    }
+                }
+            }
+            fclose(pf);
         }
     } else if (strncmp(spec, "/dev/", 5) == 0) {
         snprintf(out_dev, max_len, "%.200s", spec);
@@ -206,8 +293,8 @@ static void check_and_switch_root(void) {
         printf("[init] root device requested: %s\n", root_spec);
         char root_dev[256] = {0};
 
-        // Poll for disk readiness (up to 5 seconds)
-        for (int retries = 0; retries < 25; retries++) {
+        // Poll for disk readiness (up to 6 seconds)
+        for (int retries = 0; retries < 30; retries++) {
             resolve_root_device(root_spec, root_dev, sizeof(root_dev));
             if (root_dev[0] != '\0' && access(root_dev, F_OK) == 0) {
                 break;
@@ -226,19 +313,34 @@ static void check_and_switch_root(void) {
                     int mfd = open("/sysroot/etc/.ziro_switched", O_WRONLY | O_CREAT, 0644);
                     if (mfd >= 0) close(mfd);
 
-                    umount("/dev");
-                    umount("/proc");
-                    umount("/sys");
+                    // Ensure essential devnodes exist in /sysroot/dev for switch_root
+                    safe_mkdir("/sysroot/dev", 0755);
+                    mknod("/sysroot/dev/console", S_IFCHR | 0600, makedev(5, 1));
+                    mknod("/sysroot/dev/null", S_IFCHR | 0666, makedev(1, 3));
+                    mknod("/sysroot/dev/zero", S_IFCHR | 0666, makedev(1, 5));
+                    mknod("/sysroot/dev/tty", S_IFCHR | 0666, makedev(5, 0));
+                    mknod("/sysroot/dev/tty0", S_IFCHR | 0666, makedev(4, 0));
+                    mknod("/sysroot/dev/tty1", S_IFCHR | 0666, makedev(4, 1));
+                    mknod("/sysroot/dev/ttyS0", S_IFCHR | 0660, makedev(4, 64));
+                    mknod("/sysroot/dev/urandom", S_IFCHR | 0660, makedev(1, 9));
+
+                    umount2("/dev", MNT_DETACH);
+                    umount2("/proc", MNT_DETACH);
+                    umount2("/sys", MNT_DETACH);
 
                     printf("[init] switching root to persistent disk (%s)...\n", root_dev);
-                    execl("/sbin/switch_root", "switch_root", "/sysroot", "/sbin/init", NULL);
-                    execl("/bin/switch_root", "switch_root", "/sysroot", "/sbin/init", NULL);
-                    execl("/bin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
-                    execl("/sbin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
+                    fflush(stdout);
+                    fflush(stderr);
+
+                    const char *init_target = (access("/sysroot/sbin/init", X_OK) == 0) ? "/sbin/init" : "/init";
+                    execl("/sbin/switch_root", "switch_root", "/sysroot", init_target, NULL);
+                    execl("/bin/switch_root", "switch_root", "/sysroot", init_target, NULL);
+                    execl("/bin/busybox", "switch_root", "/sysroot", init_target, NULL);
+                    execl("/sbin/busybox", "switch_root", "/sysroot", init_target, NULL);
                     fprintf(stderr, "[init] switch_root to %s failed: %s\n", root_dev, strerror(errno));
                 } else {
                     fprintf(stderr, "[init] /sysroot/sbin/init not found on %s, unmounting\n", root_dev);
-                    umount("/sysroot");
+                    umount2("/sysroot", MNT_DETACH);
                 }
             } else {
                 fprintf(stderr, "[init] failed to mount %s on /sysroot: %s\n", root_dev, strerror(errno));
@@ -268,7 +370,12 @@ static void check_and_switch_root(void) {
             "chmod 0700 /sysroot/root; "
             "touch /sysroot/etc/.ziro_switched; "
             "mknod -m 600 /sysroot/dev/console c 5 1 2>/dev/null || true; "
-            "mknod -m 666 /sysroot/dev/null c 1 3 2>/dev/null || true",
+            "mknod -m 666 /sysroot/dev/null c 1 3 2>/dev/null || true; "
+            "mknod -m 666 /sysroot/dev/zero c 1 5 2>/dev/null || true; "
+            "mknod -m 666 /sysroot/dev/tty c 5 0 2>/dev/null || true; "
+            "mknod -m 666 /sysroot/dev/tty0 c 4 0 2>/dev/null || true; "
+            "mknod -m 666 /sysroot/dev/tty1 c 4 1 2>/dev/null || true; "
+            "mknod -m 660 /sysroot/dev/ttyS0 c 4 64 2>/dev/null || true",
             NULL
         };
         execv("/bin/sh", argv);
@@ -281,14 +388,23 @@ static void check_and_switch_root(void) {
     safe_mkdir("/sysroot/dev", 0755);
     mknod("/sysroot/dev/console", S_IFCHR | 0600, makedev(5, 1));
     mknod("/sysroot/dev/null", S_IFCHR | 0666, makedev(1, 3));
+    mknod("/sysroot/dev/zero", S_IFCHR | 0666, makedev(1, 5));
+    mknod("/sysroot/dev/tty", S_IFCHR | 0666, makedev(5, 0));
+    mknod("/sysroot/dev/tty0", S_IFCHR | 0666, makedev(4, 0));
+    mknod("/sysroot/dev/tty1", S_IFCHR | 0666, makedev(4, 1));
+    mknod("/sysroot/dev/ttyS0", S_IFCHR | 0660, makedev(4, 64));
     int fd = open("/sysroot/etc/.ziro_switched", O_WRONLY | O_CREAT, 0644);
     if (fd >= 0) close(fd);
 
-    umount("/dev");
-    umount("/proc");
-    umount("/sys");
+    umount2("/dev", MNT_DETACH);
+    umount2("/proc", MNT_DETACH);
+    umount2("/sys", MNT_DETACH);
 
     printf("[init] performing switch_root to live tmpfs...\n");
+    fflush(stdout);
+    fflush(stderr);
+    execl("/sbin/switch_root", "switch_root", "/sysroot", "/sbin/init", NULL);
+    execl("/bin/switch_root", "switch_root", "/sysroot", "/sbin/init", NULL);
     execl("/bin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
     execl("/sbin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
     fprintf(stderr, "[init] failed to switch_root: %s\n", strerror(errno));
@@ -702,20 +818,6 @@ static void sig_handler(int sig) {
     }
 }
 
-static void reap_children(void) {
-    int status;
-    pid_t pid;
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        if (pid == containerd_pid) {
-            printf("[init] containerd (PID %d) exited with status %d\n", pid, status);
-            containerd_pid = 0;
-        } else if (pid == sshd_pid) {
-            printf("[init] sshd (PID %d) exited with status %d\n", pid, status);
-            sshd_pid = 0;
-        }
-    }
-}
-
 static void get_active_console(char *dev_path, size_t max_len) {
     snprintf(dev_path, max_len, "/dev/console");
     FILE *f = fopen("/sys/class/tty/console/active", "r");
@@ -744,6 +846,9 @@ static void setup_controlling_tty(void) {
 
     int fd = open(dev_path, O_RDWR);
     if (fd < 0) {
+        fd = open("/dev/tty1", O_RDWR);
+    }
+    if (fd < 0) {
         fd = open("/dev/console", O_RDWR);
     }
     if (fd >= 0) {
@@ -757,18 +862,80 @@ static void setup_controlling_tty(void) {
     }
 }
 
-static void spawn_shell(void) {
+struct terminal_session {
+    const char *dev;
+    pid_t pid;
+    time_t last_spawn;
+    int respawn_fails;
+    int disabled;
+};
+
+static struct terminal_session term_sessions[] = {
+    {"/dev/tty1", 0, 0, 0, 0},
+    {"/dev/ttyS0", 0, 0, 0, 0},
+    {"/dev/ttyAMA0", 0, 0, 0, 0},
+};
+#define NUM_TERM_SESSIONS (sizeof(term_sessions)/sizeof(term_sessions[0]))
+
+static pid_t console_fallback_pid = 0;
+
+static void setup_terminal_attributes(int fd, const char *dev) {
+    if (strstr(dev, "ttyS") != NULL || strstr(dev, "ttyAMA") != NULL) {
+        struct termios tio;
+        if (tcgetattr(fd, &tio) == 0) {
+            cfsetispeed(&tio, B115200);
+            cfsetospeed(&tio, B115200);
+            tio.c_cflag |= (CLOCAL | CREAD | CS8);
+            tio.c_cflag &= ~(PARENB | CSTOPB | CRTSCTS);
+            tio.c_lflag |= (ICANON | ECHO | ECHOE | ISIG);
+            tio.c_iflag |= ICRNL;
+            tio.c_oflag |= (OPOST | ONLCR);
+            tcsetattr(fd, TCSANOW, &tio);
+        }
+    }
+}
+
+static void spawn_terminal(struct terminal_session *s) {
+    if (s->disabled) return;
+    if (access(s->dev, F_OK) != 0) {
+        return; // Device node does not exist
+    }
+
+    time_t now = time(NULL);
+    if (s->respawn_fails >= 5) {
+        if (now - s->last_spawn < 5) {
+            return; // 5-second backoff after consecutive fast exits
+        }
+    }
+
     pid_t pid = fork();
     if (pid == 0) {
-        setup_controlling_tty();
+        int fd = open(s->dev, O_RDWR | O_NONBLOCK | O_NOCTTY);
+        if (fd < 0) {
+            _exit(2); // Failed to open device
+        }
+
+        setup_terminal_attributes(fd, s->dev);
+
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
+
+        setsid();
+        ioctl(fd, TIOCSCTTY, 1);
+        tcsetpgrp(fd, getpid());
+
+        dup2(fd, STDIN_FILENO);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        if (fd > 2) close(fd);
 
         setenv("TERM", "linux", 1);
         setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
         setenv("HOME", "/root", 1);
         setenv("USER", "root", 1);
-        if (chdir("/root") != 0) {
-            // ignore
-        }
+        if (chdir("/root") != 0) {}
 
         if (access("/bin/sh", X_OK) == 0) {
             char *argv[] = {"sh", NULL};
@@ -778,11 +945,97 @@ static void spawn_shell(void) {
             char *argv[] = {"busybox", "sh", NULL};
             execv("/bin/busybox", argv);
         }
-        fprintf(stderr, "[init] exec shell failed: %s\n", strerror(errno));
         _exit(1);
     } else if (pid > 0) {
-        int status;
-        waitpid(pid, &status, 0);
+        s->pid = pid;
+        s->last_spawn = now;
+    }
+}
+
+static void spawn_fallback_console(void) {
+    if (console_fallback_pid > 0) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int fd = open("/dev/console", O_RDWR);
+        if (fd >= 0) {
+            setsid();
+            ioctl(fd, TIOCSCTTY, 1);
+            tcsetpgrp(fd, getpid());
+            dup2(fd, STDIN_FILENO);
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            if (fd > 2) close(fd);
+        }
+        setenv("TERM", "linux", 1);
+        setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
+        setenv("HOME", "/root", 1);
+        setenv("USER", "root", 1);
+        if (chdir("/root") != 0) {}
+
+        if (access("/bin/sh", X_OK) == 0) {
+            char *argv[] = {"sh", NULL};
+            execv("/bin/sh", argv);
+        }
+        if (access("/bin/busybox", X_OK) == 0) {
+            char *argv[] = {"busybox", "sh", NULL};
+            execv("/bin/busybox", argv);
+        }
+        _exit(1);
+    } else if (pid > 0) {
+        console_fallback_pid = pid;
+    }
+}
+
+static void supervise_terminals(void) {
+    int any_active = 0;
+    for (size_t i = 0; i < NUM_TERM_SESSIONS; i++) {
+        if (term_sessions[i].pid <= 0 && !term_sessions[i].disabled) {
+            spawn_terminal(&term_sessions[i]);
+        }
+        if (term_sessions[i].pid > 0) {
+            any_active = 1;
+        }
+    }
+
+    if (!any_active) {
+        spawn_fallback_console();
+    }
+}
+
+static void handle_child_exit(pid_t pid, int status) {
+    time_t now = time(NULL);
+
+    if (pid == containerd_pid) {
+        printf("[init] containerd (PID %d) exited with status %d; restarting...\n", pid, status);
+        containerd_pid = 0;
+        start_containerd();
+        return;
+    }
+    if (pid == sshd_pid) {
+        printf("[init] sshd (PID %d) exited with status %d; restarting...\n", pid, status);
+        sshd_pid = 0;
+        start_sshd();
+        return;
+    }
+    if (pid == console_fallback_pid) {
+        console_fallback_pid = 0;
+        return;
+    }
+
+    for (size_t i = 0; i < NUM_TERM_SESSIONS; i++) {
+        if (term_sessions[i].pid == pid) {
+            term_sessions[i].pid = 0;
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 2) {
+                term_sessions[i].disabled = 1;
+                return;
+            }
+            if (now - term_sessions[i].last_spawn < 2) {
+                term_sessions[i].respawn_fails++;
+            } else {
+                term_sessions[i].respawn_fails = 0;
+            }
+            return;
+        }
     }
 }
 
@@ -851,6 +1104,9 @@ int main(int argc, char *argv[]) {
     sigaction(SIGUSR2, &sa, NULL);
     signal(SIGCHLD, SIG_DFL);
 
+    // Enable Ctrl-Alt-Del to send SIGINT to PID 1 for clean reboot
+    reboot(RB_ENABLE_CAD);
+
     // Initialization phases
     init_filesystems();
     init_devices();
@@ -886,11 +1142,17 @@ int main(int argc, char *argv[]) {
         fclose(cmdline);
     }
 
-    // Interactive supervisor loop
+    // Interactive supervisor loop (concurrent multi-terminal on tty1, ttyS0, ttyAMA0)
     while (!shutdown_requested && !reboot_requested) {
-        spawn_shell();
-        reap_children();
-        usleep(500000); // 500ms debounce before respawn
+        supervise_terminals();
+
+        int status;
+        pid_t exited = waitpid(-1, &status, WNOHANG);
+        if (exited > 0) {
+            handle_child_exit(exited, status);
+        } else {
+            usleep(250000); // 250ms sleep -> zero CPU overhead when waiting
+        }
     }
 
     perform_shutdown(reboot_requested);

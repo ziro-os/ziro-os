@@ -475,6 +475,16 @@ EOF
     chmod 1777 "$TARGET_MNT/tmp"
     chmod 0700 "$TARGET_MNT/root"
 
+    # Static device nodes on target rootfs (required by BusyBox switch_root)
+    mknod -m 600 "$TARGET_MNT/dev/console" c 5 1 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/null" c 1 3 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/zero" c 1 5 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/tty" c 5 0 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/tty0" c 4 0 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/tty1" c 4 1 2>/dev/null || true
+    mknod -m 660 "$TARGET_MNT/dev/ttyS0" c 4 64 2>/dev/null || true
+    mknod -m 660 "$TARGET_MNT/dev/urandom" c 1 9 2>/dev/null || true
+
     # Copy Kernel into /boot
     mkdir -p "$TARGET_MNT/boot"
     for kern in /boot/vmlinuz* /vmlinuz* /build/vmlinuz*; do
@@ -495,6 +505,10 @@ EOF
 
     # If not on current rootfs, check mounted CD-ROM or ISO devices
     if [ -z "$INITR_SRC" ]; then
+        for mod in sr_mod isofs ata_piix ahci virtio_scsi scsi_mod; do
+            modprobe -q "$mod" 2>/dev/null || true
+        done
+        mdev -s 2>/dev/null || true
         mkdir -p /mnt/cdrom
         for cddev in /dev/sr* /dev/cdrom /dev/iso*; do
             if [ -b "$cddev" ]; then
@@ -521,6 +535,14 @@ EOF
         echo "Generating standalone boot initramfs for installed disk..."
         TEMP_INITR=$(mktemp -d /tmp/ziro-initr.XXXXXX 2>/dev/null || mktemp -d)
         mkdir -p "$TEMP_INITR/bin" "$TEMP_INITR/sbin" "$TEMP_INITR/dev" "$TEMP_INITR/proc" "$TEMP_INITR/sys" "$TEMP_INITR/mnt" "$TEMP_INITR/lib" "$TEMP_INITR/sysroot" "$TEMP_INITR/etc"
+        mknod -m 600 "$TEMP_INITR/dev/console" c 5 1 2>/dev/null || true
+        mknod -m 666 "$TEMP_INITR/dev/null" c 1 3 2>/dev/null || true
+        mknod -m 666 "$TEMP_INITR/dev/zero" c 1 5 2>/dev/null || true
+        mknod -m 666 "$TEMP_INITR/dev/tty" c 5 0 2>/dev/null || true
+        mknod -m 666 "$TEMP_INITR/dev/tty0" c 4 0 2>/dev/null || true
+        mknod -m 666 "$TEMP_INITR/dev/tty1" c 4 1 2>/dev/null || true
+        mknod -m 660 "$TEMP_INITR/dev/ttyS0" c 4 64 2>/dev/null || true
+        mknod -m 660 "$TEMP_INITR/dev/urandom" c 1 9 2>/dev/null || true
         [ -f /init ] && cp -a /init "$TEMP_INITR/init" || cp -a "$TARGET_MNT/init" "$TEMP_INITR/init"
         [ -f /sbin/init ] && cp -a /sbin/init "$TEMP_INITR/sbin/init" || cp -a "$TARGET_MNT/sbin/init" "$TEMP_INITR/sbin/init"
         [ -f /bin/busybox ] && cp -a /bin/busybox "$TEMP_INITR/bin/busybox" || cp -a "$TARGET_MNT/bin/busybox" "$TEMP_INITR/bin/busybox"
@@ -569,28 +591,53 @@ EOF
                      --bootloader-id=ziro-os --recheck --removable || true
     fi
 
-    # Write GRUB configuration
+    # Write GRUB configuration with Dual Console support (VGA/NoVNC screen + Serial COM1)
     cat > "$TARGET_MNT/boot/grub/grub.cfg" << EOF
+insmod part_gpt
+insmod part_msdos
+insmod ext2
+insmod fat
+insmod all_video
+insmod gfxterm
+
 set default=0
 set timeout=3
 
+# Configure Dual Console (Screen/VGA + Serial COM1)
+serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1
+terminal_input --append console serial
+terminal_output --append console serial
+
 menuentry "Ziro-OS Container Host" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=tty0 console=ttyS0 quiet
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Ziro-OS Container Host (Quiet)" {
+    search --no-floppy --label --set=root ZIRO_ROOT
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0 quiet
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Ziro-OS Container Host (Serial Console Primary)" {
+    search --no-floppy --label --set=root ZIRO_ROOT
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=tty0 console=ttyS0,115200
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Ziro-OS (Recovery Shell)" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=tty0 console=ttyS0 ziro.recovery quiet
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0 rdinit=/bin/sh
     initrd /boot/initramfs.cpio.gz
 }
 EOF
 
     # Copy GRUB config to EFI partition as well for standalone UEFI loaders
-    mkdir -p "$TARGET_MNT/boot/efi/EFI/BOOT" "$TARGET_MNT/boot/efi/boot/grub"
+    mkdir -p "$TARGET_MNT/boot/efi/EFI/BOOT" "$TARGET_MNT/boot/efi/boot/grub" "$TARGET_MNT/boot/efi/EFI/ziro-os"
     cp "$TARGET_MNT/boot/grub/grub.cfg" "$TARGET_MNT/boot/efi/boot/grub/grub.cfg" 2>/dev/null || true
     cp "$TARGET_MNT/boot/grub/grub.cfg" "$TARGET_MNT/boot/efi/EFI/BOOT/grub.cfg" 2>/dev/null || true
+    cp "$TARGET_MNT/boot/grub/grub.cfg" "$TARGET_MNT/boot/efi/EFI/ziro-os/grub.cfg" 2>/dev/null || true
 
     # 7. System Configuration
     printf "${BOLD}[6/6] Configuring hostname, network, security, and fstab...${RESET}\n"
@@ -753,6 +800,17 @@ EOF
     umount "$TARGET_MNT/dev" 2>/dev/null || true
     umount "$TARGET_MNT/proc" 2>/dev/null || true
     umount "$TARGET_MNT/sys" 2>/dev/null || true
+
+    # Re-affirm static devnodes directly on persistent ext4 rootfs (critical for BusyBox switch_root)
+    mknod -m 600 "$TARGET_MNT/dev/console" c 5 1 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/null" c 1 3 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/zero" c 1 5 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/tty" c 5 0 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/tty0" c 4 0 2>/dev/null || true
+    mknod -m 666 "$TARGET_MNT/dev/tty1" c 4 1 2>/dev/null || true
+    mknod -m 660 "$TARGET_MNT/dev/ttyS0" c 4 64 2>/dev/null || true
+    mknod -m 660 "$TARGET_MNT/dev/urandom" c 1 9 2>/dev/null || true
+
     umount "$TARGET_MNT/boot/efi" 2>/dev/null || true
     umount "$TARGET_MNT" 2>/dev/null || true
 

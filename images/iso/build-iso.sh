@@ -60,31 +60,45 @@ cp "$INITRAMFS_FILE" "$ISO_STAGING/boot/initramfs.cpio.gz"
 
 # Bundle rootfs archive on ISO if available for fast offline disk installation
 mkdir -p "$ISO_STAGING/ziro"
-if [ -f "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" ]; then
+if [ -f "$BUILD_DIR/ziro-full-rootfs-$TARGET_ARCH.tar.gz" ]; then
+    cp "$BUILD_DIR/ziro-full-rootfs-$TARGET_ARCH.tar.gz" "$ISO_STAGING/ziro/rootfs.tar.gz"
+elif [ -f "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" ]; then
     cp "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" "$ISO_STAGING/ziro/rootfs.tar.gz"
 fi
 
 # GRUB configuration for UEFI & BIOS (SeaBIOS, OVMF, VMware, VirtualBox, Proxmox)
 cat > "$ISO_STAGING/boot/grub/grub.cfg" << EOF
+insmod part_gpt
+insmod part_msdos
+insmod ext2
+insmod fat
+insmod all_video
+insmod gfxterm
+
 serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1
-terminal_input --append serial console
-terminal_output --append serial console
+terminal_input --append console serial
+terminal_output --append console serial
 
 set default=0
 set timeout=5
 
 menuentry "Ziro-OS Live Container Host & Installer" {
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Ziro-OS Live (Quiet Boot)" {
     linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init quiet
     initrd /boot/initramfs.cpio.gz
 }
 
-menuentry "Ziro-OS Live (Serial Console)" {
-    linux /boot/vmlinuz console=tty0 console=ttyS0,115200 rdinit=/init quiet
+menuentry "Ziro-OS Live (Serial Console Primary)" {
+    linux /boot/vmlinuz console=tty0 console=ttyS0,115200 rdinit=/init
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Ziro-OS Automated Terminal Installer" {
-    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.autoinstall quiet
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.autoinstall
     initrd /boot/initramfs.cpio.gz
 }
 
