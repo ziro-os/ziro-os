@@ -290,6 +290,16 @@ if [ -f "$DOCKERFILE" ]; then
     echo "✓ Updated images/docker/Dockerfile"
 fi
 
+# Update public/index.html fallback release tag
+PUBLIC_INDEX="$REPO_ROOT/public/index.html"
+if [ -f "$PUBLIC_INDEX" ]; then
+    sed -i.bak -E "s/releases\/download\/v[0-9]+\.[0-9]+\.[0-9]+/releases\/download\/${TAG}/g" "$PUBLIC_INDEX"
+    sed -i.bak -E "s/<span class=\"version-pill release-tag\">v[0-9]+\.[0-9]+\.[0-9]+<\/span>/<span class=\"version-pill release-tag\">${TAG}<\/span>/g" "$PUBLIC_INDEX"
+    sed -i.bak -E "s/<span class=\"release-tag-label\">v[0-9]+\.[0-9]+\.[0-9]+/<span class=\"release-tag-label\">${TAG}/g" "$PUBLIC_INDEX"
+    rm -f "${PUBLIC_INDEX}.bak"
+    echo "✓ Updated public/index.html"
+fi
+
 # Stage files for git commit
 git add \
     "$REPO_ROOT/VERSION" \
@@ -297,7 +307,8 @@ git add \
     "$REPO_ROOT/rootfs/etc/ziro-release" \
     "$REPO_ROOT/tools/ziroctl/cmd/version.go" \
     "$REPO_ROOT/tools/ziropkg/cmd/root.go" \
-    "$REPO_ROOT/images/docker/Dockerfile" 2>/dev/null || true
+    "$REPO_ROOT/images/docker/Dockerfile" \
+    "$REPO_ROOT/public/index.html" 2>/dev/null || true
 
 # Determine commit message and execute commit
 if [ "$FORCE" = true ] && [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
