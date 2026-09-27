@@ -16,6 +16,11 @@ var (
 	installUserData  string
 	installPassword  string
 	installAutoYes   bool
+	installNetMode   string
+	installIP        string
+	installGateway   string
+	installDNS       string
+	installIface     string
 )
 
 var installCmd = &cobra.Command{
@@ -23,7 +28,8 @@ var installCmd = &cobra.Command{
 	Short: "Install Ziro-OS to physical or virtual disk (TUI / Automated)",
 	Long: `ziroctl install launches the Ziro-OS system installer.
 It formats and partitions the target disk, installs UEFI and BIOS bootloaders,
-deploys the minimal container host operating system, and provisions SSH keys and user-data.`,
+deploys the minimal container host operating system, configures networking (DHCP / Static IP),
+and provisions SSH keys and user-data.`,
 	RunE: runInstall,
 }
 
@@ -33,6 +39,11 @@ func init() {
 	installCmd.Flags().StringVarP(&installSSHKey, "ssh-key", "k", "", "SSH public key or path to public key file for root")
 	installCmd.Flags().StringVarP(&installPassword, "password", "p", "", "Root password")
 	installCmd.Flags().StringVarP(&installUserData, "user-data", "u", "", "URL or path to user-data / cloud post-install script")
+	installCmd.Flags().StringVar(&installNetMode, "net-mode", "", "Network mode: 'dhcp', 'static', or 'skip'")
+	installCmd.Flags().StringVar(&installIP, "ip", "", "Static IPv4 address and CIDR (e.g. 192.168.1.50/24)")
+	installCmd.Flags().StringVar(&installGateway, "gateway", "", "Default gateway IPv4 address")
+	installCmd.Flags().StringVar(&installDNS, "dns", "", "DNS nameservers (default: 1.1.1.1 8.8.8.8)")
+	installCmd.Flags().StringVar(&installIface, "iface", "", "Target network interface (e.g. eth0)")
 	installCmd.Flags().BoolVarP(&installAutoYes, "yes", "y", false, "Confirm installation without interactive prompts")
 
 	rootCmd.AddCommand(installCmd)
@@ -73,6 +84,21 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	if installUserData != "" {
 		cmdArgs = append(cmdArgs, "--user-data", installUserData)
+	}
+	if installNetMode != "" {
+		cmdArgs = append(cmdArgs, "--net-mode", installNetMode)
+	}
+	if installIP != "" {
+		cmdArgs = append(cmdArgs, "--ip", installIP)
+	}
+	if installGateway != "" {
+		cmdArgs = append(cmdArgs, "--gateway", installGateway)
+	}
+	if installDNS != "" {
+		cmdArgs = append(cmdArgs, "--dns", installDNS)
+	}
+	if installIface != "" {
+		cmdArgs = append(cmdArgs, "--iface", installIface)
 	}
 	if installAutoYes {
 		cmdArgs = append(cmdArgs, "--yes")

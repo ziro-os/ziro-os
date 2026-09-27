@@ -80,18 +80,48 @@ Output artifact: `build/ziro-os-<arch>.iso`
 
 #### Proxmox VE & Hypervisor Deployment
 1. Upload `ziro-os-x86_64.iso` to Proxmox VE ISO storage (or your hypervisor of choice).
-2. Create a VM with standard settings (**SeaBIOS** or **OVMF UEFI**, VirtIO SCSI disk, 512MB+ RAM).
-3. Boot the VM. The live container OS will load in under 2 seconds.
-4. Launch the interactive TUI installer:
+2. Create a VM with standard settings (**SeaBIOS** or **OVMF UEFI**, VirtIO / SCSI / SATA / NVMe disk, 512MB+ RAM).
+3. Boot the VM. The live container OS discovers all storage drives and loads in under 2 seconds.
+4. Launch the interactive TUI installer (with automatic storage discovery and network setup wizard):
    ```bash
    ziro-install
    # or: ziroctl install
    ```
-5. Or deploy automatically with zero prompts (cloud-native key authentication and post-install user-data script):
+5. Or deploy automatically with zero prompts (cloud-native key authentication, network settings, and user-data script):
    ```bash
-   ziro-install -d /dev/sda -n ziro-node-01 -k "ssh-ed25519 AAAA..." -u https://example.com/user-data.sh -y
+   # Automated with DHCP:
+   ziro-install -d /dev/sda -n ziro-node-01 -k "ssh-ed25519 AAAA..." -y
+
+   # Automated with Static IP (Rocky/RHEL style):
+   ziro-install -d /dev/vda -n ziro-node-01 --ip 192.168.1.50/24 --gateway 192.168.1.1 --dns "1.1.1.1 8.8.8.8" -y
    ```
 6. Disconnect the ISO and reboot into your lightning-fast, hardened container host.
+
+---
+
+### 4. Cloud-Native Operations & Diagnostic Utilities (`ziroctl`)
+
+`ziroctl` includes essential toolsets for cloud and systems engineers:
+
+```bash
+# System & Cloud Health Diagnostics
+ziroctl doctor                         # Run full diagnostic suite (cgroups, containerd, storage, network)
+ziroctl cloud inspect                  # Detect hypervisor (Proxmox/AWS/GCP/Azure/Bare Metal) & DMI metadata
+
+# Network Management (Auto DHCP & Static IP Wizard)
+ziroctl network status                 # Detailed interface status, MAC, routes, DNS, and connectivity check
+ziroctl network setup                  # Interactive Rocky/RHEL-style network configuration wizard
+ziroctl network setup -i eth0 --mode dhcp --apply           # Fast auto-DHCP configuration
+ziroctl network setup -i eth0 --mode static --ip 10.0.0.50/24 --gateway 10.0.0.1 --dns 1.1.1.1 --apply
+
+# Storage & Partition Management
+ziroctl disk list                      # Inspect block devices (VirtIO, SCSI, SATA, NVMe), models, and sizes
+ziroctl disk usage                     # Filesystem disk capacity and inode utilization
+
+# Security Hardening & Audits
+ziroctl security audit                 # Audit kernel namespaces, seccomp, cgroups v2, and sticky bits
+ziroctl security harden                # Apply hardened kernel sysctls, SSH key-only auth, and file permissions
+```
 
 ---
 

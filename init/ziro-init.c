@@ -167,6 +167,117 @@ static void init_filesystems(void) {
     safe_mkdir("/var/empty", 0700);
 }
 
+static void init_devices(void) {
+    printf("[init] discovering hardware and loading kernel modules...\n");
+
+    // 1. Essential virtualization, storage, and networking kernel modules
+    static const char *modules[] = {
+        // VirtIO subsystems
+        "virtio", "virtio_ring", "virtio_pci", "virtio_pci_modern_dev",
+        "virtio_blk", "virtio_scsi", "virtio_net",
+        // SCSI & SATA controllers and disks
+        "scsi_mod", "sd_mod", "sr_mod", "sg",
+        "libata", "ata_generic", "ata_piix", "ahci", "sata_nv", "sata_via",
+        // NVMe controllers
+        "nvme", "nvme_core",
+        // Network adapters
+        "e1000", "e1000e", "igb", "r8169", "vmxnet3",
+        // Filesystems
+        "ext4", "vfat", "isofs", "overlay",
+        NULL
+    };
+
+    for (int i = 0; modules[i] != NULL; i++) {
+        pid_t p = fork();
+        if (p == 0) {
+            char *margs[] = {"modprobe", "-q", (char *)modules[i], NULL};
+            execv("/sbin/modprobe", margs);
+            execv("/bin/modprobe", margs);
+            execv("/usr/sbin/modprobe", margs);
+            _exit(0);
+        } else if (p > 0) {
+            int st;
+            waitpid(p, &st, 0);
+        }
+    }
+
+    // 2. Hardware coldplug: probe modalias for all detected devices in /sys
+    DIR *sys_bus = opendir("/sys/bus");
+    if (sys_bus) {
+        closedir(sys_bus);
+        system("find /sys/bus /sys/devices -name modalias 2>/dev/null | while read -r f; do [ -f \"$f\" ] && read -r m < \"$f\" && [ -n \"$m\" ] && modprobe -q \"$m\" 2>/dev/null; done 2>/dev/null || true");
+    }
+
+    // 3. Trigger mdev -s to populate /dev
+    pid_t mp = fork();
+    if (mp == 0) {
+        char *mdev_args[] = {"mdev", "-s", NULL};
+        execv("/sbin/mdev", mdev_args);
+        execv("/bin/mdev", mdev_args);
+        _exit(0);
+    } else if (mp > 0) {
+        int st;
+        waitpid(mp, &st, 0);
+    }
+
+    // 4. Ensure block device nodes in /dev exist by reading /sys/block/*/dev
+    DIR *blk_dir = opendir("/sys/block");
+    if (blk_dir) {
+        struct dirent *ent;
+        while ((ent = readdir(blk_dir)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            char dev_file[512];
+            snprintf(dev_file, sizeof(dev_file), "/sys/block/%s/dev", ent->d_name);
+            FILE *df = fopen(dev_file, "r");
+            if (df) {
+                int maj = 0, min = 0;
+                if (fscanf(df, "%d:%d", &maj, &min) == 2) {
+                    char node_path[512];
+                    snprintf(node_path, sizeof(node_path), "/dev/%s", ent->d_name);
+                    struct stat st;
+                    if (stat(node_path, &st) != 0) {
+                        mknod(node_path, S_IFBLK | 0660, makedev(maj, min));
+                    }
+                }
+                fclose(df);
+            }
+
+            // Also ensure partitions (e.g. sda1, vda1, nvme0n1p1) have device nodes
+            char sys_part_pattern[512];
+            snprintf(sys_part_pattern, sizeof(sys_part_pattern), "/sys/block/%s", ent->d_name);
+            DIR *pdir = opendir(sys_part_pattern);
+            if (pdir) {
+                struct dirent *pent;
+                while ((pent = readdir(pdir)) != NULL) {
+                    if (pent->d_name[0] == '.') continue;
+                    char pdev_file[640];
+                    snprintf(pdev_file, sizeof(pdev_file), "/sys/block/%s/%s/dev", ent->d_name, pent->d_name);
+                    FILE *pdf = fopen(pdev_file, "r");
+                    if (pdf) {
+                        int pmaj = 0, pmin = 0;
+                        if (fscanf(pdf, "%d:%d", &pmaj, &pmin) == 2) {
+                            char pnode_path[512];
+                            snprintf(pnode_path, sizeof(pnode_path), "/dev/%s", pent->d_name);
+                            struct stat pst;
+                            if (stat(pnode_path, &pst) != 0) {
+                                mknod(pnode_path, S_IFBLK | 0660, makedev(pmaj, pmin));
+                            }
+                        }
+                        fclose(pdf);
+                    }
+                }
+                closedir(pdir);
+            }
+
+            // Log discovered block device
+            if (strncmp(ent->d_name, "loop", 4) != 0 && strncmp(ent->d_name, "ram", 3) != 0) {
+                printf("[init] storage drive detected: /dev/%s\n", ent->d_name);
+            }
+        }
+        closedir(blk_dir);
+    }
+}
+
 static void init_cgroups(void) {
     printf("[init] initializing cgroups v2...\n");
     safe_mkdir("/sys/fs/cgroup", 0755);
@@ -548,6 +659,7 @@ int main(int argc, char *argv[]) {
 
     // Initialization phases
     init_filesystems();
+    init_devices();
     init_cgroups();
     init_hostname();
     init_network();

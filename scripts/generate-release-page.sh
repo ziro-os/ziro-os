@@ -589,16 +589,24 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
           <pre>ziro-install   # or: ziroctl install -d /dev/sda -y</pre>
         </div>
         <div class="cmd-item">
-          <label>Install Packages</label>
-          <pre>ziropkg install curl jq git</pre>
+          <label>Network Configuration</label>
+          <pre>ziroctl network setup   # or: ziroctl network status</pre>
+        </div>
+        <div class="cmd-item">
+          <label>Cloud & Diagnostics</label>
+          <pre>ziroctl doctor          # or: ziroctl cloud inspect</pre>
         </div>
         <div class="cmd-item">
           <label>Container Management</label>
           <pre>ziroctl container run -d -p 80:80 nginx</pre>
         </div>
         <div class="cmd-item">
-          <label>Security Audit</label>
-          <pre>ziroctl security audit</pre>
+          <label>Security Hardening</label>
+          <pre>ziroctl security harden # or: ziroctl security audit</pre>
+        </div>
+        <div class="cmd-item">
+          <label>Install Packages</label>
+          <pre>ziropkg install curl jq git</pre>
         </div>
       </div>
     </section>

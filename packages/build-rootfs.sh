@@ -225,7 +225,24 @@ echo "✅ Minimal Base Rootfs archive: $MINIMAL_TAR ($MINIMAL_SIZE)"
 
 # --- 5. Install Musl-Native Container Runtime, SSH, and System Utilities for Host OS ---
 echo "--- [5/5] Installing musl-native containerd, nerdctl, runc, CNI plugins, and OpenSSH ---"
-docker run --rm --platform "$DOCKER_PLATFORM" -v "$ROOTFS_FULL:/rootfs" alpine:latest sh -c '
+docker run --rm --platform "$DOCKER_PLATFORM" \
+    -v "$ROOTFS_FULL:/rootfs" \
+    -v "$BUILD_DIR:/out" \
+    -e TARGET_ARCH="$TARGET_ARCH" \
+    alpine:latest sh -c '
+    # Install linux-virt kernel & drivers inside container and copy modules into rootfs
+    echo "Installing kernel drivers & modules (linux-virt, kmod)..."
+    apk add --no-cache linux-virt kmod >/dev/null 2>&1
+    mkdir -p /rootfs/lib/modules /rootfs/boot
+    cp -a /lib/modules/* /rootfs/lib/modules/
+    if [ -f /boot/vmlinuz-virt ]; then
+        cp /boot/vmlinuz-virt /rootfs/boot/vmlinuz
+        cp /boot/vmlinuz-virt "/out/vmlinuz-${TARGET_ARCH}"
+    elif [ -f /boot/vmlinuz ]; then
+        cp /boot/vmlinuz /rootfs/boot/vmlinuz
+        cp /boot/vmlinuz "/out/vmlinuz-${TARGET_ARCH}"
+    fi
+
     mkdir -p /rootfs/etc/apk/keys
     cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
     if [ ! -f /rootfs/etc/apk/repositories ]; then
@@ -244,7 +261,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" -v "$ROOTFS_FULL:/rootfs" alpine:l
         add --no-cache \
         ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
         iptables iptables-legacy openssh-server openssh-client linux-pam \
-        e2fsprogs dosfstools util-linux sfdisk parted curl $GRUB_PKGS
+        e2fsprogs dosfstools util-linux sfdisk parted curl kmod $GRUB_PKGS
 
     # Retain official keys and repositories inside rootfs for ziropkg
     cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true

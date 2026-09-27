@@ -33,20 +33,28 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  -d, --disk <device>       Target disk device (e.g. /dev/vda, /dev/sda, /dev/nvme0n1)
-  -n, --hostname <name>     System hostname (default: ziro-host)
-  -k, --ssh-key <key|file>  SSH public key string or path to public key file
-  -p, --password <pass>     Root password (if SSH key is not used)
-  -u, --user-data <url|file>Cloud user-data / post-installation script (URL or local path)
-  -y, --yes                 Auto-confirm installation without interactive prompts
-  -h, --help                Show this help message
+  -d, --disk <device>        Target disk device (e.g. /dev/vda, /dev/sda, /dev/nvme0n1)
+  -n, --hostname <name>      System hostname (default: ziro-host)
+  -k, --ssh-key <key|file>   SSH public key string or path to public key file
+  -p, --password <pass>      Root password (if SSH key is not used)
+  -u, --user-data <url|file> Cloud user-data / post-installation script (URL or local path)
+      --net-mode <mode>      Network mode: 'dhcp' (default), 'static', or 'skip'
+      --ip <ip/cidr>         Static IPv4 address and CIDR (e.g. 192.168.1.50/24)
+      --gateway <gw>         Default gateway IPv4 address
+      --dns <servers>        Space-separated DNS nameservers (default: 1.1.1.1 8.8.8.8)
+      --iface <interface>    Target network interface (default: first active interface)
+  -y, --yes                  Auto-confirm installation without interactive prompts
+  -h, --help                 Show this help message
 
 Examples:
   # Interactive guided TUI installation:
   $(basename "$0")
 
-  # Automated unattended installation:
-  $(basename "$0") -d /dev/vda -n ziro-node-1 -k "ssh-ed25519 AAAA..." -y
+  # Automated unattended installation with DHCP:
+  $(basename "$0") -d /dev/sda -n ziro-node-1 -k "ssh-ed25519 AAAA..." -y
+
+  # Automated installation with Static IP (Rocky/RHEL style):
+  $(basename "$0") -d /dev/vda -n ziro-node-1 --ip 192.168.1.50/24 --gateway 192.168.1.1 --dns "1.1.1.1 8.8.8.8" -y
 
   # Automated with remote cloud user-data script:
   $(basename "$0") -d /dev/sda -u https://example.com/user-data.sh -y
@@ -59,6 +67,11 @@ SSH_KEY=""
 PASSWORD=""
 USER_DATA=""
 AUTO_CONFIRM=0
+NET_MODE="dhcp"
+NET_IFACE=""
+NET_IP=""
+NET_GATEWAY=""
+NET_DNS="1.1.1.1 8.8.8.8"
 
 # Parse kernel command line for automated cloud provisioning
 parse_cmdline() {
@@ -80,6 +93,22 @@ parse_cmdline() {
                     ;;
                 ziro.autoinstall)
                     AUTO_CONFIRM=1
+                    ;;
+                ziro.net=*)
+                    NET_MODE="${arg#ziro.net=}"
+                    ;;
+                ziro.ip=*)
+                    NET_IP="${arg#ziro.ip=}"
+                    NET_MODE="static"
+                    ;;
+                ziro.gw=*|ziro.gateway=*)
+                    NET_GATEWAY="${arg#*=}"
+                    ;;
+                ziro.dns=*)
+                    NET_DNS="${arg#ziro.dns=}"
+                    ;;
+                ziro.iface=*)
+                    NET_IFACE="${arg#ziro.iface=}"
                     ;;
             esac
         done
@@ -110,6 +139,27 @@ parse_args() {
                 USER_DATA="$2"
                 shift 2
                 ;;
+            --net-mode)
+                NET_MODE="$2"
+                shift 2
+                ;;
+            --ip)
+                NET_IP="$2"
+                NET_MODE="static"
+                shift 2
+                ;;
+            --gateway|--gw)
+                NET_GATEWAY="$2"
+                shift 2
+                ;;
+            --dns)
+                NET_DNS="$2"
+                shift 2
+                ;;
+            --iface)
+                NET_IFACE="$2"
+                shift 2
+                ;;
             -y|--yes)
                 AUTO_CONFIRM=1
                 shift
@@ -128,8 +178,14 @@ parse_args() {
 }
 
 detect_disks() {
+    # 1. Proactively probe virtualization, SCSI, SATA, and NVMe kernel drivers
+    for mod in virtio_pci virtio_blk virtio_scsi scsi_mod sd_mod sr_mod ahci ata_piix ata_generic nvme nvme_core; do
+        modprobe -q "$mod" 2>/dev/null || true
+    done
+    mdev -s 2>/dev/null || true
+
     DISKS=""
-    # Scan /sys/block for candidate drives
+    # 2. Scan /sys/block for candidate drives
     for devpath in /sys/block/*; do
         devname=$(basename "$devpath")
         case "$devname" in
@@ -137,6 +193,16 @@ detect_disks() {
                 continue
                 ;;
         esac
+
+        # Dynamically create device node in /dev if missing
+        if [ ! -b "/dev/$devname" ] && [ -f "$devpath/dev" ]; then
+            majmin=$(cat "$devpath/dev" 2>/dev/null || echo "")
+            if [ -n "$majmin" ]; then
+                maj="${majmin%:*}"
+                min="${majmin#*:}"
+                mknod -m 660 "/dev/$devname" b "$maj" "$min" 2>/dev/null || true
+            fi
+        fi
 
         # Verify device node exists in /dev
         if [ -b "/dev/$devname" ]; then
@@ -148,8 +214,8 @@ detect_disks() {
             # Fetch human-readable size
             size_bytes=$(cat "$devpath/size" 2>/dev/null || echo 0)
             size_mb=$((size_bytes * 512 / 1024 / 1024))
-            if [ "$size_mb" -lt 500 ]; then
-                continue # Skip devices smaller than 500MB
+            if [ "$size_mb" -lt 100 ]; then
+                continue # Skip devices smaller than 100MB
             fi
             
             DISKS="$DISKS /dev/$devname"
@@ -236,12 +302,65 @@ interactive_prompts() {
         fi
     fi
 
+    # Network configuration prompt (Rocky/RHEL wizard style)
+    printf "${BOLD}--- Network Configuration ---${RESET}\n"
+    DETECTED_IFACES=""
+    for ifpath in /sys/class/net/*; do
+        ifname=$(basename "$ifpath")
+        if [ "$ifname" != "lo" ] && [ "$ifname" != "*" ]; then
+            DETECTED_IFACES="$DETECTED_IFACES $ifname"
+        fi
+    done
+    DETECTED_IFACES=$(echo "$DETECTED_IFACES" | xargs)
+    if [ -z "$NET_IFACE" ]; then
+        NET_IFACE=$(echo "$DETECTED_IFACES" | awk '{print $1}')
+        NET_IFACE="${NET_IFACE:-eth0}"
+    fi
+
+    printf "Detected network interfaces: ${CYAN}%s${RESET}\n" "${DETECTED_IFACES:-none}"
+    printf "  ${CYAN}[1]${RESET} Auto (DHCP) - Recommended for Cloud & Proxmox [default]\n"
+    printf "  ${CYAN}[2]${RESET} Static IP Configuration (Rocky/RHEL wizard style)\n"
+    printf "  ${CYAN}[3]${RESET} Skip Network Setup\n"
+    printf "${BOLD}Select network mode [1-3] (default: 1): ${RESET}"
+    read -r net_choice || net_choice="1"
+    net_choice="${net_choice:-1}"
+    case "$net_choice" in
+        2)
+            NET_MODE="static"
+            printf "${BOLD}Enter network interface [default: %s]: ${RESET}" "$NET_IFACE"
+            read -r in_iface || in_iface=""
+            NET_IFACE="${in_iface:-$NET_IFACE}"
+
+            printf "${BOLD}Enter IPv4 address with CIDR (e.g. 192.168.1.50/24): ${RESET}"
+            read -r in_ip || in_ip=""
+            NET_IP="${in_ip:-$NET_IP}"
+
+            printf "${BOLD}Enter Default Gateway (e.g. 192.168.1.1): ${RESET}"
+            read -r in_gw || in_gw=""
+            NET_GATEWAY="${in_gw:-$NET_GATEWAY}"
+
+            printf "${BOLD}Enter DNS Nameservers [default: 1.1.1.1 8.8.8.8]: ${RESET}"
+            read -r in_dns || in_dns=""
+            NET_DNS="${in_dns:-1.1.1.1 8.8.8.8}"
+            printf "Static Network: ${GREEN}%s on %s via %s (DNS: %s)${RESET}\n\n" "$NET_IP" "$NET_IFACE" "$NET_GATEWAY" "$NET_DNS"
+            ;;
+        3)
+            NET_MODE="skip"
+            printf "Network configuration skipped.\n\n"
+            ;;
+        *)
+            NET_MODE="dhcp"
+            printf "Network mode: ${GREEN}DHCP (Auto-configuration)${RESET}\n\n"
+            ;;
+    esac
+
     # Final Confirmation
     echo "=================================================="
     printf "${YELLOW}${BOLD}⚠️  WARNING: ALL DATA ON %s WILL BE PERMANENTLY ERASED!${RESET}\n" "$TARGET_DISK"
     echo "Target Disk:     $TARGET_DISK"
     echo "Hostname:        $TARGET_HOSTNAME"
     echo "Authentication:  $([ -n "$SSH_KEY" ] && echo "SSH Public Key" || echo "Password")"
+    echo "Network:         $NET_MODE $([ "$NET_MODE" = "static" ] && echo "($NET_IP on $NET_IFACE)" || echo "(Auto-DHCP)")"
     echo "User-Data:       $([ -n "$USER_DATA" ] && echo "$USER_DATA" || echo "None")"
     echo "=================================================="
     printf "${BOLD}Type 'yes' to proceed with installation: ${RESET}"
@@ -325,6 +444,12 @@ EOF
         done
     fi
 
+    # Ensure kernel modules are installed to target disk
+    if [ -d /lib/modules ]; then
+        mkdir -p "$TARGET_MNT/lib/modules"
+        cp -a /lib/modules/* "$TARGET_MNT/lib/modules/" 2>/dev/null || true
+    fi
+
     # Create virtual mountpoint directories
     mkdir -p "$TARGET_MNT/dev" "$TARGET_MNT/proc" "$TARGET_MNT/sys" \
              "$TARGET_MNT/run" "$TARGET_MNT/tmp" "$TARGET_MNT/mnt" "$TARGET_MNT/boot/grub"
@@ -405,6 +530,46 @@ EOF
     echo "$TARGET_HOSTNAME" > "$TARGET_MNT/etc/hostname"
     sed -i "s/127.0.1.1.*/127.0.1.1\t$TARGET_HOSTNAME/" "$TARGET_MNT/etc/hosts" 2>/dev/null || \
         echo "127.0.1.1\t$TARGET_HOSTNAME" >> "$TARGET_MNT/etc/hosts"
+
+    # Configure networking (/etc/network/interfaces and /etc/resolv.conf)
+    mkdir -p "$TARGET_MNT/etc/network"
+    cat > "$TARGET_MNT/etc/network/interfaces" << EOF
+auto lo
+iface lo inet loopback
+
+EOF
+    if [ "$NET_MODE" = "dhcp" ]; then
+        for ifn in ${DETECTED_IFACES:-eth0}; do
+            cat >> "$TARGET_MNT/etc/network/interfaces" << EOF
+auto $ifn
+iface $ifn inet dhcp
+
+EOF
+        done
+        if [ ! -f "$TARGET_MNT/etc/resolv.conf" ]; then
+            cat > "$TARGET_MNT/etc/resolv.conf" << EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+        fi
+    elif [ "$NET_MODE" = "static" ] && [ -n "$NET_IP" ]; then
+        cat >> "$TARGET_MNT/etc/network/interfaces" << EOF
+auto $NET_IFACE
+iface $NET_IFACE inet static
+    address $NET_IP
+EOF
+        if [ -n "$NET_GATEWAY" ]; then
+            cat >> "$TARGET_MNT/etc/network/interfaces" << EOF
+    gateway $NET_GATEWAY
+EOF
+        fi
+        cat > "$TARGET_MNT/etc/resolv.conf" << EOF
+# Configured by Ziro-OS Installer
+EOF
+        for ns in $NET_DNS; do
+            echo "nameserver $ns" >> "$TARGET_MNT/etc/resolv.conf"
+        done
+    fi
 
     # Configure SSH security
     mkdir -p "$TARGET_MNT/root/.ssh"

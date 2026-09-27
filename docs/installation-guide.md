@@ -163,30 +163,35 @@ ziroctl install
 ```
 
 The installer will:
-1. Scan storage drives (`/dev/vda`, `/dev/sda`, `/dev/nvme0n1`, etc.) and present a numbered selection.
-2. Prompt for system hostname (default: `ziro-host`).
-3. Prompt for SSH public key (recommending key-based auth and disabling root passwords) or root password.
-4. Prompt for optional cloud post-installation user-data script (URL or local script).
-5. Partition target disk with GPT (512MB EFI System Partition + Linux Root partition).
-6. Format filesystems (`FAT32` for ESP, `ext4` for root).
-7. Deploy the Ziro-OS container host filesystem and kernel.
-8. Install hybrid UEFI (`x86_64-efi`) and BIOS (`i386-pc`) GRUB bootloaders.
-9. Generate persistent `/etc/fstab`, secure SSH configuration, and execute user-data script.
+1. Auto-probe kernel storage drivers (`virtio_scsi`, `virtio_blk`, `ahci`, `sd_mod`, `nvme`) supporting Proxmox, VMware, KVM, and bare metal.
+2. Scan storage drives (`/dev/vda`, `/dev/sda`, `/dev/nvme0n1`, etc.) and present a numbered selection.
+3. Prompt for network configuration (DHCP auto-mode, or Rocky Linux / RHEL-style Static IP with CIDR, Gateway, and DNS).
+4. Prompt for system hostname (default: `ziro-host`).
+5. Prompt for SSH public key (recommending key-based auth and disabling root passwords) or root password.
+6. Prompt for optional cloud post-installation user-data script (URL or local script).
+7. Partition target disk with GPT (512MB EFI System Partition + Linux Root partition).
+8. Format filesystems (`FAT32` for ESP, `ext4` for root).
+9. Deploy the Ziro-OS container host filesystem, kernel, and driver modules.
+10. Install hybrid UEFI (`x86_64-efi`) and BIOS (`i386-pc`) GRUB bootloaders.
+11. Generate persistent `/etc/fstab`, `/etc/network/interfaces`, `/etc/resolv.conf`, secure SSH configuration, and execute user-data script.
 
 ### 3. Automated / Unattended Cloud-Native Installation
 For automated installations without interactive prompts:
 ```bash
-# Hands-free installation with SSH key:
+# Hands-free installation with DHCP and SSH key:
 ziro-install -d /dev/vda -n ziro-node-1 -k "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..." -y
+
+# Hands-free with Static IP (Rocky Linux / RHEL style):
+ziro-install -d /dev/vda -n ziro-node-1 --net-mode static --ip 192.168.1.100/24 --gateway 192.168.1.1 --dns 1.1.1.1,8.8.8.8 -y
 
 # Hands-free with remote cloud user-data bootstrap script:
 ziro-install -d /dev/sda -n edge-host -u https://infra.internal/bootstrap.sh -y
 ```
 
 #### Kernel Command-Line Auto-Installation
-You can also trigger unattended installations directly from PXE or GRUB kernel arguments:
+You can also trigger unattended installations directly from PXE, iPXE, or GRUB kernel arguments:
 ```text
-linux /boot/vmlinuz ziro.autoinstall ziro.install=/dev/sda ziro.hostname=node1 ziro.userdata=https://example.com/init.sh quiet
+linux /boot/vmlinuz ziro.autoinstall ziro.install=/dev/sda ziro.hostname=node1 ziro.net=static ziro.ip=192.168.1.50/24 ziro.gw=192.168.1.1 ziro.dns=1.1.1.1 ziro.userdata=https://example.com/init.sh quiet
 ```
 
 ### 4. First Boot
@@ -264,14 +269,23 @@ ziro-dev deploy
 ## 🔧 System Configuration
 
 ### Network Configuration
-Ziro-OS uses automatic network configuration via DHCP by default. For static configuration:
+Ziro-OS supports automatic network configuration via DHCP by default, as well as Rocky Linux / RHEL-style interactive wizards and CLI automation:
 
 ```bash
-# Edit network configuration
-vi /etc/network/interfaces
+# View current network interfaces and addresses
+ziroctl network status
 
-# Restart networking
-systemctl restart networking
+# Interactive Rocky Linux / RHEL-style network wizard:
+ziroctl network setup
+
+# Configure static IP via CLI:
+ziroctl network setup --mode static --interface eth0 --ip 192.168.1.100/24 --gateway 192.168.1.1 --dns 1.1.1.1,8.8.8.8
+
+# Switch back to DHCP:
+ziroctl network setup --mode dhcp --interface eth0
+
+# Restart networking service:
+ziroctl network restart
 ```
 
 ### Container Runtime Configuration
@@ -285,11 +299,27 @@ systemctl restart containerd
 
 ### Security Configuration
 ```bash
-# Apply security hardening
-make harden
+# Apply cloud security hardening (sysctl, SSH key-only enforcement, permissions)
+ziroctl security harden
 
 # Check security status
 ziroctl security status
+```
+
+### Cloud & Diagnostic Engineering Utilities
+```bash
+# Inspect hypervisor / cloud provider (Proxmox, AWS, GCP, Azure, Bare Metal)
+ziroctl cloud inspect
+
+# Execute user-data script or cloud-init payload
+ziroctl cloud userdata https://infra.internal/bootstrap.sh
+
+# List storage disks, models, and partitions (VirtIO, SCSI, SATA, NVMe)
+ziroctl disk list
+ziroctl disk usage
+
+# Run full system diagnostic audit
+ziroctl doctor
 ```
 
 ## 📊 Monitoring
