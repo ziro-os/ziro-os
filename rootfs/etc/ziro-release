@@ -2,6 +2,6 @@ NAME="Ziro-OS"
 VERSION="20250930"
 ID=ziro-os
 PRETTY_NAME="Ziro-OS 20250930"
-HOME_URL="https://github.com/cubetiq/ziro-os"
+HOME_URL="https://github.com/ziro-os/ziro-os"
 BUILD_DATE="2025-09-30T03:27:35Z"
 ARCH="arm64"
