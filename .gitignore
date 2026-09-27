@@ -50,8 +50,8 @@ init/ziro-init-*
 
 # Go build artifacts
 vendor/
-*.mod
-go.sum
+# *.mod
+# go.sum
 
 # Temporary files
 *.tmp
