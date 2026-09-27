@@ -40,6 +40,7 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME}"
           fi
+          [[ "$TAG" =~ ^v ]] || TAG="v${TAG}"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Building release for: ${TAG}"
 
@@ -130,6 +131,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7

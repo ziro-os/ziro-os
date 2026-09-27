@@ -223,9 +223,9 @@ if [ "$DRY_RUN" = true ]; then
     echo "  - images/docker/Dockerfile (LABEL version=\"${NEW_VERSION}\")"
     echo -e "${YELLOW}[DRY-RUN] Git operations that would be executed:${NC}"
     if [ "$FORCE" = true ] && [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
-        echo "  - git commit --allow-empty -m \"chore(release): force re-release ${TAG} [skip ci]\""
+        echo "  - git commit --allow-empty -m \"chore(release): force re-release ${TAG}\""
     else
-        echo "  - git commit -m \"chore(release): bump version to ${TAG} [skip ci]\""
+        echo "  - git commit -m \"chore(release): bump version to ${TAG}\""
     fi
     if [ "$FORCE" = true ]; then
         echo "  - git tag -d \"${TAG}\" (if existing locally)"
@@ -301,9 +301,9 @@ git add \
 
 # Determine commit message and execute commit
 if [ "$FORCE" = true ] && [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
-    COMMIT_MSG="chore(release): force re-release ${TAG} [skip ci]"
+    COMMIT_MSG="chore(release): force re-release ${TAG}"
 else
-    COMMIT_MSG="chore(release): bump version to ${TAG} [skip ci]"
+    COMMIT_MSG="chore(release): bump version to ${TAG}"
 fi
 
 if git diff --cached --quiet; then
@@ -342,12 +342,26 @@ if [ "$PUSH_REMOTE" = true ]; then
         if [ "$FORCE" = true ]; then
             echo "Force mode: deleting remote tag ${TAG} from origin if present..."
             git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+            sleep 2
             echo "Pushing fresh tag ${TAG} with --force to origin..."
             git push origin "$TAG" --force
         else
             git push origin "$TAG"
         fi
         echo "✅ Pushed commit and tag to remote successfully!"
+
+        # Trigger or verify GitHub Actions release workflow
+        if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+            echo "Checking GitHub Actions release workflow status..."
+            sleep 3
+            RUN_ID=$(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || echo "")
+            if [ -z "$RUN_ID" ]; then
+                echo "Dispatching release workflow via GitHub CLI..."
+                gh workflow run release.yml -f version="$TAG" || true
+            fi
+            REPO_PATH=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "ziro-os/ziro-os")
+            echo "Release workflow running! Monitor at: https://github.com/${REPO_PATH}/actions/workflows/release.yml"
+        fi
     else
         echo -e "${YELLOW}⚠️ No remote 'origin' configured. Push skipped.${NC}"
         echo "You can push manually with: git push origin ${CURRENT_BRANCH} && git push origin ${TAG}"
