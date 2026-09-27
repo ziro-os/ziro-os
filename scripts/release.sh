@@ -2,6 +2,7 @@
 # Ziro-OS Automated Version Bumping & Release Script
 # Automatically calculates new semantic versions, updates build metadata,
 # commits, tags, and pushes to remote to trigger GitHub Actions release workflows.
+# Supports --force to override existing tags and re-trigger release workflows.
 
 set -euo pipefail
 
@@ -31,6 +32,7 @@ Commands:
   current                Display current version and latest Git tag
 
 Options:
+  -f, --force            Override/replace existing tag on local & remote (re-releases current version if no bump specified)
   --dry-run              Preview changes without committing or tagging
   --no-push              Commit and tag locally, but do not push to remote
   --notes <message>      Add custom release notes message
@@ -38,6 +40,8 @@ Options:
 
 Examples:
   ./scripts/release.sh                 # Automatically bumps patch version (1.0.0 -> 1.0.1)
+  ./scripts/release.sh -f              # Force re-releases current tag (overrides tag & triggers release workflow)
+  ./scripts/release.sh --force 1.0.1   # Forces release of v1.0.1 even if tag already exists
   ./scripts/release.sh minor           # Bumps minor version (1.0.0 -> 1.1.0)
   ./scripts/release.sh 1.2.0           # Sets explicit version 1.2.0
   ./scripts/release.sh --dry-run patch # Previews release without making git changes
@@ -46,12 +50,17 @@ EOF
 
 DRY_RUN=false
 PUSH_REMOTE=true
+FORCE=false
 CUSTOM_NOTES=""
-BUMP_TYPE="patch"
+BUMP_TYPE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -f|--force)
+            FORCE=true
+            shift
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -117,6 +126,17 @@ if [ "$BUMP_TYPE" = "current" ]; then
     exit 0
 fi
 
+# Default bump logic:
+# If --force was supplied without an explicit command, re-release the current version.
+# Otherwise, default to "patch".
+if [ -z "$BUMP_TYPE" ]; then
+    if [ "$FORCE" = true ]; then
+        BUMP_TYPE="same"
+    else
+        BUMP_TYPE="patch"
+    fi
+fi
+
 # Parse SemVer components
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 MAJOR="${MAJOR:-1}"
@@ -128,6 +148,9 @@ PATCH_NUM="${PATCH%%-*}"
 # Calculate Next Version
 NEW_VERSION=""
 case "$BUMP_TYPE" in
+    same)
+        NEW_VERSION="$CURRENT_VERSION"
+        ;;
     patch)
         NEW_PATCH=$((PATCH_NUM + 1))
         NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
@@ -163,10 +186,11 @@ echo -e "Current Version:  ${YELLOW}${CURRENT_VERSION}${NC} (v${CURRENT_VERSION}
 echo -e "Target Version:   ${GREEN}${NEW_VERSION}${NC} (${TAG})"
 echo -e "Build Date:       ${CYAN}${BUILD_DATE}${NC} (${BUILD_TIMESTAMP})"
 echo -e "Target Branch:    ${BLUE}${CURRENT_BRANCH}${NC}"
-echo -e "Mode:             $([ "$DRY_RUN" = true ] && echo "${YELLOW}DRY-RUN (No changes applied)${NC}" || echo "${GREEN}LIVE EXECUTION${NC}")"
+echo -e "Force Mode:       $([ "$FORCE" = true ] && echo "${RED}ENABLED (Override existing tag/release)${NC}" || echo "Disabled")"
+echo -e "Execution Mode:   $([ "$DRY_RUN" = true ] && echo "${YELLOW}DRY-RUN (No changes applied)${NC}" || echo "${GREEN}LIVE EXECUTION${NC}")"
 echo "=================================================="
 
-# Check Git working tree for unstaged changes (excluding untracked build dirs)
+# Check Git working tree for unstaged changes
 if [ "$DRY_RUN" = false ]; then
     if ! git diff --quiet || ! git diff --cached --quiet; then
         echo -e "${YELLOW}⚠️ Working tree has uncommitted modifications. These will be included in the release commit.${NC}"
@@ -186,7 +210,7 @@ echo "📝 Changes included in this release:"
 if [ -n "$CHANGELOG" ]; then
     echo "$CHANGELOG" | sed 's/^/  - /'
 else
-    echo "  - Initial release / maintenance updates"
+    echo "  - Maintenance updates / release build"
 fi
 echo ""
 
@@ -198,10 +222,24 @@ if [ "$DRY_RUN" = true ]; then
     echo "  - tools/ziropkg/cmd/root.go (Version = \"${NEW_VERSION}\")"
     echo "  - images/docker/Dockerfile (LABEL version=\"${NEW_VERSION}\")"
     echo -e "${YELLOW}[DRY-RUN] Git operations that would be executed:${NC}"
-    echo "  - git commit -m \"chore(release): bump version to ${TAG}\""
-    echo "  - git tag -a \"${TAG}\" -m \"Release ${TAG} (${BUILD_DATE})\""
-    if [ "$PUSH_REMOTE" = true ]; then
-        echo "  - git push origin ${CURRENT_BRANCH} && git push origin ${TAG}"
+    if [ "$FORCE" = true ] && [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
+        echo "  - git commit --allow-empty -m \"chore(release): force re-release ${TAG} [skip ci]\""
+    else
+        echo "  - git commit -m \"chore(release): bump version to ${TAG} [skip ci]\""
+    fi
+    if [ "$FORCE" = true ]; then
+        echo "  - git tag -d \"${TAG}\" (if existing locally)"
+        echo "  - git tag -a \"${TAG}\" -m \"Release ${TAG} (${BUILD_DATE})\""
+        if [ "$PUSH_REMOTE" = true ]; then
+            echo "  - git push origin ${CURRENT_BRANCH}"
+            echo "  - git push origin :refs/tags/${TAG} (delete remote tag on origin if existing)"
+            echo "  - git push origin ${TAG} --force"
+        fi
+    else
+        echo "  - git tag -a \"${TAG}\" -m \"Release ${TAG} (${BUILD_DATE})\""
+        if [ "$PUSH_REMOTE" = true ]; then
+            echo "  - git push origin ${CURRENT_BRANCH} && git push origin ${TAG}"
+        fi
     fi
     echo -e "\n${GREEN}Dry run completed successfully. No files or git state modified.${NC}"
     exit 0
@@ -230,7 +268,6 @@ done
 # Update tools/ziroctl/cmd/version.go
 ZIROCTL_VERSION_FILE="$REPO_ROOT/tools/ziroctl/cmd/version.go"
 if [ -f "$ZIROCTL_VERSION_FILE" ]; then
-    # Use perl/sed for cross-platform in-place replacement
     sed -i.bak -E "s/Version   = \".*\"/Version   = \"${NEW_VERSION}\"/" "$ZIROCTL_VERSION_FILE"
     sed -i.bak -E "s/BuildDate = \".*\"/BuildDate = \"${BUILD_DATE}\"/" "$ZIROCTL_VERSION_FILE"
     rm -f "${ZIROCTL_VERSION_FILE}.bak"
@@ -260,10 +297,21 @@ git add \
     "$REPO_ROOT/rootfs/etc/ziro-release" \
     "$REPO_ROOT/tools/ziroctl/cmd/version.go" \
     "$REPO_ROOT/tools/ziropkg/cmd/root.go" \
-    "$REPO_ROOT/images/docker/Dockerfile"
+    "$REPO_ROOT/images/docker/Dockerfile" 2>/dev/null || true
 
-COMMIT_MSG="chore(release): bump version to ${TAG} [skip ci]"
-git commit -m "$COMMIT_MSG"
+# Determine commit message and execute commit
+if [ "$FORCE" = true ] && [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
+    COMMIT_MSG="chore(release): force re-release ${TAG} [skip ci]"
+else
+    COMMIT_MSG="chore(release): bump version to ${TAG} [skip ci]"
+fi
+
+if git diff --cached --quiet; then
+    echo "ℹ️ No tracked file modifications detected. Creating release marker commit..."
+    git commit --allow-empty -m "$COMMIT_MSG"
+else
+    git commit -m "$COMMIT_MSG"
+fi
 echo "✓ Created Git release commit: $COMMIT_MSG"
 
 # Construct tag annotation message
@@ -275,9 +323,9 @@ if [ -n "$CHANGELOG" ]; then
     TAG_MSG="${TAG_MSG}"$'\n\n'"Changelog:"$'\n'"${CHANGELOG}"
 fi
 
-# Delete existing local tag if re-tagging
+# Delete existing local tag if re-tagging or force mode
 if git rev-parse "$TAG" >/dev/null 2>&1; then
-    echo "⚠️ Tag $TAG already exists locally; updating..."
+    echo "⚠️ Tag $TAG already exists locally; removing prior local tag..."
     git tag -d "$TAG" >/dev/null
 fi
 
@@ -288,9 +336,17 @@ echo "✓ Created annotated Git tag: $TAG"
 if [ "$PUSH_REMOTE" = true ]; then
     REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
     if [ -n "$REMOTE_URL" ]; then
-        echo "Pushing ${CURRENT_BRANCH} and tag ${TAG} to origin..."
+        echo "Pushing ${CURRENT_BRANCH} to origin..."
         git push origin "$CURRENT_BRANCH"
-        git push origin "$TAG"
+        
+        if [ "$FORCE" = true ]; then
+            echo "Force mode: deleting remote tag ${TAG} from origin if present..."
+            git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+            echo "Pushing fresh tag ${TAG} with --force to origin..."
+            git push origin "$TAG" --force
+        else
+            git push origin "$TAG"
+        fi
         echo "✅ Pushed commit and tag to remote successfully!"
     else
         echo -e "${YELLOW}⚠️ No remote 'origin' configured. Push skipped.${NC}"
@@ -299,7 +355,11 @@ if [ "$PUSH_REMOTE" = true ]; then
 else
     echo "Push skipped (--no-push enabled)."
     echo "To push manually, execute:"
-    echo "  git push origin ${CURRENT_BRANCH} && git push origin ${TAG}"
+    if [ "$FORCE" = true ]; then
+        echo "  git push origin ${CURRENT_BRANCH} && git push origin :refs/tags/${TAG} && git push origin ${TAG} --force"
+    else
+        echo "  git push origin ${CURRENT_BRANCH} && git push origin ${TAG}"
+    fi
 fi
 
 echo ""

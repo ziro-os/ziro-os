@@ -11,6 +11,9 @@ on:
         required: true
         default: 'v1.0.1'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: write
   packages: write
@@ -25,7 +28,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -41,16 +44,18 @@ jobs:
           echo "Building release for: ${TAG}"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.22'
-          cache: true
+          cache-dependency-path: |
+            tools/ziroctl/go.sum
+            tools/ziropkg/go.sum
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Install System Dependencies
         run: |
@@ -67,7 +72,7 @@ jobs:
         run: make image-iso TARGET_ARCH=x86_64
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -97,13 +102,15 @@ jobs:
           cat ../build/SHA256SUMS
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "Ziro-OS ${{ steps.version.outputs.tag }}"
           draft: false
           prerelease: false
           generate_release_notes: true
+          overwrite: true
+          overwrite_files: true
           files: |
             build/ziro-os-*.iso
             build/ziro-rootfs-*.tar.gz
@@ -124,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Generate Release Download Portal
         run: |
@@ -134,13 +141,13 @@ jobs:
           GITHUB_REF_NAME: ${{ needs.release.outputs.tag }}
 
       - name: Setup GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: '_site'
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

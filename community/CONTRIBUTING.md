@@ -210,11 +210,15 @@ Maintainers can trigger an automated release using the release utility or `make`
 make release
 # or: ./scripts/release.sh patch
 
-# 3. Bump minor or major versions
+# 3. Force re-release the same tag (e.g., if CI build failed or needs replacing)
+make release-force
+# or: ./scripts/release.sh --force
+
+# 4. Bump minor or major versions
 make release-minor   # 1.0.0 -> 1.1.0
 make release-major   # 1.0.0 -> 2.0.0
 
-# 4. Or specify an exact version
+# 5. Or specify an exact version
 ./scripts/release.sh 1.2.0
 ```
 

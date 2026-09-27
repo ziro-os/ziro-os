@@ -20,11 +20,11 @@ ziro-init-$(TARGET_ARCH): ziro-init.c
 ifeq ($(shell uname -s),Darwin)
 	@echo "macOS detected: Compiling statically using Docker Alpine ($(DOCKER_PLATFORM))..."
 	@docker run --rm --platform $(DOCKER_PLATFORM) -v $(shell pwd):/src -w /src alpine:latest sh -c \
-		"apk add --no-cache gcc musl-dev binutils >/dev/null 2>&1 && gcc -static -s -O2 -Wall ziro-init.c -o ziro-init-$(TARGET_ARCH)"
+		"apk add --no-cache gcc musl-dev binutils >/dev/null 2>&1 && gcc -static -s -O2 -Wall ziro-init.c -o ziro-init-$(TARGET_ARCH) && chmod 755 ziro-init-$(TARGET_ARCH) && chown $(shell id -u):$(shell id -g) ziro-init-$(TARGET_ARCH) 2>/dev/null || true"
 else
 	$(CC) $(CFLAGS) $(LDFLAGS) -s ziro-init.c -o ziro-init-$(TARGET_ARCH)
 endif
-	@chmod +x ziro-init-$(TARGET_ARCH)
+	@chmod +x ziro-init-$(TARGET_ARCH) 2>/dev/null || true
 
 clean:
 	rm -f ziro-init ziro-init-*

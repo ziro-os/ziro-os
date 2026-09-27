@@ -111,6 +111,9 @@ test-smoke: docker-image
 release:
 	@./scripts/release.sh patch
 
+release-force:
+	@./scripts/release.sh --force
+
 release-minor:
 	@./scripts/release.sh minor
 
@@ -136,4 +139,6 @@ help:
 	@echo "  image-iso       - Build bootable hybrid UEFI/BIOS ISO"
 	@echo "  run-qemu        - Boot Ziro-OS microVM in QEMU"
 	@echo "  test            - Run full test suite (unit tests + container smoke tests)"
+	@echo "  release         - Bump patch version, tag, and trigger GitHub Actions release"
+	@echo "  release-force   - Force re-tag and re-release current version tag on remote"
 	@echo "  clean           - Remove build artifacts"

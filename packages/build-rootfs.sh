@@ -40,7 +40,10 @@ ROOTFS_MINIMAL="$BUILD_DIR/rootfs-minimal-$TARGET_ARCH"
 ROOTFS_FULL="$BUILD_DIR/rootfs-full-$TARGET_ARCH"
 
 mkdir -p "$BUILD_DIR" "$DOWNLOAD_DIR"
-rm -rf "$ROOTFS_MINIMAL" "$ROOTFS_FULL"
+if [ -d "$ROOTFS_MINIMAL" ] || [ -d "$ROOTFS_FULL" ]; then
+    docker run --rm -v "$BUILD_DIR:/b" alpine:latest rm -rf "/b/rootfs-minimal-$TARGET_ARCH" "/b/rootfs-full-$TARGET_ARCH" 2>/dev/null || true
+    rm -rf "$ROOTFS_MINIMAL" "$ROOTFS_FULL" 2>/dev/null || true
+fi
 mkdir -p "$ROOTFS_MINIMAL" "$ROOTFS_FULL"
 
 # Helper for creating standard Linux directory layout
@@ -95,15 +98,17 @@ echo "--- [1/5] Installing BusyBox ($TARGET_ARCH) ---"
 BUSYBOX_BIN="$DOWNLOAD_DIR/busybox-$TARGET_ARCH"
 if [ ! -f "$BUSYBOX_BIN" ]; then
     echo "Extracting static BusyBox for $TARGET_ARCH via Docker Alpine..."
+    HOST_UID=$(id -u)
+    HOST_GID=$(id -g)
     docker run --rm --platform "$DOCKER_PLATFORM" -v "$DOWNLOAD_DIR:/out" alpine:latest sh -c \
-        "apk add --no-cache busybox-static >/dev/null 2>&1 && cp /bin/busybox.static /out/busybox-$TARGET_ARCH || cp /bin/busybox /out/busybox-$TARGET_ARCH"
-    chmod +x "$BUSYBOX_BIN"
+        "apk add --no-cache busybox-static >/dev/null 2>&1 && (cp /bin/busybox.static /out/busybox-$TARGET_ARCH || cp /bin/busybox /out/busybox-$TARGET_ARCH) && chmod 755 /out/busybox-$TARGET_ARCH && chown $HOST_UID:$HOST_GID /out/busybox-$TARGET_ARCH 2>/dev/null || true"
+    chmod +x "$BUSYBOX_BIN" 2>/dev/null || true
 fi
 
 install_busybox() {
     local target="$1"
     cp "$BUSYBOX_BIN" "$target/bin/busybox"
-    chmod +x "$target/bin/busybox"
+    chmod +x "$target/bin/busybox" 2>/dev/null || true
     # Create clean relative symlinks
     docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" alpine:latest sh -c '
         cd /rootfs/bin
@@ -153,9 +158,11 @@ cp "$ZIROPKG_BIN" "$ROOTFS_FULL/bin/ziropkg"
 APK_BIN="$DOWNLOAD_DIR/apk-$TARGET_ARCH"
 if [ ! -f "$APK_BIN" ]; then
     echo "Extracting static APK package manager for $TARGET_ARCH..."
+    HOST_UID=$(id -u)
+    HOST_GID=$(id -g)
     docker run --rm --platform "$DOCKER_PLATFORM" -v "$DOWNLOAD_DIR:/out" alpine:latest sh -c \
-        "apk add --no-cache apk-tools-static >/dev/null 2>&1 && cp /sbin/apk.static /out/apk-$TARGET_ARCH"
-    chmod +x "$APK_BIN"
+        "apk add --no-cache apk-tools-static >/dev/null 2>&1 && cp /sbin/apk.static /out/apk-$TARGET_ARCH && chmod 755 /out/apk-$TARGET_ARCH && chown $HOST_UID:$HOST_GID /out/apk-$TARGET_ARCH 2>/dev/null || true"
+    chmod +x "$APK_BIN" 2>/dev/null || true
 fi
 cp "$APK_BIN" "$ROOTFS_MINIMAL/sbin/apk"
 cp "$APK_BIN" "$ROOTFS_MINIMAL/usr/bin/apk"
