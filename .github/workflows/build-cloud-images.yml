@@ -1,9 +1,6 @@
 name: Build Cloud Images
 
 on:
-  push:
-    branches: [ main ]
-    tags: [ 'v*' ]
   workflow_dispatch:
     inputs:
       cloud_provider:

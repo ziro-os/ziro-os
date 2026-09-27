@@ -1,312 +1,201 @@
 # Getting Started with Ziro-OS
 
-Welcome to Ziro-OS, the container-native operating system built for cloud-native workloads! This guide will help you get up and running quickly.
+Welcome to **Ziro-OS**! This guide walks you through using, testing, and building Ziro-OS for container workloads, microVMs, and cloud environments.
 
-## 🚀 Quick Start
+---
 
-### 1. Installation
+## 🎯 What is Ziro-OS?
 
-#### Cloud Deployment (Recommended)
-```bash
-# AWS
-make cloud-aws
-aws ec2 run-instances --image-id ami-ziro-os-latest --instance-type t3.medium
+Ziro-OS is an ultra-lightweight, container-native operating system built from scratch to run container workloads with maximum performance, minimal attack surface, and instant boot times.
 
-# Azure
-make cloud-azure
-az vm create --resource-group ziro-rg --name ziro-vm --image ziro-os-latest
+- **Minimal Base**: Sub-15MB Docker base image (`ziro-os:latest`) and sub-100MB complete container host OS with `containerd`, `runc`, and CNI plugins.
+- **Stateless & Immutable**: Hardened read-only rootfs with minimal writeable paths.
+- **C99 PID 1 Supervisor**: Statically linked `ziro-init` providing sub-second boot, cgroups v2 hierarchy, loopback networking, and automated zombie process reaping.
+- **Integrated Package Management**: Fast, signed package installation via `ziropkg` and `ziroctl pkg`.
+- **Multi-Architecture**: Native support for `x86_64` and `arm64` (Apple Silicon & cloud ARM64).
 
-# GCP
-make cloud-gcp
-gcloud compute instances create ziro-vm --image-family=ziro-os
-```
+---
 
-#### Local Development
-```bash
-# Clone the repository
-git clone https://github.com/ziro-os/ziro-os.git
-cd ziro-os
+## 🐳 1. Using the Docker Base Image
 
-# Build the system
-make all
+Ziro-OS provides an Alpine-like minimal container base image built `FROM scratch`.
 
-# Test in QEMU
-make dev-qemu
-```
-
-### 2. First Container
-
-Once Ziro-OS is running, deploy your first container:
+### Build Locally
 
 ```bash
-# Using ziroctl
-ziroctl container run nginx:alpine
-
-# Using standard containerd
-ctr run --rm -t docker.io/library/nginx:alpine nginx
-
-# Check running containers
-ziroctl container list
+# Build the Docker base image for your current architecture
+make docker-image
 ```
 
-### 3. Install Packages
-
-Use ZiroPkg to install pre-built applications:
+### Run an Interactive Shell
 
 ```bash
-# Install popular packages
-ziropkg install nginx redis postgresql
-
-# Search for packages
-ziropkg search monitoring
-
-# Install monitoring stack
-ziropkg install monitoring/prometheus
+docker run --rm -it ziro-os:latest sh
 ```
 
-## 🏗️ Architecture Overview
-
-Ziro-OS is built with a minimal, container-first architecture:
-
-```
-┌─────────────────────────────────────────┐
-│              Applications               │
-│  ┌─────────┐ ┌─────────┐ ┌─────────────┐ │
-│  │   Web   │ │   API   │ │  Database   │ │
-│  └─────────┘ └─────────┘ └─────────────┘ │
-└─────────────────────────────────────────┘
-┌─────────────────────────────────────────┐
-│            Container Runtime            │
-│  ┌─────────┐ ┌─────────┐ ┌─────────────┐ │
-│  │containerd│ │   CNI   │ │   Storage   │ │
-│  └─────────┘ └─────────┘ └─────────────┘ │
-└─────────────────────────────────────────┘
-┌─────────────────────────────────────────┐
-│              Ziro-OS Kernel             │
-│        Minimal Linux + Security        │
-└─────────────────────────────────────────┘
+Inside the container:
+```sh
+/root # uname -a
+Linux 6.x ... aarch64/x86_64
+/root # cat /etc/os-release
+NAME="Ziro-OS"
+ID=ziro-os
+/root # ziroctl version
+ziroctl version 1.0.0
 ```
 
-## 🛠️ Development Workflow
+### Use in Your Own Dockerfiles
 
-### Create a New Project
+You can build container images directly on top of `ziro-os:latest`:
+
+```dockerfile
+FROM ziro-os:latest
+
+# Install necessary packages with ziropkg
+RUN ziropkg install curl ca-certificates
+
+WORKDIR /app
+COPY . .
+
+CMD ["/bin/sh"]
+```
+
+---
+
+## 📦 2. Managing Packages with `ziropkg`
+
+Ziro-OS includes `ziropkg`, a fast package manager with cryptographic signature verification that lets you install additional utilities (e.g. `curl`, `jq`, `htop`, `git`, `python3`) on demand.
+
+### Basic Commands
 
 ```bash
-# Initialize a new project
-ziro-dev init my-app --type=web --language=go
+# Install packages (e.g. curl)
+ziropkg install curl
 
-# Navigate to project
-cd my-app
+# Install multiple packages
+ziropkg install jq git htop
 
-# Build container
-ziro-dev build
+# Search the package repository
+ziropkg search redis
 
-# Test locally
-ziro-dev test
+# Inspect package details
+ziropkg info curl
 
-# Deploy to cluster
-ziro-dev deploy
-```
-
-### Project Structure
-```
-my-app/
-├── src/                 # Application source code
-├── tests/              # Test files
-├── deploy/             # Kubernetes manifests
-├── Dockerfile          # Container definition
-├── ziropkg.yaml        # Package manifest
-└── .github/workflows/  # CI/CD configuration
-```
-
-## 🔧 System Management
-
-### Container Operations
-```bash
-# List containers
-ziroctl container list
-
-# Run a container
-ziroctl container run alpine:latest /bin/sh
-
-# Stop a container
-ziroctl container stop <container-id>
-
-# Pull images
-ziroctl container pull nginx:alpine
-```
-
-### System Information
-```bash
-# System status
-ziroctl system status
-
-# System information
-ziroctl system info
-
-# Resource usage
-ziroctl system resources
-```
-
-### Package Management
-```bash
 # List installed packages
 ziropkg list
 
-# Install a package
-ziropkg install <package-name>
-
 # Remove a package
-ziropkg remove <package-name>
+ziropkg remove curl
 
-# Update packages
+# Update repository indexes
 ziropkg update
 ```
 
-## 🌐 Kubernetes Integration
+### Integration with `ziroctl`
 
-Ziro-OS works seamlessly with Kubernetes:
+Package management is also integrated directly into the `ziroctl` unified CLI:
 
-### Join Existing Cluster
 ```bash
-# Install Kubernetes components
-make install-k8s
+# Install via ziroctl
+ziroctl pkg install curl jq
 
-# Join cluster
-kubeadm join <master-ip>:6443 --token <token> --discovery-token-ca-cert-hash <hash>
+# List installed packages
+ziroctl pkg list
+
+# Search packages
+ziroctl pkg search nginx
 ```
 
-### Create New Cluster
-```bash
-# Initialize master node
-kubeadm init --pod-network-cidr=10.244.0.0/16
+---
 
-# Install CNI plugin
-kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+## 🔍 3. System Inspection & Security Audit
+
+The `ziroctl` CLI provides built-in system inspection and security auditing out of the box:
+
+```bash
+# Inspect host/container system metrics, memory, kernel, and mounts
+ziroctl system inspect
+
+# Run a CIS-style security audit (verifies immutable mounts, ASLR, sysctl hardening)
+ziroctl security audit
+
+# Output in JSON format for automated CI/CD pipelines
+ziroctl system inspect --json
+ziroctl security audit --json
 ```
 
-## 🔒 Security
+---
 
-Ziro-OS includes comprehensive security hardening:
+## 🖥️ 4. Running Ziro-OS in a MicroVM (QEMU)
 
-### Apply Security Policies
+Experience Ziro-OS booting as a standalone operating system with `containerd` and CNI plugins:
+
+### Prerequisites
+- macOS: `qemu-system-aarch64` or `qemu-system-x86_64` (uses Apple Silicon HVF acceleration)
+- Linux: `qemu-system-x86_64` or `qemu-system-aarch64` (uses KVM acceleration)
+
+### Launch MicroVM
+
 ```bash
-# Enable security hardening
-make harden
-
-# Check security status
-ziroctl security status
-
-# View security policies
-ziroctl security policies
+# Automatically boots Linux kernel with full Ziro-OS initramfs in QEMU
+make run-qemu
 ```
 
-### Container Security
-- **Seccomp profiles**: Default security policies for containers
-- **AppArmor**: Mandatory access control
-- **Network policies**: Container network isolation
-- **Resource limits**: CPU and memory constraints
+Upon boot, `ziro-init` initializes the cgroup v2 hierarchy, loopback networking, starts `containerd`, and drops you into an interactive console:
 
-## 📊 Monitoring
-
-Built-in monitoring and observability:
-
-### Install Monitoring Stack
-```bash
-# Install Prometheus, Grafana, and alerting
-make monitoring
-
-# View monitoring dashboard
-/opt/monitoring/dashboard.sh
+```text
+==================================================
+  🌀 Ziro-OS Container System (arm64 / x86_64)
+  Init: ziro-init v1.0.0 (C99 Supervisor)
+==================================================
+[ziro-os]# ziroctl system status
+[ziro-os]# ziroctl security audit
 ```
 
-### Access Monitoring
-- **Prometheus**: http://localhost:9090
-- **Node Exporter**: http://localhost:9100
-- **cAdvisor**: http://localhost:8080
+*(To exit QEMU: press `Ctrl+A`, then press `X`)*
 
-## 🚀 Production Deployment
+---
 
-### Infrastructure as Code
+## 💿 5. Generating Bootable Hybrid ISO
 
-#### Terraform (AWS)
+You can generate a bootable hybrid ISO image compatible with UEFI and Legacy BIOS for deployment in VMware, Proxmox, VirtualBox, or bare-metal servers:
+
 ```bash
-# Deploy AWS infrastructure
-cd deploy/terraform/aws
-terraform init
-terraform apply
+make image-iso
 ```
 
-#### Helm (Kubernetes)
-```bash
-# Install Ziro-OS operator
-helm install ziro-os-operator deploy/helm/ziro-os-operator/
-
-# Scale cluster
-kubectl scale deployment ziro-os-operator --replicas=5
+Output ISO image:
+```text
+build/ziro-os-<arch>.iso
 ```
 
-### Auto-scaling
-```bash
-# Enable cluster autoscaler
-kubectl apply -f deploy/kubernetes/cluster-autoscaler.yaml
+---
 
-# Configure horizontal pod autoscaler
-kubectl autoscale deployment my-app --cpu-percent=50 --min=1 --max=10
+## 🏗️ 6. Building from Source & Multi-Arch
+
+Ziro-OS supports deterministic cross-compilation across architectures:
+
+```bash
+# Build all components for current host architecture
+make all
+
+# Cross-compile CLI tools for x86_64 and arm64
+make tools-all
+
+# Build rootfs archives for both architectures
+make rootfs-all
+
+# Build multi-architecture Docker image using Docker buildx
+make docker-multiarch
+
+# Run the full test suite
+make test
 ```
 
-## 🔧 Troubleshooting
+---
 
-### Common Issues
+## 🤝 Next Steps
 
-#### Container Won't Start
-```bash
-# Check container logs
-ziroctl container logs <container-id>
-
-# Check system resources
-ziroctl system resources
-
-# Verify image
-ziroctl container images
-```
-
-#### Network Issues
-```bash
-# Check CNI configuration
-ls -la /etc/cni/net.d/
-
-# Verify bridge setup
-ip link show
-
-# Test connectivity
-ping 8.8.8.8
-```
-
-#### Storage Issues
-```bash
-# Check disk space
-df -h
-
-# Verify container storage
-ziroctl container inspect <container-id>
-
-# Clean up unused images
-ziroctl container prune
-```
-
-### Getting Help
-
-- **Documentation**: https://docs.ziro-os.io
-- **Community Forum**: https://community.ziro-os.io
-- **GitHub Issues**: https://github.com/ziro-os/ziro-os/issues
-- **Discord**: https://discord.gg/ziro-os
-
-## 🎯 Next Steps
-
-1. **Explore Examples**: Check out the `examples/` directory
-2. **Join Community**: Connect with other Ziro-OS users
-3. **Contribute**: Help improve Ziro-OS
-4. **Deploy Production**: Scale your workloads
-
-Welcome to the future of container-native computing! 🚀
+- Check out [Contributing Guide](../CONTRIBUTING.md) to learn how to contribute code, fix issues, and improve modules.
+- Read [AGENTS.md](../../AGENTS.md) for architectural guidelines and development principles.
+- Join the community discussions and report issues on GitHub!

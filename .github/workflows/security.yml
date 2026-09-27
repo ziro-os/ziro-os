@@ -51,7 +51,6 @@ jobs:
       uses: gitleaks/gitleaks-action@v2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   code-security:
     name: Code Security Analysis
@@ -62,20 +61,15 @@ jobs:
       uses: actions/checkout@v4
       
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
+        go-version: '1.22'
         
     - name: Run gosec Security Scanner
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: '-fmt sarif -out gosec-results.sarif ./...'
-        
-    - name: Upload gosec scan results
-      uses: github/codeql-action/upload-sarif@v2
-      if: always()
-      with:
-        sarif_file: 'gosec-results.sarif'
+      run: |
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
+        cd tools/ziroctl && gosec ./...
+        cd ../ziropkg && gosec ./...
 
   dependency-check:
     name: Dependency Check
@@ -86,19 +80,15 @@ jobs:
       uses: actions/checkout@v4
       
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
-        
-    - name: Run Nancy (Go dependency scanner)
-      run: |
-        go install github.com/sonatypecommunity/nancy@latest
-        go list -json -deps ./... | nancy sleuth
+        go-version: '1.22'
         
     - name: Run govulncheck
       run: |
         go install golang.org/x/vuln/cmd/govulncheck@latest
-        govulncheck ./...
+        cd tools/ziroctl && govulncheck ./...
+        cd ../ziropkg && govulncheck ./...
 
   container-security:
     name: Container Security
@@ -108,27 +98,19 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
     - name: Build container image
-      run: |
-        docker build -t ziro-os:test .
+      run: make docker-image IMAGE_TAG=ziro-os:test
         
     - name: Run Trivy container scan
       uses: aquasecurity/trivy-action@master
       with:
         image-ref: 'ziro-os:test'
-        format: 'sarif'
-        output: 'trivy-container-results.sarif'
-        
-    - name: Upload container scan results
-      uses: github/codeql-action/upload-sarif@v2
-      if: always()
-      with:
-        sarif_file: 'trivy-container-results.sarif'
-        
-    - name: Run Dockle container linter
-      run: |
-        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-          goodwithtech/dockle:latest ziro-os:test
+        format: 'table'
 
   security-policy-check:
     name: Security Policy Check

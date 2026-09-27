@@ -8,7 +8,8 @@ Ziro-OS is an ultra-lightweight, container-native operating system built from fi
 
 ## ✨ Key Capabilities
 
-- **Tiny Base Footprint**: Sub-10MB minimal Docker base image (`ziro-os:latest`), built `FROM scratch` with musl libc, BusyBox, and `ziroctl`.
+- **Tiny Base Footprint**: Sub-15MB minimal Docker base image (`ziro-os:latest`), built `FROM scratch` with musl libc, BusyBox, `ziroctl`, and `ziropkg`.
+- **Integrated Package Manager (`ziropkg`)**: Fast, verified package management out of the box (`ziropkg install curl`, `ziroctl pkg install jq`).
 - **First-Class OCI Support**: Native integration with `containerd`, `runc`, and CNI plugins (`bridge`, `loopback`, `portmap`, `firewall`).
 - **High-Performance C99 Init (`ziro-init`)**: Robust PID 1 supervisor managing early mounts, cgroups v2 hierarchy, loopback networking, containerd lifecycle, and non-blocking zombie process reaping.
 - **True Multi-Architecture**: Full support for `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).
@@ -19,7 +20,7 @@ Ziro-OS is an ultra-lightweight, container-native operating system built from fi
 
 ## 🚀 Quick Start
 
-### 1. Docker Base Image
+### 1. Docker Base Image & Package Management
 
 Build and run the official Ziro-OS base container image locally:
 
@@ -32,14 +33,19 @@ docker run --rm -it ziro-os:latest sh
 
 # Check version
 docker run --rm ziro-os:latest ziroctl version
+
+# Install additional packages inside the container (e.g. curl)
+docker run --rm ziro-os:latest /bin/sh -c "ziropkg install curl && curl --version"
 ```
 
 Use directly in your Dockerfiles:
 ```dockerfile
 FROM ziro-os:latest
 
+RUN ziropkg install curl ca-certificates
+
 WORKDIR /app
-CMD ["ziroctl", "system", "status"]
+CMD ["ziroctl", "system", "inspect"]
 ```
 
 ---
@@ -78,16 +84,16 @@ Output artifact: `build/ziro-os-<arch>.iso`
 
 | Target | Description |
 |---|---|
-| `make all` | Build `ziroctl`, rootfs, and Docker base image for host architecture |
-| `make tools` | Compile static `ziroctl` binary into `bin/` |
-| `make tools-all` | Compile `ziroctl` for both `x86_64` and `arm64` |
-| `make rootfs` | Build minimal rootfs (<10MB) and full initramfs |
+| `make all` | Build `ziroctl`, `ziropkg`, rootfs, and Docker base image for host architecture |
+| `make tools` | Compile static `ziroctl` and `ziropkg` binaries into `bin/` |
+| `make tools-all` | Compile `ziroctl` and `ziropkg` for both `x86_64` and `arm64` |
+| `make rootfs` | Build minimal rootfs (<15MB) and full initramfs |
 | `make rootfs-all` | Build rootfs archives for both `x86_64` and `arm64` |
-| `make docker-image` | Build local `ziro-os:latest` Docker image |
+| `make docker-image` | Build local `ziro-os:latest` Docker base image |
 | `make docker-multiarch` | Build multi-arch OCI image with Docker buildx (`amd64` + `arm64`) |
 | `make image-iso` | Generate bootable hybrid UEFI/BIOS ISO |
-| `make run-qemu` | Launch QEMU microVM |
-| `make test` | Run unit tests and container smoke test suite |
+| `make run-qemu` | Launch local microVM in QEMU |
+| `make test` | Run complete unit tests and container smoke test suite |
 | `make clean` | Clean transient build artifacts in `build/` |
 
 ---
@@ -124,9 +130,13 @@ ziro-os/
 │   ├── qemu/                      # Universal cross-platform QEMU runner
 │   └── iso/                       # Bootable hybrid ISO generator
 │
-├── tools/ziroctl/                 # Official control CLI (Go + Cobra)
-│   ├── cmd/                       # Subcommands: system, container, network, security
-│   └── main.go
+├── tools/                         # Static CLI tooling (Go + Cobra)
+│   ├── ziroctl/                   # System & container control CLI
+│   └── ziropkg/                   # Package management CLI
+│
+├── community/                     # Community guides and contributions
+│   ├── CONTRIBUTING.md            # Guidelines for contributors
+│   └── docs/getting-started.md    # Quickstart guide
 │
 ├── docs/                          # Authoritative documentation
 │   ├── architecture.md            # System design and PID 1 supervisor
@@ -142,11 +152,11 @@ ziro-os/
 
 ---
 
-## 📚 Documentation
+## 📚 Documentation & Community
 
-Detailed documentation is available in the [`docs/`](docs/) directory:
+- [Getting Started Guide](community/docs/getting-started.md)
+- [Contributing Guidelines](community/CONTRIBUTING.md)
 - [System Architecture](docs/architecture.md)
-- [Getting Started Guide](docs/getting-started.md)
 - [Multi-Architecture Building](docs/building.md)
 - [Security & Hardening Model](docs/security.md)
 - [Virtualization & Hypervisors](docs/virtualization.md)

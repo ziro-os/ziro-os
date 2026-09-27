@@ -45,14 +45,35 @@ else
     exit 1
 fi
 
-# Test 5: Image size footprint (< 25MB)
-echo -n "Test 5: Image size constraint (< 25MB)... "
+# Test 5: Image size footprint (< 30MB)
+echo -n "Test 5: Image size constraint (< 30MB)... "
 SIZE_BYTES=$(docker inspect -f '{{.Size}}' "$IMAGE")
 SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
-if [ "$SIZE_MB" -lt 25 ]; then
+if [ "$SIZE_MB" -lt 30 ]; then
     echo "✅ PASSED (${SIZE_MB}MB)"
 else
-    echo "⚠️  WARNING: Image size is ${SIZE_MB}MB (exceeds 25MB target)"
+    echo "⚠️  WARNING: Image size is ${SIZE_MB}MB (exceeds 30MB target)"
+fi
+
+# Test 6: Package Manager CLI
+echo -n "Test 6: ziropkg and ziroctl pkg CLI... "
+OUTPUT_PKG=$(docker run --rm "$IMAGE" ziropkg version 2>&1)
+OUTPUT_CTL=$(docker run --rm "$IMAGE" ziroctl pkg --help 2>&1)
+if [[ "$OUTPUT_PKG" == *"ziropkg version"* ]] && [[ "$OUTPUT_CTL" == *"ziroctl pkg"* ]]; then
+    echo "✅ PASSED"
+else
+    echo "❌ FAILED: Package manager CLI missing or broken"
+    exit 1
+fi
+
+# Test 7: Package installation (curl)
+echo -n "Test 7: Package installation via ziropkg (curl)... "
+CURL_VER=$(docker run --rm "$IMAGE" /bin/sh -c "ziropkg install curl >/dev/null 2>&1 && curl --version | head -n 1")
+if [[ "$CURL_VER" == *"curl"* ]]; then
+    echo "✅ PASSED ($CURL_VER)"
+else
+    echo "❌ FAILED: Could not install or run curl"
+    exit 1
 fi
 
 echo "=================================================="

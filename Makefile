@@ -36,18 +36,22 @@ all: tools rootfs docker-image
 
 # --- CLI & Tooling ---
 tools:
-	@echo "Building ziroctl CLI for $(ARCH_NORMALIZED)..."
+	@echo "Building ziroctl and ziropkg CLI for $(ARCH_NORMALIZED)..."
 	@mkdir -p bin
 	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="-s -w" -o ../../bin/ziroctl-$(ARCH_NORMALIZED) .
 	@cp bin/ziroctl-$(ARCH_NORMALIZED) bin/ziroctl
-	@echo "✅ ziroctl built at bin/ziroctl"
+	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="-s -w" -o ../../bin/ziropkg-$(ARCH_NORMALIZED) .
+	@cp bin/ziropkg-$(ARCH_NORMALIZED) bin/ziropkg
+	@echo "✅ ziroctl and ziropkg built at bin/"
 
 tools-all:
-	@echo "Building ziroctl for all architectures..."
+	@echo "Building ziroctl and ziropkg for all architectures..."
 	@mkdir -p bin
 	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../bin/ziroctl-x86_64 .
 	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../bin/ziroctl-arm64 .
-	@echo "✅ Built bin/ziroctl-x86_64 and bin/ziroctl-arm64"
+	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../bin/ziropkg-x86_64 .
+	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../bin/ziropkg-arm64 .
+	@echo "✅ Built bin/ziroctl and bin/ziropkg for x86_64 and arm64"
 
 # --- Rootfs & Userland ---
 rootfs: tools
@@ -94,8 +98,9 @@ run-qemu:
 test: test-unit test-smoke
 
 test-unit:
-	@echo "Running ziroctl unit tests..."
+	@echo "Running ziroctl and ziropkg unit tests..."
 	@cd tools/ziroctl && go test -v ./...
+	@cd tools/ziropkg && go test -v ./...
 
 test-smoke: docker-image
 	@echo "Running container smoke test suite..."
@@ -105,7 +110,7 @@ test-smoke: docker-image
 clean:
 	@echo "Cleaning transient build artifacts..."
 	@rm -rf build/
-	@rm -f bin/ziroctl*
+	@rm -f bin/ziroctl* bin/ziropkg*
 	@echo "✅ Clean complete"
 
 help:

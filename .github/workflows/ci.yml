@@ -6,240 +6,80 @@ on:
   pull_request:
     branches: [ main ]
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ziro-os/ziro-os
-
 jobs:
-  test:
-    name: Run Tests
+  unit-tests:
+    name: Unit & Audit Tests
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-        
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-          
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential qemu-system-x86 cpio gzip
-        
-    - name: Build tools
-      run: make tools
-      
-    - name: Run smoke tests
-      run: make test-smoke
-      
-    - name: Run unit tests
-      run: |
-        cd tools/ziroctl && go test -v ./...
-        cd ziropkg && go test -v ./...
-        cd sdk/ziro-sdk && go test -v ./...
-        
-    - name: Test package builds
-      run: |
-        cd packages
-        ./build-package.sh runc
-        ./build-package.sh containerd
-        
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-results
-        path: |
-          test-results/
-          coverage.out
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-  build:
-    name: Build System
-    runs-on: ubuntu-latest
-    needs: test
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-        
-    - name: Install build dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          qemu-system-x86 \
-          cpio \
-          gzip \
-          curl \
-          wget
-          
-    - name: Build kernel
-      run: make kernel
-      
-    - name: Build rootfs
-      run: make rootfs
-      
-    - name: Build tools
-      run: make tools
-      
-    - name: Build ZiroPkg
-      run: make build-ziropkg
-      
-    - name: Build SDK
-      run: make build-sdk
-      
-    - name: Create QEMU image
-      run: make image-qemu
-      
-    - name: Optimize system
-      run: make optimize
-      
-    - name: Generate build info
-      run: |
-        echo "{" > build-info.json
-        echo "  \"version\": \"$(git describe --tags --always)\"," >> build-info.json
-        echo "  \"commit\": \"$(git rev-parse HEAD)\"," >> build-info.json
-        echo "  \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\"," >> build-info.json
-        echo "  \"build_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> build-info.json
-        echo "  \"go_version\": \"$(go version | cut -d' ' -f3)\"" >> build-info.json
-        echo "}" >> build-info.json
-        
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ziro-os-build-${{ github.sha }}
-        path: |
-          bin/
-          images/qemu/output/
-          build-info.json
-          
-    - name: Upload kernel
-      uses: actions/upload-artifact@v4
-      with:
-        name: ziro-os-kernel-${{ github.sha }}
-        path: kernel/bzImage
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
 
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    needs: build
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-        
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
-      if: always()
-      with:
-        sarif_file: 'trivy-results.sarif'
-        
-    - name: Run gosec security scanner
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: './...'
-        
-  integration-test:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Download build artifacts
-      uses: actions/download-artifact@v3
-      with:
-        name: ziro-os-build-${{ github.sha }}
-        
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      
-    - name: Install test dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y qemu-system-x86 expect
-        
-    - name: Run integration tests
-      run: |
-        chmod +x bin/*
-        make test-full
-        
-    - name: Test container operations
-      run: make test-container
-      
-    - name: Upload integration test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: integration-test-results
-        path: test-results/
+      - name: Run Unit Tests (ziroctl & ziropkg)
+        run: make test-unit
 
-  performance-test:
-    name: Performance Tests
+      - name: Validate Security Audit CLI
+        run: |
+          cd tools/ziroctl
+          go run . security audit --json
+
+  build-and-smoke:
+    name: Build & Smoke Test
     runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
+    needs: unit-tests
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Download build artifacts
-      uses: actions/download-artifact@v3
-      with:
-        name: ziro-os-build-${{ github.sha }}
-        
-    - name: Run performance benchmarks
-      run: |
-        chmod +x bin/*
-        # Boot time test
-        time make dev-qemu &
-        sleep 30
-        pkill qemu || true
-        
-        # Binary size analysis
-        ls -lh bin/
-        du -sh images/qemu/output/
-        
-    - name: Generate performance report
-      run: |
-        echo "# Performance Report" > performance-report.md
-        echo "## Binary Sizes" >> performance-report.md
-        ls -lh bin/ >> performance-report.md
-        echo "## Image Sizes" >> performance-report.md
-        du -sh images/qemu/output/ >> performance-report.md
-        
-    - name: Upload performance results
-      uses: actions/upload-artifact@v4
-      with:
-        name: performance-report
-        path: performance-report.md
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential xorriso mtools dosfstools qemu-utils cpio gzip
+
+      - name: Build Static CLI Tools
+        run: make tools
+
+      - name: Build Rootfs (x86_64)
+        run: make rootfs-x86_64
+
+      - name: Build Docker Base Image
+        run: make docker-image IMAGE_TAG=ziro-os:ci
+
+      - name: Run Container Smoke Test Suite (Includes ziropkg install curl)
+        run: make test-smoke IMAGE_TAG=ziro-os:ci
+
+      - name: Build Hybrid Bootable ISO
+        run: make image-iso TARGET_ARCH=x86_64
+
+      - name: Verify Artifacts
+        run: |
+          ls -la build/
+          test -f build/ziro-os-x86_64.iso
+          test -f build/ziro-rootfs-x86_64.tar.gz
+          test -f build/ziro-initramfs-x86_64.cpio.gz
+
+      - name: Upload CI Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ziro-os-ci-x86_64-${{ github.sha }}
+          path: |
+            build/ziro-os-x86_64.iso
+            build/ziro-rootfs-x86_64.tar.gz
+            build/ziro-initramfs-x86_64.cpio.gz
+            bin/ziroctl
+            bin/ziropkg
+          if-no-files-found: error

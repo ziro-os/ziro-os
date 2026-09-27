@@ -1,409 +1,207 @@
 # Contributing to Ziro-OS
 
-Thank you for your interest in contributing to Ziro-OS! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to **Ziro-OS**! We are building an ultra-lightweight, container-native operating system designed from first principles for cloud-native workloads, microVMs, and container infrastructure.
 
-## 🌟 Ways to Contribute
+This guide outlines our development workflow, coding standards, and how to get your contributions reviewed and merged smoothly.
 
-### Code Contributions
-- **Core OS Development**: Kernel, init system, container runtime
-- **Package Manager**: ZiroPkg features and packages
-- **Developer SDK**: Tools and utilities for developers
-- **Cloud Integration**: AWS, Azure, GCP deployment tools
-- **Monitoring**: Observability and monitoring improvements
-- **Security**: Security hardening and vulnerability fixes
+---
 
-### Documentation
-- **Tutorials**: Step-by-step guides for users
-- **API Documentation**: Technical reference materials
-- **Best Practices**: Guidelines for optimal usage
-- **Troubleshooting**: Common issues and solutions
+## 🌟 Principles & Design Philosophy
 
-### Community
-- **Examples**: Sample applications and use cases
-- **Plugins**: Extensions for the Ziro-OS ecosystem
-- **Testing**: Quality assurance and bug reports
-- **Support**: Help other users in forums and chat
+Every contribution to Ziro-OS should respect our core design tenets:
 
-## 🚀 Getting Started
+1. **Minimal by Design**: We only ship what is strictly necessary to run container workloads. No bloated daemons, no unnecessary background services. Target base footprint is < 15MB.
+2. **Container-Native First**: The host OS exists to host and schedule OCI containers via `containerd` and `runc`. Containers are first-class citizens.
+3. **Stateless & Immutable**: Root filesystems are read-only. Mutable state is confined to designated tmpfs or mounted persistent volumes.
+4. **True Multi-Architecture**: Full support for both `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM64 cloud instances).
+5. **Static Linking & Zero Bloat**: Prefer statically compiled Go and C99 binaries with musl libc to avoid runtime dynamic library dependency issues.
 
-### Development Environment Setup
+---
 
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/ziro-os/ziro-os.git
-   cd ziro-os
-   ```
+## 🚀 Development Environment Setup
 
-2. **Install Dependencies**
-   ```bash
-   # Install build tools
-   sudo apt-get update
-   sudo apt-get install build-essential curl wget git
+### Prerequisites
 
-   # Install Go (for tools and SDK)
-   wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
-   sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
-   export PATH=$PATH:/usr/local/go/bin
+To build and test Ziro-OS locally, ensure you have the following installed:
 
-   # Install container tools
-   sudo apt-get install containerd.io docker.io
-   ```
+- **Go 1.21+**: For compiling `ziroctl` and `ziropkg`.
+- **Docker 24.0+** (with Buildx support): For rootfs extraction and container base building.
+- **GCC / Clang** (or `musl-gcc`): For compiling `ziro-init` PID 1 supervisor.
+- **QEMU** (`qemu-system-x86_64` and/or `qemu-system-aarch64`): For running microVM tests.
+- **xorriso / mtools / dosfstools** (optional): For generating bootable hybrid ISO images.
+- **Make**: Standard build orchestrator.
 
-3. **Build Ziro-OS**
-   ```bash
-   # Build the complete system
-   make all
+### Setup Instructions
 
-   # Test in QEMU
-   make dev-qemu
-   ```
+```bash
+# 1. Fork and clone the repository
+git clone https://github.com/<your-username>/ziro-os.git
+cd ziro-os
 
-### Development Workflow
+# 2. Verify build tools
+go version
+docker version
+make --version
 
-1. **Fork and Branch**
-   ```bash
-   # Fork the repository on GitHub
-   # Clone your fork
-   git clone https://github.com/YOUR_USERNAME/ziro-os.git
-   cd ziro-os
+# 3. Build the default target (tools, rootfs, Docker base image)
+make all
 
-   # Create a feature branch
-   git checkout -b feature/your-feature-name
-   ```
+# 4. Run the test suite
+make test
+```
 
-2. **Make Changes**
-   - Follow the coding standards (see below)
-   - Add tests for new functionality
-   - Update documentation as needed
+---
 
-3. **Test Your Changes**
-   ```bash
-   # Run tests
-   make test-smoke
-   make test-full
+## 🏗️ Repository Architecture
 
-   # Test specific components
-   make test-container
-   ```
+Understanding the project layout:
 
-4. **Submit Pull Request**
-   ```bash
-   # Commit your changes
-   git add .
-   git commit -m "feat: add your feature description"
+```text
+ziro-os/
+├── Makefile                       # Top-level build orchestrator
+├── AGENTS.md                      # AI agent and development guidelines
+├── README.md                      # Main project documentation
+├── init/                          # C99 static PID 1 supervisor (ziro-init)
+│   ├── ziro-init.c
+│   └── Makefile
+├── kernel/                        # Linux kernel configs and direct-boot builders
+│   ├── configs/
+│   └── build-kernel.sh
+├── rootfs/                        # Base rootfs skeleton configuration
+│   └── etc/                       # os-release, inittab, cni, apk repositories
+├── packages/                      # Rootfs and container runtime packager
+│   ├── build-rootfs.sh            # Multi-arch rootfs constructor
+│   └── install-container-runtime.sh
+├── images/                        # Target image generators
+│   ├── docker/                    # FROM scratch Docker base image
+│   ├── iso/                       # Hybrid UEFI/BIOS ISO builder
+│   └── qemu/                      # Direct-kernel microVM runner
+├── tools/                         # Native Go CLI tools
+│   ├── ziroctl/                   # System & container management CLI
+│   └── ziropkg/                   # Official package manager CLI
+├── tests/                         # Test suites
+│   ├── smoke/                     # Container & rootfs smoke tests
+│   └── security/                  # CIS & security audit tests
+└── community/                     # Documentation and community guides
+    ├── CONTRIBUTING.md
+    └── docs/
+        └── getting-started.md
+```
 
-   # Push to your fork
-   git push origin feature/your-feature-name
+---
 
-   # Create pull request on GitHub
-   ```
+## 🛠️ Common Build & Test Commands
+
+We provide standard `make` targets to keep development reproducible:
+
+| Target | Description |
+|---|---|
+| `make all` | Build `ziroctl`, `ziropkg`, rootfs, and Docker base image for host architecture |
+| `make tools` | Compile static `ziroctl` and `ziropkg` binaries into `bin/` |
+| `make tools-all` | Cross-compile `ziroctl` and `ziropkg` for `x86_64` and `arm64` |
+| `make rootfs` | Build minimal rootfs (<15MB) and full initramfs |
+| `make rootfs-all` | Build rootfs archives for both `x86_64` and `arm64` |
+| `make docker-image` | Build local `ziro-os:latest` Docker base image |
+| `make docker-multiarch` | Build multi-arch OCI image with Docker buildx (`amd64` + `arm64`) |
+| `make image-iso` | Generate bootable hybrid UEFI/BIOS ISO |
+| `make run-qemu` | Launch local microVM with interactive terminal |
+| `make test` | Run complete unit tests and container smoke test suite |
+| `make test-unit` | Run unit tests for `ziroctl` and `ziropkg` |
+| `make test-smoke` | Run base container verification tests |
+| `make clean` | Clean transient build artifacts in `build/` |
+
+---
 
 ## 📋 Coding Standards
 
-### General Guidelines
-- **Clarity**: Write clear, readable code with meaningful names
-- **Simplicity**: Prefer simple solutions over complex ones
-- **Performance**: Consider performance implications
-- **Security**: Follow security best practices
-- **Documentation**: Document public APIs and complex logic
+### 1. Go (`tools/ziroctl/`, `tools/ziropkg/`)
 
-### Go Code Style
-```go
-// Use gofmt for formatting
-gofmt -w .
-
-// Follow effective Go guidelines
-// https://golang.org/doc/effective_go.html
-
-// Example function with proper documentation
-// ProcessContainer handles container lifecycle operations.
-// It returns an error if the operation fails.
-func ProcessContainer(ctx context.Context, id string) error {
-    // Implementation here
-    return nil
-}
-```
-
-### Shell Script Style
-```bash
-#!/bin/bash
-# Use strict error handling
-set -euo pipefail
-
-# Use meaningful variable names
-CONTAINER_NAME="ziro-app"
-IMAGE_TAG="latest"
-
-# Quote variables to prevent word splitting
-echo "Starting container: ${CONTAINER_NAME}"
-
-# Use functions for reusable code
-function cleanup() {
-    echo "Cleaning up resources..."
-}
-trap cleanup EXIT
-```
-
-### Commit Message Format
-```
-type(scope): description
-
-[optional body]
-
-[optional footer]
-```
-
-Types:
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation changes
-- `style`: Code style changes
-- `refactor`: Code refactoring
-- `test`: Test additions or changes
-- `chore`: Build process or auxiliary tool changes
-
-Examples:
-```
-feat(ziropkg): add package search functionality
-
-Add search command to ziropkg CLI that allows users to search
-for packages by name, description, and tags.
-
-Closes #123
-```
-
-## 🧪 Testing Guidelines
-
-### Test Categories
-
-1. **Unit Tests**: Test individual functions and components
-2. **Integration Tests**: Test component interactions
-3. **System Tests**: Test complete system functionality
-4. **Performance Tests**: Benchmark and load testing
-
-### Writing Tests
-
-```go
-// Example unit test
-func TestContainerManager_Start(t *testing.T) {
-    tests := []struct {
-        name    string
-        input   string
-        want    error
-        wantErr bool
-    }{
-        {
-            name:    "valid container",
-            input:   "nginx:alpine",
-            want:    nil,
-            wantErr: false,
-        },
-        {
-            name:    "invalid image",
-            input:   "",
-            want:    ErrInvalidImage,
-            wantErr: true,
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            cm := NewContainerManager()
-            err := cm.Start(tt.input)
-            
-            if (err != nil) != tt.wantErr {
-                t.Errorf("Start() error = %v, wantErr %v", err, tt.wantErr)
-                return
-            }
-            
-            if !errors.Is(err, tt.want) {
-                t.Errorf("Start() error = %v, want %v", err, tt.want)
-            }
-        })
-    }
-}
-```
-
-### Running Tests
+- Format code using `gofmt` (`go fmt ./...`).
+- Always use `CGO_ENABLED=0` for static compilation without libc dependencies.
+- Organize CLI commands with Cobra subcommands under `cmd/`.
+- Every command should support `--help` and clean error messaging.
+- Write unit tests (`_test.go`) alongside command implementations.
 
 ```bash
-# Run all tests
-make test-full
-
-# Run specific test categories
-make test-smoke      # Basic functionality
-make test-container  # Container operations
-make test-security   # Security features
-
-# Run tests with coverage
-go test -cover ./...
-
-# Run benchmarks
-go test -bench=. ./...
+cd tools/ziroctl && go test -v ./...
+cd tools/ziropkg && go test -v ./...
 ```
 
-## 📚 Documentation Guidelines
+### 2. C99 (`init/ziro-init.c`)
 
-### Documentation Types
+- Written in clean, ANSI C99.
+- No dynamic memory allocation (`malloc`/`free`) in critical init/reaping paths to prevent memory leaks or fragmentation during long uptimes.
+- Statically link against musl libc (`musl-gcc -static`).
+- Handle signals properly: `SIGCHLD` for non-blocking zombie reaping (`waitpid(-1, &status, WNOHANG)`), `SIGINT`/`SIGTERM` for graceful shutdown.
 
-1. **API Documentation**: Generated from code comments
-2. **User Guides**: Step-by-step instructions
-3. **Tutorials**: Learning-oriented content
-4. **Reference**: Technical specifications
+### 3. Shell Scripts (`packages/`, `images/`, `kernel/`)
 
-### Writing Documentation
+- Always begin with:
+  ```bash
+  #!/bin/bash
+  set -euo pipefail
+  ```
+- Always quote variables to prevent word splitting (`"$VAR"`).
+- Make scripts architecture-aware: support both `x86_64` (or `amd64`) and `arm64` (or `aarch64`).
+- Avoid hardcoded paths; resolve repository roots dynamically via `$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)`.
 
-- **Clear Structure**: Use headings and sections
-- **Code Examples**: Include working examples
-- **Screenshots**: Visual aids where helpful
-- **Links**: Reference related content
-- **Updates**: Keep documentation current
+---
 
-### Documentation Format
+## 🧪 Testing Your Changes
 
-```markdown
-# Title
-
-Brief description of the topic.
-
-## Prerequisites
-
-- Requirement 1
-- Requirement 2
-
-## Step-by-Step Instructions
-
-### Step 1: Setup
-
-Description of the first step.
+Before opening a pull request, run the test suites locally:
 
 ```bash
-# Example command
-make setup
+# 1. Run unit tests
+make test-unit
+
+# 2. Run container smoke tests
+make test-smoke
+
+# 3. Test package manager end-to-end inside the container
+docker run --rm ziro-os:latest /bin/sh -c "ziropkg install curl && curl --version"
 ```
 
-### Step 2: Configuration
+All tests must pass cleanly.
 
-Description and code example.
+---
 
-## Troubleshooting
+## 🔄 Development Workflow & Pull Requests
 
-Common issues and solutions.
+### 1. Branch Naming
 
-## Next Steps
+Follow structured branch names:
+- `feature/<feature-name>` (e.g., `feature/cni-wireguard`)
+- `fix/<issue-name>` (e.g., `fix/apk-tls-ca-cert`)
+- `docs/<doc-update>` (e.g., `docs/quickstart-guide`)
 
-Links to related topics.
+### 2. Conventional Commits
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```text
+feat(ziropkg): add search command with filter flags
+fix(rootfs): resolve relative symlinks for busybox applets
+docs(getting-started): clarify QEMU boot instructions
+test(smoke): add package installation verification test
 ```
 
-## 🔒 Security Guidelines
+### 3. Submitting a Pull Request
 
-### Security Considerations
+1. Push your branch to your GitHub fork.
+2. Open a Pull Request targeting the `main` branch.
+3. Fill out the PR template with:
+   - Summary of changes and motivation.
+   - Architectures tested (`x86_64`, `arm64`).
+   - Test results (`make test` output).
+4. CI checks will run automatically across unit tests, multi-arch rootfs generation, container smoke tests, and security scans.
 
-- **Input Validation**: Validate all user inputs
-- **Privilege Escalation**: Use minimal required privileges
-- **Secrets Management**: Never commit secrets to code
-- **Dependencies**: Keep dependencies updated
-- **Container Security**: Follow container security best practices
+---
 
-### Reporting Security Issues
+## 🔒 Security Vulnerability Reporting
 
-**DO NOT** create public GitHub issues for security vulnerabilities.
+If you discover a security vulnerability in Ziro-OS, please do **NOT** open a public issue. Instead, report it privately via GitHub Security Advisories or email security@ziro-os.io. Include reproduction steps and details about the affected versions.
 
-Instead:
-1. Email security@ziro-os.io with details
-2. Include steps to reproduce
-3. Provide impact assessment
-4. Allow time for fix before disclosure
+---
 
-## 🏗️ Architecture Guidelines
-
-### Design Principles
-
-1. **Container-Native**: Everything runs in containers
-2. **Minimal**: Only essential components included
-3. **Secure**: Security by default
-4. **Fast**: Optimized for performance
-5. **Modular**: Pluggable architecture
-
-### Component Structure
-
-```
-ziro-os/
-├── kernel/          # Kernel configuration and patches
-├── rootfs/          # Minimal root filesystem
-├── packages/        # Package build system
-├── ziropkg/         # Package manager
-├── sdk/             # Developer SDK
-├── monitoring/      # Observability stack
-├── security/        # Security hardening
-├── deploy/          # Deployment automation
-└── community/       # Examples and documentation
-```
-
-## 🎯 Project Roadmap
-
-### Current Focus Areas
-
-1. **Performance Optimization**: Boot time and resource usage
-2. **Security Hardening**: Additional security features
-3. **Cloud Integration**: Better cloud provider support
-4. **Developer Experience**: Improved tooling and documentation
-5. **Ecosystem Growth**: More packages and plugins
-
-### How to Get Involved
-
-1. **Check Issues**: Look for "good first issue" labels
-2. **Join Discussions**: Participate in GitHub discussions
-3. **Propose Features**: Create feature request issues
-4. **Review PRs**: Help review pull requests
-5. **Write Documentation**: Improve existing docs
-
-## 💬 Communication Channels
-
-### Primary Channels
-
-- **GitHub Issues**: Bug reports and feature requests
-- **GitHub Discussions**: General questions and ideas
-- **Discord**: Real-time chat and community support
-- **Mailing List**: Development announcements
-
-### Community Guidelines
-
-- **Be Respectful**: Treat everyone with respect
-- **Be Constructive**: Provide helpful feedback
-- **Be Patient**: Allow time for responses
-- **Be Inclusive**: Welcome newcomers
-- **Follow Code of Conduct**: Adhere to community standards
-
-## 🏆 Recognition
-
-### Contributor Recognition
-
-- **Contributors List**: All contributors listed in README
-- **Release Notes**: Major contributions highlighted
-- **Community Spotlight**: Featured contributors
-- **Maintainer Status**: Path to becoming a maintainer
-
-### Becoming a Maintainer
-
-Requirements:
-1. Consistent high-quality contributions
-2. Deep understanding of project architecture
-3. Active community participation
-4. Demonstrated leadership skills
-5. Commitment to project values
-
-## 📄 License
-
-By contributing to Ziro-OS, you agree that your contributions will be licensed under the same license as the project (MIT License).
-
-## 🙏 Thank You
-
-Thank you for contributing to Ziro-OS! Your contributions help make container-native computing accessible to everyone.
-
-For questions about contributing, please:
-- Create a GitHub discussion
-- Join our Discord server
-- Email contribute@ziro-os.io
-
-Happy coding! 🚀
+> _Ziro-OS — Minimal by design. Born for the cloud._

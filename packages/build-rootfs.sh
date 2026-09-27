@@ -55,6 +55,25 @@ setup_layout() {
     # Copy tracked etc configuration skeleton
     cp -r "$REPO_ROOT/rootfs/etc/"* "$target/etc/"
     
+    # Initialize package manager database & architecture
+    mkdir -p "$target/lib/apk/db" "$target/etc/apk"
+    touch "$target/lib/apk/db/installed"
+    touch "$target/etc/apk/world"
+    local apk_arch="x86_64"
+    if [ "$TARGET_ARCH" = "arm64" ] || [ "$TARGET_ARCH" = "aarch64" ]; then
+        apk_arch="aarch64"
+    fi
+    echo "$apk_arch" > "$target/etc/apk/arch"
+
+    # Ensure TLS certificates exist for HTTPS package downloads
+    mkdir -p "$target/etc/ssl/certs"
+    if [ ! -f "$target/etc/ssl/certs/ca-certificates.crt" ]; then
+        docker run --rm --platform "$DOCKER_PLATFORM" alpine:latest cat /etc/ssl/certs/ca-certificates.crt > "$target/etc/ssl/certs/ca-certificates.crt" 2>/dev/null || true
+    fi
+    if [ -f "$target/etc/ssl/certs/ca-certificates.crt" ]; then
+        (cd "$target/etc/ssl" && ln -sf certs/ca-certificates.crt cert.pem)
+    fi
+
     # Update architecture in ziro-release
     sed -i.bak "s/ARCH=\".*\"/ARCH=\"$TARGET_ARCH\"/g" "$target/etc/ziro-release" 2>/dev/null || true
     rm -f "$target/etc/ziro-release.bak"
@@ -96,8 +115,8 @@ install_busybox "$ROOTFS_MINIMAL"
 install_busybox "$ROOTFS_FULL"
 echo "✓ BusyBox utilities installed"
 
-# --- 2. Build & Install ziroctl ---
-echo "--- [2/5] Compiling ziroctl ($GOARCH) ---"
+# --- 2. Build & Install ziroctl and ziropkg ---
+echo "--- [2/6] Compiling ziroctl and ziropkg ($GOARCH) ---"
 mkdir -p "$REPO_ROOT/bin"
 ZIROCTL_BIN="$REPO_ROOT/bin/ziroctl-$TARGET_ARCH"
 (
@@ -108,7 +127,30 @@ cp "$ZIROCTL_BIN" "$ROOTFS_MINIMAL/usr/bin/ziroctl"
 cp "$ZIROCTL_BIN" "$ROOTFS_MINIMAL/bin/ziroctl"
 cp "$ZIROCTL_BIN" "$ROOTFS_FULL/usr/bin/ziroctl"
 cp "$ZIROCTL_BIN" "$ROOTFS_FULL/bin/ziroctl"
-echo "✓ ziroctl CLI installed"
+
+ZIROPKG_BIN="$REPO_ROOT/bin/ziropkg-$TARGET_ARCH"
+(
+    cd "$REPO_ROOT/tools/ziropkg"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$ZIROPKG_BIN" .
+)
+cp "$ZIROPKG_BIN" "$ROOTFS_MINIMAL/usr/bin/ziropkg"
+cp "$ZIROPKG_BIN" "$ROOTFS_MINIMAL/bin/ziropkg"
+cp "$ZIROPKG_BIN" "$ROOTFS_FULL/usr/bin/ziropkg"
+cp "$ZIROPKG_BIN" "$ROOTFS_FULL/bin/ziropkg"
+
+# Fetch & install static apk backend
+APK_BIN="$DOWNLOAD_DIR/apk-$TARGET_ARCH"
+if [ ! -f "$APK_BIN" ]; then
+    echo "Extracting static APK package manager for $TARGET_ARCH..."
+    docker run --rm --platform "$DOCKER_PLATFORM" -v "$DOWNLOAD_DIR:/out" alpine:latest sh -c \
+        "apk add --no-cache apk-tools-static >/dev/null 2>&1 && cp /sbin/apk.static /out/apk-$TARGET_ARCH"
+    chmod +x "$APK_BIN"
+fi
+cp "$APK_BIN" "$ROOTFS_MINIMAL/sbin/apk"
+cp "$APK_BIN" "$ROOTFS_MINIMAL/usr/bin/apk"
+cp "$APK_BIN" "$ROOTFS_FULL/sbin/apk"
+cp "$APK_BIN" "$ROOTFS_FULL/usr/bin/apk"
+echo "✓ ziroctl, ziropkg, and apk package backend installed"
 
 # --- 3. Build & Install ziro-init (PID 1) ---
 echo "--- [3/5] Building ziro-init PID 1 supervisor ($TARGET_ARCH) ---"
