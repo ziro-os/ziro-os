@@ -448,20 +448,12 @@ EOF
 
     # 5. Deploy Ziro-OS rootfs
     printf "${BOLD}[4/6] Installing Ziro-OS container host files...${RESET}\n"
-    if [ -f /ziro/rootfs.tar.gz ]; then
-        tar -xzf /ziro/rootfs.tar.gz -C "$TARGET_MNT"
-    elif [ -f /boot/rootfs.tar.gz ]; then
-        tar -xzf /boot/rootfs.tar.gz -C "$TARGET_MNT"
-    elif [ -f /build/ziro-rootfs-x86_64.tar.gz ]; then
-        tar -xzf /build/ziro-rootfs-x86_64.tar.gz -C "$TARGET_MNT"
-    else
-        # Copy live operating system directories
-        for dir in bin sbin etc home lib lib64 opt root usr var; do
-            if [ -e "/$dir" ]; then
-                cp -a "/$dir" "$TARGET_MNT/" 2>/dev/null || true
-            fi
-        done
-    fi
+    # Copy live operating system directories (guarantees exact, complete host OS with containerd, SSH, and drivers)
+    for dir in bin sbin etc home lib lib64 opt root usr var; do
+        if [ -e "/$dir" ]; then
+            cp -a "/$dir" "$TARGET_MNT/" 2>/dev/null || true
+        fi
+    done
 
     # Ensure kernel modules are installed to target disk
     if [ -d /lib/modules ]; then

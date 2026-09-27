@@ -58,11 +58,9 @@ echo "✓ Initramfs: $INITRAMFS_FILE"
 cp "$KERNEL_FILE" "$ISO_STAGING/boot/vmlinuz"
 cp "$INITRAMFS_FILE" "$ISO_STAGING/boot/initramfs.cpio.gz"
 
-# Bundle rootfs archive on ISO if available for fast offline disk installation
+# Bundle minimal rootfs archive on ISO if available for container extraction
 mkdir -p "$ISO_STAGING/ziro"
-if [ -f "$BUILD_DIR/ziro-full-rootfs-$TARGET_ARCH.tar.gz" ]; then
-    cp "$BUILD_DIR/ziro-full-rootfs-$TARGET_ARCH.tar.gz" "$ISO_STAGING/ziro/rootfs.tar.gz"
-elif [ -f "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" ]; then
+if [ -f "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" ]; then
     cp "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" "$ISO_STAGING/ziro/rootfs.tar.gz"
 fi
 
