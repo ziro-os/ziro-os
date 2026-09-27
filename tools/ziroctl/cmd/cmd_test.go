@@ -47,3 +47,21 @@ func TestSecurityAuditCommand(t *testing.T) {
 		t.Errorf("expected output to contain 'Ziro-OS Security', got: %s", out)
 	}
 }
+
+func TestSystemCommands(t *testing.T) {
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"system", "--help"})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("system help command failed: %v", err)
+	}
+
+	out := buf.String()
+	for _, sub := range []string{"status", "reboot", "poweroff"} {
+		if !strings.Contains(out, sub) {
+			t.Errorf("expected system help to list '%s', got: %s", sub, out)
+		}
+	}
+}

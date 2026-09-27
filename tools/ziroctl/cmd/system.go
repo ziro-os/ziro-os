@@ -117,7 +117,38 @@ func inspectSystem() SystemStatus {
 	return st
 }
 
+var rebootCmd = &cobra.Command{
+	Use:   "reboot",
+	Short: "Cleanly sync filesystems and reboot the host system",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("Syncing filesystems and rebooting Ziro-OS host...")
+		_ = exec.Command("sync").Run()
+		if err := exec.Command("/sbin/reboot").Run(); err != nil {
+			if err := exec.Command("reboot").Run(); err != nil {
+				_ = exec.Command("kill", "-TERM", "1").Run()
+			}
+		}
+	},
+}
+
+var poweroffCmd = &cobra.Command{
+	Use:     "poweroff",
+	Aliases: []string{"shutdown", "halt"},
+	Short:   "Cleanly sync filesystems and power off the host system",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("Syncing filesystems and powering off Ziro-OS host...")
+		_ = exec.Command("sync").Run()
+		if err := exec.Command("/sbin/poweroff").Run(); err != nil {
+			if err := exec.Command("poweroff").Run(); err != nil {
+				_ = exec.Command("kill", "-USR2", "1").Run()
+			}
+		}
+	},
+}
+
 func init() {
 	systemCmd.AddCommand(statusCmd)
+	systemCmd.AddCommand(rebootCmd)
+	systemCmd.AddCommand(poweroffCmd)
 	rootCmd.AddCommand(systemCmd)
 }

@@ -58,9 +58,78 @@ static void safe_mkdir(const char *dir, mode_t mode) {
     }
 }
 
+static void init_devices(void);
+
+static void resolve_root_device(const char *spec, char *out_dev, size_t max_len) {
+    out_dev[0] = '\0';
+    if (!spec || strlen(spec) == 0) return;
+
+    if (strncmp(spec, "LABEL=", 6) == 0) {
+        const char *label = spec + 6;
+        char by_label[512];
+        snprintf(by_label, sizeof(by_label), "/dev/disk/by-label/%.200s", label);
+        if (access(by_label, F_OK) == 0) {
+            char resolved[1024];
+            if (realpath(by_label, resolved)) {
+                snprintf(out_dev, max_len, "%.250s", resolved);
+                return;
+            }
+            snprintf(out_dev, max_len, "%.250s", by_label);
+            return;
+        }
+
+        // Search common partition nodes directly
+        static const char *prefixes[] = {"/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb", "/dev/nvme0n1p", "/dev/hda", NULL};
+        for (int p = 0; prefixes[p] != NULL; p++) {
+            for (int part = 1; part <= 4; part++) {
+                char candidate[64];
+                snprintf(candidate, sizeof(candidate), "%s%d", prefixes[p], part);
+                if (access(candidate, F_OK) == 0) {
+                    char cmd[512];
+                    snprintf(cmd, sizeof(cmd), "blkid -s LABEL -o value %s 2>/dev/null", candidate);
+                    FILE *bfp = popen(cmd, "r");
+                    if (bfp) {
+                        char blabel[128];
+                        if (fgets(blabel, sizeof(blabel), bfp)) {
+                            char *bnl = strchr(blabel, '\n');
+                            if (bnl) *bnl = '\0';
+                            char *br = strchr(blabel, '\r');
+                            if (br) *br = '\0';
+                            if (strcmp(blabel, label) == 0) {
+                                snprintf(out_dev, max_len, "%s", candidate);
+                                pclose(bfp);
+                                return;
+                            }
+                        }
+                        pclose(bfp);
+                    }
+                }
+            }
+        }
+    } else if (strncmp(spec, "UUID=", 5) == 0) {
+        const char *uuid = spec + 5;
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "findfs UUID=%.128s 2>/dev/null || blkid -U %.128s 2>/dev/null", uuid, uuid);
+        FILE *fp = popen(cmd, "r");
+        if (fp) {
+            char line[256];
+            if (fgets(line, sizeof(line), fp)) {
+                char *nl = strchr(line, '\n');
+                if (nl) *nl = '\0';
+                if (strlen(line) > 0) {
+                    snprintf(out_dev, max_len, "%.200s", line);
+                }
+            }
+            pclose(fp);
+        }
+    } else if (strncmp(spec, "/dev/", 5) == 0) {
+        snprintf(out_dev, max_len, "%.200s", spec);
+    }
+}
+
 static void check_and_switch_root(void) {
     if (access("/etc/.ziro_switched", F_OK) == 0) {
-        return; // Already running on tmpfs!
+        return; // Already running on switched root!
     }
 
     struct statfs st;
@@ -70,25 +139,101 @@ static void check_and_switch_root(void) {
 
     // Skip switch if already running on a persistent filesystem (ext4, xfs, btrfs, overlayfs)
     if (ftype == 0xef53UL || ftype == 0x58465342UL || ftype == 0x9123683eUL || ftype == 0x794c7630UL) {
-        printf("[init] root fs is persistent (0x%lx); skipping switch_root\n", ftype);
+        printf("[init] running on persistent root filesystem (0x%lx); continuing boot\n", ftype);
         return;
     }
 
-    printf("[init] migrating initramfs root to high-performance tmpfs...\n");
-
-    // 1. Mount devtmpfs on /dev first so we have /dev/console and /dev/null
+    // 1. Mount essential virtual filesystems in initramfs for device detection
     safe_mkdir("/dev", 0755);
     mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+    safe_mkdir("/proc", 0755);
+    mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    safe_mkdir("/sys", 0755);
+    mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
 
-    // 2. Create /sysroot and mount tmpfs
+    // 2. Discover hardware and load kernel modules (virtio_scsi, virtio_blk, sd_mod, ahci, nvme)
+    init_devices();
+
+    // 3. Inspect kernel command line
+    char root_spec[256] = {0};
+    int live_requested = 0;
+    FILE *cmdline = fopen("/proc/cmdline", "r");
+    if (cmdline) {
+        char buf[1024];
+        if (fgets(buf, sizeof(buf), cmdline)) {
+            if (strstr(buf, "ziro.live") != NULL) {
+                live_requested = 1;
+            }
+            char *p = strstr(buf, "root=");
+            if (p) {
+                p += 5;
+                char *end = p;
+                while (*end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n') {
+                    end++;
+                }
+                size_t len = (size_t)(end - p);
+                if (len < sizeof(root_spec)) {
+                    strncpy(root_spec, p, len);
+                    root_spec[len] = '\0';
+                }
+            }
+        }
+        fclose(cmdline);
+    }
+
+    // 4. If persistent root is requested (e.g. root=LABEL=ZIRO_ROOT), locate and mount disk
+    if (!live_requested && root_spec[0] != '\0') {
+        printf("[init] root device requested: %s\n", root_spec);
+        char root_dev[256] = {0};
+
+        // Poll for disk readiness (up to 5 seconds)
+        for (int retries = 0; retries < 25; retries++) {
+            resolve_root_device(root_spec, root_dev, sizeof(root_dev));
+            if (root_dev[0] != '\0' && access(root_dev, F_OK) == 0) {
+                break;
+            }
+            usleep(200000); // 200ms
+        }
+
+        if (root_dev[0] != '\0' && access(root_dev, F_OK) == 0) {
+            printf("[init] resolved root device: %s\n", root_dev);
+            safe_mkdir("/sysroot", 0755);
+            if (mount(root_dev, "/sysroot", "ext4", MS_RELATIME, NULL) == 0) {
+                printf("[init] mounted %s on /sysroot (ext4)\n", root_dev);
+
+                // Verify real init exists in persistent sysroot
+                if (access("/sysroot/sbin/init", X_OK) == 0 || access("/sysroot/init", X_OK) == 0) {
+                    int mfd = open("/sysroot/etc/.ziro_switched", O_WRONLY | O_CREAT, 0644);
+                    if (mfd >= 0) close(mfd);
+
+                    umount("/dev");
+                    umount("/proc");
+                    umount("/sys");
+
+                    printf("[init] switching root to persistent disk (%s)...\n", root_dev);
+                    execl("/bin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
+                    execl("/sbin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
+                    fprintf(stderr, "[init] switch_root to %s failed: %s\n", root_dev, strerror(errno));
+                } else {
+                    fprintf(stderr, "[init] /sysroot/sbin/init not found on %s, unmounting\n", root_dev);
+                    umount("/sysroot");
+                }
+            } else {
+                fprintf(stderr, "[init] failed to mount %s on /sysroot: %s\n", root_dev, strerror(errno));
+            }
+        } else {
+            printf("[init] persistent root device (%s) not found; falling back to live tmpfs\n", root_spec);
+        }
+    }
+
+    // 5. Fallback: Live ISO tmpfs migration
+    printf("[init] migrating live environment to tmpfs...\n");
     safe_mkdir("/sysroot", 0755);
     if (mount("tmpfs", "/sysroot", "tmpfs", 0, "mode=0755,size=100%") < 0) {
         fprintf(stderr, "[init] failed to mount tmpfs on /sysroot: %s\n", strerror(errno));
         return;
     }
 
-    // 3. Copy rootfs contents into /sysroot
-    printf("[init] copying system files to tmpfs...\n");
     pid_t cpid = fork();
     if (cpid == 0) {
         char *argv[] = {
@@ -111,17 +256,17 @@ static void check_and_switch_root(void) {
         waitpid(cpid, &status, 0);
     }
 
-    // Ensure marker and device nodes exist in sysroot
     safe_mkdir("/sysroot/dev", 0755);
     mknod("/sysroot/dev/console", S_IFCHR | 0600, makedev(5, 1));
     mknod("/sysroot/dev/null", S_IFCHR | 0666, makedev(1, 3));
     int fd = open("/sysroot/etc/.ziro_switched", O_WRONLY | O_CREAT, 0644);
     if (fd >= 0) close(fd);
 
-    // 4. Unmount /dev on old root before switch_root
     umount("/dev");
+    umount("/proc");
+    umount("/sys");
 
-    printf("[init] performing switch_root to tmpfs...\n");
+    printf("[init] performing switch_root to live tmpfs...\n");
     execl("/bin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
     execl("/sbin/busybox", "switch_root", "/sysroot", "/sbin/init", NULL);
     fprintf(stderr, "[init] failed to switch_root: %s\n", strerror(errno));
@@ -512,10 +657,22 @@ static void start_sshd(void) {
 
 static void sig_handler(int sig) {
     switch (sig) {
-        case SIGINT:
         case SIGTERM:
+        case SIGINT:
+            // Busybox reboot or Ctrl-Alt-Del -> REBOOT
+            reboot_requested = 1;
+            shutdown_requested = 0;
+            break;
+        case SIGUSR2:
         case SIGPWR:
+            // Busybox poweroff or ACPI poweroff -> POWER OFF
             shutdown_requested = 1;
+            reboot_requested = 0;
+            break;
+        case SIGUSR1:
+            // Busybox halt -> HALT / POWER OFF
+            shutdown_requested = 1;
+            reboot_requested = 0;
             break;
         case SIGCHLD:
             // Handled in main loop
@@ -608,7 +765,19 @@ static void spawn_shell(void) {
 }
 
 static void perform_shutdown(int is_reboot) {
-    printf("\n[init] sending SIGTERM to all processes...\n");
+    printf("\n[init] syncing disks...\n");
+    sync();
+
+    printf("[init] stopping services (sshd, containerd)...\n");
+    if (sshd_pid > 0) {
+        kill(sshd_pid, SIGTERM);
+    }
+    if (containerd_pid > 0) {
+        kill(containerd_pid, SIGTERM);
+    }
+    usleep(200000); // 200ms
+
+    printf("[init] sending SIGTERM to all processes...\n");
     kill(-1, SIGTERM);
     sync();
     sleep(1);
@@ -619,12 +788,13 @@ static void perform_shutdown(int is_reboot) {
 
     printf("[init] unmounting filesystems...\n");
     mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
+    sync();
 
     if (is_reboot) {
-        printf("[init] rebooting system...\n");
+        printf("[init] rebooting system (ACPI/BIOS reset)...\n");
         reboot(RB_AUTOBOOT);
     } else {
-        printf("[init] powering off system...\n");
+        printf("[init] powering off system (ACPI powerdown)...\n");
         reboot(RB_POWER_OFF);
     }
 }
@@ -655,6 +825,8 @@ int main(int argc, char *argv[]) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGPWR, &sa, NULL);
+    sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
     signal(SIGCHLD, SIG_DFL);
 
     // Initialization phases

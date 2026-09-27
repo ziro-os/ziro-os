@@ -310,6 +310,44 @@ cp "$REPO_ROOT/scripts/installer/ziro-install.sh" "$ROOTFS_FULL/usr/sbin/ziro-in
 cp "$REPO_ROOT/scripts/installer/ziro-install.sh" "$ROOTFS_FULL/bin/ziro-install"
 chmod +x "$ROOTFS_FULL/usr/sbin/ziro-install" "$ROOTFS_FULL/bin/ziro-install"
 
+# Install dedicated reboot, poweroff, halt, and shutdown control scripts
+for rdir in "$ROOTFS_FULL" "$ROOTFS_MINIMAL"; do
+    mkdir -p "$rdir/sbin" "$rdir/bin" "$rdir/usr/bin"
+    cat > "$rdir/sbin/reboot" << 'EOF'
+#!/bin/sh
+sync
+kill -TERM 1 2>/dev/null || busybox reboot -f
+EOF
+    cat > "$rdir/sbin/poweroff" << 'EOF'
+#!/bin/sh
+sync
+kill -USR2 1 2>/dev/null || busybox poweroff -f
+EOF
+    cat > "$rdir/sbin/halt" << 'EOF'
+#!/bin/sh
+sync
+kill -USR1 1 2>/dev/null || busybox halt -f
+EOF
+    cat > "$rdir/sbin/shutdown" << 'EOF'
+#!/bin/sh
+case "$1" in
+    -r|--reboot|reboot)
+        exec /sbin/reboot
+        ;;
+    *)
+        exec /sbin/poweroff
+        ;;
+esac
+EOF
+    chmod 755 "$rdir/sbin/reboot" "$rdir/sbin/poweroff" "$rdir/sbin/halt" "$rdir/sbin/shutdown"
+    cp "$rdir/sbin/reboot" "$rdir/bin/reboot" 2>/dev/null || true
+    cp "$rdir/sbin/reboot" "$rdir/usr/bin/reboot" 2>/dev/null || true
+    cp "$rdir/sbin/poweroff" "$rdir/bin/poweroff" 2>/dev/null || true
+    cp "$rdir/sbin/poweroff" "$rdir/usr/bin/poweroff" 2>/dev/null || true
+    cp "$rdir/sbin/shutdown" "$rdir/bin/shutdown" 2>/dev/null || true
+    cp "$rdir/sbin/shutdown" "$rdir/usr/bin/shutdown" 2>/dev/null || true
+done
+
 if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
     echo "❌ FATAL: /bin/busybox was overwritten by ziro-init!"
     exit 1
