@@ -107,6 +107,16 @@ test-smoke: docker-image
 	@./tests/smoke/test-docker-base.sh $(IMAGE_TAG)
 
 # --- Cleanup ---
+# --- Release Automation ---
+release:
+	@./scripts/release.sh patch
+
+release-minor:
+	@./scripts/release.sh minor
+
+release-major:
+	@./scripts/release.sh major
+
 clean:
 	@echo "Cleaning transient build artifacts..."
 	@rm -rf build/

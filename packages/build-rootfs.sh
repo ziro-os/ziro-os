@@ -253,6 +253,15 @@ FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"
 INITRAMFS_SIZE=$(du -h "$FULL_INITRAMFS" | cut -f1)
 echo "✅ Full Container OS Initramfs: $FULL_INITRAMFS ($INITRAMFS_SIZE)"
 
+# Provide standard architecture alias symlinks for Docker buildx and release automation
+if [ "$TARGET_ARCH" = "x86_64" ]; then
+    ln -sf "ziro-rootfs-x86_64.tar.gz" "$BUILD_DIR/ziro-rootfs-amd64.tar.gz"
+    ln -sf "ziro-initramfs-x86_64.cpio.gz" "$BUILD_DIR/ziro-initramfs-amd64.cpio.gz"
+elif [ "$TARGET_ARCH" = "arm64" ]; then
+    ln -sf "ziro-rootfs-arm64.tar.gz" "$BUILD_DIR/ziro-rootfs-aarch64.tar.gz"
+    ln -sf "ziro-initramfs-arm64.cpio.gz" "$BUILD_DIR/ziro-initramfs-aarch64.cpio.gz"
+fi
+
 echo "=================================================="
 echo " Rootfs build completed successfully for $TARGET_ARCH!"
 echo " 1. Minimal Docker base: $MINIMAL_TAR ($MINIMAL_SIZE)"

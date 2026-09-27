@@ -1,4 +1,4 @@
-name: Ziro-OS Release
+name: Ziro-OS Release & Image Publishing
 
 on:
   push:
@@ -7,18 +7,22 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version tag (e.g. v1.0.0)'
+        description: 'Release version tag (e.g. v1.0.1)'
         required: true
-        default: 'v1.0.0'
+        default: 'v1.0.1'
 
 permissions:
   contents: write
   packages: write
+  pages: write
+  id-token: write
 
 jobs:
   release:
     name: Build & Publish Release
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -72,7 +76,8 @@ jobs:
       - name: Build & Push Multi-Architecture Docker Base Image
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          REPO="${{ github.repository }}"
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "Publishing container image to ghcr.io/${REPO}:${TAG}..."
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             -t "ghcr.io/${REPO}:${TAG}" \
@@ -106,3 +111,36 @@ jobs:
             build/SHA256SUMS
             bin/ziroctl-*
             bin/ziropkg-*
+
+  deploy-pages:
+    name: Deploy Release Portal to GitHub Pages
+    needs: release
+    concurrency:
+      group: 'pages'
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Generate Release Download Portal
+        run: |
+          chmod +x scripts/generate-release-page.sh
+          ./scripts/generate-release-page.sh _site
+        env:
+          GITHUB_REF_NAME: ${{ needs.release.outputs.tag }}
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '_site'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

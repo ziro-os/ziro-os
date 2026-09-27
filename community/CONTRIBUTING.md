@@ -198,6 +198,36 @@ test(smoke): add package installation verification test
 
 ---
 
+## 🚀 Release Management & Automation
+
+Maintainers can trigger an automated release using the release utility or `make` targets:
+
+```bash
+# 1. Preview changes without committing or tagging
+./scripts/release.sh --dry-run patch
+
+# 2. Automatically bump patch version (e.g., 1.0.0 -> 1.0.1)
+make release
+# or: ./scripts/release.sh patch
+
+# 3. Bump minor or major versions
+make release-minor   # 1.0.0 -> 1.1.0
+make release-major   # 1.0.0 -> 2.0.0
+
+# 4. Or specify an exact version
+./scripts/release.sh 1.2.0
+```
+
+The script automatically:
+1. Calculates the next semantic version and UTC build date.
+2. Updates `VERSION`, `rootfs/etc/os-release`, `tools/ziroctl/cmd/version.go`, `tools/ziropkg/cmd/root.go`, and `images/docker/Dockerfile`.
+3. Commits the changes (`chore(release): bump version to vX.Y.Z`).
+4. Creates an annotated Git tag (`vX.Y.Z`) with an automated changelog summary.
+5. Pushes the branch and tag to the remote repository.
+6. Triggers GitHub Actions to build multi-arch images, publish release assets, push container images to GitHub Container Registry (`ghcr.io`), and deploy the release catalog to GitHub Pages.
+
+---
+
 ## 🔒 Security Vulnerability Reporting
 
 If you discover a security vulnerability in Ziro-OS, please do **NOT** open a public issue. Instead, report it privately via GitHub Security Advisories or email security@ziro-os.io. Include reproduction steps and details about the affected versions.
