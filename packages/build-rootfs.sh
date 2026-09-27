@@ -214,6 +214,33 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
     alpine:latest sh -c '
+        mkdir -p /rootfs/sbin /rootfs/bin /rootfs/usr/bin
+        cat > /rootfs/sbin/reboot << "SH_REBOOT"
+#!/bin/sh
+sync
+kill -TERM 1 2>/dev/null || busybox reboot -f
+SH_REBOOT
+        cat > /rootfs/sbin/poweroff << "SH_POWEROFF"
+#!/bin/sh
+sync
+kill -USR2 1 2>/dev/null || busybox poweroff -f
+SH_POWEROFF
+        cat > /rootfs/sbin/halt << "SH_HALT"
+#!/bin/sh
+sync
+kill -USR1 1 2>/dev/null || busybox halt -f
+SH_HALT
+        cat > /rootfs/sbin/shutdown << "SH_SHUTDOWN"
+#!/bin/sh
+case "$1" in
+    -r|--reboot|reboot) exec /sbin/reboot ;;
+    *) exec /sbin/poweroff ;;
+esac
+SH_SHUTDOWN
+        chmod 755 /rootfs/sbin/reboot /rootfs/sbin/poweroff /rootfs/sbin/halt /rootfs/sbin/shutdown
+        cp -f /rootfs/sbin/reboot /rootfs/bin/reboot 2>/dev/null || true
+        cp -f /rootfs/sbin/poweroff /rootfs/bin/poweroff 2>/dev/null || true
+
         cd /rootfs
         tar --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" .
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
@@ -229,6 +256,8 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ROOTFS_FULL:/rootfs" \
     -v "$BUILD_DIR:/out" \
     -e TARGET_ARCH="$TARGET_ARCH" \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
     alpine:latest sh -c '
     # Install linux-virt kernel & drivers inside container and copy modules into rootfs
     echo "Installing kernel drivers & modules (linux-virt, kmod)..."
@@ -296,6 +325,43 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         ln -sf /usr/sbin/iptables /rootfs/bin/iptables
         ln -sf /usr/sbin/iptables /rootfs/usr/bin/iptables
     fi
+
+    # Install dedicated reboot, poweroff, halt, and shutdown control scripts
+    mkdir -p /rootfs/sbin /rootfs/bin /rootfs/usr/bin
+    cat > /rootfs/sbin/reboot << "SH_REBOOT"
+#!/bin/sh
+sync
+kill -TERM 1 2>/dev/null || busybox reboot -f
+SH_REBOOT
+    cat > /rootfs/sbin/poweroff << "SH_POWEROFF"
+#!/bin/sh
+sync
+kill -USR2 1 2>/dev/null || busybox poweroff -f
+SH_POWEROFF
+    cat > /rootfs/sbin/halt << "SH_HALT"
+#!/bin/sh
+sync
+kill -USR1 1 2>/dev/null || busybox halt -f
+SH_HALT
+    cat > /rootfs/sbin/shutdown << "SH_SHUTDOWN"
+#!/bin/sh
+case "$1" in
+    -r|--reboot|reboot) exec /sbin/reboot ;;
+    *) exec /sbin/poweroff ;;
+esac
+SH_SHUTDOWN
+    chmod 755 /rootfs/sbin/reboot /rootfs/sbin/poweroff /rootfs/sbin/halt /rootfs/sbin/shutdown
+    cp -f /rootfs/sbin/reboot /rootfs/bin/reboot 2>/dev/null || true
+    cp -f /rootfs/sbin/reboot /rootfs/usr/bin/reboot 2>/dev/null || true
+    cp -f /rootfs/sbin/poweroff /rootfs/bin/poweroff 2>/dev/null || true
+    cp -f /rootfs/sbin/poweroff /rootfs/usr/bin/poweroff 2>/dev/null || true
+    cp -f /rootfs/sbin/halt /rootfs/bin/halt 2>/dev/null || true
+    cp -f /rootfs/sbin/shutdown /rootfs/bin/shutdown 2>/dev/null || true
+    cp -f /rootfs/sbin/shutdown /rootfs/usr/bin/shutdown 2>/dev/null || true
+
+    # Fix permissions so non-root host user can manage files in rootfs
+    chown -R "${HOST_UID}:${HOST_GID}" /rootfs 2>/dev/null || true
+    chmod -R u+rwX /rootfs 2>/dev/null || true
 '
 
 # Re-affirm ziro-init and BusyBox after package additions
@@ -309,44 +375,6 @@ mkdir -p "$ROOTFS_FULL/usr/sbin" "$ROOTFS_FULL/bin"
 cp "$REPO_ROOT/scripts/installer/ziro-install.sh" "$ROOTFS_FULL/usr/sbin/ziro-install"
 cp "$REPO_ROOT/scripts/installer/ziro-install.sh" "$ROOTFS_FULL/bin/ziro-install"
 chmod +x "$ROOTFS_FULL/usr/sbin/ziro-install" "$ROOTFS_FULL/bin/ziro-install"
-
-# Install dedicated reboot, poweroff, halt, and shutdown control scripts
-for rdir in "$ROOTFS_FULL" "$ROOTFS_MINIMAL"; do
-    mkdir -p "$rdir/sbin" "$rdir/bin" "$rdir/usr/bin"
-    cat > "$rdir/sbin/reboot" << 'EOF'
-#!/bin/sh
-sync
-kill -TERM 1 2>/dev/null || busybox reboot -f
-EOF
-    cat > "$rdir/sbin/poweroff" << 'EOF'
-#!/bin/sh
-sync
-kill -USR2 1 2>/dev/null || busybox poweroff -f
-EOF
-    cat > "$rdir/sbin/halt" << 'EOF'
-#!/bin/sh
-sync
-kill -USR1 1 2>/dev/null || busybox halt -f
-EOF
-    cat > "$rdir/sbin/shutdown" << 'EOF'
-#!/bin/sh
-case "$1" in
-    -r|--reboot|reboot)
-        exec /sbin/reboot
-        ;;
-    *)
-        exec /sbin/poweroff
-        ;;
-esac
-EOF
-    chmod 755 "$rdir/sbin/reboot" "$rdir/sbin/poweroff" "$rdir/sbin/halt" "$rdir/sbin/shutdown"
-    cp "$rdir/sbin/reboot" "$rdir/bin/reboot" 2>/dev/null || true
-    cp "$rdir/sbin/reboot" "$rdir/usr/bin/reboot" 2>/dev/null || true
-    cp "$rdir/sbin/poweroff" "$rdir/bin/poweroff" 2>/dev/null || true
-    cp "$rdir/sbin/poweroff" "$rdir/usr/bin/poweroff" 2>/dev/null || true
-    cp "$rdir/sbin/shutdown" "$rdir/bin/shutdown" 2>/dev/null || true
-    cp "$rdir/sbin/shutdown" "$rdir/usr/bin/shutdown" 2>/dev/null || true
-done
 
 if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
     echo "❌ FATAL: /bin/busybox was overwritten by ziro-init!"
