@@ -1,0 +1,17 @@
+apiVersion: v2
+name: ziro-os-operator
+description: Kubernetes operator for managing Ziro-OS nodes
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ziro-os
+  - container-native
+  - kubernetes
+  - operator
+home: https://github.com/ziro-os/ziro-os
+sources:
+  - https://github.com/ziro-os/ziro-os
+maintainers:
+  - name: Ziro-OS Team
+    email: team@ziro-os.io

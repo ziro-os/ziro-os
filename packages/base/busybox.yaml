@@ -4,6 +4,4 @@ description: "Multi-call binary with essential Unix utilities"
 url: "https://busybox.net/downloads/busybox-1.36.1.tar.bz2"
 dependencies: ["musl"]
 build_type: "make"
-config: "defconfig"
-make_flags:
-  - "LDFLAGS=--static"
+priority: 2

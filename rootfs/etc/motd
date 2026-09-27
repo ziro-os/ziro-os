@@ -1,0 +1,13 @@
+
+ _____  _               ___  ____  
+|__  / (_) _ __  ___   / _ \/ ___| 
+  / /  | || '__|/ _ \ | | | \___ \ 
+ / /_  | || |  | (_) || |_| |___) |
+/____| |_||_|   \___/  \___/|____/ 
+
+Minimal by design. Born for the cloud.
+
+Welcome to Ziro-OS - Container-Native Operating System
+Run 'ziroctl help' for container management commands
+Run 'ctr --help' for containerd CLI
+

@@ -1,0 +1,9 @@
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/opt/cni/bin
+export HOME=/root
+export TERM=linux
+export PS1='\u@\h:\w\$ '
+
+# Display welcome message
+if [ -f /etc/motd ]; then
+    cat /etc/motd
+fi

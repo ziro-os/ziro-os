@@ -1,84 +1,124 @@
-# Ziro-OS Build System
+# Ziro-OS Centralized Build Orchestrator
+# A cloud-native, ultra-lightweight operating system for container workloads.
 
-.PHONY: all clean kernel rootfs image-qemu test-smoke
+.PHONY: all rootfs rootfs-all tools tools-all docker-image docker-multiarch kernel image-iso run-qemu test test-smoke clean help
 
-# Build targets
-KERNEL_DIR = kernel
-ROOTFS_DIR = rootfs
-IMAGES_DIR = images
-TOOLS_DIR = tools
-PACKAGES_DIR = packages
+HOST_ARCH := $(shell uname -m)
+HOST_OS   := $(shell uname -s)
+TARGET_ARCH ?= $(HOST_ARCH)
 
-# Default target
-all: kernel rootfs tools
+# Architecture normalization
+ifeq ($(TARGET_ARCH),x86_64)
+    ARCH_NORMALIZED = x86_64
+    GOARCH = amd64
+else ifeq ($(TARGET_ARCH),amd64)
+    ARCH_NORMALIZED = x86_64
+    GOARCH = amd64
+else ifeq ($(TARGET_ARCH),arm64)
+    ARCH_NORMALIZED = arm64
+    GOARCH = arm64
+else ifeq ($(TARGET_ARCH),aarch64)
+    ARCH_NORMALIZED = arm64
+    GOARCH = arm64
+else
+    ARCH_NORMALIZED = $(TARGET_ARCH)
+    GOARCH = $(TARGET_ARCH)
+endif
 
-# Kernel build
-kernel:
-	@echo "Building kernel..."
-	@cd $(KERNEL_DIR) && ./build.sh
+VERSION ?= 1.0.0
+IMAGE_TAG ?= ziro-os:latest
 
-# Root filesystem build  
-rootfs:
-	@echo "Building rootfs..."
-	@$(MAKE) -C $(PACKAGES_DIR) all
-	@$(MAKE) -C $(PACKAGES_DIR) install-to-rootfs
+all: tools rootfs docker-image
+	@echo ""
+	@echo "=================================================="
+	@echo "🎉 Ziro-OS Build Complete for $(ARCH_NORMALIZED)"
+	@echo "=================================================="
 
-# Tools build
-tools: bin/ziroctl
-
-bin/ziroctl: $(TOOLS_DIR)/ziroctl/main.go
-	@echo "Building tools..."
+# --- CLI & Tooling ---
+tools:
+	@echo "Building ziroctl CLI for $(ARCH_NORMALIZED)..."
 	@mkdir -p bin
-	@go build -o bin/ziroctl ./$(TOOLS_DIR)/ziroctl/main.go
+	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="-s -w" -o ../../bin/ziroctl-$(ARCH_NORMALIZED) .
+	@cp bin/ziroctl-$(ARCH_NORMALIZED) bin/ziroctl
+	@echo "✅ ziroctl built at bin/ziroctl"
 
-# QEMU image
-image-qemu: kernel rootfs
-	@echo "Building QEMU image..."
-	@cd $(IMAGES_DIR)/qemu && ./build.sh
+tools-all:
+	@echo "Building ziroctl for all architectures..."
+	@mkdir -p bin
+	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../bin/ziroctl-x86_64 .
+	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../bin/ziroctl-arm64 .
+	@echo "✅ Built bin/ziroctl-x86_64 and bin/ziroctl-arm64"
 
-# Tests
-test-smoke:
-	@echo "Running smoke tests..."
-	@cd tests/smoke && ./hello.sh
+# --- Rootfs & Userland ---
+rootfs: tools
+	@echo "Building rootfs for $(ARCH_NORMALIZED)..."
+	@./packages/build-rootfs.sh $(ARCH_NORMALIZED)
 
-test-full: test-smoke
-	@echo "Running full test suite..."
-	# Add more comprehensive tests
+rootfs-x86_64:
+	@./packages/build-rootfs.sh x86_64
 
-# Clean
+rootfs-arm64:
+	@./packages/build-rootfs.sh arm64
+
+rootfs-all: rootfs-x86_64 rootfs-arm64
+	@echo "✅ Multi-arch rootfs built for x86_64 and arm64"
+
+# --- Docker Base Image (Alpine-like) ---
+docker-image: rootfs
+	@echo "Building Docker base image ($(IMAGE_TAG))..."
+	@./images/docker/build-docker.sh $(ARCH_NORMALIZED)
+
+docker-multiarch: rootfs-all
+	@echo "Building multi-architecture Docker image using buildx..."
+	@docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		-t $(IMAGE_TAG) \
+		-f images/docker/Dockerfile \
+		.
+	@echo "✅ Multi-arch Docker image $(IMAGE_TAG) ready"
+
+# --- Linux Kernel ---
+kernel:
+	@echo "Building Linux kernel for $(ARCH_NORMALIZED)..."
+	@./kernel/build-kernel.sh $(ARCH_NORMALIZED)
+
+# --- Virtualization & ISO ---
+image-iso: rootfs
+	@echo "Building bootable hybrid ISO..."
+	@./images/iso/build-iso.sh $(ARCH_NORMALIZED)
+
+run-qemu:
+	@./images/qemu/run-qemu.sh $(ARCH_NORMALIZED)
+
+# --- Verification & Tests ---
+test: test-unit test-smoke
+
+test-unit:
+	@echo "Running ziroctl unit tests..."
+	@cd tools/ziroctl && go test -v ./...
+
+test-smoke: docker-image
+	@echo "Running container smoke test suite..."
+	@./tests/smoke/test-docker-base.sh $(IMAGE_TAG)
+
+# --- Cleanup ---
 clean:
-	@echo "Cleaning build artifacts..."
-	@rm -rf $(KERNEL_DIR)/build
-	@rm -rf $(ROOTFS_DIR)/build
-	@rm -rf $(IMAGES_DIR)/*/output
-	@rm -f bin/*
-
-# Package builds
-$(PACKAGES_DIR)/%:
-	@echo "Building package: $*"
-	@cd $(PACKAGES_DIR) && ./build-package.sh $*
-
-# Development helpers
-dev-qemu: image-qemu
-	@echo "Starting development QEMU instance..."
-	@qemu-system-x86_64 \
-		-m 512M \
-		-drive file=images/qemu/output/ziro-os.qcow2,format=qcow2 \
-		-netdev user,id=net0 \
-		-device e1000,netdev=net0 \
-		-nographic
+	@echo "Cleaning transient build artifacts..."
+	@rm -rf build/
+	@rm -f bin/ziroctl*
+	@echo "✅ Clean complete"
 
 help:
-	@echo "Ziro-OS Build System"
-	@echo ""
-	@echo "Targets:"
-	@echo "  all        - Build kernel, rootfs, and tools"
-	@echo "  kernel     - Build kernel only"
-	@echo "  rootfs     - Build root filesystem"
-	@echo "  tools      - Build CLI tools"
-	@echo "  image-qemu - Build QEMU image"
-	@echo "  test-smoke - Run smoke tests"
-	@echo "  test-full  - Run full test suite"
-	@echo "  dev-qemu   - Start development QEMU instance"
-	@echo "  clean      - Clean build artifacts"
-	@echo "  help       - Show this help"
+	@echo "Ziro-OS Build Targets:"
+	@echo "  all             - Build tools, rootfs, and Docker base image (default)"
+	@echo "  tools           - Compile static ziroctl CLI for TARGET_ARCH"
+	@echo "  tools-all       - Compile ziroctl for both x86_64 and arm64"
+	@echo "  rootfs          - Build minimal rootfs (<10MB) and full initramfs"
+	@echo "  rootfs-all      - Build rootfs for both x86_64 and arm64"
+	@echo "  docker-image    - Build & verify local Docker base image (ziro-os:latest)"
+	@echo "  docker-multiarch- Build multi-arch OCI image with Docker buildx"
+	@echo "  kernel          - Build container-optimized Linux kernel"
+	@echo "  image-iso       - Build bootable hybrid UEFI/BIOS ISO"
+	@echo "  run-qemu        - Boot Ziro-OS microVM in QEMU"
+	@echo "  test            - Run full test suite (unit tests + container smoke tests)"
+	@echo "  clean           - Remove build artifacts"

@@ -1,42 +1,94 @@
 # 🌀 Ziro-OS
 
-> Minimal by design. Born for the cloud.
+> **Minimal by design. Born for the cloud.**
 
-Ziro-OS is a **lightweight, minimal, container-native operating system** designed from the ground up for modern cloud-native infrastructure. Inspired by Alpine Linux's minimalism and CoreOS's container-first vision, Ziro-OS delivers a secure, ultra-fast runtime environment purpose-built for running containers — with zero bloat.
-
----
-
-## 🚀 What is Ziro-OS?
-
-Ziro-OS is:
-- **Tiny** — Small footprint, fast boot, minimal system dependencies
-- **Container-First** — Native support for Docker, Podman, and containerd
-- **Immutable** — Stateless base, perfect for secure and repeatable deployments
-- **Cloud-Native** — Optimized for VMs, cloud instances, and Kubernetes clusters
-- **Hackable** — Modular design with optional extensions and tooling
+Ziro-OS is an ultra-lightweight, container-native operating system built from first principles for cloud-native infrastructure, microVMs, and edge computing. Inspired by Alpine Linux's minimalism and modern OCI container runtimes, Ziro-OS provides a secure, minimal, sub-second boot environment purpose-built to run containers without general-purpose OS bloat.
 
 ---
 
-## ✨ Key Features
+## ✨ Key Capabilities
 
-| Feature | Description |
-|--------|-------------|
-| 🪶 Lightweight Core | Musl-libc, BusyBox-style utilities, sub-50MB image target |
-| 🐳 Container Runtimes | First-class support for Docker Engine, Podman, and containerd |
-| 🔐 Secure by Default | Minimal attack surface, optional seccomp/AppArmor integration |
-| ☁️ Cloud-Ready | Deploy on AWS, GCP, Azure, or bare metal |
-| ⚙️ Custom Tooling | Optional `ziroctl` CLI for managing containers and config |
-| 🔧 Modular Design | Networking (CNI), logging, metrics all via plug-in architecture |
+- **Tiny Base Footprint**: Sub-10MB minimal Docker base image (`ziro-os:latest`), built `FROM scratch` with musl libc, BusyBox, and `ziroctl`.
+- **First-Class OCI Support**: Native integration with `containerd`, `runc`, and CNI plugins (`bridge`, `loopback`, `portmap`, `firewall`).
+- **High-Performance C99 Init (`ziro-init`)**: Robust PID 1 supervisor managing early mounts, cgroups v2 hierarchy, loopback networking, containerd lifecycle, and non-blocking zombie process reaping.
+- **True Multi-Architecture**: Full support for `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).
+- **Sub-Second Virtualization**: Direct-kernel boot for QEMU microVMs, AWS Firecracker, and Cloud-Hypervisor, alongside hybrid UEFI/BIOS bootable ISO generation.
+- **Built-in Security & Hardening**: Immutable root filesystem, Linux namespaces, kernel seccomp filters, and hardened sysctl parameters.
 
 ---
 
-## 📦 Built-in Support
+## 🚀 Quick Start
 
-- [x] Containerd runtime
-- [x] Docker Engine or Podman
-- [x] OCI image and runtime compatibility
-- [ ] Custom package manager (`ziropkg`) — *Coming soon*
-- [ ] Kubernetes node image support — *Planned*
+### 1. Docker Base Image (Alpine-style)
+
+Build and run the official Ziro-OS base container image locally:
+
+```bash
+# Build the Docker image
+make docker-image
+
+# Run an interactive shell
+docker run --rm -it ziro-os:latest sh
+
+# Check version
+docker run --rm ziro-os:latest ziroctl version
+```
+
+Use directly in your Dockerfiles:
+```dockerfile
+FROM ziro-os:latest
+
+WORKDIR /app
+CMD ["ziroctl", "system", "status"]
+```
+
+---
+
+### 2. Boot in QEMU (MicroVM)
+
+Launch a direct-kernel microVM with hardware acceleration (Apple Silicon HVF on macOS, KVM on Linux):
+
+```bash
+# Launch microVM with containerd and interactive shell
+make run-qemu
+```
+
+Inside the booted VM:
+```bash
+ziroctl system status
+ziroctl security audit
+```
+
+*(Press `Ctrl+A`, then `X` to exit QEMU)*
+
+---
+
+### 3. Build Bootable Hybrid ISO
+
+Generate a bootable ISO for VMware, VirtualBox, Proxmox, or bare metal:
+
+```bash
+make image-iso
+```
+Output artifact: `build/ziro-os-<arch>.iso`
+
+---
+
+## 🛠️ Build Commands
+
+| Target | Description |
+|---|---|
+| `make all` | Build `ziroctl`, rootfs, and Docker base image for host architecture |
+| `make tools` | Compile static `ziroctl` binary into `bin/` |
+| `make tools-all` | Compile `ziroctl` for both `x86_64` and `arm64` |
+| `make rootfs` | Build minimal rootfs (<10MB) and full initramfs |
+| `make rootfs-all` | Build rootfs archives for both `x86_64` and `arm64` |
+| `make docker-image` | Build local `ziro-os:latest` Docker image |
+| `make docker-multiarch` | Build multi-arch OCI image with Docker buildx (`amd64` + `arm64`) |
+| `make image-iso` | Generate bootable hybrid UEFI/BIOS ISO |
+| `make run-qemu` | Launch QEMU microVM |
+| `make test` | Run unit tests and container smoke test suite |
+| `make clean` | Clean transient build artifacts in `build/` |
 
 ---
 
@@ -44,70 +96,63 @@ Ziro-OS is:
 
 ```
 ziro-os/
-├── kernel/ # Kernel source or configs (custom or Linux-based)
-├── rootfs/ # Minimal userland (musl, busybox, ziroctl, etc.)
-├── packages/ # Scripts or recipes to build core packages
-├── containerd/ # Configs and integrations for containerd
-├── docker/ # Docker engine setup (if applicable)
-├── podman/ # Podman integration
-├── images/ # Build scripts for ISO, VM, or cloud images
-├── docs/ # Technical docs and architecture specs
-├── tools/ # Optional CLI tools (e.g., ziroctl)
-└── README.md # This file
+├── Makefile                       # Top-level build orchestrator
+├── README.md                      # Project overview and quick start
+├── AGENTS.md                      # Architecture guidelines and conventions
+├── .gitignore                     # Prevents binary contamination
+│
+├── init/                          # Ziro Container OS PID 1 Supervisor
+│   ├── ziro-init.c                # C99 PID 1 supervisor (cgroups v2, containerd)
+│   └── Makefile                   # Static multi-arch compilation
+│
+├── rootfs/                        # Clean rootfs skeleton (tracked configs)
+│   ├── etc/
+│   │   ├── inittab                # Standard process table
+│   │   ├── fstab                  # Filesystem mount specifications
+│   │   ├── os-release             # Linux identification metadata
+│   │   ├── sysctl.d/99-ziro.conf  # Kernel and networking optimizations
+│   │   ├── containerd/config.toml # Production containerd configuration
+│   │   └── cni/net.d/             # CNI bridge and loopback definitions
+│   └── README.md
+│
+├── packages/                      # Rootfs package assembly engine
+│   ├── build-rootfs.sh            # Deterministic multi-arch rootfs builder
+│   └── README.md
+│
+├── images/                        # Target image generation
+│   ├── docker/                    # Multi-arch "FROM scratch" Docker image
+│   ├── qemu/                      # Universal cross-platform QEMU runner
+│   └── iso/                       # Bootable hybrid ISO generator
+│
+├── tools/ziroctl/                 # Official control CLI (Go + Cobra)
+│   ├── cmd/                       # Subcommands: system, container, network, security
+│   └── main.go
+│
+├── docs/                          # Authoritative documentation
+│   ├── architecture.md            # System design and PID 1 supervisor
+│   ├── getting-started.md         # Getting started guide
+│   ├── building.md                # Multi-arch build documentation
+│   ├── security.md                # Security and hardening model
+│   └── virtualization.md          # Hypervisor deployment guide
+│
+└── tests/                         # Automated test suites
+    ├── smoke/                     # Docker base image tests
+    └── security/                  # Security and configuration audit tests
 ```
 
 ---
 
-## 🧠 Philosophy
+## 📚 Documentation
 
-Ziro-OS is guided by three principles:
-
-1. **Less is more** — Smaller surface = better performance, security, and maintainability.
-2. **Cloud-native DNA** — Designed *from the start* to run containers and microservices.
-3. **Transparent & Hackable** — Make it easy to audit, fork, and extend.
-
----
-
-## 🌍 Roadmap
-
-- [ ] Build minimal kernel with musl & BusyBox
-- [ ] Containerd + CNI network support
-- [ ] Docker/Podman runtime toggle
-- [ ] ZiroPkg lightweight package manager
-- [ ] Kubernetes-ready node image
-- [ ] ZiroCtl CLI utility
-
----
-
-## 🛠️ Build Instructions (Coming Soon)
-
-We'll soon provide instructions to:
-- Build the base image
-- Run Ziro-OS in QEMU, Docker, or a cloud VM
-- Build containers inside Ziro-OS using Docker/Podman
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Open issues, suggest features, or submit PRs.
-Let's build the future of cloud-native OSes — together.
+Detailed documentation is available in the [`docs/`](docs/) directory:
+- [System Architecture](docs/architecture.md)
+- [Getting Started Guide](docs/getting-started.md)
+- [Multi-Architecture Building](docs/building.md)
+- [Security & Hardening Model](docs/security.md)
+- [Virtualization & Hypervisors](docs/virtualization.md)
 
 ---
 
 ## 📜 License
 
-MIT or Apache 2.0 — TBD. (by Sambo Chea)
-
----
-
-## 📣 Follow Along
-
-Join the project and help shape Ziro-OS:
-- 🌐 Website: *(coming soon)*
-- 🧵 Twitter: `@ziro_os`
-- 💬 Discord/Matrix: *(coming soon)*
-
----
-
-> *Ziro-OS — the hummingbird of operating systems. Lightweight. Agile. Cloud-native.*
+MIT License. Copyright (c) 2026 Sambo Chea and Ziro-OS Contributors.

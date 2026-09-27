@@ -1,0 +1,276 @@
+/*
+ * Ziro-OS Container Operating System - PID 1 Supervisor Init
+ * Lightweight, high-performance, container-first init system.
+ */
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/reboot.h>
+#include <sys/syscall.h>
+
+#define BANNER \
+    "\n" \
+    "  _____  _               ___  ____  \n" \
+    " |__  / (_) _ __  ___   / _ \\/ ___| \n" \
+    "   / /  | || '__|/ _ \\ | | | \\___ \\ \n" \
+    "  / /_  | || |  | (_) || |_| |___) |\n" \
+    " |____| |_||_|   \\___/  \\___/|____/ \n" \
+    "\n" \
+    " Minimal by design. Born for the cloud.\n" \
+    " Ziro-OS Container Host (PID 1 Init)\n\n"
+
+static pid_t containerd_pid = 0;
+static volatile sig_atomic_t shutdown_requested = 0;
+static volatile sig_atomic_t reboot_requested = 0;
+
+static void safe_mkdir(const char *dir, mode_t mode) {
+    if (mkdir(dir, mode) < 0 && errno != EEXIST) {
+        // ignore if exists
+    }
+}
+
+static void mount_essential(const char *source, const char *target, const char *type, unsigned long flags, const void *data) {
+    safe_mkdir(target, 0755);
+    if (mount(source, target, type, flags, data) < 0) {
+        if (errno != EBUSY) {
+            fprintf(stderr, "[init] warning: mount %s -> %s (%s) failed: %s\n", source, target, type, strerror(errno));
+        }
+    } else {
+        printf("[init] mounted %s on %s\n", type, target);
+    }
+}
+
+static void init_filesystems(void) {
+    printf("[init] initializing virtual filesystems...\n");
+    mount_essential("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    mount_essential("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    mount_essential("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+    safe_mkdir("/dev/pts", 0755);
+    mount_essential("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "gid=5,mode=620");
+    safe_mkdir("/dev/shm", 0755);
+    mount_essential("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+    safe_mkdir("/run", 0755);
+    mount_essential("run", "/run", "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755");
+    safe_mkdir("/tmp", 0777);
+    mount_essential("tmp", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+}
+
+static void init_cgroups(void) {
+    printf("[init] initializing cgroups v2...\n");
+    safe_mkdir("/sys/fs/cgroup", 0755);
+    if (mount("cgroup2", "/sys/fs/cgroup", "cgroup2", MS_NOSUID | MS_NOEXEC | MS_NODEV, "nsdelegate") < 0) {
+        if (errno != EBUSY) {
+            fprintf(stderr, "[init] warning: failed to mount cgroup2: %s\n", strerror(errno));
+        }
+    } else {
+        printf("[init] mounted cgroups v2 at /sys/fs/cgroup\n");
+    }
+
+    // Enable all available subtree controllers for containers
+    int fd_controllers = open("/sys/fs/cgroup/cgroup.controllers", O_RDONLY);
+    if (fd_controllers >= 0) {
+        char buf[256];
+        ssize_t n = read(fd_controllers, buf, sizeof(buf) - 1);
+        close(fd_controllers);
+        if (n > 0) {
+            buf[n] = '\0';
+            int fd_subtree = open("/sys/fs/cgroup/cgroup.subtree_control", O_WRONLY);
+            if (fd_subtree >= 0) {
+                char *token = strtok(buf, " \n");
+                while (token) {
+                    char enable_cmd[64];
+                    snprintf(enable_cmd, sizeof(enable_cmd), "+%s", token);
+                    write(fd_subtree, enable_cmd, strlen(enable_cmd));
+                    token = strtok(NULL, " \n");
+                }
+                close(fd_subtree);
+                printf("[init] enabled cgroup subtree controllers\n");
+            }
+        }
+    }
+}
+
+static void init_hostname(void) {
+    char hostname[64] = "ziro-os";
+    FILE *f = fopen("/etc/hostname", "r");
+    if (f) {
+        if (fgets(hostname, sizeof(hostname), f)) {
+            hostname[strcspn(hostname, "\r\n")] = '\0';
+        }
+        fclose(f);
+    }
+    sethostname(hostname, strlen(hostname));
+    printf("[init] hostname set to: %s\n", hostname);
+}
+
+static void init_network(void) {
+    printf("[init] configuring loopback networking...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"/bin/ip", "link", "set", "lo", "up", NULL};
+        execv(argv[0], argv);
+        // Fallback to ifconfig
+        char *argv_if[] = {"/sbin/ifconfig", "lo", "127.0.0.1", "up", NULL};
+        execv(argv_if[0], argv_if);
+        _exit(1);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+static void start_containerd(void) {
+    if (access("/usr/bin/containerd", X_OK) != 0 && access("/bin/containerd", X_OK) != 0) {
+        printf("[init] containerd not found; skipping container engine startup\n");
+        return;
+    }
+
+    safe_mkdir("/run/containerd", 0755);
+    safe_mkdir("/var/lib/containerd", 0755);
+    safe_mkdir("/var/log", 0755);
+
+    printf("[init] starting containerd daemon...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *bin = access("/usr/bin/containerd", X_OK) == 0 ? "/usr/bin/containerd" : "/bin/containerd";
+        char *argv[] = {bin, "--config", "/etc/containerd/config.toml", NULL};
+        int log_fd = open("/var/log/containerd.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
+        execv(argv[0], argv);
+        fprintf(stderr, "[init] failed to execute containerd: %s\n", strerror(errno));
+        _exit(1);
+    } else if (pid > 0) {
+        containerd_pid = pid;
+        printf("[init] containerd spawned (PID: %d)\n", pid);
+
+        // Quick check for socket readiness (up to 3 seconds)
+        for (int i = 0; i < 30; i++) {
+            if (access("/run/containerd/containerd.sock", F_OK) == 0) {
+                printf("[init] containerd socket ready: /run/containerd/containerd.sock\n");
+                break;
+            }
+            usleep(100000); // 100ms
+        }
+    }
+}
+
+static void sig_handler(int sig) {
+    switch (sig) {
+        case SIGINT:
+        case SIGTERM:
+            shutdown_requested = 1;
+            break;
+        case SIGPWR:
+            shutdown_requested = 1;
+            break;
+        case SIGCHLD:
+            // Handled in main loop
+            break;
+    }
+}
+
+static void reap_children(void) {
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (pid == containerd_pid) {
+            printf("[init] containerd (PID %d) exited with status %d\n", pid, status);
+            containerd_pid = 0;
+        }
+    }
+}
+
+static void spawn_shell(void) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        setenv("TERM", "linux", 1);
+        setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/sbin:/opt/cni/bin", 1);
+        setenv("HOME", "/root", 1);
+        setenv("USER", "root", 1);
+        chdir("/root");
+
+        char *shell = access("/bin/sh", X_OK) == 0 ? "/bin/sh" : "/bin/busybox";
+        char *argv[] = {shell, NULL};
+        execv(shell, argv);
+        fprintf(stderr, "[init] exec shell failed: %s\n", strerror(errno));
+        _exit(1);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+static void perform_shutdown(int is_reboot) {
+    printf("\n[init] sending SIGTERM to all processes...\n");
+    kill(-1, SIGTERM);
+    sync();
+    sleep(1);
+
+    printf("[init] sending SIGKILL to remaining processes...\n");
+    kill(-1, SIGKILL);
+    sync();
+
+    printf("[init] unmounting filesystems...\n");
+    mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
+
+    if (is_reboot) {
+        printf("[init] rebooting system...\n");
+        reboot(RB_AUTOBOOT);
+    } else {
+        printf("[init] powering off system...\n");
+        reboot(RB_POWER_OFF);
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (getpid() != 1) {
+        fprintf(stderr, "ziro-init: must be run as PID 1\n");
+        return 1;
+    }
+
+    printf(BANNER);
+    printf("[init] starting Ziro-OS PID 1 init...\n");
+
+    // Signal setup
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sig_handler;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGPWR, &sa, NULL);
+    signal(SIGCHLD, SIG_DFL);
+
+    // Initialization phases
+    init_filesystems();
+    init_cgroups();
+    init_hostname();
+    init_network();
+    start_containerd();
+
+    printf("\n[init] Ziro-OS initialization complete!\n");
+    printf("[init] Type 'ziroctl help' for container OS commands.\n\n");
+
+    // Interactive supervisor loop
+    while (!shutdown_requested && !reboot_requested) {
+        spawn_shell();
+        reap_children();
+        usleep(500000); // 500ms debounce before respawn
+    }
+
+    perform_shutdown(reboot_requested);
+    return 0;
+}

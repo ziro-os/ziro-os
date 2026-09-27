@@ -4,7 +4,4 @@ description: "Lightweight C library implementation"
 url: "https://musl.libc.org/releases/musl-1.2.4.tar.gz"
 dependencies: []
 build_type: "autotools"
-configure_flags:
-  - "--prefix=/usr"
-  - "--enable-static"
-  - "--disable-shared"
+priority: 1

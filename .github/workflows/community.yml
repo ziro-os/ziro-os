@@ -1,0 +1,317 @@
+name: Community Management
+
+on:
+  issues:
+    types: [opened, labeled]
+  pull_request:
+    types: [opened, ready_for_review]
+  schedule:
+    - cron: '0 9 * * 1'  # Weekly on Monday at 9 AM UTC
+
+jobs:
+  welcome-new-contributors:
+    name: Welcome New Contributors
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    
+    steps:
+    - name: Check if first-time contributor
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { data: pullRequests } = await github.rest.pulls.list({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'all',
+            creator: context.payload.pull_request.user.login
+          });
+          
+          const isFirstTime = pullRequests.length === 1;
+          
+          if (isFirstTime) {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `🎉 Welcome to Ziro-OS, @${context.payload.pull_request.user.login}!
+              
+              Thank you for your first contribution! Here are some helpful resources:
+              
+              - 📚 [Contributing Guide](https://github.com/ziro-os/ziro-os/blob/main/community/CONTRIBUTING.md)
+              - 🛠️ [Development Setup](https://github.com/ziro-os/ziro-os/blob/main/community/docs/getting-started.md)
+              - 💬 [Discord Community](https://discord.gg/ziro-os)
+              - 📖 [Documentation](https://docs.ziro-os.io)
+              
+              A maintainer will review your PR soon. Feel free to ask questions in the comments!`
+            });
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ['first-time-contributor']
+            });
+          }
+
+  label-issues:
+    name: Auto-label Issues
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+    
+    steps:
+    - name: Auto-label based on content
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const issue = context.payload.issue;
+          const title = issue.title.toLowerCase();
+          const body = issue.body.toLowerCase();
+          const labels = [];
+          
+          // Component labels
+          if (title.includes('ziropkg') || body.includes('ziropkg')) {
+            labels.push('component/ziropkg');
+          }
+          if (title.includes('ziro-dev') || body.includes('ziro-dev')) {
+            labels.push('component/sdk');
+          }
+          if (title.includes('kernel') || body.includes('kernel')) {
+            labels.push('component/kernel');
+          }
+          if (title.includes('container') || body.includes('container')) {
+            labels.push('component/runtime');
+          }
+          if (title.includes('network') || body.includes('network')) {
+            labels.push('component/networking');
+          }
+          if (title.includes('security') || body.includes('security')) {
+            labels.push('component/security');
+          }
+          if (title.includes('monitoring') || body.includes('monitoring')) {
+            labels.push('component/monitoring');
+          }
+          
+          // Type labels
+          if (title.includes('bug') || title.includes('error') || title.includes('fail')) {
+            labels.push('type/bug');
+          }
+          if (title.includes('feature') || title.includes('enhancement')) {
+            labels.push('type/enhancement');
+          }
+          if (title.includes('doc') || title.includes('documentation')) {
+            labels.push('type/documentation');
+          }
+          if (title.includes('question') || title.includes('help')) {
+            labels.push('type/question');
+          }
+          
+          // Priority labels
+          if (title.includes('critical') || title.includes('urgent')) {
+            labels.push('priority/high');
+          }
+          
+          // Cloud provider labels
+          if (title.includes('aws') || body.includes('aws')) {
+            labels.push('cloud/aws');
+          }
+          if (title.includes('azure') || body.includes('azure')) {
+            labels.push('cloud/azure');
+          }
+          if (title.includes('gcp') || body.includes('gcp')) {
+            labels.push('cloud/gcp');
+          }
+          
+          if (labels.length > 0) {
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: labels
+            });
+          }
+
+  triage-issues:
+    name: Triage Issues
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues' && github.event.action == 'labeled'
+    
+    steps:
+    - name: Add to project board
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const issue = context.payload.issue;
+          const label = context.payload.label;
+          
+          // Add high priority issues to urgent column
+          if (label.name === 'priority/high') {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: '🚨 This issue has been marked as high priority and will be triaged by maintainers soon.'
+            });
+          }
+          
+          // Add good first issues for new contributors
+          if (label.name === 'good first issue') {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: `👋 This issue is perfect for new contributors!
+
+              **Getting Started:**
+              1. Read our [Contributing Guide](https://github.com/ziro-os/ziro-os/blob/main/community/CONTRIBUTING.md)
+              2. Set up your [development environment](https://github.com/ziro-os/ziro-os/blob/main/community/docs/getting-started.md)
+              3. Comment on this issue to let us know you're working on it
+              4. Join our [Discord](https://discord.gg/ziro-os) if you need help!`
+            });
+          }
+
+  weekly-community-report:
+    name: Weekly Community Report
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    
+    steps:
+    - name: Generate community metrics
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const oneWeekAgo = new Date();
+          oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+          
+          // Get issues created this week
+          const { data: newIssues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'all',
+            since: oneWeekAgo.toISOString()
+          });
+          
+          // Get PRs created this week
+          const { data: newPRs } = await github.rest.pulls.list({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'all',
+            sort: 'created',
+            direction: 'desc'
+          });
+          
+          const weeklyPRs = newPRs.filter(pr => 
+            new Date(pr.created_at) > oneWeekAgo
+          );
+          
+          // Get contributors
+          const contributors = new Set();
+          [...newIssues, ...weeklyPRs].forEach(item => {
+            contributors.add(item.user.login);
+          });
+          
+          const report = `# Weekly Community Report
+          
+          ## 📊 This Week's Activity
+          
+          - 🐛 **New Issues**: ${newIssues.length}
+          - 🔄 **New Pull Requests**: ${weeklyPRs.length}
+          - 👥 **Active Contributors**: ${contributors.size}
+          
+          ## 🎯 Top Issues
+          
+          ${newIssues.slice(0, 5).map(issue => 
+            `- [${issue.title}](${issue.html_url})`
+          ).join('\n')}
+          
+          ## 🚀 Recent Contributions
+          
+          ${weeklyPRs.slice(0, 5).map(pr => 
+            `- [${pr.title}](${pr.html_url}) by @${pr.user.login}`
+          ).join('\n')}
+          
+          ## 🙏 Thank You
+          
+          Thanks to all contributors: ${Array.from(contributors).map(c => `@${c}`).join(', ')}
+          
+          ---
+          
+          Want to contribute? Check out our [good first issues](https://github.com/ziro-os/ziro-os/labels/good%20first%20issue)!`;
+          
+          console.log(report);
+          
+          // Post to discussions (would need to be implemented)
+          // This could also post to Discord, Slack, etc.
+
+  stale-issue-management:
+    name: Manage Stale Issues
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    
+    steps:
+    - name: Mark stale issues
+      uses: actions/stale@v8
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        stale-issue-message: |
+          This issue has been automatically marked as stale because it has not had
+          recent activity. It will be closed if no further activity occurs within 7 days.
+          
+          If this issue is still relevant, please:
+          - Add a comment to keep it open
+          - Add the `keep-open` label
+          - Provide additional context or updates
+          
+          Thank you for your contributions to Ziro-OS!
+        stale-pr-message: |
+          This pull request has been automatically marked as stale because it has not had
+          recent activity. It will be closed if no further activity occurs within 7 days.
+          
+          If this PR is still relevant, please:
+          - Rebase against the latest main branch
+          - Address any review comments
+          - Add a comment with updates
+          
+          Thank you for your contributions to Ziro-OS!
+        days-before-stale: 30
+        days-before-close: 7
+        stale-issue-label: 'stale'
+        stale-pr-label: 'stale'
+        exempt-issue-labels: 'keep-open,priority/high,type/security'
+        exempt-pr-labels: 'keep-open,priority/high'
+
+  contributor-recognition:
+    name: Contributor Recognition
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    
+    steps:
+    - name: Thank contributor
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const pr = context.payload.pull_request;
+          
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: pr.number,
+            body: `🎉 Thank you @${pr.user.login} for your contribution to Ziro-OS!
+            
+            Your changes have been merged and will be included in the next release.
+            
+            ## What's Next?
+            - ⭐ Star the repository if you haven't already
+            - 🐦 Share your contribution on social media
+            - 💬 Join our [Discord community](https://discord.gg/ziro-os)
+            - 📚 Check out more [good first issues](https://github.com/ziro-os/ziro-os/labels/good%20first%20issue)
+            
+            We appreciate your help in making Ziro-OS better! 🚀`
+          });
+          
+          // Add contributor label
+          await github.rest.issues.addLabels({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: pr.number,
+            labels: ['merged']
+          });

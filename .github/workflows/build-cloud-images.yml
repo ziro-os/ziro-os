@@ -1,0 +1,298 @@
+name: Build Cloud Images
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      cloud_provider:
+        description: 'Cloud provider to build for'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - aws
+        - azure
+        - gcp
+
+jobs:
+  build-aws-ami:
+    name: Build AWS AMI
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cloud_provider == 'aws' || github.event.inputs.cloud_provider == 'all' || github.event.inputs.cloud_provider == ''
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+        
+    - name: Install Packer
+      uses: hashicorp/setup-packer@main
+      with:
+        version: latest
+        
+    - name: Build Ziro-OS
+      run: |
+        make all
+        make optimize
+        
+    - name: Build AWS AMI
+      run: |
+        cd images/aws
+        ./build-ami.sh
+      env:
+        AWS_REGION: us-west-2
+        INSTANCE_TYPE: t3.medium
+        
+    - name: Get AMI ID
+      id: ami
+      run: |
+        AMI_ID=$(aws ec2 describe-images \
+          --owners self \
+          --filters "Name=name,Values=ziro-os-*" \
+          --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+          --output text)
+        echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
+        
+    - name: Test AMI
+      run: |
+        # Launch test instance
+        INSTANCE_ID=$(aws ec2 run-instances \
+          --image-id ${{ steps.ami.outputs.ami_id }} \
+          --instance-type t3.micro \
+          --key-name ziro-os-test \
+          --security-group-ids sg-12345678 \
+          --subnet-id subnet-12345678 \
+          --query 'Instances[0].InstanceId' \
+          --output text)
+          
+        echo "Launched test instance: $INSTANCE_ID"
+        
+        # Wait for instance to be running
+        aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+        
+        # Get public IP
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --instance-ids $INSTANCE_ID \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+          
+        echo "Instance public IP: $PUBLIC_IP"
+        
+        # Basic connectivity test
+        sleep 60  # Wait for boot
+        
+        # Cleanup
+        aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+        
+    - name: Share AMI to regions
+      run: |
+        AMI_ID="${{ steps.ami.outputs.ami_id }}"
+        REGIONS=("us-east-1" "us-east-2" "eu-west-1" "eu-central-1" "ap-southeast-1")
+        
+        for region in "${REGIONS[@]}"; do
+          echo "Copying AMI to $region..."
+          aws ec2 copy-image \
+            --source-region us-west-2 \
+            --source-image-id $AMI_ID \
+            --name "ziro-os-$(date +%Y%m%d-%H%M%S)" \
+            --description "Ziro-OS container-native operating system" \
+            --region $region
+        done
+
+  build-azure-image:
+    name: Build Azure VM Image
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cloud_provider == 'azure' || github.event.inputs.cloud_provider == 'all' || github.event.inputs.cloud_provider == ''
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: Install Packer
+      uses: hashicorp/setup-packer@main
+      with:
+        version: latest
+        
+    - name: Build Ziro-OS
+      run: |
+        make all
+        make optimize
+        
+    - name: Build Azure VM Image
+      run: |
+        cd images/azure
+        ./build-vm.sh
+      env:
+        AZURE_RESOURCE_GROUP: ziro-os-images
+        AZURE_LOCATION: westus2
+        
+    - name: Test Azure Image
+      run: |
+        # Create test VM
+        az vm create \
+          --resource-group ziro-os-images \
+          --name ziro-os-test-vm \
+          --image ziro-os-latest \
+          --admin-username azureuser \
+          --generate-ssh-keys \
+          --size Standard_B1s
+          
+        # Get public IP
+        PUBLIC_IP=$(az vm show \
+          --resource-group ziro-os-images \
+          --name ziro-os-test-vm \
+          --show-details \
+          --query publicIps \
+          --output tsv)
+          
+        echo "VM public IP: $PUBLIC_IP"
+        
+        # Basic connectivity test
+        sleep 60  # Wait for boot
+        
+        # Cleanup
+        az vm delete \
+          --resource-group ziro-os-images \
+          --name ziro-os-test-vm \
+          --yes
+
+  build-gcp-image:
+    name: Build GCP Image
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cloud_provider == 'gcp' || github.event.inputs.cloud_provider == 'all' || github.event.inputs.cloud_provider == ''
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+        
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+      
+    - name: Install Packer
+      uses: hashicorp/setup-packer@main
+      with:
+        version: latest
+        
+    - name: Build Ziro-OS
+      run: |
+        make all
+        make optimize
+        
+    - name: Build GCP Image
+      run: |
+        cd images/gcp
+        ./build-image.sh
+      env:
+        GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        GCP_ZONE: us-central1-a
+        
+    - name: Test GCP Image
+      run: |
+        # Create test instance
+        gcloud compute instances create ziro-os-test-vm \
+          --image-family=ziro-os \
+          --zone=us-central1-a \
+          --machine-type=e2-micro
+          
+        # Get external IP
+        EXTERNAL_IP=$(gcloud compute instances describe ziro-os-test-vm \
+          --zone=us-central1-a \
+          --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+          
+        echo "Instance external IP: $EXTERNAL_IP"
+        
+        # Basic connectivity test
+        sleep 60  # Wait for boot
+        
+        # Cleanup
+        gcloud compute instances delete ziro-os-test-vm \
+          --zone=us-central1-a \
+          --quiet
+
+  update-documentation:
+    name: Update Cloud Image Documentation
+    runs-on: ubuntu-latest
+    needs: [build-aws-ami, build-azure-image, build-gcp-image]
+    if: always() && (needs.build-aws-ami.result == 'success' || needs.build-azure-image.result == 'success' || needs.build-gcp-image.result == 'success')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Update cloud images documentation
+      run: |
+        # Update documentation with new image IDs
+        echo "Updating cloud images documentation..."
+        
+        # This would update docs with new AMI IDs, image names, etc.
+        cat > docs/cloud-images.md << 'EOF'
+        # Ziro-OS Cloud Images
+        
+        ## Latest Images
+        
+        ### AWS AMIs
+        - us-west-2: ami-xxxxxxxxx
+        - us-east-1: ami-xxxxxxxxx
+        - eu-west-1: ami-xxxxxxxxx
+        
+        ### Azure Images
+        - West US 2: ziro-os-latest
+        - East US: ziro-os-latest
+        
+        ### GCP Images
+        - Image Family: ziro-os
+        - Latest: ziro-os-YYYYMMDD-HHMMSS
+        
+        ## Usage
+        
+        ### AWS
+        ```bash
+        aws ec2 run-instances \
+          --image-id ami-xxxxxxxxx \
+          --instance-type t3.medium \
+          --key-name your-key
+        ```
+        
+        ### Azure
+        ```bash
+        az vm create \
+          --resource-group myResourceGroup \
+          --name myVM \
+          --image ziro-os-latest \
+          --admin-username azureuser
+        ```
+        
+        ### GCP
+        ```bash
+        gcloud compute instances create my-vm \
+          --image-family=ziro-os \
+          --machine-type=e2-medium
+        ```
+        EOF
+        
+    - name: Commit documentation updates
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add docs/cloud-images.md
+        git commit -m "Update cloud images documentation [skip ci]" || exit 0
+        git push

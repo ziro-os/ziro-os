@@ -1,0 +1,108 @@
+# Default values for ziro-os-operator
+
+replicaCount: 1
+
+image:
+  repository: ziro-os/operator
+  pullPolicy: IfNotPresent
+  tag: "v0.1.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Ziro-OS specific configuration
+ziroOS:
+  # Node configuration
+  nodeConfig:
+    # Container runtime settings
+    containerRuntime:
+      endpoint: "unix:///run/containerd/containerd.sock"
+      
+    # CNI configuration
+    cni:
+      binDir: "/opt/cni/bin"
+      confDir: "/etc/cni/net.d"
+      
+    # Security settings
+    security:
+      seccompProfile: "/etc/seccomp/default.json"
+      apparmorProfile: "ziro-container"
+      
+    # Monitoring
+    monitoring:
+      enabled: true
+      prometheus:
+        port: 9090
+      nodeExporter:
+        port: 9100
+      cadvisor:
+        port: 8080
+
+  # Cluster configuration
+  cluster:
+    # Auto-scaling settings
+    autoScaling:
+      enabled: true
+      minNodes: 1
+      maxNodes: 10
+      
+    # Node pool configuration
+    nodePools:
+      - name: "default"
+        instanceType: "t3.medium"
+        minSize: 1
+        maxSize: 5
+        desiredSize: 3
+        
+    # Networking
+    networking:
+      podCIDR: "10.244.0.0/16"
+      serviceCIDR: "10.96.0.0/12"
+      
+  # Monitoring and observability
+  observability:
+    metrics:
+      enabled: true
+      retention: "15d"
+    logging:
+      enabled: true
+      level: "info"
+    tracing:
+      enabled: false

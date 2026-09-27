@@ -1,11 +1,9 @@
 name: containerd
 version: "1.7.8"
 description: "Container runtime daemon"
-url: "https://github.com/containerd/containerd/releases/download/v1.7.8/containerd-1.7.8-linux-amd64.tar.gz"
+url: "https://github.com/containerd/containerd/releases/download/v1.7.8/containerd-1.7.8-linux-{GOARCH}.tar.gz"
+url_x86_64: "https://github.com/containerd/containerd/releases/download/v1.7.8/containerd-1.7.8-linux-amd64.tar.gz"
+url_arm64: "https://github.com/containerd/containerd/releases/download/v1.7.8/containerd-1.7.8-linux-arm64.tar.gz"
 dependencies: ["runc"]
 build_type: "binary"
-binaries:
-  - "bin/containerd"
-  - "bin/containerd-shim"
-  - "bin/containerd-shim-runc-v2"
-  - "bin/ctr"
+priority: 4

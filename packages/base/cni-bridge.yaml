@@ -1,0 +1,9 @@
+name: cni-bridge
+version: "1.3.0"
+description: "CNI bridge plugin for container networking"
+url: "https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-{GOARCH}-v1.3.0.tgz"
+url_x86_64: "https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-amd64-v1.3.0.tgz"
+url_arm64: "https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-arm64-v1.3.0.tgz"
+dependencies: []
+build_type: "binary"
+priority: 5

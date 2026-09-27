@@ -1,8 +1,9 @@
 name: runc
 version: "1.1.9"
 description: "OCI container runtime"
-url: "https://github.com/opencontainers/runc/releases/download/v1.1.9/runc.amd64"
+url: "https://github.com/opencontainers/runc/releases/download/v1.1.9/runc.{GOARCH}"
+url_x86_64: "https://github.com/opencontainers/runc/releases/download/v1.1.9/runc.amd64"
+url_arm64: "https://github.com/opencontainers/runc/releases/download/v1.1.9/runc.arm64"
 dependencies: []
 build_type: "binary"
-binaries:
-  - "runc"
+priority: 3

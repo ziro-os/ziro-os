@@ -1,0 +1,5 @@
+# /etc/inittab - Ziro-OS init configuration
+::sysinit:/etc/init.d/rcS
+::respawn:/bin/sh
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/umount -a -r

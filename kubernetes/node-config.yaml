@@ -1,0 +1,91 @@
+# Ziro-OS Kubernetes Node Configuration
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ziro-os-node-config
+  namespace: kube-system
+data:
+  # Kubelet configuration for Ziro-OS nodes
+  kubelet-config.yaml: |
+    apiVersion: kubelet.config.k8s.io/v1beta1
+    kind: KubeletConfiguration
+    
+    # Container runtime configuration
+    containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
+    
+    # Ziro-OS specific settings
+    cgroupDriver: "systemd"
+    failSwapOn: false
+    
+    # Resource management
+    kubeReserved:
+      cpu: "100m"
+      memory: "128Mi"
+      ephemeral-storage: "1Gi"
+    systemReserved:
+      cpu: "100m"
+      memory: "128Mi"
+      ephemeral-storage: "1Gi"
+    
+    # Networking
+    clusterDNS:
+      - "10.96.0.10"
+    clusterDomain: "cluster.local"
+    
+    # Security
+    authentication:
+      anonymous:
+        enabled: false
+      webhook:
+        enabled: true
+    authorization:
+      mode: Webhook
+    
+    # Logging
+    logging:
+      format: json
+    
+    # Feature gates for container optimizations
+    featureGates:
+      KubeletInUserNamespace: true
+      SeccompDefault: true
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ziro-os-containerd-config
+  namespace: kube-system
+data:
+  # Containerd configuration optimized for Kubernetes
+  config.toml: |
+    version = 2
+    
+    [plugins]
+      [plugins."io.containerd.grpc.v1.cri"]
+        sandbox_image = "registry.k8s.io/pause:3.9"
+        
+        [plugins."io.containerd.grpc.v1.cri".containerd]
+          snapshotter = "overlayfs"
+          default_runtime_name = "runc"
+          
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+            [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+              runtime_type = "io.containerd.runc.v2"
+              
+              [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                SystemdCgroup = true
+                
+        [plugins."io.containerd.grpc.v1.cri".cni]
+          bin_dir = "/opt/cni/bin"
+          conf_dir = "/etc/cni/net.d"
+          
+        [plugins."io.containerd.grpc.v1.cri".registry]
+          config_path = "/etc/containerd/certs.d"
+          
+    [grpc]
+      address = "/run/containerd/containerd.sock"
+      
+    [metrics]
+      address = "127.0.0.1:1338"

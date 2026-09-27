@@ -1,0 +1,30 @@
+# Makefile for Ziro-OS PID 1 Init
+CC ?= gcc
+CFLAGS ?= -O2 -Wall -Wextra -std=c99
+LDFLAGS ?= -static
+TARGET_ARCH ?= $(shell uname -m)
+
+ifeq ($(TARGET_ARCH),x86_64)
+    DOCKER_PLATFORM = linux/amd64
+else
+    DOCKER_PLATFORM = linux/arm64
+endif
+
+.PHONY: all clean
+
+all: ziro-init-$(TARGET_ARCH)
+	@cp ziro-init-$(TARGET_ARCH) ziro-init
+
+ziro-init-$(TARGET_ARCH): ziro-init.c
+	@echo "Building ziro-init for $(TARGET_ARCH)..."
+ifeq ($(shell uname -s),Darwin)
+	@echo "macOS detected: Compiling statically using Docker Alpine ($(DOCKER_PLATFORM))..."
+	@docker run --rm --platform $(DOCKER_PLATFORM) -v $(shell pwd):/src -w /src alpine:latest sh -c \
+		"apk add --no-cache gcc musl-dev binutils >/dev/null 2>&1 && gcc -static -s -O2 -Wall ziro-init.c -o ziro-init-$(TARGET_ARCH)"
+else
+	$(CC) $(CFLAGS) $(LDFLAGS) -s ziro-init.c -o ziro-init-$(TARGET_ARCH)
+endif
+	@chmod +x ziro-init-$(TARGET_ARCH)
+
+clean:
+	rm -f ziro-init ziro-init-*

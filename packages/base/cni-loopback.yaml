@@ -1,0 +1,7 @@
+name: cni-loopback
+version: "1.3.0"
+description: "CNI loopback plugin"
+url: "https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-amd64-v1.3.0.tgz"
+dependencies: []
+build_type: "binary"
+priority: 5

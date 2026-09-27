@@ -1,0 +1,213 @@
+# Ziro-OS .gitignore
+
+# Build artifacts
+/bin/*
+!/bin/.gitkeep
+/build/
+/output/
+init/ziro-init
+init/ziro-init-*
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Kernel build artifacts
+/kernel/build/
+/kernel/bzImage*
+/kernel/vmlinuz*
+/kernel/Image*
+/kernel/modules/
+/kernel/*.img
+/kernel/*.iso
+
+# Root filesystem build artifacts
+/rootfs/build/
+/rootfs/bin/
+/rootfs/sbin/
+/rootfs/lib/
+/rootfs/usr/
+/rootfs/opt/
+/rootfs/etc/init
+
+# Package build artifacts
+/packages/build/
+/packages/*/build/
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.deb
+*.rpm
+
+# Image build outputs
+/images/*/output/
+*.qcow2
+*.vmdk
+*.vdi
+*.img
+*.iso
+
+# Go build artifacts
+vendor/
+*.mod
+go.sum
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.pid
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-*
+.atom/
+*.code-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Cloud provider credentials and configs
+.aws/
+.azure/
+.gcp/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Terraform state files
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+terraform.tfvars.json
+
+# Kubernetes configs
+kubeconfig
+*.kubeconfig
+kube-config
+
+# Docker and container artifacts
+.docker/
+docker-compose.override.yml
+.dockerignore
+
+# Packer artifacts
+packer_cache/
+*.box
+
+# Vagrant
+.vagrant/
+*.box
+
+# Test artifacts
+coverage.out
+coverage.html
+test-results/
+*.test
+
+# Monitoring and logs
+/var/log/
+/logs/
+*.log
+prometheus_data/
+grafana_data/
+
+# Security sensitive files
+secrets/
+*.secret
+.env
+.env.local
+.env.*.local
+
+# Cache directories
+.cache/
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+
+# Runtime directories
+/run/
+/var/run/
+/tmp/
+/var/tmp/
+
+# Package manager artifacts
+ziropkg_cache/
+plugin_cache/
+
+# Development artifacts
+debug
+debug.test
+*.prof
+*.trace
+
+# Documentation build artifacts
+/docs/_build/
+/docs/site/
+.jekyll-cache/
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# Local development overrides
+docker-compose.override.yml
+local.env
+dev.env
+
+# Generated files
+version.txt
+build-info.json
+release-notes.md
+
+# Platform specific
+# Linux
+*~
+
+# Windows
+*.exe
+*.msi
+*.msm
+*.msp
+
+# macOS
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+work/

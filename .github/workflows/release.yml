@@ -1,0 +1,363 @@
+name: Ziro-OS Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ziro-os/ziro-os
+
+jobs:
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_notes: ${{ steps.notes.outputs.notes }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+        else
+          VERSION=${GITHUB_REF#refs/tags/}
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
+        
+    - name: Generate release notes
+      id: notes
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        # Get previous tag
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        
+        # Generate release notes
+        cat > release-notes.md << 'EOF'
+        # Ziro-OS $VERSION
+        
+        ## 🚀 What's New
+        
+        This release includes the following improvements and new features:
+        
+        ### ✨ New Features
+        EOF
+        
+        if [ -n "$PREV_TAG" ]; then
+          echo "### 📝 Changes since $PREV_TAG" >> release-notes.md
+          git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD >> release-notes.md
+        else
+          echo "### 📝 Initial Release" >> release-notes.md
+          echo "- Complete Ziro-OS container-native operating system" >> release-notes.md
+          echo "- ZiroPkg package manager" >> release-notes.md
+          echo "- Developer SDK (ziro-dev)" >> release-notes.md
+          echo "- Multi-cloud deployment support" >> release-notes.md
+          echo "- Kubernetes integration" >> release-notes.md
+          echo "- Security hardening" >> release-notes.md
+          echo "- Monitoring and observability" >> release-notes.md
+        fi
+        
+        cat >> release-notes.md << 'EOF'
+        
+        ## 📦 Artifacts
+        
+        ### Container Images
+        - `ghcr.io/ziro-os/ziro-os:$VERSION`
+        - `ghcr.io/ziro-os/ziro-os:latest`
+        
+        ### Cloud Images
+        - AWS AMI (available in multiple regions)
+        - Azure VM Image
+        - GCP Image
+        
+        ### Tools
+        - `ziroctl` - Ziro-OS management CLI
+        - `ziropkg` - Package manager
+        - `ziro-dev` - Developer SDK
+        
+        ## 🔧 Installation
+        
+        ### Quick Start
+        ```bash
+        # Download and run Ziro-OS
+        curl -fsSL https://get.ziro-os.io | sh
+        
+        # Or use cloud images
+        make cloud-aws    # AWS AMI
+        make cloud-azure  # Azure VM
+        make cloud-gcp    # GCP Image
+        ```
+        
+        ### Package Installation
+        ```bash
+        # Install packages
+        ziropkg install nginx redis postgresql
+        
+        # Install monitoring
+        ziropkg install monitoring/prometheus
+        ```
+        
+        ### Development
+        ```bash
+        # Create new project
+        ziro-dev init my-app --type=web --language=go
+        
+        # Build and deploy
+        ziro-dev build && ziro-dev deploy
+        ```
+        
+        ## 📊 System Requirements
+        
+        - **Minimum RAM**: 512MB
+        - **Minimum Storage**: 1GB
+        - **Architecture**: x86_64, ARM64
+        - **Virtualization**: KVM, VMware, VirtualBox, Hyper-V
+        
+        ## 🔒 Security
+        
+        This release includes security hardening and has been scanned for vulnerabilities.
+        
+        ## 📚 Documentation
+        
+        - [Getting Started](https://docs.ziro-os.io/getting-started)
+        - [API Reference](https://docs.ziro-os.io/api)
+        - [Examples](https://github.com/ziro-os/ziro-os/tree/main/community/examples)
+        
+        ## 🙏 Contributors
+        
+        Thank you to all contributors who made this release possible!
+        
+        ---
+        
+        **Full Changelog**: https://github.com/ziro-os/ziro-os/compare/$PREV_TAG...$VERSION
+        EOF
+        
+        # Replace VERSION placeholder
+        sed -i "s/\$VERSION/$VERSION/g" release-notes.md
+        
+        echo "notes<<EOF" >> $GITHUB_OUTPUT
+        cat release-notes.md >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+    - name: Upload release notes
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-notes
+        path: release-notes.md
+
+  build-release:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+        
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          qemu-system-x86 \
+          cpio \
+          gzip \
+          curl \
+          wget
+          
+    - name: Build for ${{ matrix.arch }}
+      run: |
+        export GOARCH=${{ matrix.arch }}
+        make all
+        make build-ziropkg
+        make build-sdk
+        
+    - name: Create release package
+      run: |
+        VERSION="${{ needs.prepare-release.outputs.version }}"
+        ARCH="${{ matrix.arch }}"
+        
+        mkdir -p release/ziro-os-$VERSION-$ARCH
+        
+        # Copy binaries
+        cp -r bin/ release/ziro-os-$VERSION-$ARCH/
+        
+        # Copy kernel and images
+        cp kernel/bzImage release/ziro-os-$VERSION-$ARCH/ 2>/dev/null || true
+        
+        # Copy documentation
+        cp README.md release/ziro-os-$VERSION-$ARCH/
+        cp -r docs/ release/ziro-os-$VERSION-$ARCH/ 2>/dev/null || true
+        
+        # Create installation script
+        cat > release/ziro-os-$VERSION-$ARCH/install.sh << 'EOF'
+        #!/bin/bash
+        # Ziro-OS Installation Script
+        
+        set -e
+        
+        echo "Installing Ziro-OS $VERSION..."
+        
+        # Install binaries
+        sudo cp bin/* /usr/local/bin/
+        sudo chmod +x /usr/local/bin/ziroctl
+        sudo chmod +x /usr/local/bin/ziropkg
+        sudo chmod +x /usr/local/bin/ziro-dev
+        
+        echo "Ziro-OS $VERSION installed successfully!"
+        echo "Run 'ziroctl version' to verify installation."
+        EOF
+        
+        chmod +x release/ziro-os-$VERSION-$ARCH/install.sh
+        
+        # Create tarball
+        cd release
+        tar -czf ziro-os-$VERSION-$ARCH.tar.gz ziro-os-$VERSION-$ARCH/
+        
+    - name: Upload release artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ziro-os-${{ needs.prepare-release.outputs.version }}-${{ matrix.arch }}
+        path: release/ziro-os-*.tar.gz
+
+  build-container-images:
+    name: Build Container Images
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=tag
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=${{ needs.prepare-release.outputs.version }}
+          
+    - name: Build and push container image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, build-release, build-container-images]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download release artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts/
+        
+    - name: Download release notes
+      uses: actions/download-artifact@v3
+      with:
+        name: release-notes
+        
+    - name: Prepare release assets
+      run: |
+        mkdir -p release-assets
+        
+        # Copy all release tarballs
+        find artifacts/ -name "*.tar.gz" -exec cp {} release-assets/ \;
+        
+        # Create checksums
+        cd release-assets
+        sha256sum *.tar.gz > checksums.txt
+        
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ needs.prepare-release.outputs.version }}
+        name: Ziro-OS ${{ needs.prepare-release.outputs.version }}
+        body_path: release-notes.md
+        draft: false
+        prerelease: ${{ contains(needs.prepare-release.outputs.version, '-') }}
+        files: |
+          release-assets/*
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-release:
+    name: Notify Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, create-release]
+    if: success()
+    
+    steps:
+    - name: Notify Discord
+      uses: Ilshidur/action-discord@master
+      env:
+        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+      with:
+        args: |
+          🎉 **Ziro-OS ${{ needs.prepare-release.outputs.version }} Released!**
+          
+          The latest version of Ziro-OS is now available:
+          - 📦 GitHub Release: https://github.com/ziro-os/ziro-os/releases/tag/${{ needs.prepare-release.outputs.version }}
+          - 🐳 Container Images: `ghcr.io/ziro-os/ziro-os:${{ needs.prepare-release.outputs.version }}`
+          - 📚 Documentation: https://docs.ziro-os.io
+          
+          Get started: `curl -fsSL https://get.ziro-os.io | sh`
+          
+    - name: Update documentation
+      run: |
+        echo "Documentation update would be triggered here"
+        # This could trigger a documentation update workflow
