@@ -117,14 +117,16 @@ echo "💡 Press Ctrl+A, then X to exit QEMU at any time."
 echo ""
 sleep 1
 
+MEMORY="${MEMORY:-1024M}"
+
 exec "$QEMU_BIN" \
     -machine "$MACHINE" \
     $QEMU_ACCEL \
     $QEMU_CPU \
-    -m 512M \
+    -m "$MEMORY" \
     -kernel "$KERNEL_IMAGE" \
     -initrd "$INITRAMFS_IMAGE" \
-    -append "console=$CONSOLE rdinit=/init quiet panic=1" \
+    -append "console=$CONSOLE rdinit=/init ramdisk_size=1048576 quiet panic=1" \
     -nographic \
     -netdev user,id=net0 \
     -device "$NET_DEV,netdev=net0" \

@@ -102,12 +102,17 @@ install_busybox() {
     docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" alpine:latest sh -c '
         cd /rootfs/bin
         for app in $(./busybox --list); do
-            ln -sf busybox "$app"
+            # Do NOT create init symlink in /bin
+            if [ "$app" != "init" ]; then
+                ln -sf busybox "$app"
+            fi
         done
         cd /rootfs/sbin
-        for app in halt poweroff reboot init ifconfig route sysctl ip insmod rmmod modprobe lsmod; do
+        # Note: init is intentionally excluded here so it never overwrites busybox!
+        for app in halt poweroff reboot ifconfig route sysctl ip insmod rmmod modprobe lsmod; do
             ln -sf ../bin/busybox "$app"
         done
+        rm -f /rootfs/init /rootfs/sbin/init /rootfs/bin/init
     '
 }
 
@@ -158,11 +163,19 @@ INIT_BIN="$REPO_ROOT/init/ziro-init-$TARGET_ARCH"
 if [ ! -f "$INIT_BIN" ]; then
     make -C "$REPO_ROOT/init" TARGET_ARCH="$TARGET_ARCH"
 fi
+rm -f "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init" "$ROOTFS_FULL/bin/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/sbin/init"
 chmod +x "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init"
 
+# Ensure busybox is untouched
+if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
+    echo "❌ FATAL: /bin/busybox was overwritten by ziro-init!"
+    exit 1
+fi
+
 # For minimal rootfs (Docker base), /bin/sh is entrypoint, but provide init as option
+rm -f "$ROOTFS_MINIMAL/sbin/ziro-init"
 cp "$INIT_BIN" "$ROOTFS_MINIMAL/sbin/ziro-init"
 chmod +x "$ROOTFS_MINIMAL/sbin/ziro-init"
 echo "✓ ziro-init supervisor installed"
@@ -177,38 +190,26 @@ MINIMAL_TAR="$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz"
 MINIMAL_SIZE=$(du -h "$MINIMAL_TAR" | cut -f1)
 echo "✅ Minimal Base Rootfs archive: $MINIMAL_TAR ($MINIMAL_SIZE)"
 
-# --- 5. Install Container Runtime for Host OS ---
-echo "--- [5/5] Installing containerd, runc, and CNI plugins for Host OS ---"
-CONTAINERD_VER="1.7.13"
-RUNC_VER="v1.1.12"
-CNI_VER="v1.4.0"
+# --- 5. Install Musl-Native Container Runtime for Host OS ---
+echo "--- [5/5] Installing musl-native containerd, runc, and CNI plugins for Host OS ---"
+docker run --rm --platform "$DOCKER_PLATFORM" -v "$ROOTFS_FULL:/rootfs" alpine:latest sh -c '
+    apk --root /rootfs --initdb add --no-cache containerd runc cni-plugins
+    mkdir -p /rootfs/opt/cni/bin
+    if [ -d /rootfs/usr/libexec/cni ]; then
+        cp -r /rootfs/usr/libexec/cni/* /rootfs/opt/cni/bin/ 2>/dev/null || true
+    fi
+'
 
-# Fetch containerd
-CONTAINERD_TAR="$DOWNLOAD_DIR/containerd-${CONTAINERD_VER}-linux-${GOARCH}.tar.gz"
-if [ ! -f "$CONTAINERD_TAR" ]; then
-    echo "Downloading containerd $CONTAINERD_VER..."
-    curl -fsSL "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VER}/containerd-${CONTAINERD_VER}-linux-${GOARCH}.tar.gz" -o "$CONTAINERD_TAR"
-fi
-tar -xzf "$CONTAINERD_TAR" -C "$ROOTFS_FULL/usr"
-rm -f "$ROOTFS_FULL/usr/bin/containerd-stress"
+# Re-affirm ziro-init and BusyBox after package additions
+rm -f "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init"
+cp "$INIT_BIN" "$ROOTFS_FULL/init"
+cp "$INIT_BIN" "$ROOTFS_FULL/sbin/init"
+chmod +x "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init"
 
-# Fetch runc
-RUNC_BIN="$DOWNLOAD_DIR/runc-${RUNC_VER}-${GOARCH}"
-if [ ! -f "$RUNC_BIN" ]; then
-    echo "Downloading runc $RUNC_VER..."
-    curl -fsSL "https://github.com/opencontainers/runc/releases/download/${RUNC_VER}/runc.${GOARCH}" -o "$RUNC_BIN"
-    chmod +x "$RUNC_BIN"
+if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
+    echo "❌ FATAL: /bin/busybox was overwritten by ziro-init!"
+    exit 1
 fi
-cp "$RUNC_BIN" "$ROOTFS_FULL/usr/bin/runc"
-chmod +x "$ROOTFS_FULL/usr/bin/runc"
-
-# Fetch CNI plugins
-CNI_TAR="$DOWNLOAD_DIR/cni-plugins-linux-${GOARCH}-${CNI_VER}.tgz"
-if [ ! -f "$CNI_TAR" ]; then
-    echo "Downloading CNI plugins $CNI_VER..."
-    curl -fsSL "https://github.com/containernetworking/plugins/releases/download/${CNI_VER}/cni-plugins-linux-${GOARCH}-${CNI_VER}.tgz" -o "$CNI_TAR"
-fi
-tar -xzf "$CNI_TAR" -C "$ROOTFS_FULL/opt/cni/bin"
 
 # Package Full Host OS Initramfs
 FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"

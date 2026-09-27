@@ -117,11 +117,16 @@ static void init_network(void) {
     printf("[init] configuring loopback networking...\n");
     pid_t pid = fork();
     if (pid == 0) {
-        char *argv[] = {"/bin/ip", "link", "set", "lo", "up", NULL};
-        execv(argv[0], argv);
-        // Fallback to ifconfig
-        char *argv_if[] = {"/sbin/ifconfig", "lo", "127.0.0.1", "up", NULL};
-        execv(argv_if[0], argv_if);
+        if (access("/bin/ip", X_OK) == 0 || access("/sbin/ip", X_OK) == 0) {
+            char *bin = access("/bin/ip", X_OK) == 0 ? "/bin/ip" : "/sbin/ip";
+            char *argv[] = {"ip", "link", "set", "lo", "up", NULL};
+            execv(bin, argv);
+        }
+        if (access("/sbin/ifconfig", X_OK) == 0 || access("/bin/ifconfig", X_OK) == 0) {
+            char *bin = access("/sbin/ifconfig", X_OK) == 0 ? "/sbin/ifconfig" : "/bin/ifconfig";
+            char *argv[] = {"ifconfig", "lo", "127.0.0.1", "up", NULL};
+            execv(bin, argv);
+        }
         _exit(1);
     } else if (pid > 0) {
         int status;
@@ -143,14 +148,14 @@ static void start_containerd(void) {
     pid_t pid = fork();
     if (pid == 0) {
         char *bin = access("/usr/bin/containerd", X_OK) == 0 ? "/usr/bin/containerd" : "/bin/containerd";
-        char *argv[] = {bin, "--config", "/etc/containerd/config.toml", NULL};
+        char *argv[] = {"containerd", "--config", "/etc/containerd/config.toml", NULL};
         int log_fd = open("/var/log/containerd.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (log_fd >= 0) {
             dup2(log_fd, STDOUT_FILENO);
             dup2(log_fd, STDERR_FILENO);
             close(log_fd);
         }
-        execv(argv[0], argv);
+        execv(bin, argv);
         fprintf(stderr, "[init] failed to execute containerd: %s\n", strerror(errno));
         _exit(1);
     } else if (pid > 0) {
@@ -172,8 +177,6 @@ static void sig_handler(int sig) {
     switch (sig) {
         case SIGINT:
         case SIGTERM:
-            shutdown_requested = 1;
-            break;
         case SIGPWR:
             shutdown_requested = 1;
             break;
@@ -197,15 +200,21 @@ static void reap_children(void) {
 static void spawn_shell(void) {
     pid_t pid = fork();
     if (pid == 0) {
+        setsid();
         setenv("TERM", "linux", 1);
         setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/sbin:/opt/cni/bin", 1);
         setenv("HOME", "/root", 1);
         setenv("USER", "root", 1);
         chdir("/root");
 
-        char *shell = access("/bin/sh", X_OK) == 0 ? "/bin/sh" : "/bin/busybox";
-        char *argv[] = {shell, NULL};
-        execv(shell, argv);
+        if (access("/bin/sh", X_OK) == 0) {
+            char *argv[] = {"sh", NULL};
+            execv("/bin/sh", argv);
+        }
+        if (access("/bin/busybox", X_OK) == 0) {
+            char *argv[] = {"busybox", "sh", NULL};
+            execv("/bin/busybox", argv);
+        }
         fprintf(stderr, "[init] exec shell failed: %s\n", strerror(errno));
         _exit(1);
     } else if (pid > 0) {
