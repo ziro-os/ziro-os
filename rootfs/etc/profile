@@ -3,7 +3,14 @@ export HOME=/root
 export TERM=linux
 export PS1='\u@\h:\w\$ '
 
-# Display welcome message
-if [ -f /etc/motd ]; then
-    cat /etc/motd
+# Display dynamic cloud status banner once per login session
+if [ -z "$ZIRO_BANNER_SHOWN" ]; then
+    export ZIRO_BANNER_SHOWN=1
+    if [ -x /usr/bin/ziro-motd ]; then
+        /usr/bin/ziro-motd
+    elif [ -x /usr/bin/ziroctl ]; then
+        /usr/bin/ziroctl motd
+    elif [ -f /etc/motd ]; then
+        cat /etc/motd
+    fi
 fi

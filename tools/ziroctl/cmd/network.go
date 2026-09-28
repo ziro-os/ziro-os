@@ -353,8 +353,8 @@ func decodeHexIPv4(hexStr string) string {
 	}
 	var b0, b1, b2, b3 byte
 	_, _ = fmt.Sscanf(hexStr, "%02x%02x%02x%02x", &b0, &b1, &b2, &b3)
-	// Little-endian order in /proc/net/route
-	return fmt.Sprintf("%d.%d.%d.%d", b0, b1, b2, b3)
+	// /proc/net/route hex formatting yields least significant byte in b0, most in b3
+	return fmt.Sprintf("%d.%d.%d.%d", b3, b2, b1, b0)
 }
 
 func init() {

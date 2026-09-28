@@ -17,3 +17,4 @@ nft_nat
 nft_compat
 nft_chain_nat
 nft_masq
+wireguard

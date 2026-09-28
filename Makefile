@@ -25,8 +25,12 @@ else
     GOARCH = $(TARGET_ARCH)
 endif
 
-VERSION ?= 1.0.0
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo "1.0.9")
 IMAGE_TAG ?= ziro-os:latest
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
+BUILD_DATE ?= $(shell date -u +"%Y-%m-%d" 2>/dev/null || echo "unknown")
+LDFLAGS_ZIRO := -s -w -X github.com/ziro-os/ziroctl/cmd.Version=$(VERSION) -X github.com/ziro-os/ziroctl/cmd.GitCommit=$(GIT_COMMIT) -X github.com/ziro-os/ziroctl/cmd.BuildDate=$(BUILD_DATE)
+LDFLAGS_PKG := -s -w -X github.com/ziro-os/ziropkg/cmd.Version=$(VERSION)
 
 all: tools rootfs docker-image
 	@echo ""
@@ -38,19 +42,19 @@ all: tools rootfs docker-image
 tools:
 	@echo "Building ziroctl and ziropkg CLI for $(ARCH_NORMALIZED)..."
 	@mkdir -p bin
-	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="-s -w" -o ../../bin/ziroctl-$(ARCH_NORMALIZED) .
+	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="$(LDFLAGS_ZIRO)" -o ../../bin/ziroctl-$(ARCH_NORMALIZED) .
 	@cp bin/ziroctl-$(ARCH_NORMALIZED) bin/ziroctl
-	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="-s -w" -o ../../bin/ziropkg-$(ARCH_NORMALIZED) .
+	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="$(LDFLAGS_PKG)" -o ../../bin/ziropkg-$(ARCH_NORMALIZED) .
 	@cp bin/ziropkg-$(ARCH_NORMALIZED) bin/ziropkg
 	@echo "✅ ziroctl and ziropkg built at bin/"
 
 tools-all:
 	@echo "Building ziroctl and ziropkg for all architectures..."
 	@mkdir -p bin
-	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../bin/ziroctl-x86_64 .
-	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../bin/ziroctl-arm64 .
-	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../bin/ziropkg-x86_64 .
-	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../bin/ziropkg-arm64 .
+	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS_ZIRO)" -o ../../bin/ziroctl-x86_64 .
+	@cd tools/ziroctl && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="$(LDFLAGS_ZIRO)" -o ../../bin/ziroctl-arm64 .
+	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS_PKG)" -o ../../bin/ziropkg-x86_64 .
+	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="$(LDFLAGS_PKG)" -o ../../bin/ziropkg-arm64 .
 	@echo "✅ Built bin/ziroctl and bin/ziropkg for x86_64 and arm64"
 
 # --- Rootfs & Userland ---

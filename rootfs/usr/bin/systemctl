@@ -1,0 +1,10 @@
+#!/bin/sh
+# Compatibility wrapper for systemctl -> ziroctl service
+if [ -x /usr/bin/ziroctl ]; then
+    exec /usr/bin/ziroctl service "$@"
+elif [ -x /bin/ziroctl ]; then
+    exec /bin/ziroctl service "$@"
+else
+    echo "ziroctl not found"
+    exit 1
+fi

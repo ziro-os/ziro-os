@@ -570,7 +570,7 @@ static void init_devices(void) {
         // Filesystems
         "ext4", "vfat", "isofs", "overlay",
         // Container & Virtual Networking / Netfilter
-        "bridge", "br_netfilter", "veth", "tap", "tun",
+        "bridge", "br_netfilter", "veth", "tap", "tun", "wireguard",
         "nf_tables", "nfnetlink", "nft_nat", "nft_compat",
         "nft_chain_nat", "nft_masq", "xt_nat", "xt_conntrack",
         "xt_MASQUERADE", "xt_addrtype", "iptable_filter", "iptable_nat",

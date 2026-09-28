@@ -1,0 +1,70 @@
+#!/bin/sh
+# Ziro-OS Dynamic Cloud Status & MOTD Generator
+# Minimal by design. Born for the cloud.
+
+if [ -x /usr/bin/ziroctl ]; then
+    exec /usr/bin/ziroctl motd
+elif [ -x /bin/ziroctl ]; then
+    exec /bin/ziroctl motd
+fi
+
+# Fallback POSIX Shell Dynamic MOTD
+CYAN="\033[1;36m"
+GREEN="\033[1;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[1;34m"
+WHITE="\033[1;37m"
+RESET="\033[0m"
+
+printf "${CYAN}"
+cat << "EOF"
+  _____  _               ___  ____  
+ |__  / (_) _ __  ___   / _ \/ ___| 
+   / /  | || '__/ _ \ | | | \___ \ 
+  / /_  | || |  | (_) || |_| |___) |
+ |____| |_||_|   \___/  \___/|____/ 
+EOF
+printf "${RESET}\n"
+
+HOSTNAME=$(hostname 2>/dev/null || echo "ziro-host")
+KERNEL=$(uname -r 2>/dev/null || echo "linux")
+ARCH=$(uname -m 2>/dev/null || echo "x86_64")
+UPTIME=$(uptime 2>/dev/null | sed -E 's/.*up +([^,]+), .*/\1/' || echo "recently")
+
+# Virtualization / Cloud detection
+PLATFORM="Bare Metal"
+if [ -f /sys/class/dmi/id/product_name ]; then
+    PROD=$(cat /sys/class/dmi/id/product_name 2>/dev/null)
+    case "$PROD" in
+        *QEMU*|*Standard*PC*) PLATFORM="Proxmox VE / QEMU KVM" ;;
+        *VirtualBox*) PLATFORM="Oracle VirtualBox" ;;
+        *VMware*) PLATFORM="VMware vSphere / ESXi" ;;
+        *) PLATFORM="$PROD" ;;
+    esac
+fi
+
+# IP address detection
+IPV4=$(ip -4 addr show 2>/dev/null | grep -o 'inet [0-9.]*' | grep -v '127.0.0.1' | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')
+[ -z "$IPV4" ] && IPV4="DHCP / Unconfigured"
+
+# Containerd check
+CONTAINERD_STATUS="${YELLOW}STOPPED${RESET}"
+if [ -S /run/containerd/containerd.sock ]; then
+    CONTAINERD_STATUS="${GREEN}ACTIVE${RESET}"
+fi
+
+# System install status
+MODE="${CYAN}[LIVE BOOT MEDIA]${RESET}"
+if [ -f /etc/ziro-installed ]; then
+    MODE="${GREEN}[INSTALLED HOST]${RESET}"
+fi
+
+printf " ${WHITE}System:${RESET}        Ziro-OS (Cloud-Native Container Host) %b\n" "$MODE"
+printf " ${WHITE}Environment:${RESET}   ${GREEN}%s${RESET} (${ARCH})\n" "$PLATFORM"
+printf " ${WHITE}Node & Kernel:${RESET} %s (Kernel %s, up %s)\n" "$HOSTNAME" "$KERNEL" "$UPTIME"
+printf " ${WHITE}IPv4 Address:${RESET}  ${CYAN}%s${RESET}\n" "$IPV4"
+printf " ${WHITE}OCI Runtime:${RESET}   containerd (%b)\n" "$CONTAINERD_STATUS"
+printf " ${WHITE}Control Plane:${RESET} ziroctl (API, Services, Compose, Cluster Mesh, WireGuard)\n"
+printf "\n"
+printf " Type '${CYAN}ziroctl help${RESET}' for cloud management, '${CYAN}ziro-install${RESET}' to install to disk.\n"
+printf "\n"

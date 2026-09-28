@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	Version   = "1.0.8"
+	Version   = "1.0.9"
 	BuildDate = "2026-09-28"
 	GitCommit = "dev"
 )
@@ -27,10 +28,27 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show Ziro-OS and ziroctl version information",
 	Run: func(cmd *cobra.Command, args []string) {
+		commit := GitCommit
+		if commit == "dev" || commit == "" {
+			if bi, ok := debug.ReadBuildInfo(); ok {
+				for _, s := range bi.Settings {
+					if s.Key == "vcs.revision" {
+						commit = s.Value
+						if len(commit) > 7 {
+							commit = commit[:7]
+						}
+					}
+					if s.Key == "vcs.time" && (BuildDate == "" || BuildDate == "2026-09-28") {
+						BuildDate = s.Value
+					}
+				}
+			}
+		}
+
 		info := VersionInfo{
 			Version:   Version,
 			BuildDate: BuildDate,
-			GitCommit: GitCommit,
+			GitCommit: commit,
 			GoVersion: runtime.Version(),
 			OS:        runtime.GOOS,
 			Arch:      runtime.GOARCH,

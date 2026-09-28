@@ -1,0 +1,539 @@
+package cmd
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+type ServiceDef struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Exec        string `json:"exec"`
+	Args        string `json:"args"`
+	PIDFile     string `json:"pidfile"`
+	LogFile     string `json:"logfile"`
+	Autostart   bool   `json:"autostart"`
+}
+
+type ServiceStatusInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Status      string `json:"status"` // RUNNING, STOPPED, FAILED
+	PID         int    `json:"pid"`
+	Enabled     bool   `json:"enabled"`
+	Uptime      string `json:"uptime"`
+	LogFile     string `json:"logfile"`
+}
+
+const (
+	servicesDir = "/etc/ziro/services"
+	enabledDir  = "/etc/ziro/services/enabled"
+	logsDir     = "/var/log"
+	runDir      = "/run"
+)
+
+var defaultServices = []ServiceDef{
+	{
+		Name:        "containerd",
+		Description: "Containerd OCI Runtime Daemon",
+		Exec:        "/usr/bin/containerd",
+		Args:        "--config /etc/containerd/config.toml",
+		PIDFile:     "/run/containerd/containerd.pid",
+		LogFile:     "/var/log/containerd.log",
+		Autostart:   true,
+	},
+	{
+		Name:        "sshd",
+		Description: "OpenSSH Secure Shell Daemon",
+		Exec:        "/usr/sbin/sshd",
+		Args:        "-D -e",
+		PIDFile:     "/run/sshd.pid",
+		LogFile:     "/var/log/sshd.log",
+		Autostart:   true,
+	},
+	{
+		Name:        "crond",
+		Description: "Periodic Cronjob Scheduler Daemon",
+		Exec:        "/usr/sbin/crond",
+		Args:        "-f -l 5",
+		PIDFile:     "/run/crond.pid",
+		LogFile:     "/var/log/crond.log",
+		Autostart:   true,
+	},
+	{
+		Name:        "firewall",
+		Description: "Ziro-OS nftables Cloud Firewall",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "firewall apply",
+		PIDFile:     "/run/ziro-firewall.pid",
+		LogFile:     "/var/log/firewall.log",
+		Autostart:   true,
+	},
+	{
+		Name:        "wireguard",
+		Description: "WireGuard Cloud Mesh VPN Service",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "wireguard up",
+		PIDFile:     "/run/ziro-wireguard.pid",
+		LogFile:     "/var/log/wireguard.log",
+		Autostart:   false,
+	},
+	{
+		Name:        "sentinel",
+		Description: "Ziro Sentinel Security & Threat Protection",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "security monitor",
+		PIDFile:     "/run/ziro-sentinel.pid",
+		LogFile:     "/var/log/sentinel.log",
+		Autostart:   true,
+	},
+	{
+		Name:        "ziro-api",
+		Description: "Ziro Control Plane REST API Server",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "api start",
+		PIDFile:     "/run/ziro-api.pid",
+		LogFile:     "/var/log/ziro-api.log",
+		Autostart:   false,
+	},
+}
+
+var serviceCmd = &cobra.Command{
+	Use:     "service",
+	Aliases: []string{"systemctl", "svc"},
+	Short:   "Manage Ziro-OS system services and background daemons",
+}
+
+var serviceListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all system services, state, and enabled status",
+	Run: func(cmd *cobra.Command, args []string) {
+		services := listAllServices()
+		fmt.Printf("%-16s %-10s %-8s %-10s %s\n", "SERVICE", "STATUS", "PID", "ENABLED", "DESCRIPTION")
+		fmt.Println(strings.Repeat("-", 75))
+		for _, s := range services {
+			pidStr := "-"
+			if s.PID > 0 {
+				pidStr = fmt.Sprintf("%d", s.PID)
+			}
+			enStr := "no"
+			if s.Enabled {
+				enStr = "yes"
+			}
+			fmt.Printf("%-16s %-10s %-8s %-10s %s\n", s.Name, s.Status, pidStr, enStr, s.Description)
+		}
+	},
+}
+
+var serviceStatusCmd = &cobra.Command{
+	Use:   "status <service>",
+	Short: "Show detailed status and recent logs for a service",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		s, err := getServiceStatus(name)
+		if err != nil {
+			fmt.Printf("Service '%s' not found.\n", name)
+			return
+		}
+		fmt.Printf("● %s - %s\n", s.Name, s.Description)
+		fmt.Printf("   Loaded:  %s (/etc/ziro/services/%s.conf; enabled: %v)\n", s.Name, s.Name, s.Enabled)
+		fmt.Printf("   Active:  %s", s.Status)
+		if s.PID > 0 {
+			fmt.Printf(" (PID: %d, Uptime: %s)", s.PID, s.Uptime)
+		}
+		fmt.Println()
+		if s.LogFile != "" {
+			fmt.Printf("   Log:     %s\n", s.LogFile)
+			printRecentLogs(s.LogFile, 5)
+		}
+	},
+}
+
+var serviceStartCmd = &cobra.Command{
+	Use:   "start <service>",
+	Short: "Start a system service",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		if err := startService(name); err != nil {
+			fmt.Printf("Failed to start %s: %v\n", name, err)
+			return
+		}
+		fmt.Printf("Started service: %s\n", name)
+	},
+}
+
+var serviceStopCmd = &cobra.Command{
+	Use:   "stop <service>",
+	Short: "Stop a running system service",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		if err := stopService(name); err != nil {
+			fmt.Printf("Failed to stop %s: %v\n", name, err)
+			return
+		}
+		fmt.Printf("Stopped service: %s\n", name)
+	},
+}
+
+var serviceRestartCmd = &cobra.Command{
+	Use:   "restart <service>",
+	Short: "Restart a system service",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		_ = stopService(name)
+		time.Sleep(500 * time.Millisecond)
+		if err := startService(name); err != nil {
+			fmt.Printf("Failed to restart %s: %v\n", name, err)
+			return
+		}
+		fmt.Printf("Restarted service: %s\n", name)
+	},
+}
+
+var serviceEnableCmd = &cobra.Command{
+	Use:   "enable <service>",
+	Short: "Enable a system service to start automatically on boot",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		if err := enableService(name); err != nil {
+			fmt.Printf("Failed to enable %s: %v\n", name, err)
+			return
+		}
+		fmt.Printf("Enabled service '%s' for boot autostart.\n", name)
+	},
+}
+
+var serviceDisableCmd = &cobra.Command{
+	Use:   "disable <service>",
+	Short: "Disable a system service from starting on boot",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		if err := disableService(name); err != nil {
+			fmt.Printf("Failed to disable %s: %v\n", name, err)
+			return
+		}
+		fmt.Printf("Disabled service '%s' from boot autostart.\n", name)
+	},
+}
+
+var serviceLogsCmd = &cobra.Command{
+	Use:   "logs <service>",
+	Short: "View recent log output from a system service",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		name := args[0]
+		s, err := getServiceStatus(name)
+		if err != nil {
+			fmt.Printf("Service '%s' not found.\n", name)
+			return
+		}
+		if s.LogFile == "" || !fileExists(s.LogFile) {
+			fmt.Printf("No log file found for service %s.\n", name)
+			return
+		}
+		printRecentLogs(s.LogFile, 50)
+	},
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+func loadServiceDef(name string) (*ServiceDef, error) {
+	// First check /etc/ziro/services/<name>.conf
+	confPath := filepath.Join(servicesDir, name+".conf")
+	if fileExists(confPath) {
+		def := &ServiceDef{Name: name}
+		f, err := os.Open(confPath)
+		if err == nil {
+			defer f.Close()
+			sc := bufio.NewScanner(f)
+			for sc.Scan() {
+				line := strings.TrimSpace(sc.Text())
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					k := strings.TrimSpace(parts[0])
+					v := strings.TrimSpace(parts[1])
+					switch k {
+					case "description":
+						def.Description = v
+					case "exec":
+						def.Exec = v
+					case "args":
+						def.Args = v
+					case "pidfile":
+						def.PIDFile = v
+					case "logfile":
+						def.LogFile = v
+					case "autostart":
+						def.Autostart = (v == "true" || v == "1" || v == "yes")
+					}
+				}
+			}
+			return def, nil
+		}
+	}
+
+	// Fallback to built-in default services
+	for _, s := range defaultServices {
+		if s.Name == name {
+			return &s, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown service: %s", name)
+}
+
+func listAllServices() []ServiceStatusInfo {
+	seen := make(map[string]bool)
+	var list []ServiceStatusInfo
+
+	// Check files in servicesDir
+	if entries, err := os.ReadDir(servicesDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".conf") {
+				name := strings.TrimSuffix(e.Name(), ".conf")
+				seen[name] = true
+				if st, err := getServiceStatus(name); err == nil {
+					list = append(list, *st)
+				}
+			}
+		}
+	}
+
+	// Add built-ins not already loaded
+	for _, s := range defaultServices {
+		if !seen[s.Name] {
+			if st, err := getServiceStatus(s.Name); err == nil {
+				list = append(list, *st)
+			}
+		}
+	}
+
+	return list
+}
+
+func getServicePID(def *ServiceDef) int {
+	if def.PIDFile != "" && fileExists(def.PIDFile) {
+		if data, err := os.ReadFile(def.PIDFile); err == nil {
+			pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+			if pid > 0 && isPIDRunning(pid) {
+				return pid
+			}
+		}
+	}
+
+	// Fallback to pgrep by executable name
+	base := filepath.Base(def.Exec)
+	out, err := exec.Command("pgrep", "-x", base).Output()
+	if err == nil {
+		pids := strings.Fields(string(out))
+		if len(pids) > 0 {
+			pid, _ := strconv.Atoi(pids[0])
+			if pid > 0 && isPIDRunning(pid) {
+				return pid
+			}
+		}
+	}
+	return 0
+}
+
+func isPIDRunning(pid int) bool {
+	procPath := fmt.Sprintf("/proc/%d", pid)
+	if _, err := os.Stat(procPath); err == nil {
+		return true
+	}
+	// Fallback to signal 0
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return process.Signal(syscall.Signal(0)) == nil
+}
+
+func getServiceStatus(name string) (*ServiceStatusInfo, error) {
+	def, err := loadServiceDef(name)
+	if err != nil {
+		return nil, err
+	}
+
+	pid := getServicePID(def)
+	status := "STOPPED"
+	uptime := "-"
+	if pid > 0 {
+		status = "RUNNING"
+		uptime = getPIDUptime(pid)
+	}
+
+	enabled := def.Autostart
+	enLink := filepath.Join(enabledDir, name)
+	if fileExists(enLink) {
+		enabled = true
+	}
+
+	return &ServiceStatusInfo{
+		Name:        def.Name,
+		Description: def.Description,
+		Status:      status,
+		PID:         pid,
+		Enabled:     enabled,
+		Uptime:      uptime,
+		LogFile:     def.LogFile,
+	}, nil
+}
+
+func getPIDUptime(pid int) string {
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	if fi, err := os.Stat(statPath); err == nil {
+		dur := time.Since(fi.ModTime()).Round(time.Second)
+		return dur.String()
+	}
+	return "unknown"
+}
+
+func startService(name string) error {
+	def, err := loadServiceDef(name)
+	if err != nil {
+		return err
+	}
+	pid := getServicePID(def)
+	if pid > 0 {
+		return fmt.Errorf("service '%s' is already running (PID %d)", name, pid)
+	}
+
+	_ = os.MkdirAll(filepath.Dir(def.PIDFile), 0755)
+	_ = os.MkdirAll(filepath.Dir(def.LogFile), 0755)
+
+	args := strings.Fields(def.Args)
+	cmd := exec.Command(def.Exec, args...)
+
+	logF, err := os.OpenFile(def.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		cmd.Stdout = logF
+		cmd.Stderr = logF
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true,
+	}
+
+	if err := cmd.Start(); err != nil {
+		if logF != nil {
+			logF.Close()
+		}
+		return fmt.Errorf("failed to start process: %w", err)
+	}
+
+	newPID := cmd.Process.Pid
+	if def.PIDFile != "" {
+		_ = os.WriteFile(def.PIDFile, []byte(strconv.Itoa(newPID)), 0644)
+	}
+
+	go func() {
+		_ = cmd.Wait()
+		if logF != nil {
+			logF.Close()
+		}
+		if def.PIDFile != "" {
+			_ = os.Remove(def.PIDFile)
+		}
+	}()
+
+	return nil
+}
+
+func stopService(name string) error {
+	def, err := loadServiceDef(name)
+	if err != nil {
+		return err
+	}
+	pid := getServicePID(def)
+	if pid <= 0 {
+		return nil // already stopped
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+
+	// Send SIGTERM
+	_ = proc.Signal(syscall.SIGTERM)
+
+	// Wait up to 3 seconds for graceful shutdown
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if !isPIDRunning(pid) {
+			if def.PIDFile != "" {
+				_ = os.Remove(def.PIDFile)
+			}
+			return nil
+		}
+	}
+
+	// Force kill if still running
+	_ = proc.Signal(syscall.SIGKILL)
+	if def.PIDFile != "" {
+		_ = os.Remove(def.PIDFile)
+	}
+	return nil
+}
+
+func enableService(name string) error {
+	_ = os.MkdirAll(enabledDir, 0755)
+	target := filepath.Join(enabledDir, name)
+	return os.WriteFile(target, []byte("enabled\n"), 0644)
+}
+
+func disableService(name string) error {
+	target := filepath.Join(enabledDir, name)
+	if fileExists(target) {
+		return os.Remove(target)
+	}
+	return nil
+}
+
+func printRecentLogs(path string, maxLines int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	start := 0
+	if len(lines) > maxLines {
+		start = len(lines) - maxLines
+	}
+	for _, l := range lines[start:] {
+		fmt.Printf("     %s\n", l)
+	}
+}
+
+func init() {
+	serviceCmd.AddCommand(serviceListCmd)
+	serviceCmd.AddCommand(serviceStatusCmd)
+	serviceCmd.AddCommand(serviceStartCmd)
+	serviceCmd.AddCommand(serviceStopCmd)
+	serviceCmd.AddCommand(serviceRestartCmd)
+	serviceCmd.AddCommand(serviceEnableCmd)
+	serviceCmd.AddCommand(serviceDisableCmd)
+	serviceCmd.AddCommand(serviceLogsCmd)
+	rootCmd.AddCommand(serviceCmd)
+}

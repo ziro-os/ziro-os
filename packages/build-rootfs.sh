@@ -321,7 +321,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         add --no-cache \
         ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
         iptables openssh-server openssh-client linux-pam \
-        e2fsprogs dosfstools util-linux sfdisk parted curl kmod $GRUB_PKGS
+        e2fsprogs dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS
 
     # Retain official keys and repositories inside rootfs for ziropkg
     cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true

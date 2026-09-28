@@ -1,0 +1,10 @@
+#!/bin/sh
+# Compatibility wrapper for docker-compose -> ziroctl compose
+if [ -x /usr/bin/ziroctl ]; then
+    exec /usr/bin/ziroctl compose "$@"
+elif [ -x /bin/ziroctl ]; then
+    exec /bin/ziroctl compose "$@"
+else
+    echo "ziroctl not found"
+    exit 1
+fi

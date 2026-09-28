@@ -29,6 +29,7 @@ init/ziro-init-*
 /rootfs/lib/
 /rootfs/usr/*
 !/rootfs/usr/share
+!/rootfs/usr/bin
 /rootfs/opt/
 /rootfs/etc/init
 
