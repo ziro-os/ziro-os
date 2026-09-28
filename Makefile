@@ -1,7 +1,7 @@
 # Ziro-OS Centralized Build Orchestrator
 # A cloud-native, ultra-lightweight operating system for container workloads.
 
-.PHONY: all rootfs rootfs-all tools tools-all docker-image docker-multiarch kernel image-iso run-qemu test test-smoke clean help
+.PHONY: test-boot all rootfs rootfs-all tools tools-all docker-image docker-multiarch kernel image-iso run-qemu test test-smoke clean help
 
 HOST_ARCH := $(shell uname -m)
 HOST_OS   := $(shell uname -s)
@@ -27,6 +27,7 @@ endif
 
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo "1.0.9")
 IMAGE_TAG ?= ziro-os:latest
+export ALPINE_IMAGE ?= alpine:3.24
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%d" 2>/dev/null || echo "unknown")
 LDFLAGS_ZIRO := -s -w -X github.com/ziro-os/ziroctl/cmd.Version=$(VERSION) -X github.com/ziro-os/ziroctl/cmd.GitCommit=$(GIT_COMMIT) -X github.com/ziro-os/ziroctl/cmd.BuildDate=$(BUILD_DATE)
@@ -105,6 +106,10 @@ test-unit:
 	@echo "Running ziroctl and ziropkg unit tests..."
 	@cd tools/ziroctl && go test -v ./...
 	@cd tools/ziropkg && go test -v ./...
+
+# Boots build/vmlinuz + initramfs in QEMU and checks the running host (needs qemu-system-*)
+test-boot:
+	@python3 tests/qemu/boot-smoke.py --arch $(ARCH_NORMALIZED)
 
 test-smoke: docker-image
 	@echo "Running container smoke test suite..."

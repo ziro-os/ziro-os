@@ -39,8 +39,8 @@ mkdir -p "$ISO_STAGING/boot/grub"
 # Verify kernel
 KERNEL_FILE="$BUILD_DIR/vmlinuz-$TARGET_ARCH"
 if [ ! -f "$KERNEL_FILE" ]; then
-    echo "Kernel not found at $KERNEL_FILE. Auto-provisioning kernel for $TARGET_ARCH..."
-    "$REPO_ROOT/kernel/build-kernel.sh" "$TARGET_ARCH"
+    echo "Kernel not found at $KERNEL_FILE. Building rootfs (provisions kernel + matching modules)..."
+    "$REPO_ROOT/packages/build-rootfs.sh" "$TARGET_ARCH"
 fi
 
 # Verify initramfs
@@ -51,7 +51,16 @@ if [ ! -f "$INITRAMFS_FILE" ]; then
     "$REPO_ROOT/packages/build-rootfs.sh" "$TARGET_ARCH"
 fi
 
-echo "✓ Kernel:    $KERNEL_FILE"
+# The kernel must match the modules packed in the initramfs, or every modprobe fails at boot.
+KREL=$(cat "$BUILD_DIR/kernel-release-$TARGET_ARCH" 2>/dev/null || true)
+if [ -z "$KREL" ] || [ ! -d "$BUILD_DIR/rootfs-full-$TARGET_ARCH/lib/modules/$KREL" ]; then
+    echo "❌ Kernel/modules mismatch: kernel '${KREL:-unknown}' vs rootfs modules:" \
+        "$(ls "$BUILD_DIR/rootfs-full-$TARGET_ARCH/lib/modules" 2>/dev/null | tr '\n' ' ')"
+    echo "   Rebuild both from one source: ./packages/build-rootfs.sh $TARGET_ARCH"
+    exit 1
+fi
+
+echo "✓ Kernel:    $KERNEL_FILE ($KREL)"
 echo "✓ Initramfs: $INITRAMFS_FILE"
 
 # Copy boot artifacts
@@ -135,7 +144,7 @@ docker run --rm \
     -e GRUB_PACKAGES="$GRUB_PACKAGES" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
-    alpine:latest sh -c '
+    "${ALPINE_IMAGE:-alpine:3.24}" sh -c '
         set -e
         echo "Installing xorriso, mtools, and bootloader tools (${GRUB_PACKAGES})..."
         apk add --no-cache xorriso mtools ${GRUB_PACKAGES} >/dev/null 2>&1

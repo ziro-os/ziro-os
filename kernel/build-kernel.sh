@@ -32,6 +32,7 @@ case "$RAW_ARCH" in
 esac
 
 BUILD_DIR="$REPO_ROOT/build"
+ALPINE_IMAGE="${ALPINE_IMAGE:-alpine:3.24}"
 FINAL_KERNEL="$BUILD_DIR/vmlinuz-$TARGET_ARCH"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
@@ -39,7 +40,7 @@ HOST_GID="$(id -g)"
 mkdir -p "$BUILD_DIR"
 
 # Reuse existing kernel if present and not forced
-if [ -s "$FINAL_KERNEL" ] && [ "${FORCE_KERNEL_BUILD:-0}" != "1" ]; then
+if [ -s "$FINAL_KERNEL" ] && [ "${FORCE_KERNEL_BUILD:-0}" != "1" ] && [ "${BUILD_FROM_SOURCE:-0}" != "1" ]; then
     echo "✓ Linux kernel already exists: $FINAL_KERNEL ($(du -h "$FINAL_KERNEL" | cut -f1))"
     ln -sf "vmlinuz-$TARGET_ARCH" "$BUILD_DIR/vmlinuz-$ALIAS_ARCH"
     exit 0
@@ -71,7 +72,7 @@ if [ "$BUILD_FROM_SOURCE" = "1" ]; then
         -v "$CONFIG_FILE:/kernel-config" \
         -e HOST_UID="$HOST_UID" \
         -e HOST_GID="$HOST_GID" \
-        alpine:latest sh -c "
+        $ALPINE_IMAGE sh -c "
             set -e
             echo 'Installing kernel build toolchain...'
             apk add --no-cache build-base linux-headers bc bison flex openssl-dev elfutils-dev perl xz bash curl
@@ -90,12 +91,23 @@ if [ "$BUILD_FROM_SOURCE" = "1" ]; then
             echo 'Compiling kernel ($KERNEL_TARGET)...'
             make ARCH=$KERNEL_ARCH -j\$(nproc) $KERNEL_TARGET
 
+            echo 'Building and installing modules...'
+            rm -rf /build/modroot
+            make -s ARCH=$KERNEL_ARCH kernelrelease > /build/kernel.release
+            if grep -q '^CONFIG_MODULES=y' .config; then
+                make ARCH=$KERNEL_ARCH -j\$(nproc) modules
+                make ARCH=$KERNEL_ARCH INSTALL_MOD_PATH=/build/modroot INSTALL_MOD_STRIP=1 modules_install
+            fi
+            mkdir -p /build/modroot/lib/modules/\$(cat /build/kernel.release)
+
             echo 'Copying built kernel image...'
             cp $KERNEL_OUT_SRC /build/vmlinuz
-            chown \${HOST_UID}:\${HOST_GID} /build/vmlinuz
+            chown -R \${HOST_UID}:\${HOST_GID} /build/vmlinuz /build/modroot /build/kernel.release
         "
 
     cp "$KERNEL_BUILD_DIR/vmlinuz" "$FINAL_KERNEL"
+    cp "$KERNEL_BUILD_DIR/kernel.release" "$BUILD_DIR/kernel-release-$TARGET_ARCH"
+    echo "Note: build the rootfs with BUILD_FROM_SOURCE=1 too, so it ships this kernel's modules."
 else
     echo "=================================================="
     echo " Provisioning Container-Optimized Linux Kernel for $TARGET_ARCH"
@@ -109,19 +121,13 @@ else
         -e HOST_UID="$HOST_UID" \
         -e HOST_GID="$HOST_GID" \
         -e TARGET_ARCH="$TARGET_ARCH" \
-        alpine:latest sh -c '
+        $ALPINE_IMAGE sh -c '
             set -e
             echo "Fetching linux-virt package for container host..."
             apk add --no-cache linux-virt >/dev/null 2>&1
-            if [ -f /boot/vmlinuz-virt ]; then
-                cp /boot/vmlinuz-virt "/out/vmlinuz-${TARGET_ARCH}"
-            elif [ -f /boot/vmlinuz ]; then
-                cp /boot/vmlinuz "/out/vmlinuz-${TARGET_ARCH}"
-            else
-                echo "Error: kernel binary not found in /boot" >&2
-                exit 1
-            fi
-            chown "${HOST_UID}:${HOST_GID}" "/out/vmlinuz-${TARGET_ARCH}"
+            cp /boot/vmlinuz-virt "/out/vmlinuz-${TARGET_ARCH}"
+            ls /lib/modules > "/out/kernel-release-${TARGET_ARCH}"
+            chown "${HOST_UID}:${HOST_GID}" "/out/vmlinuz-${TARGET_ARCH}" "/out/kernel-release-${TARGET_ARCH}"
         '
 fi
 
