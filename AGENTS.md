@@ -45,7 +45,7 @@
 
 ## Core Goals & Constraints
 
-- **Minimal Base**: target small size (e.g. ≤ ~50MB for core image).
+- **Minimal Base**: every bootable host image (ISO and initramfs, for both kernel flavors) must stay **< 300 MB** (enforced in CI); the minimal container base rootfs is ≈16 MB.
 - **Stateless & Immutable by default**: aim for immutable root filesystem, minimal writeable areas.
 - **Cloud‑Native First**: containerd, Docker/Podman support out of the box.
 - **Modular Extensible Architecture**: allow plug‑in modules.

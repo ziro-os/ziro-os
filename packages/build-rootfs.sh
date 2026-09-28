@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ziro-OS Robust Multi-Architecture Rootfs Builder
-# Creates both minimal container base (< 10MB) and full container host OS initramfs.
+# Creates both the minimal container base (~16MB) and the full container host OS initramfs (<300MB).
 
 set -euo pipefail
 
@@ -39,11 +39,20 @@ BUILD_DIR="$REPO_ROOT/build"
 ALPINE_IMAGE="${ALPINE_IMAGE:-alpine:3.24}"
 DOWNLOAD_DIR="$BUILD_DIR/downloads"
 ROOTFS_MINIMAL="$BUILD_DIR/rootfs-minimal-$TARGET_ARCH"
-ROOTFS_FULL="$BUILD_DIR/rootfs-full-$TARGET_ARCH"
+# Kernel flavor: alpine (linux-virt, default) or custom (kernel/build-kernel.sh). The minimal
+# docker rootfs is flavor-independent; host artifacts of the custom flavor carry a "-custom" suffix.
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-alpine}"
+[ "${BUILD_FROM_SOURCE:-0}" = "1" ] && KERNEL_FLAVOR="custom"
+case "$KERNEL_FLAVOR" in
+    alpine) SUFFIX="" ;;
+    custom) SUFFIX="-custom" ;;
+    *) echo "❌ Unknown KERNEL_FLAVOR '$KERNEL_FLAVOR' (use alpine or custom)"; exit 1 ;;
+esac
+ROOTFS_FULL="$BUILD_DIR/rootfs-full-$TARGET_ARCH$SUFFIX"
 
 mkdir -p "$BUILD_DIR" "$DOWNLOAD_DIR"
 if [ -d "$ROOTFS_MINIMAL" ] || [ -d "$ROOTFS_FULL" ]; then
-    docker run --rm -v "$BUILD_DIR:/b" "$ALPINE_IMAGE" rm -rf "/b/rootfs-minimal-$TARGET_ARCH" "/b/rootfs-full-$TARGET_ARCH" 2>/dev/null || true
+    docker run --rm -v "$BUILD_DIR:/b" "$ALPINE_IMAGE" rm -rf "/b/$(basename "$ROOTFS_MINIMAL")" "/b/$(basename "$ROOTFS_FULL")" 2>/dev/null || true
     rm -rf "$ROOTFS_MINIMAL" "$ROOTFS_FULL" 2>/dev/null || true
 fi
 mkdir -p "$ROOTFS_MINIMAL" "$ROOTFS_FULL"
@@ -210,7 +219,7 @@ cp "$INIT_BIN" "$ROOTFS_MINIMAL/sbin/ziro-init"
 chmod +x "$ROOTFS_MINIMAL/sbin/ziro-init"
 echo "✓ ziro-init supervisor installed"
 
-# --- 4. Package Minimal Docker Base Rootfs (< 10MB) ---
+# --- 4. Package Minimal Docker Base Rootfs (~16MB) ---
 echo "--- [4/5] Packaging Minimal Docker Base Rootfs ---"
 MINIMAL_TAR="$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz"
 HOST_UID=$(id -u)
@@ -282,35 +291,38 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ROOTFS_FULL:/rootfs" \
     -v "$BUILD_DIR:/out" \
     -e TARGET_ARCH="$TARGET_ARCH" \
-    -e BUILD_FROM_SOURCE="${BUILD_FROM_SOURCE:-0}" \
+    -e KERNEL_FLAVOR="$KERNEL_FLAVOR" \
+    -e SUFFIX="$SUFFIX" \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
     "$ALPINE_IMAGE" sh -c '
     # Kernel + modules always come from ONE source so their versions match:
-    #   BUILD_FROM_SOURCE=1 -> kernel/build-kernel.sh output (build/kernel-<arch>/)
-    #   default             -> Alpine linux-virt package
+    #   KERNEL_FLAVOR=custom -> kernel/build-kernel.sh output (build/kernel-custom-<arch>/)
+    #   KERNEL_FLAVOR=alpine -> Alpine linux-virt package
     apk add --no-cache kmod >/dev/null 2>&1
     mkdir -p /rootfs/lib/modules /rootfs/boot
     rm -rf /rootfs/lib/modules/*
-    SRC="/out/kernel-${TARGET_ARCH}"
-    if [ "${BUILD_FROM_SOURCE:-0}" = "1" ]; then
+    if [ "$KERNEL_FLAVOR" = "custom" ]; then
+        SRC="/out/kernel-custom-${TARGET_ARCH}"
         if [ ! -f "$SRC/vmlinuz" ] || [ ! -f "$SRC/kernel.release" ]; then
-            echo "BUILD_FROM_SOURCE=1 but $SRC has no kernel; run kernel/build-kernel.sh first" >&2
+            echo "KERNEL_FLAVOR=custom but $SRC has no kernel; run: KERNEL_FLAVOR=custom kernel/build-kernel.sh ${TARGET_ARCH}" >&2
             exit 1
         fi
-        echo "Using source-built kernel $(cat "$SRC/kernel.release")..."
-        [ -d "$SRC/modroot/lib/modules" ] && cp -a "$SRC/modroot/lib/modules/." /rootfs/lib/modules/
+        echo "Using Ziro custom kernel $(cat "$SRC/kernel.release")..."
+        cp -a "$SRC/modroot/lib/modules/." /rootfs/lib/modules/
         cp "$SRC/vmlinuz" /rootfs/boot/vmlinuz
-        cp "$SRC/kernel.release" "/out/kernel-release-${TARGET_ARCH}"
+        cp "$SRC/kernel.release" "/out/kernel-release-${TARGET_ARCH}${SUFFIX}"
     else
-        echo "Installing kernel drivers & modules (linux-virt)..."
+        echo "Installing Alpine linux-virt kernel & modules..."
         apk add --no-cache linux-virt >/dev/null 2>&1
         cp -a /lib/modules/. /rootfs/lib/modules/
         cp /boot/vmlinuz-virt /rootfs/boot/vmlinuz
-        ls /lib/modules > "/out/kernel-release-${TARGET_ARCH}"
+        ls /lib/modules > "/out/kernel-release-${TARGET_ARCH}${SUFFIX}"
     fi
-    cp /rootfs/boot/vmlinuz "/out/vmlinuz-${TARGET_ARCH}"
-    chown "${HOST_UID}:${HOST_GID}" "/out/vmlinuz-${TARGET_ARCH}" "/out/kernel-release-${TARGET_ARCH}"
+    sed -i "/^KERNEL_FLAVOR=/d" /rootfs/etc/ziro-release
+    echo "KERNEL_FLAVOR=\"$KERNEL_FLAVOR\"" >> /rootfs/etc/ziro-release
+    cp /rootfs/boot/vmlinuz "/out/vmlinuz-${TARGET_ARCH}${SUFFIX}"
+    chown "${HOST_UID}:${HOST_GID}" "/out/vmlinuz-${TARGET_ARCH}${SUFFIX}" "/out/kernel-release-${TARGET_ARCH}${SUFFIX}"
 
     # Run depmod to index all kernel modules for fast, clean modprobe at boot
     for kver in /rootfs/lib/modules/*; do
@@ -450,11 +462,12 @@ fi
 
 # Package Full Host OS Initramfs via Docker container (runs as root, eliminating permission denied errors on /var/empty or lock files)
 echo "Packaging Full Container OS Initramfs via Docker container..."
-FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"
+FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH$SUFFIX.cpio.gz"
 docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ROOTFS_FULL:/rootfs" \
     -v "$BUILD_DIR:/out" \
     -e TARGET_ARCH="$TARGET_ARCH" \
+    -e SUFFIX="$SUFFIX" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
     "$ALPINE_IMAGE" sh -c '
@@ -475,15 +488,15 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
 
         cd /rootfs
         if command -v pigz >/dev/null 2>&1; then
-            find . | cpio -o -H newc | pigz > "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+            find . | cpio -o -H newc | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         else
-            find . | cpio -o -H newc | gzip > "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+            find . | cpio -o -H newc | gzip > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         fi
-        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
-        chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}.cpio.gz"
+        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
+        chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         chmod -R a+rX /rootfs 2>/dev/null || true
     '
-FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"
+FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH$SUFFIX.cpio.gz"
 INITRAMFS_SIZE=$(du -h "$FULL_INITRAMFS" | cut -f1)
 echo "✅ Full OS Initramfs:    $FULL_INITRAMFS ($INITRAMFS_SIZE)"
 

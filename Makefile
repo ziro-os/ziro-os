@@ -28,6 +28,8 @@ endif
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo "1.0.9")
 IMAGE_TAG ?= ziro-os:latest
 export ALPINE_IMAGE ?= alpine:3.24
+# Kernel flavor: alpine (Alpine linux-virt, default) or custom (Ziro kernel from kernel.org sources)
+export KERNEL_FLAVOR ?= alpine
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%d" 2>/dev/null || echo "unknown")
 LDFLAGS_ZIRO := -s -w -X github.com/ziro-os/ziroctl/cmd.Version=$(VERSION) -X github.com/ziro-os/ziroctl/cmd.GitCommit=$(GIT_COMMIT) -X github.com/ziro-os/ziroctl/cmd.BuildDate=$(BUILD_DATE)
@@ -88,7 +90,7 @@ docker-multiarch: rootfs-all
 
 # --- Linux Kernel ---
 kernel:
-	@echo "Building Linux kernel for $(ARCH_NORMALIZED)..."
+	@echo "Preparing $(KERNEL_FLAVOR) kernel for $(ARCH_NORMALIZED)..."
 	@./kernel/build-kernel.sh $(ARCH_NORMALIZED)
 
 # --- Virtualization & ISO ---
@@ -109,7 +111,7 @@ test-unit:
 
 # Boots build/vmlinuz + initramfs in QEMU and checks the running host (needs qemu-system-*)
 test-boot:
-	@python3 tests/qemu/boot-smoke.py --arch $(ARCH_NORMALIZED)
+	@python3 tests/qemu/boot-smoke.py --arch $(ARCH_NORMALIZED) --flavor $(KERNEL_FLAVOR)
 
 test-smoke: docker-image
 	@echo "Running container smoke test suite..."
@@ -140,7 +142,7 @@ help:
 	@echo "  all             - Build tools, rootfs, and Docker base image (default)"
 	@echo "  tools           - Compile static ziroctl CLI for TARGET_ARCH"
 	@echo "  tools-all       - Compile ziroctl for both x86_64 and arm64"
-	@echo "  rootfs          - Build minimal rootfs (<10MB) and full initramfs"
+	@echo "  rootfs          - Build minimal rootfs (~16MB) and full host initramfs (<300MB)"
 	@echo "  rootfs-all      - Build rootfs for both x86_64 and arm64"
 	@echo "  docker-image    - Build & verify local Docker base image (ziro-os:latest)"
 	@echo "  docker-multiarch- Build multi-arch OCI image with Docker buildx"

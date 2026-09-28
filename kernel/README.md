@@ -1,11 +1,14 @@
 # Kernel
 
-This directory contains kernel sources, patches, and configuration files for Ziro-OS.
+Ziro-OS has two kernel flavors (see [docs/building.md](../docs/building.md#-kernel-flavors)):
 
-## Structure
-- `config/` - Kernel configuration files for different target platforms
-- `patches/` - Custom patches for minimal kernel build
-- `linux/` - Linux kernel source or submodule (if using Linux)
+- `alpine` (default): Alpine `linux-virt`, installed together with its modules by `packages/build-rootfs.sh`.
+- `custom`: built by `build-kernel.sh` from kernel.org LTS sources, using the upstream arch `defconfig` plus:
+  - `configs/ziro-common.config`: containers, networking, filesystems, cloud/hypervisor drivers, hardening
+  - `configs/ziro-x86_64.config`, `configs/ziro-arm64.config`: arch-specific options
 
-## Build
-Run `make kernel` from project root to build the kernel with Ziro-OS optimizations.
+```bash
+KERNEL_FLAVOR=custom ./kernel/build-kernel.sh x86_64   # -> build/kernel-custom-x86_64/{vmlinuz,modroot,config}
+```
+
+The build fails if any requested option does not survive `olddefconfig`.

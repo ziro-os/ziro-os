@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/generate-release-page.sh'
+      - '.github/workflows/pages.yml'
       - 'public/**'
       - 'community/**'
       - 'docs/**'
@@ -36,6 +37,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Generate Release & Images Catalog
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           chmod +x scripts/generate-release-page.sh
           ./scripts/generate-release-page.sh _site

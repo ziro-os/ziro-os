@@ -8,11 +8,12 @@ Ziro-OS is an ultra-lightweight, container-native operating system built from fi
 
 ## ✨ Key Capabilities
 
-- **Tiny Base Footprint**: Sub-15MB minimal Docker base image (`ziro-os:latest`), built `FROM scratch` with musl libc, BusyBox, `ziroctl`, and `ziropkg`.
+- **Tiny Base Footprint**: ≈16 MB minimal Docker base image (`ziro-os:latest`), built `FROM scratch` with musl libc, BusyBox, `ziroctl`, and `ziropkg`.
 - **Integrated Package Manager (`ziropkg`)**: Fast, verified package management out of the box (`ziropkg install curl`, `ziroctl pkg install jq`).
 - **First-Class OCI Support**: Native integration with `containerd`, `runc`, and CNI plugins (`bridge`, `loopback`, `portmap`, `firewall`).
 - **High-Performance C99 Init (`ziro-init`)**: Robust PID 1 supervisor managing early mounts, cgroups v2 hierarchy, loopback networking, containerd lifecycle, and non-blocking zombie process reaping.
 - **True Multi-Architecture**: Full support for `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).
+- **Two Kernel Flavors**: Alpine `linux-virt` (default, VM-tuned) or the Ziro custom LTS kernel (bare metal plus KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro and GCP, with enforced module signing). Each flavor ships its own images, and CI boot-tests every build in QEMU.
 - **Sub-Second Virtualization**: Direct-kernel boot for QEMU microVMs, AWS Firecracker, and Cloud-Hypervisor, alongside hybrid UEFI/BIOS bootable ISO generation.
 - **Built-in Security & Hardening**: Immutable root filesystem, Linux namespaces, kernel seccomp filters, and hardened sysctl parameters.
 
@@ -132,7 +133,7 @@ ziroctl security harden                # Apply hardened kernel sysctls, SSH key-
 | `make all` | Build `ziroctl`, `ziropkg`, rootfs, and Docker base image for host architecture |
 | `make tools` | Compile static `ziroctl` and `ziropkg` binaries into `bin/` |
 | `make tools-all` | Compile `ziroctl` and `ziropkg` for both `x86_64` and `arm64` |
-| `make rootfs` | Build minimal rootfs (<15MB) and full initramfs |
+| `make rootfs` | Build minimal rootfs (≈16 MB) and full host initramfs (< 300 MB) |
 | `make rootfs-all` | Build rootfs archives for both `x86_64` and `arm64` |
 | `make docker-image` | Build local `ziro-os:latest` Docker base image |
 | `make docker-multiarch` | Build multi-arch OCI image with Docker buildx (`amd64` + `arm64`) |
@@ -204,6 +205,7 @@ ziro-os/
 - [System Architecture](docs/architecture.md)
 - [Multi-Architecture Building](docs/building.md)
 - [Security & Hardening Model](docs/security.md)
+- [Upgrading Ziro-OS](docs/upgrade.md)
 - [Virtualization & Hypervisors](docs/virtualization.md)
 
 ---

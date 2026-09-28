@@ -19,12 +19,13 @@ import time
 BOOT_MARKER = "Live initialization complete"
 
 
-def qemu_command(arch, build_dir):
-    kernel = os.path.join(build_dir, f"vmlinuz-{arch}")
-    initrd = os.path.join(build_dir, f"ziro-initramfs-{arch}.cpio.gz")
+def qemu_command(arch, build_dir, flavor):
+    sfx = "" if flavor == "alpine" else f"-{flavor}"
+    kernel = os.path.join(build_dir, f"vmlinuz-{arch}{sfx}")
+    initrd = os.path.join(build_dir, f"ziro-initramfs-{arch}{sfx}.cpio.gz")
     for f in (kernel, initrd):
         if not os.path.exists(f):
-            sys.exit(f"missing {f}; run 'make rootfs TARGET_ARCH={arch}' first")
+            sys.exit(f"missing {f}; run 'make rootfs TARGET_ARCH={arch} KERNEL_FLAVOR={flavor}' first")
 
     host = platform.machine().lower()
     native = (arch == "x86_64" and host in ("x86_64", "amd64")) or (arch == "arm64" and host in ("arm64", "aarch64"))
@@ -114,14 +115,15 @@ def main():
     ap = argparse.ArgumentParser()
     default_arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
     ap.add_argument("--arch", default=default_arch, choices=["x86_64", "arm64"])
+    ap.add_argument("--flavor", default=os.environ.get("KERNEL_FLAVOR", "alpine"), choices=["alpine", "custom"])
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--boot-timeout", type=int, default=600)
     ap.add_argument("--no-pull", action="store_true", help="skip the container run check (no internet)")
     args = ap.parse_args()
 
-    cmd, accel = qemu_command(args.arch, args.build_dir)
-    log_path = os.path.join(args.build_dir, f"qemu-boot-{args.arch}.log")
-    print(f"booting {args.arch} ({accel}); serial log: {log_path}")
+    cmd, accel = qemu_command(args.arch, args.build_dir, args.flavor)
+    log_path = os.path.join(args.build_dir, f"qemu-boot-{args.arch}-{args.flavor}.log")
+    print(f"booting {args.arch}/{args.flavor} kernel ({accel}); serial log: {log_path}")
     con = Console(cmd, log_path)
 
     results = []

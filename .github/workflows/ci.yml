@@ -91,12 +91,17 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: qemu-boot-log-${{ github.sha }}
-          path: build/qemu-boot-x86_64.log
+          path: build/qemu-boot-x86_64-*.log
           if-no-files-found: ignore
 
-      - name: Verify Artifacts
+      - name: Verify Artifacts & enforce image size goal (< 300 MB)
         run: |
           ls -la build/
+          for f in build/ziro-os-x86_64.iso build/ziro-initramfs-x86_64.cpio.gz; do
+            size=$(stat -c %s "$f")
+            echo "$f: $((size / 1000000)) MB"
+            [ "$size" -lt 300000000 ] || { echo "::error::$f exceeds the 300 MB image goal"; exit 1; }
+          done
           test -f build/ziro-os-x86_64.iso
           test -f build/ziro-rootfs-x86_64.tar.gz
           test -f build/ziro-initramfs-x86_64.cpio.gz

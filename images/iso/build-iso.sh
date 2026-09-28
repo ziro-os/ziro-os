@@ -29,22 +29,26 @@ echo " Architecture: $TARGET_ARCH"
 echo "=================================================="
 
 BUILD_DIR="$REPO_ROOT/build"
-ISO_STAGING="$BUILD_DIR/iso-staging-$TARGET_ARCH"
-OUTPUT_ISO="$BUILD_DIR/ziro-os-$TARGET_ARCH.iso"
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-alpine}"
+[ "${BUILD_FROM_SOURCE:-0}" = "1" ] && KERNEL_FLAVOR="custom"
+SUFFIX=""
+[ "$KERNEL_FLAVOR" = "custom" ] && SUFFIX="-custom"
+ISO_STAGING="$BUILD_DIR/iso-staging-$TARGET_ARCH$SUFFIX"
+OUTPUT_ISO="$BUILD_DIR/ziro-os-$TARGET_ARCH$SUFFIX.iso"
 
 mkdir -p "$BUILD_DIR"
 rm -rf "$ISO_STAGING"
 mkdir -p "$ISO_STAGING/boot/grub"
 
 # Verify kernel
-KERNEL_FILE="$BUILD_DIR/vmlinuz-$TARGET_ARCH"
+KERNEL_FILE="$BUILD_DIR/vmlinuz-$TARGET_ARCH$SUFFIX"
 if [ ! -f "$KERNEL_FILE" ]; then
     echo "Kernel not found at $KERNEL_FILE. Building rootfs (provisions kernel + matching modules)..."
     "$REPO_ROOT/packages/build-rootfs.sh" "$TARGET_ARCH"
 fi
 
 # Verify initramfs
-INITRAMFS_FILE="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH.cpio.gz"
+INITRAMFS_FILE="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH$SUFFIX.cpio.gz"
 if [ ! -f "$INITRAMFS_FILE" ]; then
     echo "Initramfs not found: $INITRAMFS_FILE"
     echo "Building rootfs first with: ./packages/build-rootfs.sh $TARGET_ARCH"
@@ -52,11 +56,11 @@ if [ ! -f "$INITRAMFS_FILE" ]; then
 fi
 
 # The kernel must match the modules packed in the initramfs, or every modprobe fails at boot.
-KREL=$(cat "$BUILD_DIR/kernel-release-$TARGET_ARCH" 2>/dev/null || true)
-if [ -z "$KREL" ] || [ ! -d "$BUILD_DIR/rootfs-full-$TARGET_ARCH/lib/modules/$KREL" ]; then
+KREL=$(cat "$BUILD_DIR/kernel-release-$TARGET_ARCH$SUFFIX" 2>/dev/null || true)
+if [ -z "$KREL" ] || [ ! -d "$BUILD_DIR/rootfs-full-$TARGET_ARCH$SUFFIX/lib/modules/$KREL" ]; then
     echo "❌ Kernel/modules mismatch: kernel '${KREL:-unknown}' vs rootfs modules:" \
-        "$(ls "$BUILD_DIR/rootfs-full-$TARGET_ARCH/lib/modules" 2>/dev/null | tr '\n' ' ')"
-    echo "   Rebuild both from one source: ./packages/build-rootfs.sh $TARGET_ARCH"
+        "$(ls "$BUILD_DIR/rootfs-full-$TARGET_ARCH$SUFFIX/lib/modules" 2>/dev/null | tr '\n' ' ')"
+    echo "   Rebuild both from one source: KERNEL_FLAVOR=$KERNEL_FLAVOR ./packages/build-rootfs.sh $TARGET_ARCH"
     exit 1
 fi
 
@@ -109,6 +113,11 @@ menuentry "Ziro-OS Automated Terminal Installer" {
     initrd /boot/initramfs.cpio.gz
 }
 
+menuentry "Upgrade Existing Ziro-OS Install (keep all data)" {
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.autoinstall ziro.upgrade
+    initrd /boot/initramfs.cpio.gz
+}
+
 menuentry "Boot Installed Ziro-OS from Hard Drive (auto-detect)" {
     search --no-floppy --label --set=root ZIRO_ROOT
     linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0
@@ -141,6 +150,7 @@ docker run --rm \
     -v "$ISO_STAGING:/iso" \
     -v "$BUILD_DIR:/out" \
     -e TARGET_ARCH="$TARGET_ARCH" \
+    -e SUFFIX="$SUFFIX" \
     -e GRUB_PACKAGES="$GRUB_PACKAGES" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
@@ -148,9 +158,11 @@ docker run --rm \
         set -e
         echo "Installing xorriso, mtools, and bootloader tools (${GRUB_PACKAGES})..."
         apk add --no-cache xorriso mtools ${GRUB_PACKAGES} >/dev/null 2>&1
+        # Lets the installer detect corrupt media before an upgrade touches the disk
+        (cd /iso && sha256sum boot/vmlinuz boot/initramfs.cpio.gz > SHA256SUMS)
         echo "Generating hybrid bootable ISO image with El Torito BIOS + UEFI catalogs..."
-        grub-mkrescue -o "/out/ziro-os-${TARGET_ARCH}.iso" /iso 2>&1
-        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-os-${TARGET_ARCH}.iso"
+        grub-mkrescue -o "/out/ziro-os-${TARGET_ARCH}${SUFFIX}.iso" /iso 2>&1
+        chown "${HOST_UID}:${HOST_GID}" "/out/ziro-os-${TARGET_ARCH}${SUFFIX}.iso"
     '
 
 ISO_SIZE=$(du -h "$OUTPUT_ISO" | cut -f1)

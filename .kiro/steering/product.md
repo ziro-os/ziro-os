@@ -22,7 +22,7 @@ Ziro‑OS is a cloud‑native, ultra‑lightweight operating system designed fro
 
 ## 📈 Success Metrics
 
-- Base image size (e.g. ≤ 50 MB, excluding container runtimes)
+- Image size: bootable host image (ISO / initramfs, both kernel flavors) < 300 MB; minimal container base ≈16 MB
 - Boot time (from power-on / VM start to runtime ready)
 - Memory / CPU overhead vs minimal Linux
 - Compatibility with common container tooling (Docker CLI, Podman, `ctr`)

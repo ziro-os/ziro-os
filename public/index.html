@@ -425,12 +425,12 @@
     <!-- Metrics Strip -->
     <section class="stats-strip">
       <div class="stat-item">
-        <div class="stat-val">&le; 15 MB</div>
-        <div class="stat-label">Core Base Image</div>
+        <div class="stat-val">15.9 MB</div>
+        <div class="stat-label">Minimal Container Base</div>
       </div>
       <div class="stat-item">
-        <div class="stat-val">&lt; 1 sec</div>
-        <div class="stat-label">MicroVM Boot Time</div>
+        <div class="stat-val">&lt; 300 MB</div>
+        <div class="stat-label">Full Host Image (CI-enforced)</div>
       </div>
       <div class="stat-item">
         <div class="stat-val">containerd</div>
@@ -450,32 +450,35 @@
       </div>
 
       <div class="grid">
-        <!-- ISO Card -->
+        <!-- Host image: Alpine kernel -->
         <div class="card">
           <div class="card-top">
             <div class="card-header-row">
-              <span class="card-title">💿 Hybrid Bootable ISO</span>
-              <span class="badge-arch">x86_64</span>
+              <span class="card-title">💿 Host Image &middot; Alpine Kernel</span>
+              <span class="badge-arch">Default</span>
             </div>
-            <p class="card-desc">Universal UEFI/BIOS bootable ISO for physical hardware, VMware, Proxmox, and VirtualBox.</p>
+            <p class="card-desc">Alpine <code>linux-virt</code> LTS kernel, tuned for virtual machines (KVM, QEMU, Proxmox, cloud VMs). UEFI/BIOS ISO, host initramfs with containerd, and the matching kernel for direct boot.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziro-os-x86_64.iso" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-os-x86_64.iso">Download ISO (138MB)</a>
+            <a class="btn" data-asset="ziro-os-x86_64.iso" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-os-x86_64.iso">ISO x86_64<span class="size"> (226.9 MB)</span></a>
+            <a class="btn btn-subtle" data-asset="ziro-initramfs-x86_64.cpio.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-initramfs-x86_64.cpio.gz">initramfs x86_64<span class="size"> (185.2 MB)</span></a>
+            <a class="btn btn-subtle" data-asset="ziro-initramfs-arm64.cpio.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-initramfs-arm64.cpio.gz">initramfs arm64<span class="size"> (165.0 MB)</span></a>
+            
+            
           </div>
         </div>
 
-        <!-- Initramfs Card -->
+        <!-- Host image: Ziro custom kernel -->
         <div class="card">
           <div class="card-top">
             <div class="card-header-row">
-              <span class="card-title">⚡ Host Initramfs</span>
-              <span class="badge-arch">Dual Arch</span>
+              <span class="card-title">🧬 Host Image &middot; Ziro Custom Kernel</span>
+              <span class="badge-arch">Any Hardware</span>
             </div>
-            <p class="card-desc">Complete container host image with ziro-init (PID 1), containerd 2.3, runc, and CNI plugins.</p>
+            <p class="card-desc">Ziro kernel built from kernel.org LTS sources: the upstream defconfig plus drivers for bare metal, KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro and GCP, with the security hardening built in. Boot-tested in CI on every build.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziro-initramfs-x86_64.cpio.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-initramfs-x86_64.cpio.gz">x86_64 (116MB)</a>
-            <a class="btn btn-subtle" data-asset="ziro-initramfs-arm64.cpio.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-initramfs-arm64.cpio.gz">arm64 (107MB)</a>
+            <span class="card-desc">Not in this release yet; published from the next release onward.</span>
           </div>
         </div>
 
@@ -489,8 +492,8 @@
             <p class="card-desc">Stripped root filesystem archive for custom container builds and lightweight microVM roots.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziro-rootfs-x86_64.tar.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-rootfs-x86_64.tar.gz">x86_64 (12MB)</a>
-            <a class="btn btn-subtle" data-asset="ziro-rootfs-arm64.tar.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-rootfs-arm64.tar.gz">arm64 (12MB)</a>
+            <a class="btn" data-asset="ziro-rootfs-x86_64.tar.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-rootfs-x86_64.tar.gz">x86_64<span class="size"> (15.9 MB)</span></a>
+            <a class="btn btn-subtle" data-asset="ziro-rootfs-arm64.tar.gz" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziro-rootfs-arm64.tar.gz">arm64<span class="size"> (15.5 MB)</span></a>
           </div>
         </div>
 
@@ -504,8 +507,8 @@
             <p class="card-desc">Statically linked CLI for system inspection, container lifecycles, and security auditing.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziroctl-x86_64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziroctl-x86_64">x86_64</a>
-            <a class="btn btn-subtle" data-asset="ziroctl-arm64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziroctl-arm64">arm64</a>
+            <a class="btn" data-asset="ziroctl-x86_64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziroctl-x86_64">x86_64<span class="size"> (8.9 MB)</span></a>
+            <a class="btn btn-subtle" data-asset="ziroctl-arm64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziroctl-arm64">arm64<span class="size"> (8.3 MB)</span></a>
           </div>
         </div>
 
@@ -519,8 +522,8 @@
             <p class="card-desc">Package manager CLI for installing verified packages (curl, jq, git, htop) on Ziro-OS.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziropkg-x86_64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziropkg-x86_64">x86_64</a>
-            <a class="btn btn-subtle" data-asset="ziropkg-arm64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziropkg-arm64">arm64</a>
+            <a class="btn" data-asset="ziropkg-x86_64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziropkg-x86_64">x86_64<span class="size"> (4.1 MB)</span></a>
+            <a class="btn btn-subtle" data-asset="ziropkg-arm64" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/ziropkg-arm64">arm64<span class="size"> (3.9 MB)</span></a>
           </div>
         </div>
 
@@ -534,7 +537,7 @@
             <p class="card-desc">Cryptographic SHA256 checksum manifest for verifying artifact integrity.</p>
           </div>
           <div class="btn-group">
-            <a class="btn btn-subtle" data-asset="SHA256SUMS" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/SHA256SUMS">Download SHA256SUMS</a>
+            <a class="btn btn-subtle" data-asset="SHA256SUMS" href="https://github.com/ziro-os/ziro-os/releases/download/v1.0.9/SHA256SUMS">Download SHA256SUMS<span class="size"> (1.2 KB)</span></a>
           </div>
         </div>
       </div>
@@ -546,6 +549,7 @@
         <h2>Quick Start</h2>
         <span>CLI Reference</span>
       </div>
+      <div class="cmd-grid">
         <div class="cmd-item">
           <label>Disk Installation</label>
           <pre>ziro-install   # or: ziroctl install -d /dev/sda -y</pre>
@@ -612,6 +616,8 @@
               const link = document.querySelector('[data-asset="' + asset.name + '"]');
               if (link) {
                 link.href = asset.browser_download_url;
+                const size = link.querySelector('.size');
+                if (size) size.textContent = asset.size < 1000000 ? ' (' + (asset.size / 1000).toFixed(1) + ' KB)' : ' (' + (asset.size / 1000000).toFixed(1) + ' MB)';
               }
             });
           }

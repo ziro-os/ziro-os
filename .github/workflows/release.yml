@@ -21,8 +21,13 @@ permissions:
   id-token: write
 
 jobs:
+  custom-kernel:
+    name: Custom kernel flavor
+    uses: ./.github/workflows/kernel-custom.yml
+
   release:
     name: Build & Publish Release
+    needs: custom-kernel
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -73,6 +78,21 @@ jobs:
       - name: Build Bootable Hybrid ISO
         run: make image-iso TARGET_ARCH=x86_64
 
+      - name: Enforce image size goal (< 300 MB)
+        run: |
+          for f in build/ziro-os-x86_64.iso build/ziro-initramfs-x86_64.cpio.gz build/ziro-initramfs-arm64.cpio.gz; do
+            size=$(stat -c %s "$f")
+            echo "$f: $((size / 1000000)) MB"
+            [ "$size" -lt 300000000 ] || { echo "::error::$f exceeds the 300 MB image goal"; exit 1; }
+          done
+
+      - name: Download custom kernel flavor artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: custom-kernel-*
+          path: build
+          merge-multiple: true
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
@@ -97,7 +117,7 @@ jobs:
         run: |
           mkdir -p build
           cd build
-          sha256sum ziro-os-*.iso ziro-rootfs-*.tar.gz ziro-initramfs-*.cpio.gz > SHA256SUMS
+          sha256sum ziro-os-*.iso ziro-rootfs-*.tar.gz ziro-initramfs-*.cpio.gz vmlinuz-x86_64* vmlinuz-arm64* kernel-config-* > SHA256SUMS
           cd ../bin
           sha256sum ziroctl-* ziropkg-* >> ../build/SHA256SUMS
           echo "Generated SHA256SUMS:"
@@ -117,6 +137,9 @@ jobs:
             build/ziro-os-*.iso
             build/ziro-rootfs-*.tar.gz
             build/ziro-initramfs-*.cpio.gz
+            build/vmlinuz-x86_64*
+            build/vmlinuz-arm64*
+            build/kernel-config-*
             build/SHA256SUMS
             bin/ziroctl-*
             bin/ziropkg-*

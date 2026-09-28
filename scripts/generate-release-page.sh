@@ -34,6 +34,46 @@ REGISTRY_TAGGED="ghcr.io/${REPO_NAME}:${RELEASE_VERSION}"
 
 mkdir -p "$OUTPUT_DIR"
 
+# Real asset sizes come from the GitHub Releases API, never hardcoded numbers.
+# GITHUB_TOKEN (set in CI) only raises the API rate limit; the release data is public.
+ASSET_SIZES=""
+API_URL="https://api.github.com/repos/${REPO_NAME}/releases/tags/${RELEASE_VERSION}"
+AUTH_HEADER=()
+[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HEADER=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+if RELEASE_JSON=$(curl -fsSL ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} "$API_URL" 2>/dev/null); then
+    ASSET_SIZES=$(printf '%s' "$RELEASE_JSON" | python3 -c 'import json,sys
+for a in json.load(sys.stdin).get("assets", []): print(a["name"], a["size"])')
+    echo "Resolved $(printf '%s\n' "$ASSET_SIZES" | grep -c . || true) release assets for ${RELEASE_VERSION}"
+else
+    echo "Warning: could not query ${API_URL}; sizes are filled in by the browser from the live release." >&2
+fi
+
+asset_bytes() { printf '%s\n' "$ASSET_SIZES" | awk -v n="$1" '$1 == n { print $2 }'; }
+
+# Decimal megabytes (1 MB = 1,000,000 bytes), matching the CI size gate.
+fmt_mb() { awk -v b="$1" 'BEGIN { if (b < 1000000) printf "%.1f KB", b / 1000; else printf "%.1f MB", b / 1000000 }'; }
+
+# btn <asset> <label> [subtle]: a download button with its real size; omitted when the
+# release is known and does not contain the asset (e.g. a flavor not built for that arch).
+btn() {
+    local name="$1" label="$2" cls="btn" bytes size=""
+    [ "${3:-}" = "subtle" ] && cls="btn btn-subtle"
+    bytes=$(asset_bytes "$name")
+    if [ -z "$bytes" ] && [ -n "$ASSET_SIZES" ]; then return 0; fi
+    [ -n "$bytes" ] && size=" ($(fmt_mb "$bytes"))"
+    printf '<a class="%s" data-asset="%s" href="%s/%s">%s<span class="size">%s</span></a>' \
+        "$cls" "$name" "$DOWNLOAD_BASE" "$name" "$label" "$size"
+}
+
+CUSTOM_BTNS="$(btn ziro-os-x86_64-custom.iso "ISO x86_64")$(btn ziro-initramfs-x86_64-custom.cpio.gz "initramfs x86_64" subtle)$(btn ziro-initramfs-arm64-custom.cpio.gz "initramfs arm64" subtle)$(btn vmlinuz-x86_64-custom "kernel x86_64" subtle)$(btn vmlinuz-arm64-custom "kernel arm64" subtle)$(btn kernel-config-x86_64-custom ".config x86_64" subtle)$(btn kernel-config-arm64-custom ".config arm64" subtle)"
+if [ -z "$CUSTOM_BTNS" ]; then
+    CUSTOM_BTNS='<span class="card-desc">Not in this release yet; published from the next release onward.</span>'
+fi
+
+MINIMAL_BYTES=$(asset_bytes "ziro-rootfs-x86_64.tar.gz")
+MINIMAL_STAT="&asymp; 16 MB"
+[ -n "$MINIMAL_BYTES" ] && MINIMAL_STAT=$(fmt_mb "$MINIMAL_BYTES")
+
 cat > "$OUTPUT_DIR/index.html" <<EOF
 <!DOCTYPE html>
 <html lang="en">
@@ -462,12 +502,12 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
     <!-- Metrics Strip -->
     <section class="stats-strip">
       <div class="stat-item">
-        <div class="stat-val">&le; 15 MB</div>
-        <div class="stat-label">Core Base Image</div>
+        <div class="stat-val">${MINIMAL_STAT}</div>
+        <div class="stat-label">Minimal Container Base</div>
       </div>
       <div class="stat-item">
-        <div class="stat-val">&lt; 1 sec</div>
-        <div class="stat-label">MicroVM Boot Time</div>
+        <div class="stat-val">&lt; 300 MB</div>
+        <div class="stat-label">Full Host Image (CI-enforced)</div>
       </div>
       <div class="stat-item">
         <div class="stat-val">containerd</div>
@@ -487,32 +527,35 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
       </div>
 
       <div class="grid">
-        <!-- ISO Card -->
+        <!-- Host image: Alpine kernel -->
         <div class="card">
           <div class="card-top">
             <div class="card-header-row">
-              <span class="card-title">💿 Hybrid Bootable ISO</span>
-              <span class="badge-arch">x86_64</span>
+              <span class="card-title">💿 Host Image &middot; Alpine Kernel</span>
+              <span class="badge-arch">Default</span>
             </div>
-            <p class="card-desc">Universal UEFI/BIOS bootable ISO for physical hardware, VMware, Proxmox, and VirtualBox.</p>
+            <p class="card-desc">Alpine <code>linux-virt</code> LTS kernel, tuned for virtual machines (KVM, QEMU, Proxmox, cloud VMs). UEFI/BIOS ISO, host initramfs with containerd, and the matching kernel for direct boot.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziro-os-x86_64.iso" href="${DOWNLOAD_BASE}/ziro-os-x86_64.iso">Download ISO (138MB)</a>
+            $(btn ziro-os-x86_64.iso "ISO x86_64")
+            $(btn ziro-initramfs-x86_64.cpio.gz "initramfs x86_64" subtle)
+            $(btn ziro-initramfs-arm64.cpio.gz "initramfs arm64" subtle)
+            $(btn vmlinuz-x86_64 "kernel x86_64" subtle)
+            $(btn vmlinuz-arm64 "kernel arm64" subtle)
           </div>
         </div>
 
-        <!-- Initramfs Card -->
+        <!-- Host image: Ziro custom kernel -->
         <div class="card">
           <div class="card-top">
             <div class="card-header-row">
-              <span class="card-title">⚡ Host Initramfs</span>
-              <span class="badge-arch">Dual Arch</span>
+              <span class="card-title">🧬 Host Image &middot; Ziro Custom Kernel</span>
+              <span class="badge-arch">Any Hardware</span>
             </div>
-            <p class="card-desc">Complete container host image with ziro-init (PID 1), containerd 2.3, runc, and CNI plugins.</p>
+            <p class="card-desc">Ziro kernel built from kernel.org LTS sources: the upstream defconfig plus drivers for bare metal, KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro and GCP, with the security hardening built in. Boot-tested in CI on every build.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziro-initramfs-x86_64.cpio.gz" href="${DOWNLOAD_BASE}/ziro-initramfs-x86_64.cpio.gz">x86_64 (116MB)</a>
-            <a class="btn btn-subtle" data-asset="ziro-initramfs-arm64.cpio.gz" href="${DOWNLOAD_BASE}/ziro-initramfs-arm64.cpio.gz">arm64 (107MB)</a>
+            ${CUSTOM_BTNS}
           </div>
         </div>
 
@@ -526,8 +569,8 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
             <p class="card-desc">Stripped root filesystem archive for custom container builds and lightweight microVM roots.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziro-rootfs-x86_64.tar.gz" href="${DOWNLOAD_BASE}/ziro-rootfs-x86_64.tar.gz">x86_64 (12MB)</a>
-            <a class="btn btn-subtle" data-asset="ziro-rootfs-arm64.tar.gz" href="${DOWNLOAD_BASE}/ziro-rootfs-arm64.tar.gz">arm64 (12MB)</a>
+            $(btn ziro-rootfs-x86_64.tar.gz "x86_64")
+            $(btn ziro-rootfs-arm64.tar.gz "arm64" subtle)
           </div>
         </div>
 
@@ -541,8 +584,8 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
             <p class="card-desc">Statically linked CLI for system inspection, container lifecycles, and security auditing.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziroctl-x86_64" href="${DOWNLOAD_BASE}/ziroctl-x86_64">x86_64</a>
-            <a class="btn btn-subtle" data-asset="ziroctl-arm64" href="${DOWNLOAD_BASE}/ziroctl-arm64">arm64</a>
+            $(btn ziroctl-x86_64 "x86_64")
+            $(btn ziroctl-arm64 "arm64" subtle)
           </div>
         </div>
 
@@ -556,8 +599,8 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
             <p class="card-desc">Package manager CLI for installing verified packages (curl, jq, git, htop) on Ziro-OS.</p>
           </div>
           <div class="btn-group">
-            <a class="btn" data-asset="ziropkg-x86_64" href="${DOWNLOAD_BASE}/ziropkg-x86_64">x86_64</a>
-            <a class="btn btn-subtle" data-asset="ziropkg-arm64" href="${DOWNLOAD_BASE}/ziropkg-arm64">arm64</a>
+            $(btn ziropkg-x86_64 "x86_64")
+            $(btn ziropkg-arm64 "arm64" subtle)
           </div>
         </div>
 
@@ -571,7 +614,7 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
             <p class="card-desc">Cryptographic SHA256 checksum manifest for verifying artifact integrity.</p>
           </div>
           <div class="btn-group">
-            <a class="btn btn-subtle" data-asset="SHA256SUMS" href="${DOWNLOAD_BASE}/SHA256SUMS">Download SHA256SUMS</a>
+            $(btn SHA256SUMS "Download SHA256SUMS" subtle)
           </div>
         </div>
       </div>
@@ -650,6 +693,8 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
               const link = document.querySelector('[data-asset="' + asset.name + '"]');
               if (link) {
                 link.href = asset.browser_download_url;
+                const size = link.querySelector('.size');
+                if (size) size.textContent = asset.size < 1000000 ? ' (' + (asset.size / 1000).toFixed(1) + ' KB)' : ' (' + (asset.size / 1000000).toFixed(1) + ' MB)';
               }
             });
           }

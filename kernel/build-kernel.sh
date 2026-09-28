@@ -1,6 +1,13 @@
 #!/bin/bash
-# Ziro-OS Reproducible Kernel Builder (Docker-based)
-# Builds or extracts Linux LTS kernel optimized for containers and virtualization.
+# Ziro-OS kernel builder. Two flavors:
+#
+#   KERNEL_FLAVOR=alpine (default)  Alpine linux-virt. Nothing to build here: packages/build-rootfs.sh
+#                                   installs the kernel together with its matching modules.
+#   KERNEL_FLAVOR=custom            Ziro kernel built from kernel.org sources: upstream defconfig
+#                                   (broad hardware) + kernel/configs/ziro-*.config (containers,
+#                                   security, every major cloud/hypervisor). Output: build/kernel-custom-<arch>/
+#
+# BUILD_FROM_SOURCE=1 is accepted as an alias for KERNEL_FLAVOR=custom.
 
 set -euo pipefail
 
@@ -10,20 +17,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RAW_ARCH="${1:-$(uname -m)}"
 case "$RAW_ARCH" in
     x86_64|amd64)
-        TARGET_ARCH="x86_64"
-        KERNEL_ARCH="x86"
-        DOCKER_PLATFORM="linux/amd64"
-        KERNEL_TARGET="bzImage"
-        KERNEL_OUT_SRC="arch/x86/boot/bzImage"
-        ALIAS_ARCH="amd64"
+        TARGET_ARCH="x86_64"; KERNEL_ARCH="x86"; DOCKER_PLATFORM="linux/amd64"
+        KERNEL_TARGET="bzImage"; KERNEL_OUT_SRC="arch/x86/boot/bzImage"
         ;;
     arm64|aarch64)
-        TARGET_ARCH="arm64"
-        KERNEL_ARCH="arm64"
-        DOCKER_PLATFORM="linux/arm64"
-        KERNEL_TARGET="Image"
-        KERNEL_OUT_SRC="arch/arm64/boot/Image"
-        ALIAS_ARCH="aarch64"
+        TARGET_ARCH="arm64"; KERNEL_ARCH="arm64"; DOCKER_PLATFORM="linux/arm64"
+        KERNEL_TARGET="vmlinuz.efi"; KERNEL_OUT_SRC="arch/arm64/boot/vmlinuz.efi"
         ;;
     *)
         echo "❌ Unsupported architecture: $RAW_ARCH"
@@ -31,109 +30,99 @@ case "$RAW_ARCH" in
         ;;
 esac
 
-BUILD_DIR="$REPO_ROOT/build"
-ALPINE_IMAGE="${ALPINE_IMAGE:-alpine:3.24}"
-FINAL_KERNEL="$BUILD_DIR/vmlinuz-$TARGET_ARCH"
-HOST_UID="$(id -u)"
-HOST_GID="$(id -g)"
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-alpine}"
+[ "${BUILD_FROM_SOURCE:-0}" = "1" ] && KERNEL_FLAVOR="custom"
 
-mkdir -p "$BUILD_DIR"
-
-# Reuse existing kernel if present and not forced
-if [ -s "$FINAL_KERNEL" ] && [ "${FORCE_KERNEL_BUILD:-0}" != "1" ] && [ "${BUILD_FROM_SOURCE:-0}" != "1" ]; then
-    echo "✓ Linux kernel already exists: $FINAL_KERNEL ($(du -h "$FINAL_KERNEL" | cut -f1))"
-    ln -sf "vmlinuz-$TARGET_ARCH" "$BUILD_DIR/vmlinuz-$ALIAS_ARCH"
+if [ "$KERNEL_FLAVOR" = "alpine" ]; then
+    echo "KERNEL_FLAVOR=alpine: the linux-virt kernel and its modules are installed by packages/build-rootfs.sh."
     exit 0
 fi
-
-BUILD_FROM_SOURCE="${BUILD_FROM_SOURCE:-0}"
-
-if [ "$BUILD_FROM_SOURCE" = "1" ]; then
-    KERNEL_VER="${KERNEL_VERSION:-6.6.8}"
-    KERNEL_BUILD_DIR="$BUILD_DIR/kernel-$TARGET_ARCH"
-    CONFIG_FILE="$REPO_ROOT/kernel/configs/config-$TARGET_ARCH"
-
-    mkdir -p "$KERNEL_BUILD_DIR"
-
-    echo "=================================================="
-    echo " Compiling Linux Kernel $KERNEL_VER from source for $TARGET_ARCH"
-    echo " Configuration: $CONFIG_FILE"
-    echo " Platform:      $DOCKER_PLATFORM"
-    echo "=================================================="
-
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "❌ Config file not found: $CONFIG_FILE"
-        exit 1
-    fi
-
-    docker run --rm \
-        --platform "$DOCKER_PLATFORM" \
-        -v "$KERNEL_BUILD_DIR:/build" \
-        -v "$CONFIG_FILE:/kernel-config" \
-        -e HOST_UID="$HOST_UID" \
-        -e HOST_GID="$HOST_GID" \
-        $ALPINE_IMAGE sh -c "
-            set -e
-            echo 'Installing kernel build toolchain...'
-            apk add --no-cache build-base linux-headers bc bison flex openssl-dev elfutils-dev perl xz bash curl
-
-            cd /build
-            if [ ! -d 'linux-$KERNEL_VER' ]; then
-                echo 'Downloading Linux kernel $KERNEL_VER...'
-                curl -fsSL https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VER.tar.xz | tar -xJ
-            fi
-
-            cd linux-$KERNEL_VER
-            echo 'Applying Ziro-OS kernel configuration...'
-            cp /kernel-config .config
-            make ARCH=$KERNEL_ARCH olddefconfig
-
-            echo 'Compiling kernel ($KERNEL_TARGET)...'
-            make ARCH=$KERNEL_ARCH -j\$(nproc) $KERNEL_TARGET
-
-            echo 'Building and installing modules...'
-            rm -rf /build/modroot
-            make -s ARCH=$KERNEL_ARCH kernelrelease > /build/kernel.release
-            if grep -q '^CONFIG_MODULES=y' .config; then
-                make ARCH=$KERNEL_ARCH -j\$(nproc) modules
-                make ARCH=$KERNEL_ARCH INSTALL_MOD_PATH=/build/modroot INSTALL_MOD_STRIP=1 modules_install
-            fi
-            mkdir -p /build/modroot/lib/modules/\$(cat /build/kernel.release)
-
-            echo 'Copying built kernel image...'
-            cp $KERNEL_OUT_SRC /build/vmlinuz
-            chown -R \${HOST_UID}:\${HOST_GID} /build/vmlinuz /build/modroot /build/kernel.release
-        "
-
-    cp "$KERNEL_BUILD_DIR/vmlinuz" "$FINAL_KERNEL"
-    cp "$KERNEL_BUILD_DIR/kernel.release" "$BUILD_DIR/kernel-release-$TARGET_ARCH"
-    echo "Note: build the rootfs with BUILD_FROM_SOURCE=1 too, so it ships this kernel's modules."
-else
-    echo "=================================================="
-    echo " Provisioning Container-Optimized Linux Kernel for $TARGET_ARCH"
-    echo " Mode:     Pre-compiled Linux Virt LTS"
-    echo " Platform: $DOCKER_PLATFORM"
-    echo "=================================================="
-
-    docker run --rm \
-        --platform "$DOCKER_PLATFORM" \
-        -v "$BUILD_DIR:/out" \
-        -e HOST_UID="$HOST_UID" \
-        -e HOST_GID="$HOST_GID" \
-        -e TARGET_ARCH="$TARGET_ARCH" \
-        $ALPINE_IMAGE sh -c '
-            set -e
-            echo "Fetching linux-virt package for container host..."
-            apk add --no-cache linux-virt >/dev/null 2>&1
-            cp /boot/vmlinuz-virt "/out/vmlinuz-${TARGET_ARCH}"
-            ls /lib/modules > "/out/kernel-release-${TARGET_ARCH}"
-            chown "${HOST_UID}:${HOST_GID}" "/out/vmlinuz-${TARGET_ARCH}" "/out/kernel-release-${TARGET_ARCH}"
-        '
+if [ "$KERNEL_FLAVOR" != "custom" ]; then
+    echo "❌ Unknown KERNEL_FLAVOR '$KERNEL_FLAVOR' (use alpine or custom)"
+    exit 1
 fi
 
-ln -sf "vmlinuz-$TARGET_ARCH" "$BUILD_DIR/vmlinuz-$ALIAS_ARCH"
-KERNEL_SIZE=$(du -h "$FINAL_KERNEL" | cut -f1)
+BUILD_DIR="$REPO_ROOT/build"
+ALPINE_IMAGE="${ALPINE_IMAGE:-alpine:3.24}"
+KERNEL_VER="${KERNEL_VERSION:-6.18.54}"   # longterm; same base as Alpine linux-virt
+OUT="$BUILD_DIR/kernel-custom-$TARGET_ARCH"
+mkdir -p "$OUT"
 
 echo "=================================================="
-echo "✅ Kernel ready: $FINAL_KERNEL ($KERNEL_SIZE)"
+echo " Ziro custom kernel $KERNEL_VER for $TARGET_ARCH"
+echo " Config:   ${KERNEL_ARCH} defconfig + ziro-common + ziro-$TARGET_ARCH"
+echo " Output:   $OUT"
+echo "=================================================="
+
+docker run --rm --platform "$DOCKER_PLATFORM" \
+    -v "$OUT:/build" \
+    -v "$REPO_ROOT/kernel/configs:/configs:ro" \
+    -e KV="$KERNEL_VER" -e KARCH="$KERNEL_ARCH" -e TARCH="$TARGET_ARCH" \
+    -e KTARGET="$KERNEL_TARGET" -e KOUT="$KERNEL_OUT_SRC" \
+    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    "$ALPINE_IMAGE" sh -euc '
+        apk add --no-cache build-base linux-headers bc bison flex openssl-dev elfutils-dev \
+            perl python3 xz bash curl diffutils findutils kmod gzip openssl >/dev/null
+
+        cd /build
+        TARBALL="linux-$KV.tar.xz"
+        if [ ! -d "linux-$KV" ]; then
+            BASE="https://cdn.kernel.org/pub/linux/kernel/v${KV%%.*}.x"
+            curl -fsSLO "$BASE/$TARBALL"
+            curl -fsSL "$BASE/sha256sums.asc" | grep " $TARBALL\$" | sha256sum -c -
+            tar -xJf "$TARBALL" && rm -f "$TARBALL"
+        fi
+        cd "linux-$KV"
+
+        echo "Configuring: defconfig + Ziro fragments..."
+        make -s ARCH=$KARCH defconfig
+        ./scripts/kconfig/merge_config.sh -m -O . .config /configs/ziro-common.config "/configs/ziro-$TARCH.config" >/dev/null
+        make -s ARCH=$KARCH olddefconfig
+
+        # Every requested option must survive olddefconfig (renamed/unsatisfiable symbols fail the build).
+        missing=""
+        for frag in /configs/ziro-common.config "/configs/ziro-$TARCH.config"; do
+            while IFS= read -r line; do
+                case "$line" in
+                    CONFIG_*=*)
+                        sym=${line%%=*}; want=${line#*=}
+                        got=$(grep -E "^$sym=" .config | cut -d= -f2- || true)
+                        if [ "$want" = "y" ] && [ "$got" = "m" ]; then
+                            echo "  note: $sym built as module (a dependency is modular)"
+                        elif [ "$got" != "$want" ]; then
+                            missing="$missing\n  $sym: want $want, got ${got:-unset}"
+                        fi
+                        ;;
+                    "# CONFIG_"*" is not set")
+                        sym=${line#"# "}; sym=${sym%% *}
+                        if grep -qE "^$sym=[ym]" .config; then missing="$missing\n  $sym: want unset, got set"; fi
+                        ;;
+                esac
+            done < "$frag"
+        done
+        if [ -n "$missing" ]; then
+            printf "❌ Kernel config options dropped by olddefconfig:$missing\n" >&2
+            exit 1
+        fi
+        echo "✓ All Ziro config options applied"
+
+        echo "Compiling kernel + modules with $(nproc) jobs..."
+        make -s ARCH=$KARCH -j"$(nproc)" "$KTARGET" modules
+
+        rm -rf /build/modroot
+        make -s ARCH=$KARCH INSTALL_MOD_PATH=/build/modroot INSTALL_MOD_STRIP=1 modules_install
+        KREL=$(make -s ARCH=$KARCH kernelrelease)
+        rm -f "/build/modroot/lib/modules/$KREL/build" "/build/modroot/lib/modules/$KREL/source"
+        depmod -b /build/modroot "$KREL"
+
+        cp "$KOUT" /build/vmlinuz
+        cp .config /build/config
+        echo "$KREL" > /build/kernel.release
+        chown -R "$HOST_UID:$HOST_GID" /build/vmlinuz /build/config /build/kernel.release /build/modroot
+    '
+
+echo "=================================================="
+echo "✅ Custom kernel $(cat "$OUT/kernel.release") ready: $OUT/vmlinuz ($(du -h "$OUT/vmlinuz" | cut -f1))"
+echo "   modules: $(du -sh "$OUT/modroot" | cut -f1)   config: $OUT/config"
+echo "   Next: KERNEL_FLAVOR=custom ./packages/build-rootfs.sh $TARGET_ARCH"
 echo "=================================================="

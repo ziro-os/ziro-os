@@ -6,7 +6,7 @@ This guide covers building, running, and deploying Ziro-OS using Docker, QEMU mi
 
 ## 🚀 Quick Start (Docker Base Image)
 
-Ziro-OS provides an authentic minimal container base image built `FROM scratch` (similar to Alpine Linux) weighing under 10MB.
+Ziro-OS provides an authentic minimal container base image built `FROM scratch` (similar to Alpine Linux) weighing about 16 MB.
 
 ### 1. Build the Docker Image
 ```bash
