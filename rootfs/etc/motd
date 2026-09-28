@@ -1,13 +1,16 @@
 
- _____  _               ___  ____  
-|__  / (_) _ __  ___   / _ \/ ___| 
-  / /  | || '__|/ _ \ | | | \___ \ 
- / /_  | || |  | (_) || |_| |___) |
-/____| |_||_|   \___/  \___/|____/ 
+  _____  _               ___  ____  
+ |__  / (_) _ __  ___   / _ \/ ___| 
+   / /  | || '__/ _ \ | | | \___ \ 
+  / /_  | || |  | (_) || |_| |___) |
+ |____| |_||_|   \___/  \___/|____/ 
 
-Minimal by design. Born for the cloud.
+ Minimal by design. Born for the cloud.
+ Welcome to Ziro-OS Enterprise Container Host
 
-Welcome to Ziro-OS - Container-Native Operating System
-Run 'ziroctl help' for container management commands
-Run 'ctr --help' for containerd CLI
+ * Documentation: https://ziro-os.github.io/ziro-os
+ * Management:    ziroctl [container|pkg|network|module|cluster]
+ * OCI Engine:    containerd, nerdctl, runc
+
+ Type 'ziroctl help' for quick start commands.
 

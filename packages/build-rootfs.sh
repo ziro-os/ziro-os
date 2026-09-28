@@ -294,6 +294,15 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         cp /boot/vmlinuz "/out/vmlinuz-${TARGET_ARCH}"
     fi
 
+    # Run depmod to index all kernel modules for fast, clean modprobe at boot
+    for kver in /rootfs/lib/modules/*; do
+        if [ -d "$kver" ]; then
+            kname=$(basename "$kver")
+            echo "Indexing kernel modules for $kname with depmod..."
+            depmod -a -b /rootfs "$kname" 2>/dev/null || depmod -a "$kname" 2>/dev/null || true
+        fi
+    done
+
     mkdir -p /rootfs/etc/apk/keys
     cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
     if [ ! -f /rootfs/etc/apk/repositories ]; then
@@ -311,7 +320,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         --allow-untrusted \
         add --no-cache \
         ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
-        iptables iptables-legacy openssh-server openssh-client linux-pam \
+        iptables openssh-server openssh-client linux-pam \
         e2fsprogs dosfstools util-linux sfdisk parted curl kmod $GRUB_PKGS
 
     # Retain official keys and repositories inside rootfs for ziropkg
@@ -331,21 +340,25 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         ln -sf /usr/bin/runc /rootfs/bin/runc
         ln -sf /usr/bin/runc /rootfs/sbin/runc
     fi
-    # Route iptables through legacy multi-binary for maximum compatibility with kernel netfilter
-    if [ -f /rootfs/usr/sbin/xtables-legacy-multi ]; then
-        ln -sf xtables-legacy-multi /rootfs/usr/sbin/iptables
-        ln -sf xtables-legacy-multi /rootfs/usr/sbin/iptables-save
-        ln -sf xtables-legacy-multi /rootfs/usr/sbin/iptables-restore
-        ln -sf xtables-legacy-multi /rootfs/usr/sbin/ip6tables
-        ln -sf xtables-legacy-multi /rootfs/usr/sbin/ip6tables-save
-        ln -sf xtables-legacy-multi /rootfs/usr/sbin/ip6tables-restore
-        ln -sf /usr/sbin/xtables-legacy-multi /rootfs/sbin/iptables
-        ln -sf /usr/sbin/xtables-legacy-multi /rootfs/bin/iptables
-        ln -sf /usr/sbin/xtables-legacy-multi /rootfs/usr/bin/iptables
-    elif [ -f /rootfs/usr/sbin/iptables ]; then
-        ln -sf /usr/sbin/iptables /rootfs/sbin/iptables
-        ln -sf /usr/sbin/iptables /rootfs/bin/iptables
-        ln -sf /usr/sbin/iptables /rootfs/usr/bin/iptables
+
+    # Route iptables through modern xtables-nft-multi for Linux kernel 6.x nftables compatibility
+    NFT_TARGET=""
+    if [ -f /rootfs/usr/sbin/xtables-nft-multi ]; then
+        NFT_TARGET="/usr/sbin/xtables-nft-multi"
+    elif [ -f /rootfs/sbin/xtables-nft-multi ]; then
+        NFT_TARGET="/sbin/xtables-nft-multi"
+    fi
+
+    if [ -n "$NFT_TARGET" ]; then
+        for p in /rootfs/sbin /rootfs/usr/sbin /rootfs/bin /rootfs/usr/bin; do
+            mkdir -p "$p"
+            ln -sf "$NFT_TARGET" "$p/iptables"
+            ln -sf "$NFT_TARGET" "$p/iptables-save"
+            ln -sf "$NFT_TARGET" "$p/iptables-restore"
+            ln -sf "$NFT_TARGET" "$p/ip6tables"
+            ln -sf "$NFT_TARGET" "$p/ip6tables-save"
+            ln -sf "$NFT_TARGET" "$p/ip6tables-restore"
+        done
     fi
 
     # Install dedicated reboot, poweroff, halt, and shutdown control scripts

@@ -1,0 +1,19 @@
+# Ziro-OS Essential Kernel Modules for Storage, Networking, and Containers
+virtio_pci
+virtio_blk
+virtio_scsi
+virtio_net
+scsi_mod
+sd_mod
+sr_mod
+ahci
+nvme
+overlay
+bridge
+br_netfilter
+veth
+nf_tables
+nft_nat
+nft_compat
+nft_chain_nat
+nft_masq

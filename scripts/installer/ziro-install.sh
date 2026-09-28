@@ -620,7 +620,7 @@ menuentry "Ziro-OS Container Host (Serial Console Primary)" {
 
 menuentry "Ziro-OS (Recovery Shell)" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0 rdinit=/bin/sh
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0 ziro.recovery
     initrd /boot/initramfs.cpio.gz
 }
 EOF
@@ -634,6 +634,11 @@ EOF
     # 7. System Configuration
     printf "${BOLD}[6/6] Configuring hostname, network, security, and fstab...${RESET}\n"
     
+    # Mark target system as permanently installed container host
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$TARGET_MNT/etc/ziro-installed"
+    echo "INSTALL_DATE=\"$(date -u)\"" >> "$TARGET_MNT/etc/ziro-installed"
+    echo "TARGET_DISK=\"$TARGET_DISK\"" >> "$TARGET_MNT/etc/ziro-installed"
+
     # Write /etc/fstab
     cat > "$TARGET_MNT/etc/fstab" << EOF
 LABEL=ZIRO_ROOT  /          ext4  defaults,noatime,errors=remount-ro  0  1

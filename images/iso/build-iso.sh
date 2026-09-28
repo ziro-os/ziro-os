@@ -100,8 +100,19 @@ menuentry "Ziro-OS Automated Terminal Installer" {
     initrd /boot/initramfs.cpio.gz
 }
 
+menuentry "Boot Installed Ziro-OS from Hard Drive (auto-detect)" {
+    search --no-floppy --label --set=root ZIRO_ROOT
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Boot from Next Device / Local Disk (hd0)" {
+    set root=(hd0)
+    chainloader +1
+}
+
 menuentry "Ziro-OS (Recovery Shell)" {
-    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/bin/sh
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.recovery
     initrd /boot/initramfs.cpio.gz
 }
 EOF

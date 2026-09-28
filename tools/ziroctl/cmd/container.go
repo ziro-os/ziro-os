@@ -159,7 +159,7 @@ var containerRunCmd = &cobra.Command{
 			for _, v := range runVolume {
 				backendArgs = append(backendArgs, "-v", v)
 			}
-			if runRm {
+			if runRm && !runDetach {
 				backendArgs = append(backendArgs, "--rm")
 			}
 			if runInteractive {

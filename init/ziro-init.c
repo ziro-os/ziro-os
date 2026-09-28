@@ -467,6 +467,11 @@ static void init_devices(void) {
         "e1000", "e1000e", "igb", "r8169", "vmxnet3",
         // Filesystems
         "ext4", "vfat", "isofs", "overlay",
+        // Container & Virtual Networking / Netfilter
+        "bridge", "br_netfilter", "veth", "tap", "tun",
+        "nf_tables", "nfnetlink", "nft_nat", "nft_compat",
+        "nft_chain_nat", "nft_masq", "xt_nat", "xt_conntrack",
+        "xt_MASQUERADE", "xt_addrtype", "iptable_filter", "iptable_nat",
         NULL
     };
 
@@ -482,6 +487,28 @@ static void init_devices(void) {
             int st;
             waitpid(p, &st, 0);
         }
+    }
+
+    // Load any additional modules requested in /etc/modules
+    FILE *mf = fopen("/etc/modules", "r");
+    if (mf) {
+        char mline[128];
+        while (fgets(mline, sizeof(mline), mf)) {
+            mline[strcspn(mline, " \t\r\n#")] = '\0';
+            if (mline[0] == '\0') continue;
+            pid_t mp = fork();
+            if (mp == 0) {
+                char *margs[] = {"modprobe", "-q", mline, NULL};
+                execv("/sbin/modprobe", margs);
+                execv("/bin/modprobe", margs);
+                execv("/usr/sbin/modprobe", margs);
+                _exit(0);
+            } else if (mp > 0) {
+                int st;
+                waitpid(mp, &st, 0);
+            }
+        }
+        fclose(mf);
     }
 
     // 2. Hardware coldplug: probe modalias for all detected devices in /sys
@@ -698,6 +725,15 @@ static void init_network(void) {
         }
         closedir(d);
     }
+
+    // 3. Apply container bridge networking and routing sysctl parameters
+    system("sysctl -q -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true");
+    system("sysctl -q -w net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null || true");
+    system("sysctl -q -w net.bridge.bridge-nf-call-arptables=1 2>/dev/null || true");
+    system("sysctl -q -w net.ipv4.ip_forward=1 2>/dev/null || true");
+    system("sysctl -q -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true");
+    system("sysctl -p /etc/sysctl.d/99-ziro.conf 2>/dev/null || true");
+    system("sysctl -p /etc/sysctl.conf 2>/dev/null || true");
 }
 
 static void start_containerd(void) {
@@ -838,6 +874,62 @@ static void get_active_console(char *dev_path, size_t max_len) {
     }
 }
 
+static int is_installed_system(void) {
+    if (access("/etc/ziro-installed", F_OK) == 0) {
+        return 1;
+    }
+    struct statfs s;
+    if (statfs("/", &s) == 0) {
+        if (s.f_type != RAMFS_MAGIC && s.f_type != TMPFS_MAGIC) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int root_has_password(void) {
+    FILE *f = fopen("/etc/shadow", "r");
+    if (!f) return 0;
+    char line[256];
+    int has_pass = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "root:", 5) == 0) {
+            char *pass = line + 5;
+            if (pass[0] == '$') {
+                has_pass = 1;
+            }
+            break;
+        }
+    }
+    fclose(f);
+    return has_pass;
+}
+
+static void print_host_ips(void) {
+    DIR *d = opendir("/sys/class/net");
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.' || strcmp(ent->d_name, "lo") == 0) continue;
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "ip -4 addr show %s 2>/dev/null | awk '/inet /{print $2}'", ent->d_name);
+        FILE *p = popen(cmd, "r");
+        char ip[64] = {0};
+        if (p) {
+            if (fgets(ip, sizeof(ip), p)) {
+                ip[strcspn(ip, "\r\n")] = '\0';
+            }
+            pclose(p);
+        }
+        if (strlen(ip) > 0) {
+            printf("  * IPv4 (%s):    %s\n", ent->d_name, ip);
+        } else {
+            printf("  * IPv4 (%s):    configuring (DHCP auto-assign)...\n", ent->d_name);
+        }
+    }
+    closedir(d);
+}
+
 static void setup_controlling_tty(void) {
     setsid();
 
@@ -937,12 +1029,23 @@ static void spawn_terminal(struct terminal_session *s) {
         setenv("USER", "root", 1);
         if (chdir("/root") != 0) {}
 
+        if (is_installed_system() && root_has_password()) {
+            if (access("/bin/login", X_OK) == 0) {
+                char *argv[] = {"login", NULL};
+                execv("/bin/login", argv);
+            }
+            if (access("/bin/busybox", X_OK) == 0) {
+                char *argv[] = {"busybox", "login", NULL};
+                execv("/bin/busybox", argv);
+            }
+        }
+
         if (access("/bin/sh", X_OK) == 0) {
-            char *argv[] = {"sh", NULL};
+            char *argv[] = {"-sh", NULL};
             execv("/bin/sh", argv);
         }
         if (access("/bin/busybox", X_OK) == 0) {
-            char *argv[] = {"busybox", "sh", NULL};
+            char *argv[] = {"busybox", "sh", "-l", NULL};
             execv("/bin/busybox", argv);
         }
         _exit(1);
@@ -972,12 +1075,23 @@ static void spawn_fallback_console(void) {
         setenv("USER", "root", 1);
         if (chdir("/root") != 0) {}
 
+        if (is_installed_system() && root_has_password()) {
+            if (access("/bin/login", X_OK) == 0) {
+                char *argv[] = {"login", NULL};
+                execv("/bin/login", argv);
+            }
+            if (access("/bin/busybox", X_OK) == 0) {
+                char *argv[] = {"busybox", "login", NULL};
+                execv("/bin/busybox", argv);
+            }
+        }
+
         if (access("/bin/sh", X_OK) == 0) {
-            char *argv[] = {"sh", NULL};
+            char *argv[] = {"-sh", NULL};
             execv("/bin/sh", argv);
         }
         if (access("/bin/busybox", X_OK) == 0) {
-            char *argv[] = {"busybox", "sh", NULL};
+            char *argv[] = {"busybox", "sh", "-l", NULL};
             execv("/bin/busybox", argv);
         }
         _exit(1);
@@ -1090,9 +1204,6 @@ int main(int argc, char *argv[]) {
     // If running on kernel ramfs, seamlessly migrate to tmpfs to enable container pivot_root
     check_and_switch_root();
 
-    printf(BANNER);
-    printf("[init] starting Ziro-OS PID 1 init...\n");
-
     // Signal setup
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -1107,39 +1218,101 @@ int main(int argc, char *argv[]) {
     // Enable Ctrl-Alt-Del to send SIGINT to PID 1 for clean reboot
     reboot(RB_ENABLE_CAD);
 
+    // Inspect kernel command line for recovery or autoinstall
+    int recovery_requested = 0;
+    int autoinstall_requested = 0;
+    FILE *cmdline = fopen("/proc/cmdline", "r");
+    if (cmdline) {
+        char buf[1024];
+        if (fgets(buf, sizeof(buf), cmdline)) {
+            if (strstr(buf, "ziro.recovery") != NULL || strstr(buf, "emergency") != NULL || strstr(buf, "single") != NULL) {
+                recovery_requested = 1;
+            }
+            if (strstr(buf, "ziro.autoinstall") != NULL) {
+                autoinstall_requested = 1;
+            }
+        }
+        fclose(cmdline);
+    }
+
     // Initialization phases
     init_filesystems();
     init_devices();
+
+    if (recovery_requested) {
+        printf("\n============================================================\n");
+        printf("  Ziro-OS Emergency Maintenance / Recovery Shell\n");
+        printf("  Filesystems mounted in /dev, /proc, /sys. Type 'exit' to reboot.\n");
+        printf("============================================================\n\n");
+
+        setup_controlling_tty();
+        pid_t rpid = fork();
+        if (rpid == 0) {
+            setenv("TERM", "linux", 1);
+            setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
+            setenv("HOME", "/root", 1);
+            setenv("USER", "root", 1);
+            if (chdir("/root") != 0) {}
+            char *rargs[] = {"-sh", NULL};
+            execv("/bin/sh", rargs);
+            execv("/bin/busybox", rargs);
+            _exit(1);
+        } else if (rpid > 0) {
+            int st;
+            waitpid(rpid, &st, 0);
+        }
+
+        printf("\n[recovery] Exiting recovery mode. Syncing and rebooting...\n");
+        perform_shutdown(1);
+        return 0;
+    }
+
+    if (is_installed_system()) {
+        printf("\n================================================================================\n");
+        printf("  Ziro-OS Enterprise Container Host (x86_64)\n");
+        printf("  Minimal by design. Born for the cloud.\n");
+        printf("================================================================================\n");
+    } else {
+        printf(BANNER);
+        printf("[init] starting Ziro-OS Live & Installer Init...\n");
+    }
+
     init_cgroups();
     init_hostname();
     init_network();
     start_containerd();
     start_sshd();
 
-    printf("\n[init] Ziro-OS initialization complete!\n");
-    printf("[init] Type 'ziro-install' to install Ziro-OS to physical or virtual disk.\n");
-    printf("[init] Type 'ziroctl help' for container OS commands.\n\n");
+    if (is_installed_system()) {
+        char hname[64] = "ziro-os";
+        gethostname(hname, sizeof(hname));
+        printf("\n================================================================================\n");
+        printf("  Ziro-OS Enterprise Container Host Status:\n");
+        printf("  * Hostname:       %s\n", hname);
+        print_host_ips();
+        printf("  * Container:      containerd (active)\n");
+        printf("  * OCI Runtime:    runc / crun\n");
+        printf("  * Storage:        LABEL=ZIRO_ROOT (ext4)\n");
+        printf("  * Management:     ziroctl (container, network, cluster, image)\n");
+        printf("================================================================================\n\n");
+    } else {
+        printf("\n[init] Ziro-OS Live initialization complete!\n");
+        printf("[init] Type 'ziro-install' to install Ziro-OS to physical or virtual disk.\n");
+        printf("[init] Type 'ziroctl help' for container OS commands.\n\n");
+    }
 
-    // Check if auto-installer was requested on kernel command line
-    FILE *cmdline = fopen("/proc/cmdline", "r");
-    if (cmdline) {
-        char buf[1024];
-        if (fgets(buf, sizeof(buf), cmdline)) {
-            if (strstr(buf, "ziro.autoinstall") != NULL) {
-                printf("[init] Launching Ziro-OS Terminal Installer (ziro.autoinstall requested)...\n\n");
-                pid_t ipid = fork();
-                if (ipid == 0) {
-                    setup_controlling_tty();
-                    char *iargs[] = {"/usr/sbin/ziro-install", NULL};
-                    execv(iargs[0], iargs);
-                    _exit(1);
-                } else if (ipid > 0) {
-                    int st;
-                    waitpid(ipid, &st, 0);
-                }
-            }
+    if (autoinstall_requested) {
+        printf("[init] Launching Ziro-OS Terminal Installer (ziro.autoinstall requested)...\n\n");
+        pid_t ipid = fork();
+        if (ipid == 0) {
+            setup_controlling_tty();
+            char *iargs[] = {"/usr/sbin/ziro-install", NULL};
+            execv(iargs[0], iargs);
+            _exit(1);
+        } else if (ipid > 0) {
+            int st;
+            waitpid(ipid, &st, 0);
         }
-        fclose(cmdline);
     }
 
     // Interactive supervisor loop (concurrent multi-terminal on tty1, ttyS0, ttyAMA0)
