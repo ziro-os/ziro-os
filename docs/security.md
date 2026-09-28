@@ -69,3 +69,14 @@ Output:
   paths outside the backup allowlist, traversal, hardlinks, and writes through symlinks.
 - **Clustering** is experimental. `cluster join` only records metadata, and `cluster deploy` runs replicas on the
   local node only.
+- **Kernel & sysctl**: the kernel config fragments add KASLR, strict RWX, a strong stack protector, hardened
+  usercopy, FORTIFY, the Yama and lockdown LSMs, unprivileged BPF off, and nftables/WireGuard built in. Shipped
+  sysctls set `kptr_restrict=2`, `dmesg_restrict=1`, `unprivileged_bpf_disabled=1`, `ptrace_scope=1`, protected
+  links/fifos/regular files, and loose `rp_filter=2` (strict mode breaks WireGuard and multi-homed routing).
+- **Logs**: crond runs `ziroctl service rotate-logs` hourly. It copies and truncates any `/var/log/*.log` over
+  10MB, and Sentinel only logs when the alert set changes.
+- **CI supply chain**: every GitHub Action is pinned to a commit SHA and each workflow gets least-privilege
+  `permissions`. Cloud image builds use OIDC once the `AWS_ROLE_ARN` or `GCP_WIF_PROVIDER` + `GCP_SERVICE_ACCOUNT`
+  repo variables are set. After that, delete the static key secrets.
+- **Terraform (AWS)**: IMDSv2 is required with hop limit 1. SSH is limited to `ssh_allowed_cidrs`, which is
+  required. Bootstrap scripts come from the pinned `ziro_version` tag, with optional sha256 verification.

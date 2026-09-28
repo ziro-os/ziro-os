@@ -162,3 +162,32 @@ func TestWireGuardHelpers(t *testing.T) {
 		t.Errorf("bad keypair %q %q", priv, pub)
 	}
 }
+
+func TestParseCronLine(t *testing.T) {
+	cases := map[string]bool{
+		"*/5 * * * * /bin/echo hi": true,
+		"@reboot /usr/bin/foo":     true,
+		"PATH=/bin:/usr/bin":       false,
+		"# comment":                false,
+		"":                         false,
+	}
+	for line, want := range cases {
+		if _, _, ok := parseCronLine(line); ok != want {
+			t.Errorf("parseCronLine(%q) ok=%v, want %v", line, ok, want)
+		}
+	}
+}
+
+func TestRotateLog(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "svc.log")
+	if err := os.WriteFile(p, make([]byte, maxLogSize+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rotateLog(p)
+	if fi, _ := os.Stat(p); fi.Size() != 0 {
+		t.Errorf("log not truncated: %d bytes", fi.Size())
+	}
+	if fi, err := os.Stat(p + ".1"); err != nil || fi.Size() != maxLogSize+1 {
+		t.Errorf("previous generation missing or wrong size")
+	}
+}

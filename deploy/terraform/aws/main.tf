@@ -1,7 +1,7 @@
 # Terraform configuration for Ziro-OS on AWS
 
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.3" # optional() object attributes
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -42,6 +42,27 @@ variable "node_count" {
 variable "key_name" {
   description = "AWS key pair name"
   type        = string
+}
+
+variable "ssh_allowed_cidrs" {
+  description = "CIDRs allowed to reach SSH (22). No default: never open SSH to 0.0.0.0/0 by accident."
+  type        = list(string)
+}
+
+variable "ziro_version" {
+  description = "Ziro-OS release tag whose bootstrap scripts are fetched (pinned, never 'main')"
+  type        = string
+  default     = "v1.0.9"
+}
+
+variable "bootstrap_sha256" {
+  description = "Optional sha256 of each bootstrap script at ziro_version; verified when set"
+  type = object({
+    install_k8s        = optional(string, "")
+    install_monitoring = optional(string, "")
+    harden             = optional(string, "")
+  })
+  default = {}
 }
 
 # Data sources
@@ -123,12 +144,12 @@ resource "aws_security_group" "ziro_os_nodes" {
   name_prefix = "${var.cluster_name}-nodes"
   vpc_id      = aws_vpc.ziro_os.id
 
-  # SSH access
+  # SSH access (restricted)
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.ssh_allowed_cidrs
   }
 
   # Kubernetes API
@@ -194,8 +215,19 @@ resource "aws_launch_template" "ziro_os" {
   vpc_security_group_ids = [aws_security_group.ziro_os_nodes.id]
 
   user_data = base64encode(templatefile("${path.module}/user-data.sh", {
-    cluster_name = var.cluster_name
+    cluster_name              = var.cluster_name
+    ziro_version              = var.ziro_version
+    install_k8s_sha256        = var.bootstrap_sha256.install_k8s
+    install_monitoring_sha256 = var.bootstrap_sha256.install_monitoring
+    harden_sha256             = var.bootstrap_sha256.harden
   }))
+
+  # Enforce IMDSv2; hop limit 1 keeps containers from reaching instance credentials
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
 
   tag_specifications {
     resource_type = "instance"

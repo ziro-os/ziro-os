@@ -17,6 +17,10 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: read
+  id-token: write  # OIDC federation to AWS / GCP
+
 jobs:
   build-aws-ami:
     name: Build AWS AMI
@@ -25,17 +29,19 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v6
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        # Prefer OIDC: set repo variable AWS_ROLE_ARN (then delete the static key secrets).
+        role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+        aws-access-key-id: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
         aws-region: us-west-2
         
     - name: Install Packer
-      uses: hashicorp/setup-packer@main
+      uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
       with:
         version: latest
         
@@ -115,15 +121,15 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       
     - name: Azure Login
-      uses: azure/login@v3
+      uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
         
     - name: Install Packer
-      uses: hashicorp/setup-packer@main
+      uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
       with:
         version: latest
         
@@ -177,18 +183,21 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       
     - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v3
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
       with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
+        # Prefer Workload Identity Federation: set repo variables GCP_WIF_PROVIDER and GCP_SERVICE_ACCOUNT.
+        workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+        service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        credentials_json: ${{ vars.GCP_WIF_PROVIDER == '' && secrets.GCP_SA_KEY || '' }}
         
     - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v3
+      uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       
     - name: Install Packer
-      uses: hashicorp/setup-packer@main
+      uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
       with:
         version: latest
         
@@ -236,7 +245,7 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       
     - name: Update cloud images documentation
       run: |

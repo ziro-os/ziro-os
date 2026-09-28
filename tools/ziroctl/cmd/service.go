@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -281,6 +282,42 @@ var serviceBootCmd = &cobra.Command{
 	},
 }
 
+const maxLogSize = 10 << 20
+
+// rotateLog keeps one previous generation once a log exceeds maxLogSize.
+// Copy+truncate (not rename) so daemons holding the file with O_APPEND keep working.
+func rotateLog(path string) {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() < maxLogSize {
+		return
+	}
+	src, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(path+".1", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return
+	}
+	defer dst.Close()
+	if _, err := io.Copy(dst, src); err == nil {
+		_ = os.Truncate(path, 0)
+	}
+}
+
+var serviceRotateLogsCmd = &cobra.Command{
+	Use:    "rotate-logs",
+	Short:  "Rotate /var/log/*.log files larger than 10MB (run hourly by crond)",
+	Hidden: true,
+	Run: func(cmd *cobra.Command, args []string) {
+		logs, _ := filepath.Glob(filepath.Join(logsDir, "*.log"))
+		for _, l := range logs {
+			rotateLog(l)
+		}
+	},
+}
+
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
@@ -489,6 +526,7 @@ func startService(name string) error {
 	args := strings.Fields(def.Args)
 	cmd := exec.Command(def.Exec, args...)
 
+	rotateLog(def.LogFile)
 	logF, err := os.OpenFile(def.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err == nil {
 		cmd.Stdout = logF
@@ -603,5 +641,6 @@ func init() {
 	serviceCmd.AddCommand(serviceDisableCmd)
 	serviceCmd.AddCommand(serviceLogsCmd)
 	serviceCmd.AddCommand(serviceBootCmd)
+	serviceCmd.AddCommand(serviceRotateLogsCmd)
 	rootCmd.AddCommand(serviceCmd)
 }
