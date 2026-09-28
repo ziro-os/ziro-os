@@ -23,6 +23,11 @@
 #include <sys/vfs.h>
 #include <sys/sysmacros.h>
 #include <time.h>
+#include <limits.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #ifndef MS_REC
 #define MS_REC 16384
@@ -65,17 +70,46 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
     out_dev[0] = '\0';
     if (!spec || strlen(spec) == 0) return;
 
+    // First ensure all device nodes for recognized partitions in /proc/partitions exist in /dev
+    FILE *pf_init = fopen("/proc/partitions", "r");
+    if (pf_init) {
+        char pline[256];
+        while (fgets(pline, sizeof(pline), pf_init)) {
+            int maj = 0, min = 0;
+            long long blocks = 0;
+            char pname[128];
+            if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) == 4) {
+                if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
+                char devpath[256];
+                snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
+                struct stat st;
+                if (stat(devpath, &st) != 0) {
+                    mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
+                }
+            }
+        }
+        fclose(pf_init);
+    }
+
     if (strncmp(spec, "LABEL=", 6) == 0) {
         const char *label = spec + 6;
-        char by_label[512];
+        char by_label[PATH_MAX];
         snprintf(by_label, sizeof(by_label), "/dev/disk/by-label/%.200s", label);
         if (access(by_label, F_OK) == 0) {
-            char resolved[1024];
+            char resolved[PATH_MAX];
             if (realpath(by_label, resolved)) {
-                snprintf(out_dev, max_len, "%.250s", resolved);
+                snprintf(out_dev, max_len, "%.200s", resolved);
                 return;
             }
-            snprintf(out_dev, max_len, "%.250s", by_label);
+            ssize_t r = readlink(by_label, resolved, sizeof(resolved) - 1);
+            if (r > 0) {
+                resolved[r] = '\0';
+                if (resolved[0] == '/') {
+                    snprintf(out_dev, max_len, "%.200s", resolved);
+                    return;
+                }
+            }
+            snprintf(out_dev, max_len, "%.200s", by_label);
             return;
         }
 
@@ -111,12 +145,13 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
                     if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
                     char devpath[256];
                     snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
-                    if (access(devpath, F_OK) != 0) {
+                    struct stat st;
+                    if (stat(devpath, &st) != 0) {
                         mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
                     }
                     if (access(devpath, F_OK) == 0) {
                         char bcmd[512];
-                        snprintf(bcmd, sizeof(bcmd), "blkid -s LABEL -o value %s 2>/dev/null", devpath);
+                        snprintf(bcmd, sizeof(bcmd), "blkid -s LABEL -o value %.200s 2>/dev/null", devpath);
                         FILE *bfp = popen(bcmd, "r");
                         if (bfp) {
                             char blabel[128];
@@ -126,7 +161,7 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
                                 char *bcr = strchr(blabel, '\r');
                                 if (bcr) *bcr = '\0';
                                 if (strcmp(blabel, label) == 0) {
-                                    snprintf(out_dev, max_len, "%s", devpath);
+                                    snprintf(out_dev, max_len, "%.200s", devpath);
                                     pclose(bfp);
                                     fclose(pf);
                                     return;
@@ -141,7 +176,10 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
         }
 
         // Search common partition nodes directly
-        static const char *prefixes[] = {"/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb", "/dev/nvme0n1p", "/dev/hda", NULL};
+        static const char *prefixes[] = {
+            "/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb",
+            "/dev/nvme0n1p", "/dev/hda", "/dev/xvda", NULL
+        };
         for (int p = 0; prefixes[p] != NULL; p++) {
             for (int part = 1; part <= 8; part++) {
                 char candidate[64];
@@ -170,6 +208,26 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
         }
     } else if (strncmp(spec, "UUID=", 5) == 0) {
         const char *uuid = spec + 5;
+        char by_uuid[PATH_MAX];
+        snprintf(by_uuid, sizeof(by_uuid), "/dev/disk/by-uuid/%.200s", uuid);
+        if (access(by_uuid, F_OK) == 0) {
+            char resolved[PATH_MAX];
+            if (realpath(by_uuid, resolved)) {
+                snprintf(out_dev, max_len, "%.200s", resolved);
+                return;
+            }
+            ssize_t r = readlink(by_uuid, resolved, sizeof(resolved) - 1);
+            if (r > 0) {
+                resolved[r] = '\0';
+                if (resolved[0] == '/') {
+                    snprintf(out_dev, max_len, "%.200s", resolved);
+                    return;
+                }
+            }
+            snprintf(out_dev, max_len, "%.200s", by_uuid);
+            return;
+        }
+
         char cmd[1024];
         snprintf(cmd, sizeof(cmd), "findfs UUID=%.128s 2>/dev/null || blkid -U %.128s 2>/dev/null", uuid, uuid);
         FILE *fp = popen(cmd, "r");
@@ -201,12 +259,13 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
                     if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
                     char devpath[256];
                     snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
-                    if (access(devpath, F_OK) != 0) {
+                    struct stat st;
+                    if (stat(devpath, &st) != 0) {
                         mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
                     }
                     if (access(devpath, F_OK) == 0) {
                         char bcmd[512];
-                        snprintf(bcmd, sizeof(bcmd), "blkid -s UUID -o value %s 2>/dev/null", devpath);
+                        snprintf(bcmd, sizeof(bcmd), "blkid -s UUID -o value %.200s 2>/dev/null", devpath);
                         FILE *bfp = popen(bcmd, "r");
                         if (bfp) {
                             char buuid[128];
@@ -216,7 +275,7 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
                                 char *bcr = strchr(buuid, '\r');
                                 if (bcr) *bcr = '\0';
                                 if (strcasecmp(buuid, uuid) == 0) {
-                                    snprintf(out_dev, max_len, "%s", devpath);
+                                    snprintf(out_dev, max_len, "%.200s", devpath);
                                     pclose(bfp);
                                     fclose(pf);
                                     return;
@@ -228,6 +287,38 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
                 }
             }
             fclose(pf);
+        }
+
+        // Search common partition nodes directly
+        static const char *prefixes[] = {
+            "/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb",
+            "/dev/nvme0n1p", "/dev/hda", "/dev/xvda", NULL
+        };
+        for (int p = 0; prefixes[p] != NULL; p++) {
+            for (int part = 1; part <= 8; part++) {
+                char candidate[64];
+                snprintf(candidate, sizeof(candidate), "%s%d", prefixes[p], part);
+                if (access(candidate, F_OK) == 0) {
+                    char bcmd[512];
+                    snprintf(bcmd, sizeof(bcmd), "blkid -s UUID -o value %s 2>/dev/null", candidate);
+                    FILE *bfp = popen(bcmd, "r");
+                    if (bfp) {
+                        char buuid[128];
+                        if (fgets(buuid, sizeof(buuid), bfp)) {
+                            char *bnl = strchr(buuid, '\n');
+                            if (bnl) *bnl = '\0';
+                            char *br = strchr(buuid, '\r');
+                            if (br) *br = '\0';
+                            if (strcasecmp(buuid, uuid) == 0) {
+                                snprintf(out_dev, max_len, "%s", candidate);
+                                pclose(bfp);
+                                return;
+                            }
+                        }
+                        pclose(bfp);
+                    }
+                }
+            }
         }
     } else if (strncmp(spec, "/dev/", 5) == 0) {
         snprintf(out_dev, max_len, "%.200s", spec);
@@ -335,9 +426,20 @@ static void check_and_switch_root(void) {
                     const char *init_target = (access("/sysroot/sbin/init", X_OK) == 0) ? "/sbin/init" : "/init";
                     execl("/sbin/switch_root", "switch_root", "/sysroot", init_target, NULL);
                     execl("/bin/switch_root", "switch_root", "/sysroot", init_target, NULL);
+                    execl("/bin/busybox", "busybox", "switch_root", "/sysroot", init_target, NULL);
                     execl("/bin/busybox", "switch_root", "/sysroot", init_target, NULL);
+                    execl("/sbin/busybox", "busybox", "switch_root", "/sysroot", init_target, NULL);
                     execl("/sbin/busybox", "switch_root", "/sysroot", init_target, NULL);
-                    fprintf(stderr, "[init] switch_root to %s failed: %s\n", root_dev, strerror(errno));
+                    fprintf(stderr, "[init] FATAL: switch_root to %s failed: %s\n", root_dev, strerror(errno));
+
+                    // Emergency recovery shell if switch_root cannot execute
+                    mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+                    mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+                    mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+                    fprintf(stderr, "[init] Dropping to emergency recovery shell...\n");
+                    char *rargs[] = {"-sh", NULL};
+                    execv("/bin/sh", rargs);
+                    execv("/bin/busybox", rargs);
                 } else {
                     fprintf(stderr, "[init] /sysroot/sbin/init not found on %s, unmounting\n", root_dev);
                     umount2("/sysroot", MNT_DETACH);
@@ -585,6 +687,31 @@ static void init_devices(void) {
             }
         }
         closedir(blk_dir);
+    }
+
+    // 5. Ensure all partition devices in /proc/partitions exist in /dev
+    FILE *pf_devs = fopen("/proc/partitions", "r");
+    if (pf_devs) {
+        char pline[256];
+        while (fgets(pline, sizeof(pline), pf_devs)) {
+            int maj = 0, min = 0;
+            long long blocks = 0;
+            char pname[128];
+            if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) == 4) {
+                if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
+                char devpath[256];
+                snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
+                struct stat st;
+                if (stat(devpath, &st) != 0) {
+                    mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
+                }
+                char last = pname[strlen(pname) - 1];
+                if (last >= '0' && last <= '9' && strncmp(pname, "loop", 4) != 0 && strncmp(pname, "ram", 3) != 0) {
+                    printf("[init] partition detected: /dev/%s\n", pname);
+                }
+            }
+        }
+        fclose(pf_devs);
     }
 }
 

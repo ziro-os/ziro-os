@@ -15,13 +15,20 @@ endif
 all: ziro-init-$(TARGET_ARCH)
 	@cp ziro-init-$(TARGET_ARCH) ziro-init
 
+DOCKER_CMD := $(shell which docker 2>/dev/null)
+MUSL_GCC := $(shell which musl-gcc 2>/dev/null)
+
 ziro-init-$(TARGET_ARCH): ziro-init.c
 	@echo "Building ziro-init for $(TARGET_ARCH)..."
-ifeq ($(shell uname -s),Darwin)
-	@echo "macOS detected: Compiling statically using Docker Alpine ($(DOCKER_PLATFORM))..."
+ifneq ($(DOCKER_CMD),)
+	@echo "Compiling statically with musl libc via Docker Alpine ($(DOCKER_PLATFORM))..."
 	@docker run --rm --platform $(DOCKER_PLATFORM) -v $(shell pwd):/src -w /src alpine:latest sh -c \
 		"apk add --no-cache gcc musl-dev binutils >/dev/null 2>&1 && gcc -static -s -O2 -Wall ziro-init.c -o ziro-init-$(TARGET_ARCH) && chmod 755 ziro-init-$(TARGET_ARCH) && chown $(shell id -u):$(shell id -g) ziro-init-$(TARGET_ARCH) 2>/dev/null || true"
+else ifneq ($(MUSL_GCC),)
+	@echo "Compiling statically with musl-gcc..."
+	$(MUSL_GCC) $(CFLAGS) -static -s ziro-init.c -o ziro-init-$(TARGET_ARCH)
 else
+	@echo "Compiling with host compiler (fallback)..."
 	$(CC) $(CFLAGS) $(LDFLAGS) -s ziro-init.c -o ziro-init-$(TARGET_ARCH)
 endif
 	@chmod +x ziro-init-$(TARGET_ARCH) 2>/dev/null || true
