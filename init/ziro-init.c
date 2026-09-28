@@ -55,6 +55,10 @@
 
 static pid_t containerd_pid = 0;
 static pid_t sshd_pid = 0;
+/* Crash-loop backoff for supervised daemons: restart at 1s, 2s, 4s ... capped at 60s. */
+static time_t containerd_started = 0, containerd_restart_at = 0;
+static time_t sshd_started = 0, sshd_restart_at = 0;
+static int containerd_fails = 0, sshd_fails = 0;
 static volatile sig_atomic_t shutdown_requested = 0;
 static volatile sig_atomic_t reboot_requested = 0;
 
@@ -65,6 +69,39 @@ static void safe_mkdir(const char *dir, mode_t mode) {
 }
 
 static void init_devices(void);
+
+/* Kernel cmdline is matched per whitespace-separated token, never by substring. */
+static char kcmdline[1024];
+
+static void read_cmdline(void) {
+    kcmdline[0] = '\0';
+    FILE *f = fopen("/proc/cmdline", "r");
+    if (!f) return;
+    if (!fgets(kcmdline, sizeof(kcmdline), f)) kcmdline[0] = '\0';
+    fclose(f);
+}
+
+/* Returns the token equal to key, or the value after "key=" (key ending in '='). */
+static const char *cmdline_find(const char *key, size_t *vlen) {
+    size_t klen = strlen(key);
+    int is_kv = key[klen - 1] == '=';
+    const char *p = kcmdline;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        const char *s = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+        size_t len = (size_t)(p - s);
+        if (strncmp(s, key, klen) == 0 && (is_kv ? len >= klen : len == klen)) {
+            if (vlen) *vlen = is_kv ? len - klen : 0;
+            return s + klen;
+        }
+    }
+    return NULL;
+}
+
+static int cmdline_has(const char *key) {
+    return cmdline_find(key, NULL) != NULL;
+}
 
 static void resolve_root_device(const char *spec, char *out_dev, size_t max_len) {
     out_dev[0] = '\0';
@@ -111,26 +148,6 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
             }
             snprintf(out_dev, max_len, "%.200s", by_label);
             return;
-        }
-
-        // Fast resolution via findfs or blkid -L
-        char fcmd[512];
-        snprintf(fcmd, sizeof(fcmd), "findfs LABEL=%.128s 2>/dev/null || blkid -L %.128s 2>/dev/null", label, label);
-        FILE *fp = popen(fcmd, "r");
-        if (fp) {
-            char line[256];
-            if (fgets(line, sizeof(line), fp)) {
-                char *nl = strchr(line, '\n');
-                if (nl) *nl = '\0';
-                char *cr = strchr(line, '\r');
-                if (cr) *cr = '\0';
-                if (strlen(line) > 0 && access(line, F_OK) == 0) {
-                    snprintf(out_dev, max_len, "%.200s", line);
-                    pclose(fp);
-                    return;
-                }
-            }
-            pclose(fp);
         }
 
         // Exhaustive partition scan via /proc/partitions
@@ -226,25 +243,6 @@ static void resolve_root_device(const char *spec, char *out_dev, size_t max_len)
             }
             snprintf(out_dev, max_len, "%.200s", by_uuid);
             return;
-        }
-
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "findfs UUID=%.128s 2>/dev/null || blkid -U %.128s 2>/dev/null", uuid, uuid);
-        FILE *fp = popen(cmd, "r");
-        if (fp) {
-            char line[256];
-            if (fgets(line, sizeof(line), fp)) {
-                char *nl = strchr(line, '\n');
-                if (nl) *nl = '\0';
-                char *cr = strchr(line, '\r');
-                if (cr) *cr = '\0';
-                if (strlen(line) > 0 && access(line, F_OK) == 0) {
-                    snprintf(out_dev, max_len, "%.200s", line);
-                    pclose(fp);
-                    return;
-                }
-            }
-            pclose(fp);
         }
 
         // Exhaustive partition scan via /proc/partitions
@@ -354,29 +352,13 @@ static void check_and_switch_root(void) {
 
     // 3. Inspect kernel command line
     char root_spec[256] = {0};
-    int live_requested = 0;
-    FILE *cmdline = fopen("/proc/cmdline", "r");
-    if (cmdline) {
-        char buf[1024];
-        if (fgets(buf, sizeof(buf), cmdline)) {
-            if (strstr(buf, "ziro.live") != NULL) {
-                live_requested = 1;
-            }
-            char *p = strstr(buf, "root=");
-            if (p) {
-                p += 5;
-                char *end = p;
-                while (*end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n') {
-                    end++;
-                }
-                size_t len = (size_t)(end - p);
-                if (len < sizeof(root_spec)) {
-                    strncpy(root_spec, p, len);
-                    root_spec[len] = '\0';
-                }
-            }
-        }
-        fclose(cmdline);
+    read_cmdline();
+    int live_requested = cmdline_has("ziro.live");
+    size_t rlen = 0;
+    const char *rval = cmdline_find("root=", &rlen);
+    if (rval && rlen < sizeof(root_spec)) {
+        memcpy(root_spec, rval, rlen);
+        root_spec[rlen] = '\0';
     }
 
     // 4. If persistent root is requested (e.g. root=LABEL=ZIRO_ROOT), locate and mount disk
@@ -413,7 +395,7 @@ static void check_and_switch_root(void) {
                     mknod("/sysroot/dev/tty0", S_IFCHR | 0666, makedev(4, 0));
                     mknod("/sysroot/dev/tty1", S_IFCHR | 0666, makedev(4, 1));
                     mknod("/sysroot/dev/ttyS0", S_IFCHR | 0660, makedev(4, 64));
-                    mknod("/sysroot/dev/urandom", S_IFCHR | 0660, makedev(1, 9));
+                    mknod("/sysroot/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
 
                     umount2("/dev", MNT_DETACH);
                     umount2("/proc", MNT_DETACH);
@@ -889,6 +871,7 @@ static void start_containerd(void) {
         _exit(1);
     } else if (pid > 0) {
         containerd_pid = pid;
+        containerd_started = time(NULL);
         printf("[init] containerd spawned (PID: %d)\n", pid);
 
         // Quick check for socket readiness (up to 3 seconds)
@@ -952,6 +935,7 @@ static void start_sshd(void) {
         _exit(1);
     } else if (pid > 0) {
         sshd_pid = pid;
+        sshd_started = time(NULL);
         printf("[init] OpenSSH daemon ready: port 22 (PID: %d)\n", pid);
     }
 }
@@ -1014,22 +998,32 @@ static int is_installed_system(void) {
     return 0;
 }
 
-static int root_has_password(void) {
-    FILE *f = fopen("/etc/shadow", "r");
-    if (!f) return 0;
-    char line[256];
-    int has_pass = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "root:", 5) == 0) {
-            char *pass = line + 5;
-            if (pass[0] == '$') {
-                has_pass = 1;
-            }
-            break;
-        }
+/*
+ * Console session: installed systems ALWAYS require login (a locked or empty
+ * root password simply means no console login). A bare root shell is only
+ * offered on the live ISO. Break-glass access is the exact 'ziro.recovery'
+ * kernel argument, which already requires bootloader access.
+ */
+static void exec_console_session(void) {
+    setenv("TERM", "linux", 1);
+    setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
+    setenv("HOME", "/root", 1);
+    setenv("USER", "root", 1);
+    if (chdir("/root") != 0) {}
+
+    if (is_installed_system()) {
+        char *largv[] = {"login", NULL};
+        execv("/bin/login", largv);
+        char *bargv[] = {"busybox", "login", NULL};
+        execv("/bin/busybox", bargv);
+        _exit(1); /* never fall back to an unauthenticated shell */
     }
-    fclose(f);
-    return has_pass;
+
+    char *argv[] = {"-sh", NULL};
+    execv("/bin/sh", argv);
+    char *bargv[] = {"busybox", "sh", "-l", NULL};
+    execv("/bin/busybox", bargv);
+    _exit(1);
 }
 
 static void print_host_ips(void) {
@@ -1150,32 +1144,7 @@ static void spawn_terminal(struct terminal_session *s) {
         dup2(fd, STDERR_FILENO);
         if (fd > 2) close(fd);
 
-        setenv("TERM", "linux", 1);
-        setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
-        setenv("HOME", "/root", 1);
-        setenv("USER", "root", 1);
-        if (chdir("/root") != 0) {}
-
-        if (is_installed_system() && root_has_password()) {
-            if (access("/bin/login", X_OK) == 0) {
-                char *argv[] = {"login", NULL};
-                execv("/bin/login", argv);
-            }
-            if (access("/bin/busybox", X_OK) == 0) {
-                char *argv[] = {"busybox", "login", NULL};
-                execv("/bin/busybox", argv);
-            }
-        }
-
-        if (access("/bin/sh", X_OK) == 0) {
-            char *argv[] = {"-sh", NULL};
-            execv("/bin/sh", argv);
-        }
-        if (access("/bin/busybox", X_OK) == 0) {
-            char *argv[] = {"busybox", "sh", "-l", NULL};
-            execv("/bin/busybox", argv);
-        }
-        _exit(1);
+        exec_console_session();
     } else if (pid > 0) {
         s->pid = pid;
         s->last_spawn = now;
@@ -1196,32 +1165,7 @@ static void spawn_fallback_console(void) {
             dup2(fd, STDERR_FILENO);
             if (fd > 2) close(fd);
         }
-        setenv("TERM", "linux", 1);
-        setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/cni/bin", 1);
-        setenv("HOME", "/root", 1);
-        setenv("USER", "root", 1);
-        if (chdir("/root") != 0) {}
-
-        if (is_installed_system() && root_has_password()) {
-            if (access("/bin/login", X_OK) == 0) {
-                char *argv[] = {"login", NULL};
-                execv("/bin/login", argv);
-            }
-            if (access("/bin/busybox", X_OK) == 0) {
-                char *argv[] = {"busybox", "login", NULL};
-                execv("/bin/busybox", argv);
-            }
-        }
-
-        if (access("/bin/sh", X_OK) == 0) {
-            char *argv[] = {"-sh", NULL};
-            execv("/bin/sh", argv);
-        }
-        if (access("/bin/busybox", X_OK) == 0) {
-            char *argv[] = {"busybox", "sh", "-l", NULL};
-            execv("/bin/busybox", argv);
-        }
-        _exit(1);
+        exec_console_session();
     } else if (pid > 0) {
         console_fallback_pid = pid;
     }
@@ -1243,19 +1187,54 @@ static void supervise_terminals(void) {
     }
 }
 
+static time_t schedule_backoff(int fails) {
+    return fails >= 6 ? 60 : (time_t)1 << fails;
+}
+
+static void restart_due_daemons(void) {
+    time_t now = time(NULL);
+    if (containerd_restart_at && now >= containerd_restart_at) {
+        containerd_restart_at = 0;
+        start_containerd();
+    }
+    if (sshd_restart_at && now >= sshd_restart_at) {
+        sshd_restart_at = 0;
+        start_sshd();
+    }
+}
+
+/* Start everything enabled in /etc/ziro/services (firewall, sentinel, cloud-init, ...). */
+static void start_enabled_services(void) {
+    if (access("/usr/bin/ziroctl", X_OK) != 0) return;
+    printf("[init] starting enabled Ziro services...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"ziroctl", "service", "boot", NULL};
+        execv("/usr/bin/ziroctl", argv);
+        _exit(1);
+    } else if (pid > 0) {
+        int st;
+        waitpid(pid, &st, 0);
+    }
+}
+
 static void handle_child_exit(pid_t pid, int status) {
     time_t now = time(NULL);
 
     if (pid == containerd_pid) {
-        printf("[init] containerd (PID %d) exited with status %d; restarting...\n", pid, status);
         containerd_pid = 0;
-        start_containerd();
+        containerd_fails = (now - containerd_started < 10) ? containerd_fails + 1 : 0;
+        containerd_restart_at = now + schedule_backoff(containerd_fails);
+        printf("[init] containerd (PID %d) exited with status %d; restarting in %lds\n",
+               pid, status, (long)(containerd_restart_at - now));
         return;
     }
     if (pid == sshd_pid) {
-        printf("[init] sshd (PID %d) exited with status %d; restarting...\n", pid, status);
         sshd_pid = 0;
-        start_sshd();
+        sshd_fails = (now - sshd_started < 10) ? sshd_fails + 1 : 0;
+        sshd_restart_at = now + schedule_backoff(sshd_fails);
+        printf("[init] sshd (PID %d) exited with status %d; restarting in %lds\n",
+               pid, status, (long)(sshd_restart_at - now));
         return;
     }
     if (pid == console_fallback_pid) {
@@ -1290,19 +1269,33 @@ static void perform_shutdown(int is_reboot) {
     }
     if (containerd_pid > 0) {
         kill(containerd_pid, SIGTERM);
+        /* Give containerd up to 10s to stop tasks and flush snapshots. */
+        for (int i = 0; i < 100 && waitpid(containerd_pid, NULL, WNOHANG) == 0; i++) {
+            usleep(100000);
+        }
     }
-    usleep(200000); // 200ms
 
     printf("[init] sending SIGTERM to all processes...\n");
     kill(-1, SIGTERM);
     sync();
-    sleep(1);
+    sleep(3);
 
     printf("[init] sending SIGKILL to remaining processes...\n");
     kill(-1, SIGKILL);
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
     sync();
 
     printf("[init] unmounting filesystems...\n");
+    pid_t upid = fork();
+    if (upid == 0) {
+        char *uargv[] = {"umount", "-a", "-r", NULL};
+        execv("/bin/umount", uargv);
+        char *bargv[] = {"busybox", "umount", "-a", "-r", NULL};
+        execv("/bin/busybox", bargv);
+        _exit(1);
+    } else if (upid > 0) {
+        waitpid(upid, NULL, 0);
+    }
     mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
 
@@ -1346,21 +1339,9 @@ int main(int argc, char *argv[]) {
     reboot(RB_ENABLE_CAD);
 
     // Inspect kernel command line for recovery or autoinstall
-    int recovery_requested = 0;
-    int autoinstall_requested = 0;
-    FILE *cmdline = fopen("/proc/cmdline", "r");
-    if (cmdline) {
-        char buf[1024];
-        if (fgets(buf, sizeof(buf), cmdline)) {
-            if (strstr(buf, "ziro.recovery") != NULL || strstr(buf, "emergency") != NULL || strstr(buf, "single") != NULL) {
-                recovery_requested = 1;
-            }
-            if (strstr(buf, "ziro.autoinstall") != NULL) {
-                autoinstall_requested = 1;
-            }
-        }
-        fclose(cmdline);
-    }
+    read_cmdline();
+    int recovery_requested = cmdline_has("ziro.recovery");
+    int autoinstall_requested = cmdline_has("ziro.autoinstall");
 
     // Initialization phases
     init_filesystems();
@@ -1409,6 +1390,7 @@ int main(int argc, char *argv[]) {
     init_network();
     start_containerd();
     start_sshd();
+    start_enabled_services();
 
     if (is_installed_system()) {
         char hname[64] = "ziro-os";
@@ -1445,6 +1427,7 @@ int main(int argc, char *argv[]) {
     // Interactive supervisor loop (concurrent multi-terminal on tty1, ttyS0, ttyAMA0)
     while (!shutdown_requested && !reboot_requested) {
         supervise_terminals();
+        restart_due_daemons();
 
         int status;
         pid_t exited = waitpid(-1, &status, WNOHANG);

@@ -46,3 +46,26 @@ Output:
  [PASS] Container IPv4 Forwarding Enabled
  [PASS] /tmp sticky bit configured correctly
 ```
+
+## Secure Defaults (v1.0.10)
+
+- **Console login**: installed systems always require `login` on tty1/ttyS0/ttyAMA0. A locked or empty root
+  password means no console login. An unauthenticated root shell exists only on the live ISO, or with the exact
+  `ziro.recovery` kernel argument. Anyone who can pick the GRUB "recovery" entry gets root, so set a GRUB
+  password on shared consoles.
+- **Cloud access**: the `cloud-init` service (autostart) uses IMDSv2 to install instance SSH keys into
+  `/root/.ssh/authorized_keys` and runs shell user-data once per instance. It only trusts `169.254.169.254` on
+  EC2-compatible clouds detected by DMI (override with `touch /etc/ziro/cloud-init.force`).
+- **Services**: `ziro-init` starts every enabled service (`ziroctl service boot`), so the firewall and Sentinel
+  are active from boot. A service's PID is only signalled when its argv matches the service definition.
+- **Firewall**: rules live in their own `inet ziro` nftables table. CNI, nerdctl, WireGuard and kube-proxy rules
+  are never flushed. ICMP/ICMPv6 are allowed, and so is SSH (22). Inputs are validated, and nft errors are reported.
+- **REST API**: binds `127.0.0.1:8443` by default, CORS is off, and the token is checked in constant time and never
+  logged. To expose it: `ziroctl api start --bind 0.0.0.0` plus `ziroctl firewall allow 8443`.
+- **Sentinel**: alert-only by default. Use `ziroctl security monitor --enforce` to SIGKILL CRITICAL detections.
+  File integrity is checked against a baseline in `/etc/ziro/fim.db`. Refresh it after upgrades with
+  `ziroctl security harden`.
+- **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
+  paths outside the backup allowlist, traversal, hardlinks, and writes through symlinks.
+- **Clustering** is experimental. `cluster join` only records metadata, and `cluster deploy` runs replicas on the
+  local node only.

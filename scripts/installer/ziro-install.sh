@@ -36,7 +36,7 @@ Options:
   -d, --disk <device>        Target disk device (e.g. /dev/vda, /dev/sda, /dev/nvme0n1)
   -n, --hostname <name>      System hostname (default: ziro-host)
   -k, --ssh-key <key|file>   SSH public key string or path to public key file
-  -p, --password <pass>      Root password (if SSH key is not used)
+  -p, --password <pass>      Root password (visible in ps; prefer env ZIRO_ROOT_PASSWORD)
   -u, --user-data <url|file> Cloud user-data / post-installation script (URL or local path)
       --net-mode <mode>      Network mode: 'dhcp' (default), 'static', or 'skip'
       --ip <ip/cidr>         Static IPv4 address and CIDR (e.g. 192.168.1.50/24)
@@ -64,7 +64,7 @@ EOF
 TARGET_DISK=""
 TARGET_HOSTNAME="ziro-host"
 SSH_KEY=""
-PASSWORD=""
+PASSWORD="${ZIRO_ROOT_PASSWORD:-}"
 USER_DATA=""
 AUTO_CONFIRM=0
 NET_MODE="dhcp"
@@ -256,6 +256,10 @@ interactive_prompts() {
         printf "${BOLD}Select target disk [1-%d] (default: 1): ${RESET}" "$total_disks"
         read -r choice || choice="1"
         choice="${choice:-1}"
+        # Only a plain number may reach eval
+        case "$choice" in
+            ''|*[!0-9]*) choice=1 ;;
+        esac
         eval "TARGET_DISK=\$disk_${choice}"
         if [ -z "$TARGET_DISK" ]; then
             eval "TARGET_DISK=\$disk_1"
@@ -286,8 +290,8 @@ interactive_prompts() {
             stty echo
             echo ""
             if [ -z "$PASSWORD" ]; then
-                PASSWORD="ziro"
-                printf "${YELLOW}Default password set to 'ziro' (change immediately upon boot)${RESET}\n\n"
+                printf "${RED}Error: an SSH public key or a root password is required.${RESET}\n"
+                exit 1
             fi
         fi
     fi
@@ -711,11 +715,16 @@ EOF
             sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$TARGET_MNT/etc/ssh/sshd_config" 2>/dev/null || true
             sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' "$TARGET_MNT/etc/ssh/sshd_config" 2>/dev/null || true
         fi
-    elif [ -n "$PASSWORD" ]; then
+    elif [ -z "$PASSWORD" ]; then
+        printf "${YELLOW}Warning: no SSH key or root password set. Console login is disabled;${RESET}\n"
+        printf "${YELLOW}access is only possible via cloud metadata SSH keys (cloud-init) or ziro.recovery.${RESET}\n"
+    else
         # Set root password
+        # Password goes through stdin only: never interpolated into a shell command.
         if command -v chpasswd >/dev/null 2>&1; then
-            echo "root:$PASSWORD" | chpasswd -R "$TARGET_MNT" 2>/dev/null || \
-                chroot "$TARGET_MNT" sh -c "echo 'root:$PASSWORD' | chpasswd" 2>/dev/null || true
+            printf 'root:%s\n' "$PASSWORD" | chpasswd -R "$TARGET_MNT" 2>/dev/null || \
+                printf 'root:%s\n' "$PASSWORD" | chroot "$TARGET_MNT" chpasswd 2>/dev/null || \
+                printf "${YELLOW}Warning: failed to set root password.${RESET}\n"
         fi
     fi
 

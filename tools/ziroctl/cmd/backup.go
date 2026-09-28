@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -16,6 +18,71 @@ import (
 
 const defaultBackupDir = "/var/backups/ziro"
 
+// backupPaths are the only locations a backup may contain or restore into.
+var backupPaths = []string{
+	"/etc/ziro",
+	"/etc/ssh",
+	"/etc/wireguard",
+	"/etc/network",
+	"/etc/crontabs",
+	"/etc/hostname",
+	"/etc/hosts",
+	"/etc/resolv.conf",
+	"/etc/sysctl.conf",
+}
+
+// validateBackupArchive rejects members outside backupPaths, path traversal,
+// hardlinks/devices, and writes through a symlink shipped in the same archive.
+func validateBackupArchive(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(gz)
+
+	var symlinks []string
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		name := filepath.Clean("/" + h.Name)
+		if strings.Contains(h.Name, "..") {
+			return fmt.Errorf("member %q contains '..'", h.Name)
+		}
+		allowed := false
+		for _, p := range backupPaths {
+			if name == p || strings.HasPrefix(name, p+"/") {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("member %q is outside the backup allowlist", h.Name)
+		}
+		for _, l := range symlinks {
+			if strings.HasPrefix(name, l+"/") {
+				return fmt.Errorf("member %q would be written through symlink %q", h.Name, l)
+			}
+		}
+		switch h.Typeflag {
+		case tar.TypeReg, tar.TypeDir:
+		case tar.TypeSymlink:
+			symlinks = append(symlinks, name)
+		default:
+			return fmt.Errorf("member %q has disallowed type %q", h.Name, string(h.Typeflag))
+		}
+	}
+}
+
 var (
 	backupOutPath     string
 	backupIncludeData bool
@@ -30,7 +97,7 @@ var backupCmd = &cobra.Command{
 
 var backupCreateCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create an encrypted/compressed backup of system configurations and cluster state",
+	Short: "Create a compressed (unencrypted, root-only) backup of system configurations and cluster state",
 	Run: func(cmd *cobra.Command, args []string) {
 		_ = os.MkdirAll(defaultBackupDir, 0700)
 
@@ -42,23 +109,10 @@ var backupCreateCmd = &cobra.Command{
 
 		fmt.Printf("📦 Creating Ziro-OS configuration backup at %s...\n", targetArchive)
 
-		// List of critical config files & dirs to bundle
-		pathsToBackup := []string{
-			"/etc/ziro",
-			"/etc/ssh",
-			"/etc/wireguard",
-			"/etc/network",
-			"/etc/crontabs",
-			"/etc/hostname",
-			"/etc/hosts",
-			"/etc/resolv.conf",
-			"/etc/sysctl.conf",
-		}
-
 		var existingPaths []string
-		for _, p := range pathsToBackup {
+		for _, p := range backupPaths {
 			if _, err := os.Stat(p); err == nil {
-				existingPaths = append(existingPaths, p)
+				existingPaths = append(existingPaths, strings.TrimPrefix(p, "/"))
 			}
 		}
 
@@ -68,11 +122,13 @@ var backupCreateCmd = &cobra.Command{
 		}
 
 		// Execute tar czf
-		tarArgs := append([]string{"-czf", targetArchive, "-P"}, existingPaths...)
+		// Archive holds private keys and tokens: create it root-only.
+		tarArgs := append([]string{"-czf", targetArchive, "-C", "/"}, existingPaths...)
 		if err := exec.Command("tar", tarArgs...).Run(); err != nil {
 			fmt.Printf("Tar failed: %v\n", err)
 			return
 		}
+		_ = os.Chmod(targetArchive, 0600)
 
 		// Generate SHA-256 integrity checksum manifest
 		hashStr, err := computeFileSHA256(targetArchive)
@@ -82,7 +138,7 @@ var backupCreateCmd = &cobra.Command{
 		}
 
 		manifestFile := targetArchive + ".sha256"
-		_ = os.WriteFile(manifestFile, []byte(fmt.Sprintf("%s  %s\n", hashStr, filepath.Base(targetArchive))), 0644)
+		_ = os.WriteFile(manifestFile, []byte(fmt.Sprintf("%s  %s\n", hashStr, filepath.Base(targetArchive))), 0600)
 
 		fi, _ := os.Stat(targetArchive)
 		sizeKB := fi.Size() / 1024
@@ -148,7 +204,10 @@ var backupRestoreCmd = &cobra.Command{
 		if fileExists(manifestPath) {
 			fmt.Println("Verifying SHA-256 archive integrity...")
 			expectedData, _ := os.ReadFile(manifestPath)
-			expectedHash := strings.Fields(string(expectedData))[0]
+			expectedHash := ""
+			if f := strings.Fields(string(expectedData)); len(f) > 0 {
+				expectedHash = f[0]
+			}
 
 			actualHash, err := computeFileSHA256(archivePath)
 			if err != nil || actualHash != expectedHash {
@@ -163,7 +222,12 @@ var backupRestoreCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Restoring configurations from %s to / ...\n", archivePath)
-		tarCmd := exec.Command("tar", "-xzf", archivePath, "-P", "-C", "/")
+		if err := validateBackupArchive(archivePath); err != nil {
+			fmt.Printf("❌ Refusing to restore: %v\n", err)
+			return
+		}
+		// No -P: leading '/' is stripped and everything lands under -C /.
+		tarCmd := exec.Command("tar", "-xzf", archivePath, "-C", "/")
 		tarCmd.Stdout = os.Stdout
 		tarCmd.Stderr = os.Stderr
 		if err := tarCmd.Run(); err != nil {

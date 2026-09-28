@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +45,7 @@ var wgInitCmd = &cobra.Command{
 		_ = os.MkdirAll(defaultWgPeers, 0700)
 
 		privKey, pubKey := generateWgKeypair()
+		egress := defaultRouteIface()
 
 		confContent := fmt.Sprintf(`# Ziro-OS WireGuard Cloud Mesh Interface
 [Interface]
@@ -51,11 +55,15 @@ PrivateKey = %s
 SaveConfig = true
 
 # Cloud mesh routing & container overlay rules
-PostUp = iptables -A FORWARD -i %s -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -D FORWARD -i %s -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
-`, wgCIDR, wgPort, privKey, wgIface, wgIface)
+PostUp = iptables -A FORWARD -i %s -j ACCEPT; iptables -t nat -A POSTROUTING -o %s -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -i %s -j ACCEPT; iptables -t nat -D POSTROUTING -o %s -j MASQUERADE 2>/dev/null || true
+`, wgCIDR, wgPort, privKey, wgIface, egress, wgIface, egress)
 
 		confPath := filepath.Join(wireguardDir, wgIface+".conf")
+		if fileExists(confPath) {
+			fmt.Printf("%s already exists; refusing to overwrite the server key.\n", confPath)
+			return
+		}
 		if err := os.WriteFile(confPath, []byte(confContent), 0600); err != nil {
 			fmt.Printf("Failed to write config: %v\n", err)
 			return
@@ -96,11 +104,27 @@ var wgUpCmd = &cobra.Command{
 			return
 		}
 
-		// Fallback to ip link + wg setconf
+		// Fallback without wg-quick: strip wg-quick keys, then ip + wg setconf
+		fmt.Printf("wg-quick unavailable or failed (%s); using ip/wg fallback\n", strings.TrimSpace(string(out)))
+		data, err := os.ReadFile(confPath)
+		if err != nil {
+			fmt.Printf("Failed to read %s: %v\n", confPath, err)
+			return
+		}
+		setconf := exec.Command("wg", "setconf", wgIface, "/dev/stdin")
+		setconf.Stdin = strings.NewReader(stripWgQuick(string(data)))
 		_ = exec.Command("ip", "link", "add", "dev", wgIface, "type", "wireguard").Run()
-		_ = exec.Command("wg", "setconf", wgIface, confPath).Run()
+		if out, err := setconf.CombinedOutput(); err != nil {
+			fmt.Printf("wg setconf failed: %v: %s\n", err, out)
+			return
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "Address" {
+				_ = exec.Command("ip", "address", "add", strings.TrimSpace(v), "dev", wgIface).Run()
+			}
+		}
 		_ = exec.Command("ip", "link", "set", "up", "dev", wgIface).Run()
-		fmt.Printf("WireGuard up output: %s\n", string(out))
+		fmt.Printf("✓ WireGuard interface '%s' is UP (fallback).\n", wgIface)
 	},
 }
 
@@ -138,12 +162,33 @@ var wgPeerAddCmd = &cobra.Command{
 			return
 		}
 
-		clientPriv, clientPub := generateWgKeypair()
+		if err := validName(peerName); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+		serverConfPath := filepath.Join(wireguardDir, wgIface+".conf")
+		serverConf, err := os.ReadFile(serverConfPath)
+		if err != nil {
+			fmt.Printf("Server config %s not found. Run 'ziroctl wireguard init' first.\n", serverConfPath)
+			return
+		}
+		if fileExists(filepath.Join(defaultWgPeers, peerName+".conf")) {
+			fmt.Printf("Peer '%s' already exists.\n", peerName)
+			return
+		}
 
 		allocatedIP := peerIP
 		if allocatedIP == "" {
-			allocatedIP = "10.10.0.2/32"
+			if allocatedIP, err = nextPeerIP(string(serverConf)); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				return
+			}
+		} else if strings.Contains(string(serverConf), "AllowedIPs = "+allocatedIP+"\n") {
+			fmt.Printf("Error: %s is already assigned to another peer.\n", allocatedIP)
+			return
 		}
+
+		clientPriv, clientPub := generateWgKeypair()
 
 		serverHost := getFirstNonLoopbackIPv4()
 		if serverHost == "" {
@@ -157,7 +202,6 @@ var wgPeerAddCmd = &cobra.Command{
 		}
 
 		// Add peer to server config
-		serverConfPath := filepath.Join(wireguardDir, wgIface+".conf")
 		peerEntry := fmt.Sprintf("\n# Peer: %s\n[Peer]\nPublicKey = %s\nAllowedIPs = %s\n", peerName, clientPub, allocatedIP)
 		_ = appendToFile(serverConfPath, peerEntry)
 
@@ -223,25 +267,83 @@ var wgPeerListCmd = &cobra.Command{
 }
 
 func generateWgKeypair() (string, string) {
-	// If 'wg' tool is available, use official curve25519 generation
-	if _, err := exec.LookPath("wg"); err == nil {
-		if privOut, err := exec.Command("wg", "genkey").Output(); err == nil {
-			priv := strings.TrimSpace(string(privOut))
-			cmd := exec.Command("wg", "pubkey")
-			cmd.Stdin = strings.NewReader(priv)
-			if pubOut, err := cmd.Output(); err == nil {
-				return priv, strings.TrimSpace(string(pubOut))
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err) // crypto/rand failure: nothing sane to continue with
+	}
+	return base64.StdEncoding.EncodeToString(priv.Bytes()),
+		base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes())
+}
+
+// defaultRouteIface returns the interface of the IPv4 default route (for NAT).
+func defaultRouteIface() string {
+	data, err := os.ReadFile("/proc/net/route")
+	if err == nil {
+		for _, line := range strings.Split(string(data), "\n")[1:] {
+			f := strings.Fields(line)
+			if len(f) > 1 && f[1] == "00000000" {
+				return f[0]
 			}
 		}
 	}
+	return "eth0"
+}
 
-	// High-entropy 32-byte fallback
-	key := make([]byte, 32)
-	_, _ = rand.Read(key)
-	priv := base64.StdEncoding.EncodeToString(key)
-	_, _ = rand.Read(key)
-	pub := base64.StdEncoding.EncodeToString(key)
-	return priv, pub
+// nextPeerIP returns the first free /32 in the server's subnet, skipping the
+// server address and every AllowedIPs already present in its config.
+func nextPeerIP(serverConf string) (string, error) {
+	var ipnet *net.IPNet
+	used := map[string]bool{}
+	for _, line := range strings.Split(serverConf, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch k {
+		case "Address":
+			ip, n, err := net.ParseCIDR(strings.Split(v, ",")[0])
+			if err == nil {
+				ipnet = n
+				used[ip.String()] = true
+			}
+		case "AllowedIPs":
+			for _, c := range strings.Split(v, ",") {
+				if ip, _, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+					used[ip.String()] = true
+				}
+			}
+		}
+	}
+	if ipnet == nil || ipnet.IP.To4() == nil {
+		return "", fmt.Errorf("no IPv4 Address in server config")
+	}
+	for n := binary.BigEndian.Uint32(ipnet.IP.To4()) + 1; ; n++ {
+		c := make(net.IP, 4)
+		binary.BigEndian.PutUint32(c, n)
+		if !ipnet.Contains(c) {
+			break
+		}
+		if c[3] == 0 || c[3] == 255 || used[c.String()] {
+			continue
+		}
+		return c.String() + "/32", nil
+	}
+	return "", fmt.Errorf("mesh subnet %s is full", ipnet)
+}
+
+// stripWgQuick removes wg-quick-only keys so 'wg setconf' accepts the file.
+func stripWgQuick(conf string) string {
+	skip := map[string]bool{"Address": true, "DNS": true, "MTU": true, "Table": true, "SaveConfig": true,
+		"PreUp": true, "PostUp": true, "PreDown": true, "PostDown": true}
+	var out []string
+	for _, line := range strings.Split(conf, "\n") {
+		k, _, _ := strings.Cut(line, "=")
+		if !skip[strings.TrimSpace(k)] {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func appendToFile(path, content string) error {
@@ -263,7 +365,7 @@ func init() {
 	wgDownCmd.Flags().StringVarP(&wgIface, "interface", "i", defaultWgIface, "WireGuard interface name")
 
 	wgPeerAddCmd.Flags().StringVarP(&peerName, "name", "n", "", "Peer/client identifier name")
-	wgPeerAddCmd.Flags().StringVar(&peerIP, "ip", "10.10.0.2/32", "Peer mesh IP address")
+	wgPeerAddCmd.Flags().StringVar(&peerIP, "ip", "", "Peer mesh IP (default: next free address in the mesh subnet)")
 	wgPeerAddCmd.Flags().StringVarP(&wgIface, "interface", "i", defaultWgIface, "Target WireGuard interface")
 	wgPeerAddCmd.Flags().IntVarP(&wgPort, "port", "p", 51820, "Server UDP port")
 	wgPeerAddCmd.Flags().BoolVar(&showQR, "qr", false, "Display ASCII QR code in terminal")
