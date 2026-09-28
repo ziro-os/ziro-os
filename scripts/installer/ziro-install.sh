@@ -44,6 +44,9 @@ Options:
       --dns <servers>        Space-separated DNS nameservers (default: 1.1.1.1 8.8.8.8)
       --iface <interface>    Target network interface (default: first active interface)
   -y, --yes                  Auto-confirm installation without interactive prompts
+      --upgrade              Upgrade an existing Ziro-OS install in place (keeps all data)
+      --erase                Allow wiping a disk that already holds Ziro-OS (unattended mode)
+      --force                Upgrade even if the pre-upgrade config snapshot fails
   -h, --help                 Show this help message
 
 Examples:
@@ -58,6 +61,9 @@ Examples:
 
   # Automated with remote cloud user-data script:
   $(basename "$0") -d /dev/sda -u https://example.com/user-data.sh -y
+
+  # Upgrade an existing installation from this ISO (config, containers and data are kept):
+  $(basename "$0") --upgrade -y
 EOF
 }
 
@@ -72,6 +78,10 @@ NET_IFACE=""
 NET_IP=""
 NET_GATEWAY=""
 NET_DNS="1.1.1.1 8.8.8.8"
+INSTALL_MODE=""   # "", upgrade, erase
+FORCE=0
+UPGRADE_PART=""
+EXISTING_VERSION=""
 
 # Parse kernel command line for automated cloud provisioning
 parse_cmdline() {
@@ -93,6 +103,12 @@ parse_cmdline() {
                     ;;
                 ziro.autoinstall)
                     AUTO_CONFIRM=1
+                    ;;
+                ziro.upgrade)
+                    INSTALL_MODE="upgrade"
+                    ;;
+                ziro.erase)
+                    INSTALL_MODE="erase"
                     ;;
                 ziro.net=*)
                     NET_MODE="${arg#ziro.net=}"
@@ -164,6 +180,18 @@ parse_args() {
                 AUTO_CONFIRM=1
                 shift
                 ;;
+            --upgrade)
+                INSTALL_MODE="upgrade"
+                shift
+                ;;
+            --erase)
+                INSTALL_MODE="erase"
+                shift
+                ;;
+            --force)
+                FORCE=1
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -224,6 +252,38 @@ detect_disks() {
     echo "$DISKS"
 }
 
+# Parent disk of a partition device, e.g. /dev/nvme0n1p3 -> /dev/nvme0n1.
+part_disk() {
+    _p=$(readlink -f "/sys/class/block/$(basename "$1")/.." 2>/dev/null) || return 0
+    echo "/dev/$(basename "$_p")"
+}
+
+# Finds an existing installation (ZIRO_ROOT with /etc/ziro-installed), limited to
+# TARGET_DISK when one is set. Sets UPGRADE_PART and EXISTING_VERSION.
+find_existing_install() {
+    UPGRADE_PART=""
+    EXISTING_VERSION=""
+    mdev -s 2>/dev/null || true
+    for part in $(blkid -o device -t LABEL=ZIRO_ROOT 2>/dev/null); do
+        if [ -n "$TARGET_DISK" ] && [ "$(part_disk "$part")" != "$TARGET_DISK" ]; then
+            continue
+        fi
+        mkdir -p /mnt/ziro-probe
+        mount -r "$part" /mnt/ziro-probe 2>/dev/null || continue
+        if [ -f /mnt/ziro-probe/etc/ziro-installed ]; then
+            if [ -n "$UPGRADE_PART" ]; then
+                umount /mnt/ziro-probe
+                printf "${RED}❌ Several disks hold Ziro-OS; choose one with --disk.${RESET}\n"
+                exit 1
+            fi
+            UPGRADE_PART="$part"
+            EXISTING_VERSION=$(sed -n 's/^VERSION="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /mnt/ziro-probe/etc/ziro-release 2>/dev/null)
+        fi
+        umount /mnt/ziro-probe 2>/dev/null || true
+    done
+    [ -n "$UPGRADE_PART" ]
+}
+
 interactive_prompts() {
     print_banner
 
@@ -266,6 +326,20 @@ interactive_prompts() {
         fi
     fi
     printf "Target Disk selected: ${GREEN}%s${RESET}\n\n" "$TARGET_DISK"
+
+    if find_existing_install; then
+        printf "${YELLOW}${BOLD}Ziro-OS %s is already installed on %s.${RESET}\n" "${EXISTING_VERSION:-unknown}" "$UPGRADE_PART"
+        printf "  ${CYAN}[U]${RESET} Upgrade — keep all configuration, containers and data [default]\n"
+        printf "  ${CYAN}[E]${RESET} Erase the disk and reinstall\n"
+        printf "  ${CYAN}[C]${RESET} Cancel\n"
+        printf "${BOLD}Choose [U/e/c]: ${RESET}"
+        read -r mode_choice || mode_choice=""
+        case "$mode_choice" in
+            e|E) INSTALL_MODE="erase" ;;
+            c|C) printf "${RED}Cancelled.${RESET}\n"; exit 0 ;;
+            *) INSTALL_MODE="upgrade"; return 0 ;;
+        esac
+    fi
 
     # Hostname prompt
     printf "${BOLD}Enter system hostname [default: %s]: ${RESET}" "$TARGET_HOSTNAME"
@@ -373,6 +447,97 @@ interactive_prompts() {
         printf "${RED}Installation cancelled by user.${RESET}\n"
         exit 0
     fi
+}
+
+# Sets INITR_SRC to the OS image this installer runs from: live /boot or the ISO.
+find_boot_image() {
+    INITR_SRC=""
+    for candidate in /boot/initramfs* /initramfs* /build/ziro-initramfs*.cpio.gz; do
+        if [ -f "$candidate" ]; then
+            INITR_SRC="$candidate"
+            return 0
+        fi
+    done
+    for mod in sr_mod isofs ata_piix ahci virtio_scsi scsi_mod; do
+        modprobe -q "$mod" 2>/dev/null || true
+    done
+    mdev -s 2>/dev/null || true
+    mkdir -p /mnt/cdrom
+    for cddev in /dev/sr* /dev/cdrom /dev/iso*; do
+        if [ -b "$cddev" ]; then
+            mount -r "$cddev" /mnt/cdrom 2>/dev/null || true
+            if [ -f /mnt/cdrom/boot/initramfs.cpio.gz ]; then
+                INITR_SRC="/mnt/cdrom/boot/initramfs.cpio.gz"
+                return 0
+            fi
+            umount /mnt/cdrom 2>/dev/null || true
+        fi
+    done
+}
+
+# In-place upgrade of an existing installation: nothing is partitioned or
+# formatted; ziroctl swaps the OS files and keeps config, containers and data.
+perform_upgrade() {
+    if [ -f /etc/ziro-installed ]; then
+        printf "${RED}❌ This is an installed host. Boot the new ISO, or run 'ziroctl upgrade'.${RESET}\n"
+        exit 1
+    fi
+    printf "\n${CYAN}⬆️  Upgrading Ziro-OS %s on %s (all data is kept)...${RESET}\n" "${EXISTING_VERSION:-unknown}" "$UPGRADE_PART"
+
+    find_boot_image
+    if [ -z "$INITR_SRC" ]; then
+        printf "${RED}❌ Could not find the Ziro-OS image on the install media.${RESET}\n"
+        exit 1
+    fi
+    if [ "$INITR_SRC" = "/mnt/cdrom/boot/initramfs.cpio.gz" ] && [ -f /mnt/cdrom/SHA256SUMS ]; then
+        printf "${BOLD}[1/4] Verifying install media...${RESET}\n"
+        if ! (cd /mnt/cdrom && sha256sum -c SHA256SUMS); then
+            printf "${RED}❌ Install media is corrupt (SHA-256 mismatch). Nothing was changed.${RESET}\n"
+            exit 1
+        fi
+    fi
+
+    TARGET_MNT="/mnt/ziro-target"
+    mkdir -p "$TARGET_MNT"
+    umount -R "$TARGET_MNT" 2>/dev/null || true
+    mount "$UPGRADE_PART" "$TARGET_MNT"
+    ESP=""
+    for d in $(blkid -o device -t LABEL=ZIRO_ESP 2>/dev/null); do
+        [ "$(part_disk "$d")" = "$(part_disk "$UPGRADE_PART")" ] && ESP="$d"
+    done
+    if [ -n "$ESP" ]; then
+        mkdir -p "$TARGET_MNT/boot/efi"
+        mount "$ESP" "$TARGET_MNT/boot/efi"
+    fi
+    for fs in dev proc sys; do
+        mount --bind "/$fs" "$TARGET_MNT/$fs"
+    done
+    cleanup_upgrade() {
+        for fs in dev proc sys boot/efi; do
+            umount "$TARGET_MNT/$fs" 2>/dev/null || true
+        done
+        sync
+        umount "$TARGET_MNT" 2>/dev/null || true
+    }
+    trap cleanup_upgrade EXIT
+
+    printf "${BOLD}[2/4] Snapshotting configuration with the installed ziroctl...${RESET}\n"
+    if ! chroot "$TARGET_MNT" /usr/bin/ziroctl backup create; then
+        if [ "$FORCE" -ne 1 ]; then
+            printf "${RED}❌ Pre-upgrade snapshot failed; nothing was changed. Use --force to skip it.${RESET}\n"
+            exit 1
+        fi
+        printf "${YELLOW}⚠️  --force: continuing without a snapshot.${RESET}\n"
+    fi
+
+    printf "${BOLD}[3/4] Swapping OS files and kernel...${RESET}\n"
+    ziroctl upgrade apply --root "$TARGET_MNT" --initramfs "$INITR_SRC"
+
+    printf "${BOLD}[4/4] Finalizing...${RESET}\n"
+    cleanup_upgrade
+    trap - EXIT
+    printf "\n${GREEN}🎉 Ziro-OS upgraded. Remove the install media and reboot.${RESET}\n"
+    printf "   Roll back with 'ziroctl upgrade rollback' or the \"Ziro-OS (previous version)\" boot entry.\n\n"
 }
 
 perform_install() {
@@ -490,35 +655,10 @@ EOF
         fi
     done
 
-    # Locate or extract boot initramfs
-    INITR_SRC=""
-    for candidate in /boot/initramfs* /initramfs* /build/ziro-initramfs*.cpio.gz; do
-        if [ -f "$candidate" ]; then
-            INITR_SRC="$candidate"
-            break
-        fi
-    done
-
-    # If not on current rootfs, check mounted CD-ROM or ISO devices
-    if [ -z "$INITR_SRC" ]; then
-        for mod in sr_mod isofs ata_piix ahci virtio_scsi scsi_mod; do
-            modprobe -q "$mod" 2>/dev/null || true
-        done
-        mdev -s 2>/dev/null || true
-        mkdir -p /mnt/cdrom
-        for cddev in /dev/sr* /dev/cdrom /dev/iso*; do
-            if [ -b "$cddev" ]; then
-                mount -r "$cddev" /mnt/cdrom 2>/dev/null || true
-                if [ -f /mnt/cdrom/boot/initramfs.cpio.gz ]; then
-                    INITR_SRC="/mnt/cdrom/boot/initramfs.cpio.gz"
-                    if [ ! -f "$TARGET_MNT/boot/vmlinuz" ] && [ -f /mnt/cdrom/boot/vmlinuz ]; then
-                        cp /mnt/cdrom/boot/vmlinuz "$TARGET_MNT/boot/vmlinuz"
-                    fi
-                    break
-                fi
-                umount /mnt/cdrom 2>/dev/null || true
-            fi
-        done
+    # Locate boot initramfs (live /boot or the install media)
+    find_boot_image
+    if [ "$INITR_SRC" = "/mnt/cdrom/boot/initramfs.cpio.gz" ] && [ ! -f "$TARGET_MNT/boot/vmlinuz" ] && [ -f /mnt/cdrom/boot/vmlinuz ]; then
+        cp /mnt/cdrom/boot/vmlinuz "$TARGET_MNT/boot/vmlinuz"
     fi
 
     if [ -n "$INITR_SRC" ] && [ -f "$INITR_SRC" ]; then
@@ -846,10 +986,29 @@ main() {
     parse_cmdline
     parse_args "$@"
 
-    if [ "$AUTO_CONFIRM" -eq 0 ] || [ -z "$TARGET_DISK" ]; then
-        interactive_prompts
+    # Upgrade needs no disk selection: the existing ZIRO_ROOT is located directly.
+    if [ "$INSTALL_MODE" = "upgrade" ]; then
+        if ! find_existing_install; then
+            printf "${RED}❌ No existing Ziro-OS installation found%s.${RESET}\n" "${TARGET_DISK:+ on $TARGET_DISK}"
+            exit 1
+        fi
+        perform_upgrade
+        exit 0
     fi
 
+    if [ "$AUTO_CONFIRM" -eq 0 ] || [ -z "$TARGET_DISK" ]; then
+        interactive_prompts
+    elif [ "$INSTALL_MODE" != "erase" ] && find_existing_install; then
+        # Unattended installs never wipe an existing installation implicitly.
+        printf "${RED}❌ %s already holds Ziro-OS %s. Pass --upgrade (or ziro.upgrade) to keep data,${RESET}\n" "$TARGET_DISK" "${EXISTING_VERSION:-unknown}"
+        printf "${RED}   or --erase (ziro.erase) to wipe it and reinstall.${RESET}\n"
+        exit 1
+    fi
+
+    if [ "$INSTALL_MODE" = "upgrade" ]; then
+        perform_upgrade
+        exit 0
+    fi
     perform_install
 }
 

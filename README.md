@@ -205,6 +205,7 @@ ziro-os/
 - [System Architecture](docs/architecture.md)
 - [Multi-Architecture Building](docs/building.md)
 - [Security & Hardening Model](docs/security.md)
+- [Upgrading Ziro-OS](docs/upgrade.md)
 - [Virtualization & Hypervisors](docs/virtualization.md)
 
 ---

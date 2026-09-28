@@ -99,55 +99,57 @@ var backupCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a compressed (unencrypted, root-only) backup of system configurations and cluster state",
 	Run: func(cmd *cobra.Command, args []string) {
-		_ = os.MkdirAll(defaultBackupDir, 0700)
-
-		ts := time.Now().Format("20060102-150405")
-		targetArchive := backupOutPath
-		if targetArchive == "" {
-			targetArchive = filepath.Join(defaultBackupDir, fmt.Sprintf("ziro-backup-%s.tar.gz", ts))
+		if _, err := createBackup(backupOutPath); err != nil {
+			fmt.Printf("Backup failed: %v\n", err)
 		}
-
-		fmt.Printf("📦 Creating Ziro-OS configuration backup at %s...\n", targetArchive)
-
-		var existingPaths []string
-		for _, p := range backupPaths {
-			if _, err := os.Stat(p); err == nil {
-				existingPaths = append(existingPaths, strings.TrimPrefix(p, "/"))
-			}
-		}
-
-		if len(existingPaths) == 0 {
-			fmt.Println("Warning: No standard configuration directories found to backup.")
-			return
-		}
-
-		// Execute tar czf
-		// Archive holds private keys and tokens: create it root-only.
-		tarArgs := append([]string{"-czf", targetArchive, "-C", "/"}, existingPaths...)
-		if err := exec.Command("tar", tarArgs...).Run(); err != nil {
-			fmt.Printf("Tar failed: %v\n", err)
-			return
-		}
-		_ = os.Chmod(targetArchive, 0600)
-
-		// Generate SHA-256 integrity checksum manifest
-		hashStr, err := computeFileSHA256(targetArchive)
-		if err != nil {
-			fmt.Printf("Checksum calculation error: %v\n", err)
-			return
-		}
-
-		manifestFile := targetArchive + ".sha256"
-		_ = os.WriteFile(manifestFile, []byte(fmt.Sprintf("%s  %s\n", hashStr, filepath.Base(targetArchive))), 0600)
-
-		fi, _ := os.Stat(targetArchive)
-		sizeKB := fi.Size() / 1024
-
-		fmt.Println("================================================================")
-		fmt.Printf(" ✓ Backup successfully created: %s (%d KB)\n", targetArchive, sizeKB)
-		fmt.Printf(" ✓ SHA-256 Manifest:           %s\n", hashStr)
-		fmt.Println("================================================================")
 	},
+}
+
+// createBackup archives backupPaths into out (default: timestamped file in
+// defaultBackupDir), writes a .sha256 manifest next to it and returns the path.
+func createBackup(out string) (string, error) {
+	if err := os.MkdirAll(defaultBackupDir, 0700); err != nil {
+		return "", err
+	}
+	if out == "" {
+		ts := time.Now().Format("20060102-150405")
+		out = filepath.Join(defaultBackupDir, fmt.Sprintf("ziro-backup-%s.tar.gz", ts))
+	}
+
+	fmt.Printf("📦 Creating Ziro-OS configuration backup at %s...\n", out)
+
+	var existingPaths []string
+	for _, p := range backupPaths {
+		if _, err := os.Stat(p); err == nil {
+			existingPaths = append(existingPaths, strings.TrimPrefix(p, "/"))
+		}
+	}
+	if len(existingPaths) == 0 {
+		return "", fmt.Errorf("no standard configuration directories found to back up")
+	}
+
+	// Archive holds private keys and tokens: create it root-only.
+	tarArgs := append([]string{"-czf", out, "-C", "/"}, existingPaths...)
+	if err := exec.Command("tar", tarArgs...).Run(); err != nil {
+		return "", fmt.Errorf("tar: %w", err)
+	}
+	_ = os.Chmod(out, 0600)
+
+	hashStr, err := computeFileSHA256(out)
+	if err != nil {
+		return "", fmt.Errorf("checksum: %w", err)
+	}
+	manifest := fmt.Sprintf("%s  %s\n", hashStr, filepath.Base(out))
+	if err := os.WriteFile(out+".sha256", []byte(manifest), 0600); err != nil {
+		return "", err
+	}
+
+	fi, _ := os.Stat(out)
+	fmt.Println("================================================================")
+	fmt.Printf(" ✓ Backup successfully created: %s (%d KB)\n", out, fi.Size()/1024)
+	fmt.Printf(" ✓ SHA-256 Manifest:           %s\n", hashStr)
+	fmt.Println("================================================================")
+	return out, nil
 }
 
 var backupListCmd = &cobra.Command{

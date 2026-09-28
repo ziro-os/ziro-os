@@ -113,6 +113,11 @@ menuentry "Ziro-OS Automated Terminal Installer" {
     initrd /boot/initramfs.cpio.gz
 }
 
+menuentry "Upgrade Existing Ziro-OS Install (keep all data)" {
+    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.autoinstall ziro.upgrade
+    initrd /boot/initramfs.cpio.gz
+}
+
 menuentry "Boot Installed Ziro-OS from Hard Drive (auto-detect)" {
     search --no-floppy --label --set=root ZIRO_ROOT
     linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0
@@ -153,6 +158,8 @@ docker run --rm \
         set -e
         echo "Installing xorriso, mtools, and bootloader tools (${GRUB_PACKAGES})..."
         apk add --no-cache xorriso mtools ${GRUB_PACKAGES} >/dev/null 2>&1
+        # Lets the installer detect corrupt media before an upgrade touches the disk
+        (cd /iso && sha256sum boot/vmlinuz boot/initramfs.cpio.gz > SHA256SUMS)
         echo "Generating hybrid bootable ISO image with El Torito BIOS + UEFI catalogs..."
         grub-mkrescue -o "/out/ziro-os-${TARGET_ARCH}${SUFFIX}.iso" /iso 2>&1
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-os-${TARGET_ARCH}${SUFFIX}.iso"
