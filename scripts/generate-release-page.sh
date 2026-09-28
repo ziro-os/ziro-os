@@ -53,22 +53,49 @@ asset_bytes() { printf '%s\n' "$ASSET_SIZES" | awk -v n="$1" '$1 == n { print $2
 # Decimal megabytes (1 MB = 1,000,000 bytes), matching the CI size gate.
 fmt_mb() { awk -v b="$1" 'BEGIN { if (b < 1000000) printf "%.1f KB", b / 1000; else printf "%.1f MB", b / 1000000 }'; }
 
-# btn <asset> <label> [subtle]: a download button with its real size; omitted when the
-# release is known and does not contain the asset (e.g. a flavor not built for that arch).
-btn() {
-    local name="$1" label="$2" cls="btn" bytes size=""
-    [ "${3:-}" = "subtle" ] && cls="btn btn-subtle"
+# dl <asset>: download link with the real size, or a dash when the release does not
+# ship that file. "-" marks a combination that is never built (e.g. an arm64 ISO).
+dl() {
+    local name="$1" bytes label="Download"
+    if [ "$name" = "-" ]; then printf '<span class="na" title="Not built">&mdash;</span>'; return 0; fi
     bytes=$(asset_bytes "$name")
-    if [ -z "$bytes" ] && [ -n "$ASSET_SIZES" ]; then return 0; fi
-    [ -n "$bytes" ] && size=" ($(fmt_mb "$bytes"))"
-    printf '<a class="%s" data-asset="%s" href="%s/%s">%s<span class="size">%s</span></a>' \
-        "$cls" "$name" "$DOWNLOAD_BASE" "$name" "$label" "$size"
+    if [ -z "$bytes" ] && [ -n "$ASSET_SIZES" ]; then printf '<span class="na" title="Not in this release">&mdash;</span>'; return 0; fi
+    [ -n "$bytes" ] && label=$(fmt_mb "$bytes")
+    printf '<a class="dl" data-asset="%s" href="%s/%s" title="%s"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14"/></svg><span class="size">%s</span></a>' \
+        "$name" "$DOWNLOAD_BASE" "$name" "$name" "$label"
 }
 
-CUSTOM_BTNS="$(btn ziro-os-x86_64-custom.iso "ISO x86_64")$(btn ziro-initramfs-x86_64-custom.cpio.gz "initramfs x86_64" subtle)$(btn ziro-initramfs-arm64-custom.cpio.gz "initramfs arm64" subtle)$(btn vmlinuz-x86_64-custom "kernel x86_64" subtle)$(btn vmlinuz-arm64-custom "kernel arm64" subtle)$(btn kernel-config-x86_64-custom ".config x86_64" subtle)$(btn kernel-config-arm64-custom ".config arm64" subtle)"
-if [ -z "$CUSTOM_BTNS" ]; then
-    CUSTOM_BTNS='<span class="card-desc">Not in this release yet; published from the next release onward.</span>'
-fi
+has() { [ "$1" != "-" ] && { [ -z "$ASSET_SIZES" ] || [ -n "$(asset_bytes "$1")" ]; }; }
+
+# row <name> <description> <x86_64 asset> <arm64 asset>: skipped when neither file exists.
+row() {
+    has "$3" || has "$4" || return 0
+    printf '<tr><th scope="row"><span class="a-name">%s</span><span class="a-desc">%s</span></th><td data-arch="x86_64">%s</td><td data-arch="arm64">%s</td></tr>' \
+        "$1" "$2" "$(dl "$3")" "$(dl "$4")"
+}
+
+# group <title> <note> <rows>: a titled block of rows, omitted when empty.
+group() {
+    [ -n "$3" ] || return 0
+    local note=""
+    [ -n "$2" ] && note="<span>$2</span>"
+    printf '<tbody><tr class="group"><th colspan="3" scope="colgroup">%s%s</th></tr>%s</tbody>\n' "$1" "$note" "$3"
+}
+
+# One checksum file covers every architecture, so its link spans both columns.
+sums_row() {
+    printf '<tr><th scope="row"><span class="a-name">SHA256SUMS</span><span class="a-desc">SHA-256 of every file above</span></th><td colspan="2">%s</td></tr>' "$(dl SHA256SUMS)"
+}
+
+ARTIFACTS="$(group "Host OS &middot; Alpine kernel" "Default. linux-virt LTS, tuned for virtual machines." \
+    "$(row "ISO" "Live system and disk installer, UEFI and BIOS" ziro-os-x86_64.iso -)$(row "Host image" "initramfs for direct boot and <code>ziroctl upgrade</code>" ziro-initramfs-x86_64.cpio.gz ziro-initramfs-arm64.cpio.gz)$(row "Kernel" "vmlinuz for QEMU, Firecracker and Cloud Hypervisor" vmlinuz-x86_64 vmlinuz-arm64)")
+$(group "Host OS &middot; Ziro kernel" "kernel.org LTS with drivers for bare metal, KVM, Xen, Hyper-V, VMware, AWS Nitro and GCP." \
+    "$(row "ISO" "Live system and disk installer, UEFI and BIOS" ziro-os-x86_64-custom.iso -)$(row "Host image" "initramfs for direct boot and <code>ziroctl upgrade</code>" ziro-initramfs-x86_64-custom.cpio.gz ziro-initramfs-arm64-custom.cpio.gz)$(row "Kernel" "vmlinuz for QEMU, Firecracker and Cloud Hypervisor" vmlinuz-x86_64-custom vmlinuz-arm64-custom)$(row "Kernel config" "The .config this kernel was built from" kernel-config-x86_64-custom kernel-config-arm64-custom)")
+$(group "Container base" "" \
+    "$(row "Rootfs" "Minimal root filesystem for container images and microVMs" ziro-rootfs-x86_64.tar.gz ziro-rootfs-arm64.tar.gz)")
+$(group "Tools" "Static binaries, no dependencies." \
+    "$(row "ziroctl" "Manage the host: containers, network, security, upgrades" ziroctl-x86_64 ziroctl-arm64)$(row "ziropkg" "Install signed Alpine packages" ziropkg-x86_64 ziropkg-arm64)")
+$(group "Checksums" "" "$(sums_row)")"
 
 MINIMAL_BYTES=$(asset_bytes "ziro-rootfs-x86_64.tar.gz")
 MINIMAL_STAT="&asymp; 16 MB"
@@ -108,7 +135,7 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
     }
     body {
       background-color: var(--bg);
-      background-image: 
+      background-image:
         radial-gradient(ellipse 80% 50% at 50% -20%, rgba(56, 189, 248, 0.12), transparent),
         radial-gradient(ellipse 60% 40% at 80% 80%, rgba(16, 185, 129, 0.05), transparent);
       color: var(--text);
@@ -125,7 +152,7 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
       padding: 0 1.5rem;
       width: 100%;
     }
-    
+
     /* Navigation Bar */
     nav {
       border-bottom: 1px solid var(--border);
@@ -162,6 +189,7 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
       color: #04101e;
     }
     .brand-name {
+      white-space: nowrap;
       font-size: 1.15rem;
       font-weight: 700;
       letter-spacing: -0.02em;
@@ -202,7 +230,7 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
     .nav-links a:hover {
       color: var(--text);
     }
-    
+
     /* Hero Section */
     .hero {
       padding: 3.5rem 0 2rem 0;
@@ -292,8 +320,6 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
     .stat-label {
       font-size: 0.75rem;
       color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
       margin-top: 0.25rem;
     }
 
@@ -317,89 +343,108 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
       font-family: var(--font-mono);
     }
 
-    /* Downloads Grid */
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-      gap: 1.25rem;
-      margin-bottom: 3.5rem;
-    }
-    .card {
+    /* Artifact list */
+    .artifacts {
+      width: 100%;
+      border-collapse: collapse;
       background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 1.35rem;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      transition: all 0.15s ease;
+      overflow: hidden;
+      font-size: 0.875rem;
     }
-    .card:hover {
-      border-color: var(--border-accent);
-      background: var(--card-hover);
-      transform: translateY(-2px);
-    }
-    .card-top {
-      margin-bottom: 1rem;
-    }
-    .card-header-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 0.4rem;
-    }
-    .card-title {
-      font-size: 1.05rem;
-      font-weight: 700;
-    }
-    .badge-arch {
-      font-family: var(--font-mono);
+    .artifacts thead th {
+      text-align: left;
       font-size: 0.7rem;
-      background: rgba(56, 189, 248, 0.12);
-      border: 1px solid rgba(56, 189, 248, 0.25);
-      color: var(--primary);
-      padding: 0.15rem 0.45rem;
-      border-radius: 4px;
-      font-weight: 500;
-    }
-    .card-desc {
+      font-weight: 600;
       color: var(--text-muted);
-      font-size: 0.825rem;
-      line-height: 1.4;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.7rem 1rem;
+      border-bottom: 1px solid var(--border);
     }
-    
-    .btn-group {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
+    .artifacts thead th:not(:first-child) {
+      text-transform: none;
+      letter-spacing: 0;
     }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.4rem;
-      background: var(--primary);
-      color: #04101e;
+    .artifacts thead th:not(:first-child),
+    .artifacts td {
+      width: 9.5rem;
+      font-family: var(--font-mono);
+    }
+    .artifacts tr.group th {
+      text-align: left;
+      padding: 1.1rem 1rem 0.45rem;
       font-size: 0.8rem;
       font-weight: 600;
-      padding: 0.5rem 0.85rem;
-      border-radius: 6px;
-      text-decoration: none;
-      flex: 1;
-      min-width: 120px;
-      transition: background 0.15s ease;
-      white-space: nowrap;
+      color: var(--primary);
     }
-    .btn:hover {
-      background: var(--primary-hover);
+    .artifacts tr.group th span {
+      display: block;
+      margin-top: 0.15rem;
+      font-weight: 400;
+      color: var(--text-muted);
     }
-    .btn-subtle {
-      background: #1e2638;
-      color: var(--text);
+    .artifacts tbody + tbody tr.group th {
+      border-top: 1px solid var(--border);
+    }
+    .artifacts th[scope="row"],
+    .artifacts td {
+      padding: 0.55rem 1rem;
+      text-align: left;
+      vertical-align: middle;
+    }
+    .artifacts tbody tr:not(.group):hover {
+      background: var(--card-hover);
+    }
+    .a-name {
+      display: block;
+      font-weight: 600;
+    }
+    .a-desc {
+      display: block;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      font-weight: 400;
+    }
+    .a-desc code {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: #7dd3fc;
+    }
+    .dl {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.6rem;
       border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      text-decoration: none;
+      white-space: nowrap;
+      min-width: 7.25rem;
+      transition: border-color 0.15s ease, color 0.15s ease;
     }
-    .btn-subtle:hover {
-      background: #2a3449;
+    .dl svg {
+      flex-shrink: 0;
+    }
+    .dl:hover,
+    .dl:focus-visible {
+      border-color: var(--border-accent);
+      color: var(--primary);
+    }
+    .na {
+      color: #475569;
+      padding-left: 0.6rem;
+    }
+    .hint {
+      margin: 0.75rem 0 3.5rem;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+    .hint code {
+      font-family: var(--font-mono);
+      color: #7dd3fc;
     }
 
     /* Commands Snippets Box */
@@ -457,8 +502,60 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
       .stats-strip {
         grid-template-columns: repeat(2, 1fr);
       }
+      .cmd-grid {
+        grid-template-columns: 1fr;
+      }
+      .stat-val {
+        font-size: 0.95rem;
+        white-space: nowrap;
+      }
       .nav-links {
         gap: 0.75rem;
+      }
+    }
+    @media (max-width: 640px) {
+      .artifacts thead {
+        display: none;
+      }
+      .artifacts,
+      .artifacts tbody,
+      .artifacts tr,
+      .artifacts th {
+        display: block;
+      }
+      .artifacts tr:not(.group) {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem 0.75rem;
+        padding: 0.6rem 1rem;
+      }
+      .artifacts th[scope="row"] {
+        flex-basis: 100%;
+        padding: 0;
+      }
+      .artifacts td {
+        flex: 1 1 0;
+        min-width: 0;
+        width: auto;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+      .dl {
+        min-width: 0;
+      }
+      /* The Downloads header already shows the version */
+      nav .version-pill {
+        display: none;
+      }
+      .artifacts td[data-arch]::before {
+        content: attr(data-arch);
+        color: var(--text-muted);
+        font-size: 0.75rem;
+      }
+      .na {
+        padding-left: 0;
       }
     }
   </style>
@@ -503,152 +600,64 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
     <section class="stats-strip">
       <div class="stat-item">
         <div class="stat-val">${MINIMAL_STAT}</div>
-        <div class="stat-label">Minimal Container Base</div>
+        <div class="stat-label">Container base</div>
       </div>
       <div class="stat-item">
         <div class="stat-val">&lt; 300 MB</div>
-        <div class="stat-label">Full Host Image (CI-enforced)</div>
+        <div class="stat-label">Host image</div>
       </div>
       <div class="stat-item">
         <div class="stat-val">containerd</div>
-        <div class="stat-label">Native OCI Runtime</div>
+        <div class="stat-label">Runtime</div>
       </div>
       <div class="stat-item">
-        <div class="stat-val">x86_64 &amp; arm64</div>
-        <div class="stat-label">Multi-Architecture</div>
+        <div class="stat-val">x86_64 &middot; arm64</div>
+        <div class="stat-label">Architectures</div>
       </div>
     </section>
 
-    <!-- Downloads Grid -->
-    <section>
+    <section aria-labelledby="downloads">
       <div class="section-head">
-        <h2>Release Artifacts</h2>
-        <span class="release-tag-label">${RELEASE_VERSION} · <span class="release-date">Latest Release</span></span>
+        <h2 id="downloads">Downloads</h2>
+        <span class="release-tag-label">${RELEASE_VERSION} · <span class="release-date">latest</span></span>
       </div>
-
-      <div class="grid">
-        <!-- Host image: Alpine kernel -->
-        <div class="card">
-          <div class="card-top">
-            <div class="card-header-row">
-              <span class="card-title">💿 Host Image &middot; Alpine Kernel</span>
-              <span class="badge-arch">Default</span>
-            </div>
-            <p class="card-desc">Alpine <code>linux-virt</code> LTS kernel, tuned for virtual machines (KVM, QEMU, Proxmox, cloud VMs). UEFI/BIOS ISO, host initramfs with containerd, and the matching kernel for direct boot.</p>
-          </div>
-          <div class="btn-group">
-            $(btn ziro-os-x86_64.iso "ISO x86_64")
-            $(btn ziro-initramfs-x86_64.cpio.gz "initramfs x86_64" subtle)
-            $(btn ziro-initramfs-arm64.cpio.gz "initramfs arm64" subtle)
-            $(btn vmlinuz-x86_64 "kernel x86_64" subtle)
-            $(btn vmlinuz-arm64 "kernel arm64" subtle)
-          </div>
-        </div>
-
-        <!-- Host image: Ziro custom kernel -->
-        <div class="card">
-          <div class="card-top">
-            <div class="card-header-row">
-              <span class="card-title">🧬 Host Image &middot; Ziro Custom Kernel</span>
-              <span class="badge-arch">Any Hardware</span>
-            </div>
-            <p class="card-desc">Ziro kernel built from kernel.org LTS sources: the upstream defconfig plus drivers for bare metal, KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro and GCP, with the security hardening built in. Boot-tested in CI on every build.</p>
-          </div>
-          <div class="btn-group">
-            ${CUSTOM_BTNS}
-          </div>
-        </div>
-
-        <!-- Rootfs Card -->
-        <div class="card">
-          <div class="card-top">
-            <div class="card-header-row">
-              <span class="card-title">📦 Minimal Rootfs</span>
-              <span class="badge-arch">Dual Arch</span>
-            </div>
-            <p class="card-desc">Stripped root filesystem archive for custom container builds and lightweight microVM roots.</p>
-          </div>
-          <div class="btn-group">
-            $(btn ziro-rootfs-x86_64.tar.gz "x86_64")
-            $(btn ziro-rootfs-arm64.tar.gz "arm64" subtle)
-          </div>
-        </div>
-
-        <!-- ziroctl CLI -->
-        <div class="card">
-          <div class="card-top">
-            <div class="card-header-row">
-              <span class="card-title">🛠️ ziroctl CLI</span>
-              <span class="badge-arch">Binary</span>
-            </div>
-            <p class="card-desc">Statically linked CLI for system inspection, container lifecycles, and security auditing.</p>
-          </div>
-          <div class="btn-group">
-            $(btn ziroctl-x86_64 "x86_64")
-            $(btn ziroctl-arm64 "arm64" subtle)
-          </div>
-        </div>
-
-        <!-- ziropkg CLI -->
-        <div class="card">
-          <div class="card-top">
-            <div class="card-header-row">
-              <span class="card-title">📦 ziropkg CLI</span>
-              <span class="badge-arch">Binary</span>
-            </div>
-            <p class="card-desc">Package manager CLI for installing verified packages (curl, jq, git, htop) on Ziro-OS.</p>
-          </div>
-          <div class="btn-group">
-            $(btn ziropkg-x86_64 "x86_64")
-            $(btn ziropkg-arm64 "arm64" subtle)
-          </div>
-        </div>
-
-        <!-- SHA256SUMS -->
-        <div class="card">
-          <div class="card-top">
-            <div class="card-header-row">
-              <span class="card-title">🔒 Verification Checksums</span>
-              <span class="badge-arch">Manifest</span>
-            </div>
-            <p class="card-desc">Cryptographic SHA256 checksum manifest for verifying artifact integrity.</p>
-          </div>
-          <div class="btn-group">
-            $(btn SHA256SUMS "Download SHA256SUMS" subtle)
-          </div>
-        </div>
-      </div>
+      <table class="artifacts">
+        <thead>
+          <tr><th scope="col">File</th><th scope="col">x86_64</th><th scope="col">arm64</th></tr>
+        </thead>
+        ${ARTIFACTS}
+      </table>
+      <p class="hint">Verify after download: <code>sha256sum -c SHA256SUMS --ignore-missing</code></p>
     </section>
 
     <!-- Quick Usage -->
     <section class="commands-container">
       <div class="section-head" style="margin-bottom: 0.5rem;">
-        <h2>Quick Start</h2>
-        <span>CLI Reference</span>
+        <h2>Quick start</h2>
       </div>
       <div class="cmd-grid">
         <div class="cmd-item">
-          <label>Disk Installation</label>
-          <pre>ziro-install   # or: ziroctl install -d /dev/sda -y</pre>
+          <label>Install to disk</label>
+          <pre>ziroctl install -d /dev/sda -y</pre>
         </div>
         <div class="cmd-item">
-          <label>Network Configuration</label>
-          <pre>ziroctl network setup   # or: ziroctl network status</pre>
+          <label>Check health</label>
+          <pre>ziroctl doctor</pre>
         </div>
         <div class="cmd-item">
-          <label>Cloud & Diagnostics</label>
-          <pre>ziroctl doctor          # or: ziroctl cloud inspect</pre>
-        </div>
-        <div class="cmd-item">
-          <label>Container Management</label>
+          <label>Run a container</label>
           <pre>ziroctl container run -d -p 80:80 nginx</pre>
         </div>
         <div class="cmd-item">
-          <label>Security Hardening</label>
-          <pre>ziroctl security harden # or: ziroctl security audit</pre>
+          <label>Harden the host</label>
+          <pre>ziroctl security harden</pre>
         </div>
         <div class="cmd-item">
-          <label>Install Packages</label>
+          <label>Upgrade</label>
+          <pre>ziroctl upgrade</pre>
+        </div>
+        <div class="cmd-item">
+          <label>Install packages</label>
           <pre>ziropkg install curl jq git</pre>
         </div>
       </div>
@@ -658,8 +667,8 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
   <footer>
     <div class="wrapper">
       <p>
-        <strong>Ziro-OS</strong> &middot; Cloud-Native Container Operating System &middot; 
-        <a href="https://github.com/${REPO_NAME}" target="_blank">GitHub</a> &middot; 
+        <strong>Ziro-OS</strong> &middot;
+        <a href="https://github.com/${REPO_NAME}" target="_blank">GitHub</a> &middot;
         <a href="https://github.com/${REPO_NAME}/blob/main/LICENSE" target="_blank">MIT License</a>
       </p>
     </div>
@@ -675,7 +684,7 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
       });
     }
 
-    // Dynamic Live Release Resolution from GitHub API
+    // Refresh version, date and sizes from the live release.
     (function fetchLiveRelease() {
       const repo = "${REPO_NAME}";
       fetch('https://api.github.com/repos/' + repo + '/releases/latest')
@@ -694,7 +703,7 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
               if (link) {
                 link.href = asset.browser_download_url;
                 const size = link.querySelector('.size');
-                if (size) size.textContent = asset.size < 1000000 ? ' (' + (asset.size / 1000).toFixed(1) + ' KB)' : ' (' + (asset.size / 1000000).toFixed(1) + ' MB)';
+                if (size) size.textContent = asset.size < 1000000 ? (asset.size / 1000).toFixed(1) + ' KB' : (asset.size / 1000000).toFixed(1) + ' MB';
               }
             });
           }
