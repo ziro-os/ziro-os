@@ -75,6 +75,9 @@ jobs:
       - name: Build host rootfs & initramfs with the custom kernel
         run: make rootfs
 
+      - name: Verify archive security metadata
+        run: python3 tests/security/test-artifact-metadata.py build/ziro-rootfs-$TARGET_ARCH.tar.gz build/ziro-initramfs-$TARGET_ARCH-custom.cpio.gz
+
       - name: QEMU boot smoke test (custom kernel)
         run: make test-boot
 

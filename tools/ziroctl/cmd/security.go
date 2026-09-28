@@ -25,8 +25,8 @@ const (
 )
 
 type ThreatDetection struct {
-	Type        string `json:"type"`        // "REVERSE_SHELL", "CRYPTO_MINER", "RANSOMWARE", "ESCAPE_ATTEMPT"
-	Severity    string `json:"severity"`    // "CRITICAL", "HIGH", "MEDIUM"
+	Type        string `json:"type"`     // "REVERSE_SHELL", "CRYPTO_MINER", "RANSOMWARE", "ESCAPE_ATTEMPT"
+	Severity    string `json:"severity"` // "CRITICAL", "HIGH", "MEDIUM"
 	PID         int    `json:"pid"`
 	ProcessName string `json:"process_name"`
 	Details     string `json:"details"`
@@ -97,9 +97,7 @@ var securityAuditCmd = &cobra.Command{
 		// Check 6: SSH Password Auth disabled
 		sshKeyOnly := false
 		if data, err := os.ReadFile("/etc/ssh/sshd_config"); err == nil {
-			if strings.Contains(string(data), "PasswordAuthentication no") {
-				sshKeyOnly = true
-			}
+			sshKeyOnly = sshKeyOnlyConfig(data)
 		}
 		printCheck(out, "SSH Enforces Key-Only Authentication (Passwords Disabled)", sshKeyOnly)
 	},
@@ -237,24 +235,15 @@ fs.protected_symlinks = 1
 
 		// 2. SSH Hardening
 		sshdConfigPath := "/etc/ssh/sshd_config"
-		if data, err := os.ReadFile(sshdConfigPath); err == nil {
-			content := string(data)
-			if !strings.Contains(content, "PasswordAuthentication no") {
-				content += "\nPasswordAuthentication no\n"
-			}
-			if !strings.Contains(content, "PermitRootLogin prohibit-password") {
-				content += "PermitRootLogin prohibit-password\n"
-			}
-			if !strings.Contains(content, "X11Forwarding no") {
-				content += "X11Forwarding no\n"
-			}
-			if !strings.Contains(content, "MaxAuthTries 3") {
-				content += "MaxAuthTries 3\n"
-			}
-			_ = os.WriteFile(sshdConfigPath, []byte(content), 0600)
-			fmt.Println("  ✓ Hardened OpenSSH server configuration (/etc/ssh/sshd_config)")
-			_ = exec.Command("pkill", "-HUP", "sshd").Run()
+		if err := hardenSSHFile(sshdConfigPath); err != nil {
+			return fmt.Errorf("SSH hardening failed: %w", err)
 		}
+		if err := exec.Command("pkill", "-HUP", "sshd").Run(); err != nil {
+			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+				return fmt.Errorf("SSH reload failed: %w", err)
+			}
+		}
+		fmt.Println("  ✓ Validated and hardened OpenSSH server configuration (/etc/ssh/sshd_config)")
 
 		// 3. File Permissions
 		_ = os.Chmod("/etc/shadow", 0600)

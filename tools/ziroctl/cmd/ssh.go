@@ -10,10 +10,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Kept separate so tests never modify the host's real authorized keys.
+var sshAuthorizedKeysPath = rootAuthorizedKeys
+
 var sshCmd = &cobra.Command{
-	Use:     "ssh",
-	Short:   "Secure Shell (SSH) service and key management",
-	Long:    `Inspect SSH remote management status and manage authorized public keys for hardened, passwordless remote access.`,
+	Use:   "ssh",
+	Short: "Secure Shell (SSH) service and key management",
+	Long:  `Inspect SSH remote management status and manage authorized public keys for hardened, passwordless remote access.`,
 }
 
 var sshStatusCmd = &cobra.Command{
@@ -46,7 +49,7 @@ var sshStatusCmd = &cobra.Command{
 		}
 
 		// Check authorized keys
-		authKeysPath := "/root/.ssh/authorized_keys"
+		authKeysPath := sshAuthorizedKeysPath
 		if data, err := os.ReadFile(authKeysPath); err == nil {
 			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 			validCount := 0
@@ -78,13 +81,13 @@ var sshKeyAddCmd = &cobra.Command{
 			return fmt.Errorf("invalid SSH public key format: must begin with ssh-* or ecdsa-*")
 		}
 
-		sshDir := "/root/.ssh"
+		sshDir := filepath.Dir(sshAuthorizedKeysPath)
 		if err := os.MkdirAll(sshDir, 0700); err != nil {
 			return fmt.Errorf("failed to create %s: %w", sshDir, err)
 		}
 		_ = os.Chmod(sshDir, 0700)
 
-		authKeysPath := filepath.Join(sshDir, "authorized_keys")
+		authKeysPath := sshAuthorizedKeysPath
 		f, err := os.OpenFile(authKeysPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to open %s: %w", authKeysPath, err)
@@ -105,7 +108,7 @@ var sshKeyListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all configured authorized public keys",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		authKeysPath := "/root/.ssh/authorized_keys"
+		authKeysPath := sshAuthorizedKeysPath
 		data, err := os.ReadFile(authKeysPath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -143,7 +146,7 @@ var sshKeyClearCmd = &cobra.Command{
 	Use:   "clear",
 	Short: "Clear all authorized SSH keys",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		authKeysPath := "/root/.ssh/authorized_keys"
+		authKeysPath := sshAuthorizedKeysPath
 		if err := os.Remove(authKeysPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to remove %s: %w", authKeysPath, err)
 		}

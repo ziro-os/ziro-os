@@ -4,6 +4,22 @@
 
 set -eu
 
+# Only authenticated remote scripts may become root-executed bootstrap code.
+# Local files remain supported; curl enforces TLS on every redirect as well.
+stage_user_data() {
+    source="$1"
+    destination="$2"
+    case "$source" in
+        https://*)
+            command -v curl >/dev/null 2>&1 || { echo "HTTPS user-data requires curl" >&2; return 1; }
+            curl --proto '=https' --proto-redir '=https' -fsSL --max-time 120 "$source" -o "$destination"
+            ;;
+        *://*) echo "User-data URLs must use https" >&2; return 1 ;;
+        *) [ -f "$source" ] || { echo "User-data file not found" >&2; return 1; }
+           cp "$source" "$destination" ;;
+    esac
+}
+
 # Color constants
 BOLD="\033[1m"
 GREEN="\033[1;32m"
@@ -871,22 +887,14 @@ EOF
     # Execute Cloud User-Data Script if provided
     if [ -n "$USER_DATA" ]; then
         printf "${CYAN}Executing cloud user-data configuration script...${RESET}\n"
-        UD_SCRIPT="$TARGET_MNT/tmp/ziro-userdata.sh"
-        if echo "$USER_DATA" | grep -qE '^https?://'; then
-            if command -v curl >/dev/null 2>&1; then
-                curl -fsSL "$USER_DATA" -o "$UD_SCRIPT"
-            elif command -v wget >/dev/null 2>&1; then
-                wget -q "$USER_DATA" -O "$UD_SCRIPT"
-            fi
-        elif [ -f "$USER_DATA" ]; then
-            cp "$USER_DATA" "$UD_SCRIPT"
-        fi
-
-        if [ -f "$UD_SCRIPT" ]; then
-            chmod +x "$UD_SCRIPT"
-            chroot "$TARGET_MNT" /bin/sh /tmp/ziro-userdata.sh || printf "${YELLOW}Warning: User-data script finished with errors.${RESET}\n"
+        UD_SCRIPT=$(umask 077; mktemp "$TARGET_MNT/tmp/ziro-userdata.XXXXXX")
+        if ! stage_user_data "$USER_DATA" "$UD_SCRIPT"; then
             rm -f "$UD_SCRIPT"
+            echo "Failed to stage authenticated user-data; script was not executed" >&2
+            return 1
         fi
+        chroot "$TARGET_MNT" /bin/sh "/tmp/$(basename "$UD_SCRIPT")" || printf "${YELLOW}Warning: User-data script finished with errors.${RESET}\n"
+        rm -f "$UD_SCRIPT"
     fi
 
     # Install dedicated reboot, poweroff, halt, and shutdown control scripts

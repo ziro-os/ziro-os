@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,9 +38,9 @@ func TestSSHKeyValidation(t *testing.T) {
 
 func TestSSHKeyLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	original := sshAuthorizedKeysPath
+	sshAuthorizedKeysPath = filepath.Join(tmpDir, ".ssh", "authorized_keys")
+	t.Cleanup(func() { sshAuthorizedKeysPath = original })
 
 	testKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGo4wS84K2x... test@ziro-os"
 
@@ -50,15 +51,31 @@ func TestSSHKeyLifecycle(t *testing.T) {
 	rootCmd.SetArgs([]string{"ssh", "key", "add", testKey})
 
 	// Run command
-	_ = rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(sshAuthorizedKeysPath)
+	if err != nil || strings.TrimSpace(string(data)) != testKey {
+		t.Fatalf("key not saved: %q, %v", data, err)
+	}
 
 	// List keys
 	buf.Reset()
 	rootCmd.SetArgs([]string{"ssh", "key", "list"})
-	_ = rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "test@ziro-os") {
+		t.Fatal("key not listed")
+	}
 
 	// Clear keys
 	buf.Reset()
 	rootCmd.SetArgs([]string{"ssh", "key", "clear"})
-	_ = rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sshAuthorizedKeysPath); !os.IsNotExist(err) {
+		t.Fatal("key not cleared")
+	}
 }

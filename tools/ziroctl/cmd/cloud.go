@@ -97,7 +97,7 @@ func cloudMetadataTrusted() bool {
 // imdsGet fetches an EC2-compatible metadata path, using an IMDSv2 session
 // token when available (required on hardened AWS instances), else IMDSv1.
 func imdsGet(path string) ([]byte, int, error) {
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := metadataClient(3 * time.Second)
 	token := ""
 	if req, err := http.NewRequest(http.MethodPut, imdsBase+"/api/token", nil); err == nil {
 		req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "300")
@@ -123,6 +123,32 @@ func imdsGet(path string) ([]byte, int, error) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	return body, resp.StatusCode, err
+}
+
+// Metadata is link-local: never send tokens through a proxy or a redirect.
+func metadataClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{Timeout: timeout, Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return fmt.Errorf("metadata redirects are not permitted")
+		}}
+}
+
+func validateUserDataURL(u *url.URL) error {
+	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("user-data URLs must use https without credentials")
+	}
+	return nil
+}
+
+func userDataClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many user-data redirects")
+		}
+		return validateUserDataURL(req.URL)
+	}}
 }
 
 // installMetadataSSHKeys appends instance public keys to root's authorized_keys (idempotent).
@@ -201,10 +227,10 @@ var cloudUserDataCmd = &cobra.Command{
 		if len(args) > 0 {
 			// Explicit URL: code is executed as root, so it must be authenticated by TLS.
 			u, err := url.Parse(args[0])
-			if err != nil || (u.Scheme != "https" && u.Hostname() != "169.254.169.254") {
+			if err != nil || validateUserDataURL(u) != nil {
 				return fmt.Errorf("refusing %q: user-data URLs must use https", args[0])
 			}
-			client := &http.Client{Timeout: 30 * time.Second}
+			client := userDataClient()
 			resp, err := client.Get(u.String())
 			if err != nil {
 				return fmt.Errorf("failed to fetch user-data: %w", err)
@@ -317,7 +343,7 @@ func detectCloudPlatform() (string, string) {
 }
 
 func checkMetadataService() {
-	client := &http.Client{Timeout: 1 * time.Second}
+	client := metadataClient(time.Second)
 	resp, err := client.Get("http://169.254.169.254/latest/meta-data/")
 	if err == nil {
 		resp.Body.Close()
