@@ -67,8 +67,8 @@ Output:
   `ziroctl security harden`.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
   paths outside the backup allowlist, traversal, hardlinks, and writes through symlinks.
-- **Clustering** is experimental. `cluster join` only records metadata, and `cluster deploy` runs replicas on the
-  local node only.
+- **Clustering**: joins use a pinned master certificate plus a join token, and each node gets its own token (the
+  master stores only hashes). See [clustering.md](clustering.md).
 - **Kernel & sysctl**: the kernel config fragments add KASLR, strict RWX, a strong stack protector, hardened
   usercopy, FORTIFY, the Yama and lockdown LSMs, unprivileged BPF off, and nftables/WireGuard built in. Shipped
   sysctls set `kptr_restrict=2`, `dmesg_restrict=1`, `unprivileged_bpf_disabled=1`, `ptrace_scope=1`, protected

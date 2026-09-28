@@ -424,14 +424,27 @@ func startAPIServer() {
 
 	// 7. Cluster
 	mux.HandleFunc("/api/v1/cluster", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		cfg, _ := loadClusterConfig()
-		nodes := loadNodesList()
-		svcs := loadServicesList()
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"config":   cfg,
-			"nodes":    nodes,
-			"services": svcs,
-		})
+		// Never expose join/node tokens: return an explicit, redacted view.
+		cfg, err := loadClusterConfig()
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"role": "standalone"})
+			return
+		}
+		view := map[string]interface{}{
+			"cluster_id": cfg.ClusterID, "role": cfg.Role, "node_id": cfg.NodeID, "master": cfg.MasterAddr,
+		}
+		if cfg.Role == "master" {
+			if st, err := readState(); err == nil {
+				apps := []map[string]interface{}{}
+				for _, a := range st.Apps {
+					apps = append(apps, map[string]interface{}{
+						"name": a.Name, "image": a.Image, "replicas": a.Replicas, "port": a.Port, "status": st.appStatus(a),
+					})
+				}
+				view["nodes"], view["apps"], view["placements"] = st.Nodes, apps, st.Replicas
+			}
+		}
+		_ = json.NewEncoder(w).Encode(view)
 	}))
 
 	// 8. Security Scan
