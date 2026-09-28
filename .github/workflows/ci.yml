@@ -29,11 +29,22 @@ jobs:
             tools/ziroctl/go.sum
             tools/ziropkg/go.sum
 
+      - name: Install OpenSSH for effective-policy tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+          sudo mkdir -p /run/sshd
+
       - name: Run Unit Tests (ziroctl & ziropkg)
         run: make test-unit
 
       - name: Test installer bootstrap transport
         run: python3 tests/security/test-userdata-transport.py
+
+      - name: Test patched DHCP packet parser
+        run: |
+          cd packages/cni-dhcp
+          go test -mod=readonly -run TestReadFrom github.com/insomniacslk/dhcp/dhcpv4/nclient4
 
       - name: Validate Security Audit CLI
         run: |
@@ -111,6 +122,9 @@ jobs:
 
       - name: Verify archive security metadata
         run: python3 tests/security/test-artifact-metadata.py build/ziro-rootfs-x86_64.tar.gz build/ziro-initramfs-x86_64.cpio.gz
+
+      - name: Verify rebuilt DHCP CNI plugin
+        run: python3 tests/security/test-cni-dhcp.py build/rootfs-full-x86_64 x86_64
 
       - name: Upload CI Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

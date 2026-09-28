@@ -23,7 +23,7 @@ func sshDirective(line string) (string, string) {
 	if line == "" || strings.HasPrefix(line, "#") {
 		return "", ""
 	}
-	fields := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' || r == '=' })
+	fields := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' || r == '\r' || r == '=' })
 	if len(fields) == 0 {
 		return "", ""
 	}

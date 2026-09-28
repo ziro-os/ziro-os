@@ -21,7 +21,7 @@ Security is a foundational design pillar of Ziro-OS. Unlike general-purpose dist
 
 ### 4. Kernel Seccomp & Capability Restrictions
 - Kernel configurations explicitly enable `CONFIG_SECCOMP` and `CONFIG_SECCOMP_FILTER`.
-- Default capability restrictions prevent unprivileged containers from accessing host devices or performing raw network modifications.
+- Runtime policy must restrict capabilities and device access. Verify the effective configuration for each workload.
 
 ### 5. Network Hardening (Sysctl)
 Configured in `/etc/sysctl.d/99-ziro.conf`:
@@ -69,7 +69,8 @@ Output:
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
   paths outside the backup allowlist, traversal, hardlinks, and writes through symlinks.
   Creation stages bytes in a private file, publishes the finished archive atomically, and refuses existing
-  archive/checksum destinations. Choose a trusted output directory and protect exported archives.
+  archive/checksum destinations. Output filesystems must enforce 0600 permissions and support hard links
+  (for example ext4); unsupported filesystems fail before archiving secrets. Choose a trusted directory.
 - **Clustering**: joins use a pinned master certificate plus a join token, and each node gets its own token (the
   master stores only hashes). See [clustering.md](clustering.md).
   A replica is reported running only when its assigned Ready node reports it.
@@ -91,6 +92,8 @@ Explicit remote user-data requires HTTPS, including redirects. Installer local f
 Automatic metadata is cloud-gated, bypasses environment proxies, and refuses redirects. Image tar/cpio
 members use root ownership independently of the build user's UID. Quarantine rules precede established
 and ICMP accepts; loopback remains trusted and forwarding/NAT policy belongs to container networking.
+The iptables fallback temporarily sets INPUT to DROP during replacement and restores the requested
+policy only after all rules succeed. A failed replacement reports an error and leaves INPUT closed.
 
 `ziroctl security harden` rewrites managed SSH settings in global and Match scopes, preserves stronger
 root-login and retry restrictions, and validates with `sshd -t` before replacement. Active Include
@@ -102,3 +105,8 @@ Run `make test-unit`, `python3 tests/security/test-userdata-transport.py`, and
 These checks do not establish cloud-image boot correctness, external agent isolation, or absence of all
 vulnerabilities. Agents receiving a host runtime socket or privileged mounts receive corresponding host
 authority; the cluster agent is a workload reconciler rather than an LLM permission sandbox.
+
+The DHCP CNI binary is rebuilt from pinned upstream source with patched x/net in both shipped locations.
+See [the override recipe](../packages/cni-dhcp/README.md), including package upgrade limitations.
+`tests/security/test-cni-dhcp.py <rootfs-directory> <x86_64|arm64>` checks its dependencies, static linking,
+and CNI VERSION response; it does not exercise a custom DHCP lease lifecycle.
