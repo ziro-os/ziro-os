@@ -276,8 +276,10 @@ SH_SHUTDOWN
         # Validate that /bin/sh executes correctly
         chroot /rootfs /bin/busybox sh -c "echo '\''✓ Minimal rootfs shell validated'\''"
 
+        # GNU tar is build-only; override member ownership without changing modes.
+        apk add --no-cache tar >/dev/null || exit 1
         cd /rootfs
-        tar --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" .
+        tar --numeric-owner --owner=0 --group=0 --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" . || exit 1
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
         chmod 644 "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
         chmod -R a+rX /rootfs 2>/dev/null || true
@@ -488,9 +490,9 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
 
         cd /rootfs
         if command -v pigz >/dev/null 2>&1; then
-            find . | cpio -o -H newc | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
+            find . | cpio -o -H newc -R 0:0 | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         else
-            find . | cpio -o -H newc | gzip > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
+            find . | cpio -o -H newc -R 0:0 | gzip > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         fi
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
