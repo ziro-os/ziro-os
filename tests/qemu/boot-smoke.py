@@ -150,6 +150,10 @@ def main():
         rc, out = con.run("modprobe nf_tables && modprobe wireguard && modprobe overlay && echo MODOK")
         check("modprobe nf_tables/wireguard/overlay", "MODOK" in out, out)
 
+        if args.flavor == "custom":
+            rc, out = con.run("cat /sys/module/module/parameters/sig_enforce")
+            check("module signature enforcement active (custom kernel)", "Y" in out, out)
+
         ok, out = retry(con, "test -S /run/containerd/containerd.sock && echo CTRDOK", lambda rc, o: "CTRDOK" in o, 60)
         check("containerd socket ready", ok, out)
 

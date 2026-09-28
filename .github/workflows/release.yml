@@ -156,4 +156,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Dispatching pages.yml on main branch to deploy release portal..."
-          gh workflow run pages.yml --ref main || true
+          # No checkout in this job, so the repo must be explicit. Releases created with GITHUB_TOKEN
+          # do not fire 'on: release' in other workflows, so this dispatch is the only path that
+          # regenerates the portal with the published asset sizes: let it fail loudly.
+          gh workflow run pages.yml --ref main --repo "$GITHUB_REPOSITORY"
