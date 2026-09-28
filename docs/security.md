@@ -69,7 +69,7 @@ Output:
   paths outside the backup allowlist, traversal, hardlinks, and writes through symlinks.
 - **Clustering**: joins use a pinned master certificate plus a join token, and each node gets its own token (the
   master stores only hashes). See [clustering.md](clustering.md).
-- **Kernel & sysctl**: the kernel config fragments add KASLR, strict RWX, a strong stack protector, hardened
+- **Kernel & sysctl**: the `custom` kernel flavor enforces module signing (ephemeral per-build key; unsigned modules are rejected). Its config fragments add KASLR, strict RWX, a strong stack protector, hardened
   usercopy, FORTIFY, the Yama and lockdown LSMs, unprivileged BPF off, and nftables/WireGuard built in. Shipped
   sysctls set `kptr_restrict=2`, `dmesg_restrict=1`, `unprivileged_bpf_disabled=1`, `ptrace_scope=1`, protected
   links/fifos/regular files, and loose `rp_filter=2` (strict mode breaks WireGuard and multi-homed routing).

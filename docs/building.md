@@ -19,7 +19,7 @@ make all
 ```
 Compiles:
 1. `bin/ziroctl`: Statically compiled Go CLI.
-2. `build/ziro-rootfs-<arch>.tar.gz`: Minimal container base (< 10MB).
+2. `build/ziro-rootfs-<arch>.tar.gz`: Minimal container base (≈16 MB).
 3. `build/ziro-initramfs-<arch>.cpio.gz`: Full container OS initramfs.
 4. `ziro-os:latest`: Local Docker container image.
 
@@ -73,18 +73,34 @@ It needs `qemu-system-x86_64` or `qemu-system-aarch64` and uses KVM (Linux) or H
 Pass `--no-pull` to the script if the machine has no internet access. The serial log is written to
 `build/qemu-boot-<arch>.log`. CI runs this test on every PR.
 
-## 🐧 Kernel & Modules
+## 🐧 Kernel Flavors
 
-The kernel and its modules always come from **one** source, so their versions always match:
+Ziro-OS ships two kernel flavors. Each one produces its own, separately named artifacts:
 
-| Mode | Kernel | Modules |
+| | `alpine` (default) | `custom` |
 |---|---|---|
-| default | Alpine `linux-virt` (installed by `packages/build-rootfs.sh`) | the same `linux-virt` package |
-| `BUILD_FROM_SOURCE=1` | `kernel/build-kernel.sh` using `kernel/configs/config-<arch>` | built by the same kernel build (`modules_install`) |
+| Kernel | Alpine `linux-virt` LTS package | Ziro kernel built from kernel.org LTS sources (`KERNEL_VERSION`, default 6.18.54) |
+| Config | Alpine's (tuned for VMs) | upstream arch `defconfig` (broad hardware) + `kernel/configs/ziro-common.config` + `ziro-<arch>.config` |
+| Targets | KVM/QEMU, Proxmox, most cloud VMs | bare metal plus KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro (ENA/NVMe), GCP (gVNIC); boot-critical drivers built in |
+| Hardening | Alpine defaults | KASLR, strict RWX, stack protector, FORTIFY, Yama + lockdown LSMs, unprivileged BPF off, **enforced module signing** (ephemeral per-build key) |
+| Artifacts | `vmlinuz-<arch>`, `ziro-initramfs-<arch>.cpio.gz`, `ziro-os-<arch>.iso` | same names with a `-custom` suffix, plus `kernel-config-<arch>-custom` |
 
-For a source build, export the variable for the **whole** build:
-`BUILD_FROM_SOURCE=1 make image-iso TARGET_ARCH=x86_64`.
+```bash
+make rootfs image-iso TARGET_ARCH=x86_64                       # alpine flavor
+make kernel rootfs image-iso TARGET_ARCH=x86_64 KERNEL_FLAVOR=custom
+make test-boot TARGET_ARCH=x86_64 KERNEL_FLAVOR=custom         # boot-test that flavor
+```
 
-`build/kernel-release-<arch>` records the kernel version. `images/iso/build-iso.sh` refuses to build an ISO when
-that version has no matching `lib/modules/<version>` in the rootfs. All build containers use the pinned
-`ALPINE_IMAGE` (default `alpine:3.24`); override it to move to a newer Alpine release.
+The custom build fails if `olddefconfig` drops or changes any option from the Ziro fragments, so a renamed or
+unsatisfiable symbol can never ship silently. CI (`.github/workflows/kernel-custom.yml`) builds and boot-tests
+the custom flavor natively on x86_64 and arm64. Releases publish both flavors.
+
+The kernel and its modules always come from **one** source. `build/kernel-release-<arch>[-custom]` records the
+version, and `images/iso/build-iso.sh` refuses to build an ISO whose kernel has no matching `lib/modules/<version>`
+in the rootfs. All build containers use the pinned `ALPINE_IMAGE` (default `alpine:3.24`).
+
+## 📏 Image Size Goal
+
+Every bootable host image (ISO and initramfs, both flavors) must stay **under 300 MB** (decimal MB). CI and the
+release workflow fail if an artifact crosses that limit. The minimal container base rootfs is about 16 MB.
+The release page reads real artifact sizes from the GitHub Releases API instead of hardcoding them.

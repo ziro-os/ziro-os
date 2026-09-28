@@ -14,8 +14,7 @@ FAILED=0
 
 # 1. Check kernel security options
 echo -n "Check 1: Kernel configs enable SECCOMP... "
-if grep -q "CONFIG_SECCOMP=y" "$REPO_ROOT/kernel/configs/config-arm64" && \
-   grep -q "CONFIG_SECCOMP=y" "$REPO_ROOT/kernel/configs/config-x86_64"; then
+if grep -q "^CONFIG_SECCOMP_FILTER=y" "$REPO_ROOT/kernel/configs/ziro-common.config"; then
     echo "✅ PASSED"
 else
     echo "❌ FAILED"
@@ -23,8 +22,7 @@ else
 fi
 
 echo -n "Check 2: Kernel configs enable User Namespaces... "
-if grep -q "CONFIG_USER_NS=y" "$REPO_ROOT/kernel/configs/config-arm64" && \
-   grep -q "CONFIG_USER_NS=y" "$REPO_ROOT/kernel/configs/config-x86_64"; then
+if grep -q "^CONFIG_USER_NS=y" "$REPO_ROOT/kernel/configs/ziro-common.config"; then
     echo "✅ PASSED"
 else
     echo "❌ FAILED"

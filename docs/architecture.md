@@ -24,7 +24,7 @@ Ziro-OS is a cloud-native, ultra-lightweight operating system engineered from fi
 +-----------------------------------------------------------------------+
 ```
 
-1. **Minimal Base**: Sub-10MB base container rootfs, ~50MB full host initramfs.
+1. **Minimal Base**: ≈16 MB minimal container rootfs; full host image (ISO / initramfs, `alpine` or `custom` kernel) < 300 MB.
 2. **Stateless & Immutable**: Immutable root filesystem with minimal writeable paths (`/run`, `/tmp`, `/var/lib/containerd`).
 3. **Container-Native**: Built-in `containerd`, `runc`, and CNI networking.
 4. **Multi-Architecture**: First-class support for `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).

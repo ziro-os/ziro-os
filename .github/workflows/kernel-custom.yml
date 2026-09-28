@@ -1,0 +1,113 @@
+name: Custom Kernel Build & Boot Test
+
+# Builds the Ziro custom kernel (upstream defconfig + kernel/configs/ziro-*.config) natively on
+# x86_64 and arm64, packs it into the host initramfs, boots it in QEMU, and enforces the image
+# size goal. Reused by release.yml to publish the "-custom" artifacts.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'kernel/**'
+      - 'init/**'
+      - 'packages/build-rootfs.sh'
+      - 'images/iso/**'
+      - 'tests/qemu/**'
+      - '.github/workflows/kernel-custom.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kernel/**'
+      - 'packages/build-rootfs.sh'
+  schedule:
+    - cron: '0 3 * * 0'  # weekly: catch upstream LTS / Alpine drift
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  custom-kernel:
+    name: Custom kernel (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            qemu: qemu-system-x86
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            qemu: qemu-system-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      KERNEL_FLAVOR: custom
+      TARGET_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+          cache-dependency-path: |
+            tools/ziroctl/go.sum
+            tools/ziropkg/go.sum
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso mtools dosfstools cpio gzip ${{ matrix.qemu }}
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Build custom kernel (fails if any Ziro config option is dropped)
+        run: make kernel
+
+      - name: Build host rootfs & initramfs with the custom kernel
+        run: make rootfs
+
+      - name: QEMU boot smoke test (custom kernel)
+        run: make test-boot
+
+      - name: Build hybrid ISO (x86_64)
+        if: matrix.arch == 'x86_64'
+        run: make image-iso
+
+      - name: Enforce image size goal (< 300 MB)
+        run: |
+          cp build/kernel-custom-$TARGET_ARCH/config build/kernel-config-$TARGET_ARCH-custom
+          for f in build/ziro-initramfs-$TARGET_ARCH-custom.cpio.gz build/ziro-os-$TARGET_ARCH-custom.iso; do
+            [ -f "$f" ] || continue
+            size=$(stat -c %s "$f")
+            echo "$f: $((size / 1000000)) MB"
+            [ "$size" -lt 300000000 ] || { echo "::error::$f exceeds the 300 MB image goal"; exit 1; }
+          done
+
+      - name: Upload QEMU serial log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: qemu-boot-log-${{ matrix.arch }}-custom
+          path: build/qemu-boot-*.log
+          if-no-files-found: ignore
+
+      - name: Upload custom kernel artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: custom-kernel-${{ matrix.arch }}
+          path: |
+            build/vmlinuz-${{ matrix.arch }}-custom
+            build/ziro-initramfs-${{ matrix.arch }}-custom.cpio.gz
+            build/ziro-os-${{ matrix.arch }}-custom.iso
+            build/kernel-config-${{ matrix.arch }}-custom
+          if-no-files-found: error
+          retention-days: 7

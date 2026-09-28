@@ -8,7 +8,7 @@ Welcome to **Ziro-OS**! This guide walks you through using, testing, and buildin
 
 Ziro-OS is an ultra-lightweight, container-native operating system built from scratch to run container workloads with maximum performance, minimal attack surface, and instant boot times.
 
-- **Minimal Base**: Sub-15MB Docker base image (`ziro-os:latest`) and sub-100MB complete container host OS with `containerd`, `runc`, and CNI plugins.
+- **Minimal Base**: ≈16 MB Docker base image (`ziro-os:latest`) and a complete container host OS under 300 MB with `containerd`, `runc`, and CNI plugins.
 - **Stateless & Immutable**: Hardened read-only rootfs with minimal writeable paths.
 - **C99 PID 1 Supervisor**: Statically linked `ziro-init` providing sub-second boot, cgroups v2 hierarchy, loopback networking, and automated zombie process reaping.
 - **Integrated Package Management**: Fast, signed package installation via `ziropkg` and `ziroctl pkg`.

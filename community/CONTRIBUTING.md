@@ -99,7 +99,7 @@ We provide standard `make` targets to keep development reproducible:
 | `make all` | Build `ziroctl`, `ziropkg`, rootfs, and Docker base image for host architecture |
 | `make tools` | Compile static `ziroctl` and `ziropkg` binaries into `bin/` |
 | `make tools-all` | Cross-compile `ziroctl` and `ziropkg` for `x86_64` and `arm64` |
-| `make rootfs` | Build minimal rootfs (<15MB) and full initramfs |
+| `make rootfs` | Build minimal rootfs (≈16 MB) and full host initramfs (< 300 MB) |
 | `make rootfs-all` | Build rootfs archives for both `x86_64` and `arm64` |
 | `make docker-image` | Build local `ziro-os:latest` Docker base image |
 | `make docker-multiarch` | Build multi-arch OCI image with Docker buildx (`amd64` + `arm64`) |
