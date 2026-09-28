@@ -98,20 +98,19 @@ var backupCmd = &cobra.Command{
 var backupCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a compressed (unencrypted, root-only) backup of system configurations and cluster state",
-	Run: func(cmd *cobra.Command, args []string) {
-		if _, err := createBackup(backupOutPath); err != nil {
-			fmt.Printf("Backup failed: %v\n", err)
-		}
+	RunE: func(cmd *cobra.Command, args []string) error {
+		_, err := createBackup(backupOutPath)
+		return err
 	},
 }
 
 // createBackup archives backupPaths into out (default: timestamped file in
 // defaultBackupDir), writes a .sha256 manifest next to it and returns the path.
 func createBackup(out string) (string, error) {
-	if err := os.MkdirAll(defaultBackupDir, 0700); err != nil {
-		return "", err
-	}
 	if out == "" {
+		if err := os.MkdirAll(defaultBackupDir, 0700); err != nil {
+			return "", err
+		}
 		ts := time.Now().Format("20060102-150405")
 		out = filepath.Join(defaultBackupDir, fmt.Sprintf("ziro-backup-%s.tar.gz", ts))
 	}
@@ -128,19 +127,54 @@ func createBackup(out string) (string, error) {
 		return "", fmt.Errorf("no standard configuration directories found to back up")
 	}
 
-	// Archive holds private keys and tokens: create it root-only.
-	tarArgs := append([]string{"-czf", out, "-C", "/"}, existingPaths...)
-	if err := exec.Command("tar", tarArgs...).Run(); err != nil {
+	// Never truncate an existing archive or follow an output symlink. The
+	// descriptor is private before tar writes its first secret-bearing byte.
+	if _, err := os.Lstat(out); err == nil {
+		return "", fmt.Errorf("backup output already exists: %s", out)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	f, err := os.CreateTemp(filepath.Dir(out), ".ziro-backup-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		f.Close()
+		os.Remove(f.Name())
+	}()
+	tarArgs := append([]string{"-czf", "-", "-C", "/"}, existingPaths...)
+	archive := exec.Command("tar", tarArgs...)
+	archive.Stdout = f
+	archive.Stderr = os.Stderr
+	if err := archive.Run(); err != nil {
 		return "", fmt.Errorf("tar: %w", err)
 	}
-	_ = os.Chmod(out, 0600)
+	if err := f.Close(); err != nil {
+		return "", err
+	}
 
-	hashStr, err := computeFileSHA256(out)
+	hashStr, err := computeFileSHA256(f.Name())
 	if err != nil {
 		return "", fmt.Errorf("checksum: %w", err)
 	}
 	manifest := fmt.Sprintf("%s  %s\n", hashStr, filepath.Base(out))
-	if err := os.WriteFile(out+".sha256", []byte(manifest), 0600); err != nil {
+	checksum, err := os.OpenFile(out+".sha256", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := checksum.WriteString(manifest)
+	closeErr := checksum.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(out + ".sha256")
+		if writeErr != nil {
+			return "", writeErr
+		}
+		return "", closeErr
+	}
+	// Link publishes the finished archive atomically and refuses existing files,
+	// including a symlink introduced after the initial destination check.
+	if err := os.Link(f.Name(), out); err != nil {
+		os.Remove(out + ".sha256")
 		return "", err
 	}
 

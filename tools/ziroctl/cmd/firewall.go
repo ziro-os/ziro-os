@@ -71,12 +71,17 @@ var fwStatusCmd = &cobra.Command{
 var fwEnableCmd = &cobra.Command{
 	Use:   "enable",
 	Short: "Enable cloud firewall and apply hardened security rules",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
 		cfg.Enabled = true
-		_ = saveFirewallConfig(cfg)
-		applyFirewallRules(cfg)
+		if err := saveFirewallConfig(cfg); err != nil {
+			return err
+		}
+		if err := applyFirewallRules(cfg); err != nil {
+			return err
+		}
 		fmt.Println("✓ Ziro-OS Cloud Firewall ENABLED and active.")
+		return nil
 	},
 }
 
@@ -165,20 +170,22 @@ var fwDenyCmd = &cobra.Command{
 
 var fwBlockIPCmd = &cobra.Command{
 	Use:   "block-ip <ip-or-cidr>",
-	Short: "Immediately quarantine and drop all packets from an IP address or CIDR",
+	Short: "Quarantine incoming traffic from an IP address or CIDR (loopback is trusted)",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ip := strings.TrimSpace(args[0])
 		if _, err := parseBlockTarget(ip); err != nil {
-			fmt.Printf("Error: %v\n", err)
-			return
+			return err
 		}
 
 		cfg := loadFirewallConfig()
 		for _, b := range cfg.BlockedIPs {
 			if b.IP == ip {
+				if cfg.Enabled {
+					return applyFirewallRules(cfg)
+				}
 				fmt.Printf("IP %s is already blocked.\n", ip)
-				return
+				return nil
 			}
 		}
 
@@ -186,11 +193,18 @@ var fwBlockIPCmd = &cobra.Command{
 			IP:      ip,
 			Comment: fwComment,
 		})
-		_ = saveFirewallConfig(cfg)
-		if cfg.Enabled {
-			applyFirewallRules(cfg)
+		if err := saveFirewallConfig(cfg); err != nil {
+			return err
 		}
-		fmt.Printf("🛡️ Quarantined & BLOCKED traffic from IP: %s\n", ip)
+		if cfg.Enabled {
+			if err := applyFirewallRules(cfg); err != nil {
+				return err
+			}
+			fmt.Printf("🛡️ Quarantined & BLOCKED traffic from IP: %s\n", ip)
+		} else {
+			fmt.Printf("Saved quarantine for %s; firewall is disabled.\n", ip)
+		}
+		return nil
 	},
 }
 
@@ -360,9 +374,6 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 	sb.WriteString("    type filter hook input priority 0; policy " + policy + ";\n")
 	sb.WriteString("    iif \"lo\" accept\n")
 	sb.WriteString("    ct state invalid drop\n")
-	sb.WriteString("    ct state established,related accept\n")
-	sb.WriteString("    ip protocol icmp accept\n")
-	sb.WriteString("    ip6 nexthdr icmpv6 accept\n")
 
 	for _, b := range cfg.BlockedIPs {
 		fam, err := parseBlockTarget(b.IP)
@@ -371,6 +382,10 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 		}
 		sb.WriteString(fmt.Sprintf("    %s saddr %s drop\n", fam, b.IP))
 	}
+	// Loopback remains trusted; quarantine every other source before broad accepts.
+	sb.WriteString("    ct state established,related accept\n")
+	sb.WriteString("    ip protocol icmp accept\n")
+	sb.WriteString("    ip6 nexthdr icmpv6 accept\n")
 	for _, r := range cfg.AllowedPorts {
 		if r.Port < 1 || r.Port > 65535 || (r.Protocol != "tcp" && r.Protocol != "udp") {
 			return "", fmt.Errorf("invalid port rule %d/%s", r.Port, r.Protocol)
@@ -404,20 +419,31 @@ func applyIptables(cfg FirewallConfig) error {
 	}
 	for _, bin := range []string{"iptables", "ip6tables"} {
 		if _, err := exec.LookPath(bin); err != nil {
-			continue
+			return fmt.Errorf("firewall requires %s: %w", bin, err)
 		}
-		run := func(a ...string) { _ = exec.Command(bin, a...).Run() }
-		run("-F", "INPUT")
+		var ruleErr error
+		run := func(a ...string) {
+			if ruleErr != nil {
+				return
+			}
+			if out, err := exec.Command(bin, a...).CombinedOutput(); err != nil {
+				ruleErr = fmt.Errorf("%s: %w: %s", bin, err, strings.TrimSpace(string(out)))
+			}
+		}
 		run("-P", "INPUT", policy)
+		run("-F", "INPUT")
 		run("-A", "INPUT", "-i", "lo", "-j", "ACCEPT")
-		run("-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 		for _, b := range cfg.BlockedIPs {
 			if fam, _ := parseBlockTarget(b.IP); (fam == "ip") == (bin == "iptables") {
 				run("-A", "INPUT", "-s", b.IP, "-j", "DROP")
 			}
 		}
+		run("-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 		for _, r := range cfg.AllowedPorts {
 			run("-A", "INPUT", "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")
+		}
+		if ruleErr != nil {
+			return ruleErr
 		}
 	}
 	return nil

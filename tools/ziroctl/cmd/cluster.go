@@ -177,11 +177,12 @@ func (st *ClusterState) node(id string) *ClusterNode {
 
 // appStatus reports "<running>/<replicas> running[, N pending]" from agent reports.
 func (st *ClusterState) appStatus(app ClusteredApp) string {
-	running := map[string]bool{}
+	running := map[string]map[string]bool{}
 	for _, n := range st.Nodes {
 		if n.Status == "Ready" {
+			running[n.ID] = map[string]bool{}
 			for _, c := range n.Running {
-				running[c] = true
+				running[n.ID][c] = true
 			}
 		}
 	}
@@ -192,7 +193,7 @@ func (st *ClusterState) appStatus(app ClusteredApp) string {
 		}
 		if r.Node == "" {
 			pending++
-		} else if running[containerName(app, r.Index)] {
+		} else if running[r.Node][containerName(app, r.Index)] {
 			up++
 		}
 	}

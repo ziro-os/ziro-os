@@ -79,6 +79,16 @@ Ziro‑OS operates as a minimal host layer whose sole purpose is to run containe
 - Optionally include AppArmor or SELinux (user choice)
 - Immutable root filesystem; writeable areas only under controlled dirs (e.g. `/var/lib/containers`)
 
+The current installer mounts ext4 read/write, and live boot uses writable tmpfs; immutable root is a
+design target requiring further implementation. Shipped tar/cpio ownership is normalized to root,
+independently of build-workspace ownership. GNU tar is a build-only dependency for metadata overrides.
+Explicit remote bootstrap scripts require HTTPS across redirects; cloud metadata bypasses proxies and
+refuses redirects. Backups stage private files before atomic publication and refuse existing output
+paths. SSH hardening rewrites global and conditional controls, preserves stricter settings, validates
+with OpenSSH, and refuses active Includes until operators consolidate them. Firewall quarantine
+precedes established/protocol accepts, with loopback deliberately trusted. Cluster health reports are
+scoped to the node assigned each replica.
+
 ### 🧪 Testing & Validation
 
 - QEMU-based boot & basic function tests

@@ -7,16 +7,17 @@ Security is a foundational design pillar of Ziro-OS. Unlike general-purpose dist
 ## 🔒 Security Principles
 
 ### 1. Minimal Attack Surface
-- No extraneous services, package managers, or compilers on the host OS.
-- Only essential container runtimes (`containerd`, `runc`) and the `ziro-init` supervisor are installed.
+- Full hosts include containerd/runc/CNI, OpenSSH, apk/ziropkg, and enabled host services.
+- The minimal container base starts `/bin/sh`; optional API and cluster listeners require configuration.
 
 ### 2. Immutable Root Filesystem
-- The base rootfs is mounted read-only in production.
-- Only designated tmpfs paths (`/run`, `/tmp`) and dedicated container storage (`/var/lib/containerd`) are writable.
+- Immutable root is a design target. The current installer mounts ext4 read/write; live boot uses writable tmpfs.
+- `/run` and `/tmp` use tmpfs. Deployments requiring immutable root must provide and verify that enforcement.
 
 ### 3. Unified cgroups v2 & Namespaces
-- Enforces strict resource limits (CPU quotas, memory caps, PID exhaustion limits) using cgroup2 subtree controllers.
-- Complete isolation via Linux namespaces (`pid`, `net`, `ipc`, `uts`, `user`, `mnt`).
+- PID 1 enables cgroup2 controllers. Workload CPU, memory, and PID limits must be supplied by runtime/CRI policy.
+- Namespace and seccomp support must be paired with verified runtime settings; host binds, privileged mode,
+  runtime sockets, and host networking grant additional authority. Local `ctr` fallback uses host networking.
 
 ### 4. Kernel Seccomp & Capability Restrictions
 - Kernel configurations explicitly enable `CONFIG_SECCOMP` and `CONFIG_SECCOMP_FILTER`.
@@ -67,8 +68,11 @@ Output:
   `ziroctl security harden`.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
   paths outside the backup allowlist, traversal, hardlinks, and writes through symlinks.
+  Creation stages bytes in a private file, publishes the finished archive atomically, and refuses existing
+  archive/checksum destinations. Choose a trusted output directory and protect exported archives.
 - **Clustering**: joins use a pinned master certificate plus a join token, and each node gets its own token (the
   master stores only hashes). See [clustering.md](clustering.md).
+  A replica is reported running only when its assigned Ready node reports it.
 - **Kernel & sysctl**: the `custom` kernel flavor enforces module signing (ephemeral per-build key; unsigned modules are rejected). Its config fragments add KASLR, strict RWX, a strong stack protector, hardened
   usercopy, FORTIFY, the Yama and lockdown LSMs, unprivileged BPF off, and nftables/WireGuard built in. Shipped
   sysctls set `kptr_restrict=2`, `dmesg_restrict=1`, `unprivileged_bpf_disabled=1`, `ptrace_scope=1`, protected
@@ -80,3 +84,21 @@ Output:
   repo variables are set. After that, delete the static key secrets.
 - **Terraform (AWS)**: IMDSv2 is required with hop limit 1. SSH is limited to `ssh_allowed_cidrs`, which is
   required. Bootstrap scripts come from the pinned `ziro_version` tag, with optional sha256 verification.
+
+## Security boundary checks
+
+Explicit remote user-data requires HTTPS, including redirects. Installer local files remain supported.
+Automatic metadata is cloud-gated, bypasses environment proxies, and refuses redirects. Image tar/cpio
+members use root ownership independently of the build user's UID. Quarantine rules precede established
+and ICMP accepts; loopback remains trusted and forwarding/NAT policy belongs to container networking.
+
+`ziroctl security harden` rewrites managed SSH settings in global and Match scopes, preserves stronger
+root-login and retry restrictions, and validates with `sshd -t` before replacement. Active Include
+directives cause a visible failure; consolidate included policy before invoking hardening. The audit
+uses active directives and does not count comments as enforcement.
+
+Run `make test-unit`, `python3 tests/security/test-userdata-transport.py`, and
+`python3 tests/security/test-artifact-metadata.py <rootfs.tar.gz> <initramfs.cpio.gz>` for regressions.
+These checks do not establish cloud-image boot correctness, external agent isolation, or absence of all
+vulnerabilities. Agents receiving a host runtime socket or privileged mounts receive corresponding host
+authority; the cluster agent is a workload reconciler rather than an LLM permission sandbox.
