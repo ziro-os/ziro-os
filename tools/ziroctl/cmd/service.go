@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -94,6 +95,15 @@ var defaultServices = []ServiceDef{
 		Args:        "security monitor",
 		PIDFile:     "/run/ziro-sentinel.pid",
 		LogFile:     "/var/log/sentinel.log",
+		Autostart:   true,
+	},
+	{
+		Name:        "cloud-init",
+		Description: "Cloud metadata SSH keys & user-data bootstrap (once per instance)",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "cloud userdata --wait 60",
+		PIDFile:     "/run/ziro-cloud-init.pid",
+		LogFile:     "/var/log/cloud-init.log",
 		Autostart:   true,
 	},
 	{
@@ -250,12 +260,46 @@ var serviceLogsCmd = &cobra.Command{
 	},
 }
 
+// initManaged daemons are supervised (and restarted) by ziro-init itself.
+var initManaged = map[string]bool{"containerd": true, "sshd": true}
+
+var serviceBootCmd = &cobra.Command{
+	Use:    "boot",
+	Short:  "Start all enabled services (invoked by ziro-init at boot)",
+	Hidden: true,
+	Run: func(cmd *cobra.Command, args []string) {
+		for _, s := range listAllServices() {
+			if !s.Enabled || initManaged[s.Name] || s.Status == "RUNNING" {
+				continue
+			}
+			if err := startService(s.Name); err != nil {
+				fmt.Printf("[boot] %s: %v\n", s.Name, err)
+				continue
+			}
+			fmt.Printf("[boot] started %s\n", s.Name)
+		}
+	},
+}
+
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
 
+// validName guards every user-supplied identifier that ends up in a file path.
+var validNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
+
+func validName(name string) error {
+	if !validNameRe.MatchString(name) || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid name %q (allowed: a-z 0-9 _ . -)", name)
+	}
+	return nil
+}
+
 func loadServiceDef(name string) (*ServiceDef, error) {
+	if err := validName(name); err != nil {
+		return nil, err
+	}
 	// First check /etc/ziro/services/<name>.conf
 	confPath := filepath.Join(servicesDir, name+".conf")
 	if fileExists(confPath) {
@@ -331,29 +375,49 @@ func listAllServices() []ServiceStatusInfo {
 	return list
 }
 
+// getServicePID returns the PID only if that process really is this service
+// (argv matches exec+args). Several services share /usr/bin/ziroctl, and pidfiles
+// go stale, so a bare name or pidfile match could signal an unrelated process.
 func getServicePID(def *ServiceDef) int {
-	if def.PIDFile != "" && fileExists(def.PIDFile) {
+	if def.PIDFile != "" {
 		if data, err := os.ReadFile(def.PIDFile); err == nil {
 			pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-			if pid > 0 && isPIDRunning(pid) {
+			if pid > 0 && pidMatches(def, pid) {
 				return pid
 			}
 		}
 	}
 
-	// Fallback to pgrep by executable name
-	base := filepath.Base(def.Exec)
-	out, err := exec.Command("pgrep", "-x", base).Output()
-	if err == nil {
-		pids := strings.Fields(string(out))
-		if len(pids) > 0 {
-			pid, _ := strconv.Atoi(pids[0])
-			if pid > 0 && isPIDRunning(pid) {
-				return pid
-			}
+	// Fallback for daemons started without a pidfile (e.g. containerd/sshd by init)
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err == nil && pid > 1 && pidMatches(def, pid) {
+			return pid
 		}
 	}
 	return 0
+}
+
+func pidMatches(def *ServiceDef, pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	argv := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+	want := strings.Fields(def.Args)
+	if filepath.Base(argv[0]) != filepath.Base(def.Exec) || len(argv)-1 != len(want) {
+		return false
+	}
+	for i, a := range want {
+		if argv[i+1] != a {
+			return false
+		}
+	}
+	return true
 }
 
 func isPIDRunning(pid int) bool {
@@ -383,10 +447,10 @@ func getServiceStatus(name string) (*ServiceStatusInfo, error) {
 		uptime = getPIDUptime(pid)
 	}
 
+	// An explicit enable/disable marker overrides the conf's autostart default.
 	enabled := def.Autostart
-	enLink := filepath.Join(enabledDir, name)
-	if fileExists(enLink) {
-		enabled = true
+	if data, err := os.ReadFile(filepath.Join(enabledDir, name)); err == nil {
+		enabled = strings.TrimSpace(string(data)) == "enabled"
 	}
 
 	return &ServiceStatusInfo{
@@ -425,7 +489,7 @@ func startService(name string) error {
 	args := strings.Fields(def.Args)
 	cmd := exec.Command(def.Exec, args...)
 
-	logF, err := os.OpenFile(def.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logF, err := os.OpenFile(def.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err == nil {
 		cmd.Stdout = logF
 		cmd.Stderr = logF
@@ -498,17 +562,20 @@ func stopService(name string) error {
 }
 
 func enableService(name string) error {
+	if _, err := loadServiceDef(name); err != nil {
+		return err
+	}
 	_ = os.MkdirAll(enabledDir, 0755)
 	target := filepath.Join(enabledDir, name)
 	return os.WriteFile(target, []byte("enabled\n"), 0644)
 }
 
 func disableService(name string) error {
-	target := filepath.Join(enabledDir, name)
-	if fileExists(target) {
-		return os.Remove(target)
+	if err := validName(name); err != nil {
+		return err
 	}
-	return nil
+	_ = os.MkdirAll(enabledDir, 0755)
+	return os.WriteFile(filepath.Join(enabledDir, name), []byte("disabled\n"), 0644)
 }
 
 func printRecentLogs(path string, maxLines int) {
@@ -535,5 +602,6 @@ func init() {
 	serviceCmd.AddCommand(serviceEnableCmd)
 	serviceCmd.AddCommand(serviceDisableCmd)
 	serviceCmd.AddCommand(serviceLogsCmd)
+	serviceCmd.AddCommand(serviceBootCmd)
 	rootCmd.AddCommand(serviceCmd)
 }

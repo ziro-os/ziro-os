@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -68,52 +71,200 @@ var cloudInspectCmd = &cobra.Command{
 	},
 }
 
+const (
+	imdsBase           = "http://169.254.169.254/latest"
+	cloudInitMarker    = "/var/lib/ziro/cloud-init.instance"
+	rootAuthorizedKeys = "/root/.ssh/authorized_keys"
+)
+
+const cloudInitForce = "/etc/ziro/cloud-init.force"
+
+var cloudWait int
+
+func cloudMetadataTrusted() bool {
+	if fileExists(cloudInitForce) {
+		return true
+	}
+	dmi := strings.ToLower(readDMI("sys_vendor") + " " + readDMI("product_name") + " " + readDMI("bios_vendor"))
+	for _, v := range []string{"amazon", "ec2", "openstack", "alibaba"} {
+		if strings.Contains(dmi, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// imdsGet fetches an EC2-compatible metadata path, using an IMDSv2 session
+// token when available (required on hardened AWS instances), else IMDSv1.
+func imdsGet(path string) ([]byte, int, error) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	token := ""
+	if req, err := http.NewRequest(http.MethodPut, imdsBase+"/api/token", nil); err == nil {
+		req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "300")
+		if resp, err := client.Do(req); err == nil {
+			if resp.StatusCode == http.StatusOK {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				token = strings.TrimSpace(string(b))
+			}
+			resp.Body.Close()
+		}
+	}
+	req, err := http.NewRequest(http.MethodGet, imdsBase+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if token != "" {
+		req.Header.Set("X-aws-ec2-metadata-token", token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	return body, resp.StatusCode, err
+}
+
+// installMetadataSSHKeys appends instance public keys to root's authorized_keys (idempotent).
+func installMetadataSSHKeys() int {
+	list, code, err := imdsGet("/meta-data/public-keys/")
+	if err != nil || code != http.StatusOK {
+		return 0
+	}
+	_ = os.MkdirAll(filepath.Dir(rootAuthorizedKeys), 0700)
+	existing, _ := os.ReadFile(rootAuthorizedKeys)
+	added := 0
+	for _, line := range strings.Split(string(list), "\n") {
+		idx := strings.SplitN(strings.TrimSpace(line), "=", 2)[0]
+		if idx == "" {
+			continue
+		}
+		key, code, err := imdsGet("/meta-data/public-keys/" + idx + "/openssh-key")
+		k := strings.TrimSpace(string(key))
+		if err != nil || code != http.StatusOK || !(strings.HasPrefix(k, "ssh-") || strings.HasPrefix(k, "ecdsa-")) {
+			continue
+		}
+		if strings.Contains(string(existing), k) {
+			continue
+		}
+		if err := appendLine(rootAuthorizedKeys, k); err == nil {
+			existing = append(existing, []byte(k+"\n")...)
+			added++
+		}
+	}
+	return added
+}
+
+func appendLine(path, line string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(line + "\n")
+	return err
+}
+
+// runUserDataScript executes a shell user-data payload from a private temp file.
+func runUserDataScript(script []byte) error {
+	if len(bytes.TrimSpace(script)) == 0 {
+		fmt.Println("User-data is empty.")
+		return nil
+	}
+	if bytes.HasPrefix(script, []byte("#cloud-config")) {
+		fmt.Println("User-data is #cloud-config (not supported); only shell scripts are executed.")
+		return nil
+	}
+	f, err := os.CreateTemp("", "ziro-userdata-*.sh")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(script); err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+
+	fmt.Println("Executing cloud user-data bootstrap script...")
+	runCmd := exec.Command("/bin/sh", f.Name())
+	runCmd.Stdout = os.Stdout
+	runCmd.Stderr = os.Stderr
+	return runCmd.Run()
+}
+
 var cloudUserDataCmd = &cobra.Command{
 	Use:   "userdata [URL]",
-	Short: "Fetch and execute cloud user-data bootstrap script",
+	Short: "Install metadata SSH keys and run the cloud user-data script (once per instance)",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var scriptURL string
 		if len(args) > 0 {
-			scriptURL = args[0]
-		} else {
-			// Try standard cloud metadata endpoint
-			scriptURL = "http://169.254.169.254/latest/user-data"
+			// Explicit URL: code is executed as root, so it must be authenticated by TLS.
+			u, err := url.Parse(args[0])
+			if err != nil || (u.Scheme != "https" && u.Hostname() != "169.254.169.254") {
+				return fmt.Errorf("refusing %q: user-data URLs must use https", args[0])
+			}
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Get(u.String())
+			if err != nil {
+				return fmt.Errorf("failed to fetch user-data: %w", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("server returned HTTP %d", resp.StatusCode)
+			}
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+			if err != nil {
+				return err
+			}
+			return runUserDataScript(body)
 		}
 
-		fmt.Printf("Fetching cloud user-data from: %s...\n", scriptURL)
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Get(scriptURL)
-		if err != nil {
-			return fmt.Errorf("failed to fetch user-data: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("metadata server returned HTTP %d", resp.StatusCode)
-		}
-
-		scriptBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response: %w", err)
-		}
-
-		if len(scriptBytes) == 0 {
-			fmt.Println("User-data script is empty.")
+		// 169.254.169.254 is only trustworthy on a real cloud: on a LAN anyone can
+		// answer it and would get root via SSH keys/user-data.
+		if !cloudMetadataTrusted() {
+			fmt.Println("Not an EC2-compatible cloud (DMI); skipping metadata. Override: touch " + cloudInitForce)
 			return nil
 		}
 
-		tmpFile := "/tmp/ziro-cloud-init.sh"
-		if err := os.WriteFile(tmpFile, scriptBytes, 0755); err != nil {
-			return fmt.Errorf("failed to write script: %w", err)
+		// Metadata service: wait for DHCP/IMDS at boot.
+		var instanceID []byte
+		var code int
+		var err error
+		for i := 0; ; i++ {
+			instanceID, code, err = imdsGet("/meta-data/instance-id")
+			if (err == nil && code == http.StatusOK) || i >= cloudWait {
+				break
+			}
+			time.Sleep(time.Second)
 		}
-		defer os.Remove(tmpFile)
+		if err != nil || code != http.StatusOK {
+			fmt.Println("No EC2-compatible metadata service found; nothing to do.")
+			return nil
+		}
+		id := strings.TrimSpace(string(instanceID))
 
-		fmt.Println("Executing cloud user-data bootstrap script...")
-		runCmd := exec.Command("/bin/sh", tmpFile)
-		runCmd.Stdout = os.Stdout
-		runCmd.Stderr = os.Stderr
-		return runCmd.Run()
+		if n := installMetadataSSHKeys(); n > 0 {
+			fmt.Printf("✓ Installed %d SSH public key(s) from instance metadata\n", n)
+		}
+
+		if prev, _ := os.ReadFile(cloudInitMarker); strings.TrimSpace(string(prev)) == id {
+			fmt.Printf("User-data already executed for instance %s; skipping.\n", id)
+			return nil
+		}
+		body, code, err := imdsGet("/user-data")
+		if err != nil {
+			return fmt.Errorf("failed to fetch user-data: %w", err)
+		}
+		if code == http.StatusOK {
+			if err := runUserDataScript(body); err != nil {
+				return err
+			}
+		} else if code != http.StatusNotFound {
+			return fmt.Errorf("metadata server returned HTTP %d", code)
+		}
+		_ = os.MkdirAll(filepath.Dir(cloudInitMarker), 0700)
+		return os.WriteFile(cloudInitMarker, []byte(id+"\n"), 0600)
 	},
 }
 
@@ -178,6 +329,7 @@ func checkMetadataService() {
 
 func init() {
 	cloudCmd.AddCommand(cloudInspectCmd)
+	cloudUserDataCmd.Flags().IntVar(&cloudWait, "wait", 0, "Seconds to wait for the metadata service")
 	cloudCmd.AddCommand(cloudUserDataCmd)
 	rootCmd.AddCommand(cloudCmd)
 }

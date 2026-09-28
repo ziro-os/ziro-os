@@ -89,7 +89,7 @@ func saveClusterConfig(cfg *ClusterConfig) error {
 var clusterCmd = &cobra.Command{
 	Use:     "cluster",
 	Aliases: []string{"mesh", "swarm"},
-	Short:   "Manage container clustering, mesh nodes, and distributed replicas",
+	Short:   "[experimental] Cluster metadata & local replica deployment (no multi-node scheduling yet)",
 }
 
 var clusterPort int
@@ -202,7 +202,9 @@ var clusterJoinCmd = &cobra.Command{
 			return
 		}
 
-		fmt.Printf("✓ Joined Ziro-OS Cluster at %s as WORKER node %s (%s)\n", masterAddr, nodeID, host)
+		fmt.Printf("✓ Recorded cluster membership: master %s, WORKER node %s (%s)\n", masterAddr, nodeID, host)
+		fmt.Println("⚠ [experimental] The master was not contacted and the token was not verified;")
+		fmt.Println("  this node is not scheduled remotely yet.")
 	},
 }
 
@@ -262,6 +264,10 @@ var clusterDeployCmd = &cobra.Command{
 			fmt.Println("Error: --name and --image are required.")
 			return
 		}
+		if err := validName(appName); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
 		if appReplicas <= 0 {
 			appReplicas = 1
 		}
@@ -277,14 +283,10 @@ var clusterDeployCmd = &cobra.Command{
 			Replicas:  appReplicas,
 			Port:      appPort,
 			CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
-			Status:    "Running",
 		}
 
-		apps := loadServicesList()
-		apps = append(apps, app)
-		_ = saveServicesList(apps)
-
-		fmt.Printf("✓ Deploying '%s' (Image: %s, Replicas: %d, Port: %s)...\n", appName, appImage, appReplicas, appPort)
+		fmt.Printf("Deploying '%s' locally (Image: %s, Replicas: %d, Port: %s)...\n", appName, appImage, appReplicas, appPort)
+		started := 0
 
 		// Start local replicas via nerdctl / ctr
 		for i := 1; i <= appReplicas; i++ {
@@ -293,15 +295,18 @@ var clusterDeployCmd = &cobra.Command{
 			if appPort != "" {
 				runArgs = append(runArgs, "-p", appPort)
 			}
-			runArgs = append(runArgs, appImage)
+			runArgs = append(runArgs, "--", appImage)
 
-			if err := exec.Command("nerdctl", runArgs...).Run(); err != nil {
-				// Fallback to ctr if nerdctl not installed
-				_ = exec.Command("ctr", "run", "-d", appImage, cName).Run()
+			if out, err := exec.Command("nerdctl", runArgs...).CombinedOutput(); err != nil {
+				fmt.Printf("  ✗ %s: %v %s\n", cName, err, strings.TrimSpace(string(out)))
+				continue
 			}
+			started++
 		}
 
-		fmt.Printf("✓ Successfully scheduled %d replica(s) across cluster nodes!\n", appReplicas)
+		app.Status = fmt.Sprintf("%d/%d started (local)", started, appReplicas)
+		_ = saveServicesList(append(loadServicesList(), app))
+		fmt.Printf("%d/%d replica(s) started on THIS node. [experimental] Multi-node scheduling is not implemented yet.\n", started, appReplicas)
 	},
 }
 

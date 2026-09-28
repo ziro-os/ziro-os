@@ -3,6 +3,7 @@ package cmd
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -63,13 +64,11 @@ var apiStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show status and connectivity of Ziro REST API server",
 	Run: func(cmd *cobra.Command, args []string) {
-		running := isAPIServerRunning()
-		token := getOrCreateAPIToken()
-		if running {
+		if isAPIServerRunning() {
 			fmt.Printf("● Ziro REST API Server: \033[1;32mACTIVE (Running)\033[0m\n")
-			fmt.Printf("   Port:     %d (HTTPS / TLS 1.3)\n", apiPort)
+			fmt.Printf("   Port:     %d (HTTPS / TLS 1.2+)\n", apiPort)
 			fmt.Printf("   Endpoint: https://127.0.0.1:%d/api/v1/health\n", apiPort)
-			fmt.Printf("   Auth:     Bearer Token (%s...)\n", token[:8])
+			fmt.Printf("   Auth:     Bearer Token (see 'ziroctl api token')\n")
 		} else {
 			fmt.Printf("● Ziro REST API Server: \033[1;33mSTANDBY (Stopped)\033[0m\n")
 			fmt.Println("   Start via: 'ziroctl api start' or 'ziroctl service start ziro-api'")
@@ -234,10 +233,37 @@ func (rl *rateLimiter) allow(ip string) bool {
 		}
 	}
 	if len(valid) >= rl.limit {
+		rl.clients[ip] = valid
 		return false
 	}
 	rl.clients[ip] = append(valid, now)
+
+	// Evict idle clients so the map cannot grow without bound.
+	if len(rl.clients) > 1024 {
+		for k, ts := range rl.clients {
+			if len(ts) == 0 || !ts[len(ts)-1].After(cutoff) {
+				delete(rl.clients, k)
+			}
+		}
+	}
 	return true
+}
+
+// cachedSecurityScan avoids re-hashing binaries on every API request.
+var (
+	scanMu     sync.Mutex
+	scanCache  SecurityScanReport
+	scanCached time.Time
+)
+
+func cachedSecurityScan() SecurityScanReport {
+	scanMu.Lock()
+	defer scanMu.Unlock()
+	if time.Since(scanCached) > 30*time.Second {
+		scanCache = runSecurityScan()
+		scanCached = time.Now()
+	}
+	return scanCache
 }
 
 func startAPIServer() {
@@ -262,7 +288,7 @@ func startAPIServer() {
 
 			// CORS
 			origin := r.Header.Get("Origin")
-			if origin != "" {
+			if origin != "" && apiCorsHost != "" {
 				w.Header().Set("Access-Control-Allow-Origin", apiCorsHost)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
@@ -287,7 +313,7 @@ func startAPIServer() {
 			if !isPublic {
 				authHeader := r.Header.Get("Authorization")
 				expected := "Bearer " + token
-				if authHeader != expected {
+				if subtle.ConstantTimeCompare([]byte(authHeader), []byte(expected)) != 1 {
 					w.WriteHeader(http.StatusUnauthorized)
 					_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "Unauthorized: Invalid or missing Bearer token"})
 					return
@@ -410,8 +436,7 @@ func startAPIServer() {
 
 	// 8. Security Scan
 	mux.HandleFunc("/api/v1/security", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		rep := runSecurityScan()
-		_ = json.NewEncoder(w).Encode(rep)
+		_ = json.NewEncoder(w).Encode(cachedSecurityScan())
 	}))
 
 	addr := fmt.Sprintf("%s:%d", apiBindHost, apiPort)
@@ -419,7 +444,7 @@ func startAPIServer() {
 	fmt.Printf(" 🚀 Ziro-OS Control Plane REST API Server started!\n")
 	fmt.Println("================================================================")
 	fmt.Printf(" Listening on: %s (TLS 1.3 / HTTPS: %v)\n", addr, apiUseTLS)
-	fmt.Printf(" Bearer Token: %s\n", token)
+	fmt.Println(" Bearer Token: run 'ziroctl api token' (never logged)")
 	fmt.Println(" Control Endpoints:")
 	fmt.Println("   • GET  /api/v1/health       - Server & OS liveness check")
 	fmt.Println("   • GET  /api/v1/system       - System metrics & cloud metadata")
@@ -441,7 +466,10 @@ func startAPIServer() {
 	}
 
 	if apiUseTLS {
-		_ = ensureTLSCertificates()
+		if err := ensureTLSCertificates(); err != nil {
+			fmt.Printf("TLS certificate error: %v\n", err)
+			return
+		}
 		server.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
@@ -457,9 +485,9 @@ func startAPIServer() {
 
 func init() {
 	apiStartCmd.Flags().IntVarP(&apiPort, "port", "p", 8443, "REST API listening port")
-	apiStartCmd.Flags().StringVar(&apiBindHost, "bind", "0.0.0.0", "Network address to bind")
+	apiStartCmd.Flags().StringVar(&apiBindHost, "bind", "127.0.0.1", "Network address to bind (use 0.0.0.0 to expose remotely; also 'ziroctl firewall allow 8443')")
 	apiStartCmd.Flags().BoolVar(&apiUseTLS, "tls", true, "Enable TLS / HTTPS encryption")
-	apiStartCmd.Flags().StringVar(&apiCorsHost, "cors", "*", "Allowed CORS origin for Web GUI")
+	apiStartCmd.Flags().StringVar(&apiCorsHost, "cors", "", "Allowed CORS origin for Web GUI (disabled when empty)")
 
 	apiStatusCmd.Flags().IntVarP(&apiPort, "port", "p", 8443, "REST API listening port")
 	apiTokenCmd.Flags().IntVarP(&apiPort, "port", "p", 8443, "REST API listening port")

@@ -150,6 +150,8 @@ var securityScanCmd = &cobra.Command{
 	},
 }
 
+var sentinelEnforce bool
+
 var securityMonitorCmd = &cobra.Command{
 	Use:   "monitor",
 	Short: "Start continuous Sentinel background threat monitoring daemon",
@@ -164,9 +166,9 @@ var securityMonitorCmd = &cobra.Command{
 			if rep.ThreatsCount > 0 || !rep.CanaryOK || !rep.IntegrityOK {
 				fmt.Printf("[%s] 🚨 ALERT: %d threats detected! Canary: %v, FIM: %v\n",
 					time.Now().Format("15:04:05"), rep.ThreatsCount, rep.CanaryOK, rep.IntegrityOK)
-				// Isolate threats if critical
+				// Auto-kill only when explicitly enforced: heuristics can false-positive on real workloads.
 				for _, t := range rep.Threats {
-					if t.Severity == "CRITICAL" && t.PID > 1 {
+					if sentinelEnforce && t.Severity == "CRITICAL" && t.PID > 1 {
 						fmt.Printf("    ⚡ Auto-mitigating CRITICAL threat: terminating PID %d (%s)...\n", t.PID, t.ProcessName)
 						_ = exec.Command("kill", "-9", strconv.Itoa(t.PID)).Run()
 					}
@@ -251,6 +253,10 @@ fs.protected_symlinks = 1
 		_ = os.Chmod("/root/.ssh/authorized_keys", 0600)
 		fmt.Println("  ✓ Restricted permissions on /etc/shadow, /etc/passwd, and /root/.ssh")
 
+		_ = os.Remove(fimDBPath)
+		checkFIM()
+		fmt.Printf("  ✓ Recorded file integrity baseline at %s\n", fimDBPath)
+
 		ensureCanary()
 		fmt.Println("  ✓ Armed Ransomware Canary honeypot at /var/canary/sentinel.token")
 
@@ -289,27 +295,10 @@ func runSecurityScan() SecurityScanReport {
 		})
 	}
 
-	// 2. FIM check
-	criticalBinaries := []string{
-		"/bin/busybox",
-		"/bin/sh",
-		"/sbin/init",
-		"/usr/bin/containerd",
-		"/etc/passwd",
-		"/etc/shadow",
-	}
-
-	for _, bin := range criticalBinaries {
-		if fileExists(bin) {
-			hash, err := computeSHA256Hash(bin)
-			if err != nil {
-				rep.IntegrityOK = false
-				rep.FIMIssues = append(rep.FIMIssues, fmt.Sprintf("%s: unreadable (%v)", bin, err))
-			} else if len(hash) != 64 {
-				rep.IntegrityOK = false
-				rep.FIMIssues = append(rep.FIMIssues, fmt.Sprintf("%s: invalid hash", bin))
-			}
-		}
+	// 2. FIM check against the recorded baseline
+	rep.IntegrityOK, rep.FIMIssues = checkFIM()
+	if !rep.IntegrityOK {
+		rep.HardeningScore -= 30
 	}
 
 	// 3. AI Heuristic threat inspection of /proc
@@ -339,105 +328,134 @@ func computeSHA256Hash(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+var fimCriticalFiles = []string{
+	"/bin/busybox",
+	"/sbin/init",
+	"/usr/bin/containerd",
+	"/usr/bin/ziroctl",
+	"/usr/sbin/sshd",
+	"/etc/passwd",
+	"/etc/shadow",
+	"/etc/ssh/sshd_config",
+}
+
+// checkFIM compares critical files with the baseline in fimDBPath, creating the
+// baseline on first run. Re-baseline after legitimate updates with 'security harden'.
+func checkFIM() (bool, []string) {
+	current := map[string]string{}
+	for _, f := range fimCriticalFiles {
+		if h, err := computeSHA256Hash(f); err == nil {
+			current[f] = h
+		}
+	}
+
+	var baseline map[string]string
+	data, err := os.ReadFile(fimDBPath)
+	if err != nil || json.Unmarshal(data, &baseline) != nil {
+		_ = os.MkdirAll(filepath.Dir(fimDBPath), 0700)
+		if out, err := json.MarshalIndent(current, "", "  "); err == nil {
+			_ = os.WriteFile(fimDBPath, out, 0600)
+		}
+		return true, nil
+	}
+
+	var issues []string
+	for _, f := range fimCriticalFiles {
+		want, had := baseline[f]
+		got, has := current[f]
+		switch {
+		case had && !has:
+			issues = append(issues, f+": missing or unreadable")
+		case had && want != got:
+			issues = append(issues, f+": modified since baseline")
+		}
+	}
+	return len(issues) == 0, issues
+}
+
+var (
+	minerPatterns  = []string{"xmrig", "stratum+tcp", "stratum+ssl", "cryptonight", "minerd", "ethminer", "nanominer"}
+	escapePatterns = []string{"/sys/fs/cgroup/release_agent", "devices.allow", "core_pattern"}
+	shells         = map[string]bool{"sh": true, "bash": true, "ash": true, "dash": true, "zsh": true, "ksh": true}
+	netcats        = map[string]bool{"nc": true, "ncat": true, "netcat": true}
+)
+
+// classifyProcess matches argv tokens, not raw substrings, so e.g. 'ssh -i key.pem'
+// is never mistaken for 'sh -i'. It returns the threat type, severity and matched signature.
+func classifyProcess(argv []string, stdinIsSocket bool) (string, string, string) {
+	if len(argv) == 0 {
+		return "", "", ""
+	}
+	base := filepath.Base(argv[0])
+	joined := strings.Join(argv, " ")
+	lower := strings.ToLower(joined)
+
+	if strings.Contains(joined, "/dev/tcp/") || strings.Contains(joined, "/dev/udp/") {
+		return "REVERSE_SHELL", "CRITICAL", "/dev/tcp redirection"
+	}
+	if shells[base] && stdinIsSocket {
+		return "REVERSE_SHELL", "CRITICAL", "shell with network socket on stdin"
+	}
+	if netcats[base] {
+		for _, a := range argv[1:] {
+			if a == "-e" || a == "-c" || a == "--exec" || a == "--sh-exec" {
+				return "REVERSE_SHELL", "CRITICAL", base + " " + a
+			}
+		}
+	}
+	if strings.Contains(joined, "pty.spawn") {
+		return "REVERSE_SHELL", "HIGH", "pty.spawn"
+	}
+	for _, pat := range minerPatterns {
+		if strings.Contains(lower, pat) {
+			return "CRYPTO_MINER", "CRITICAL", pat
+		}
+	}
+	for _, pat := range escapePatterns {
+		if strings.Contains(joined, pat) {
+			return "ESCAPE_ATTEMPT", "HIGH", pat
+		}
+	}
+	if base == "nsenter" && strings.Contains(joined, "-t 1") {
+		return "ESCAPE_ATTEMPT", "HIGH", "nsenter into PID 1"
+	}
+	return "", "", ""
+}
+
 func scanProcThreats() []ThreatDetection {
 	var detections []ThreatDetection
 	procEntries, err := os.ReadDir("/proc")
 	if err != nil {
 		return detections
 	}
-
-	// Signatures
-	reverseShellPatterns := []string{
-		"/dev/tcp/",
-		"pty.spawn",
-		"nc -e",
-		"ncat -e",
-		"bash -i",
-		"sh -i",
-	}
-
-	minerPatterns := []string{
-		"xmrig",
-		"stratum+tcp",
-		"stratum+ssl",
-		"cryptonight",
-		"minerd",
-		"ethminer",
-		"nanominer",
-	}
-
-	escapePatterns := []string{
-		"/sys/fs/cgroup/release_agent",
-		"devices.allow",
-		"nsenter -t 1",
-	}
+	self := os.Getpid()
 
 	for _, entry := range procEntries {
-		if !entry.IsDir() {
-			continue
-		}
 		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 {
+		if err != nil || pid <= 1 || pid == self {
 			continue
 		}
-
-		cmdlinePath := filepath.Join("/proc", entry.Name(), "cmdline")
-		cmdBytes, err := os.ReadFile(cmdlinePath)
-		if err != nil {
+		cmdBytes, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || len(cmdBytes) == 0 {
 			continue
 		}
-		cmdline := strings.ReplaceAll(string(cmdBytes), "\x00", " ")
-		if strings.TrimSpace(cmdline) == "" {
+		argv := strings.Split(strings.TrimRight(string(cmdBytes), "\x00"), "\x00")
+		fd0, _ := os.Readlink(filepath.Join("/proc", entry.Name(), "fd", "0"))
+
+		typ, sev, sig := classifyProcess(argv, strings.HasPrefix(fd0, "socket:"))
+		if typ == "" {
 			continue
 		}
-
-		commPath := filepath.Join("/proc", entry.Name(), "comm")
-		commBytes, _ := os.ReadFile(commPath)
-		pname := strings.TrimSpace(string(commBytes))
-
-		// Check reverse shells
-		for _, pat := range reverseShellPatterns {
-			if strings.Contains(cmdline, pat) {
-				detections = append(detections, ThreatDetection{
-					Type:        "REVERSE_SHELL",
-					Severity:    "CRITICAL",
-					PID:         pid,
-					ProcessName: pname,
-					Details:     fmt.Sprintf("Matched interactive network shell pattern: '%s' in %s", pat, cmdline),
-				})
-				break
-			}
-		}
-
-		// Check crypto miners
-		for _, pat := range minerPatterns {
-			if strings.Contains(strings.ToLower(cmdline), pat) || strings.Contains(strings.ToLower(pname), pat) {
-				detections = append(detections, ThreatDetection{
-					Type:        "CRYPTO_MINER",
-					Severity:    "CRITICAL",
-					PID:         pid,
-					ProcessName: pname,
-					Details:     fmt.Sprintf("Detected crypto mining signature: '%s'", pat),
-				})
-				break
-			}
-		}
-
-		// Check container escape patterns
-		for _, pat := range escapePatterns {
-			if strings.Contains(cmdline, pat) {
-				detections = append(detections, ThreatDetection{
-					Type:        "ESCAPE_ATTEMPT",
-					Severity:    "CRITICAL",
-					PID:         pid,
-					ProcessName: pname,
-					Details:     fmt.Sprintf("Detected potential container breakout payload: '%s'", pat),
-				})
-				break
-			}
-		}
+		commBytes, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "comm"))
+		// Details carry only the signature, never the full cmdline (it may contain secrets).
+		detections = append(detections, ThreatDetection{
+			Type:        typ,
+			Severity:    sev,
+			PID:         pid,
+			ProcessName: strings.TrimSpace(string(commBytes)),
+			Details:     "matched signature: " + sig,
+		})
 	}
-
 	return detections
 }
 
@@ -452,6 +470,7 @@ func printCheck(out io.Writer, name string, passed bool) {
 func init() {
 	securityCmd.AddCommand(securityAuditCmd)
 	securityCmd.AddCommand(securityScanCmd)
+	securityMonitorCmd.Flags().BoolVar(&sentinelEnforce, "enforce", false, "SIGKILL processes flagged CRITICAL (default: alert only)")
 	securityCmd.AddCommand(securityMonitorCmd)
 	securityCmd.AddCommand(securityHardenCmd)
 	rootCmd.AddCommand(securityCmd)
