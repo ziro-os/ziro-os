@@ -276,8 +276,10 @@ SH_SHUTDOWN
         # Validate that /bin/sh executes correctly
         chroot /rootfs /bin/busybox sh -c "echo '\''✓ Minimal rootfs shell validated'\''"
 
+        # GNU tar is build-only; override member ownership without changing modes.
+        apk add --no-cache tar >/dev/null || exit 1
         cd /rootfs
-        tar --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" .
+        tar --numeric-owner --owner=0 --group=0 --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" . || exit 1
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
         chmod 644 "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
         chmod -R a+rX /rootfs 2>/dev/null || true
@@ -344,14 +346,33 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         GRUB_PKGS="grub-bios grub-efi"
     fi
 
-    apk --root /rootfs --initdb \
-        --keys-dir /etc/apk/keys \
-        --repositories-file /etc/apk/repositories \
-        --allow-untrusted \
-        add --no-cache \
-        ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
-        iptables openssh-server openssh-client linux-pam \
-        e2fsprogs dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS
+    # Signatures are verified against the Alpine keys (never --allow-untrusted). Transient mirror/DNS
+    # errors are retried; a partial install must fail the build instead of shipping a broken host.
+    ok=0
+    for attempt in 1 2 3; do
+        if apk --root /rootfs --initdb \
+            --keys-dir /etc/apk/keys \
+            --repositories-file /etc/apk/repositories \
+            add --no-cache \
+            ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
+            iptables openssh-server openssh-client linux-pam \
+            e2fsprogs dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS; then
+            ok=1
+            break
+        fi
+        echo "apk install failed (attempt $attempt/3); retrying in 15s..." >&2
+        sleep 15
+    done
+    if [ "$ok" != 1 ]; then
+        echo "FATAL: host packages failed to install" >&2
+        exit 1
+    fi
+    for bin in usr/bin/containerd usr/bin/nerdctl usr/bin/runc usr/sbin/nft usr/sbin/sshd usr/bin/wg usr/sbin/iptables; do
+        if [ ! -x "/rootfs/$bin" ]; then
+            echo "FATAL: /$bin missing from host rootfs" >&2
+            exit 1
+        fi
+    done
 
     # Retain official keys and repositories inside rootfs for ziropkg
     cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
@@ -488,9 +509,9 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
 
         cd /rootfs
         if command -v pigz >/dev/null 2>&1; then
-            find . | cpio -o -H newc | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
+            find . | cpio -o -H newc -R 0:0 | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         else
-            find . | cpio -o -H newc | gzip > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
+            find . | cpio -o -H newc -R 0:0 | gzip > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         fi
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
