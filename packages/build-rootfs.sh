@@ -35,13 +35,15 @@ echo " Platform: $DOCKER_PLATFORM"
 echo "=================================================="
 
 BUILD_DIR="$REPO_ROOT/build"
+# Pinned Alpine release: kernel, modules and packages all come from one branch (reproducible builds)
+ALPINE_IMAGE="${ALPINE_IMAGE:-alpine:3.24}"
 DOWNLOAD_DIR="$BUILD_DIR/downloads"
 ROOTFS_MINIMAL="$BUILD_DIR/rootfs-minimal-$TARGET_ARCH"
 ROOTFS_FULL="$BUILD_DIR/rootfs-full-$TARGET_ARCH"
 
 mkdir -p "$BUILD_DIR" "$DOWNLOAD_DIR"
 if [ -d "$ROOTFS_MINIMAL" ] || [ -d "$ROOTFS_FULL" ]; then
-    docker run --rm -v "$BUILD_DIR:/b" alpine:latest rm -rf "/b/rootfs-minimal-$TARGET_ARCH" "/b/rootfs-full-$TARGET_ARCH" 2>/dev/null || true
+    docker run --rm -v "$BUILD_DIR:/b" "$ALPINE_IMAGE" rm -rf "/b/rootfs-minimal-$TARGET_ARCH" "/b/rootfs-full-$TARGET_ARCH" 2>/dev/null || true
     rm -rf "$ROOTFS_MINIMAL" "$ROOTFS_FULL" 2>/dev/null || true
 fi
 mkdir -p "$ROOTFS_MINIMAL" "$ROOTFS_FULL"
@@ -77,7 +79,7 @@ setup_layout() {
     echo "$apk_arch" > "$target/etc/apk/arch"
 
     # Copy trusted Alpine signing keys and repository list
-    docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" alpine:latest sh -c '
+    docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" "$ALPINE_IMAGE" sh -c '
         mkdir -p /rootfs/etc/apk/keys
         cp -r /etc/apk/keys/* /rootfs/etc/apk/keys/ 2>/dev/null || true
         if [ ! -f /rootfs/etc/apk/repositories ]; then
@@ -88,7 +90,7 @@ setup_layout() {
     # Ensure TLS certificates exist for HTTPS package downloads
     mkdir -p "$target/etc/ssl/certs"
     if [ ! -f "$target/etc/ssl/certs/ca-certificates.crt" ]; then
-        docker run --rm --platform "$DOCKER_PLATFORM" alpine:latest cat /etc/ssl/certs/ca-certificates.crt > "$target/etc/ssl/certs/ca-certificates.crt" 2>/dev/null || true
+        docker run --rm --platform "$DOCKER_PLATFORM" "$ALPINE_IMAGE" cat /etc/ssl/certs/ca-certificates.crt > "$target/etc/ssl/certs/ca-certificates.crt" 2>/dev/null || true
     fi
     if [ -f "$target/etc/ssl/certs/ca-certificates.crt" ]; then
         (cd "$target/etc/ssl" && ln -sf certs/ca-certificates.crt cert.pem)
@@ -111,7 +113,7 @@ if [ ! -f "$BUSYBOX_BIN" ]; then
     echo "Extracting static BusyBox for $TARGET_ARCH via Docker Alpine..."
     HOST_UID=$(id -u)
     HOST_GID=$(id -g)
-    docker run --rm --platform "$DOCKER_PLATFORM" -v "$DOWNLOAD_DIR:/out" alpine:latest sh -c \
+    docker run --rm --platform "$DOCKER_PLATFORM" -v "$DOWNLOAD_DIR:/out" "$ALPINE_IMAGE" sh -c \
         "apk add --no-cache busybox-static >/dev/null 2>&1 && (cp /bin/busybox.static /out/busybox-$TARGET_ARCH || cp /bin/busybox /out/busybox-$TARGET_ARCH) && chmod 755 /out/busybox-$TARGET_ARCH && chown $HOST_UID:$HOST_GID /out/busybox-$TARGET_ARCH 2>/dev/null || true"
     chmod +x "$BUSYBOX_BIN" 2>/dev/null || true
 fi
@@ -121,7 +123,7 @@ install_busybox() {
     cp "$BUSYBOX_BIN" "$target/bin/busybox"
     chmod +x "$target/bin/busybox" 2>/dev/null || true
     # Create clean relative symlinks
-    docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" alpine:latest sh -c '
+    docker run --rm --platform "$DOCKER_PLATFORM" -v "$target:/rootfs" "$ALPINE_IMAGE" sh -c '
         cd /rootfs/bin
         for app in $(./busybox --list); do
             case "$app" in
@@ -175,7 +177,7 @@ if [ ! -f "$APK_BIN" ]; then
     echo "Extracting static APK package manager for $TARGET_ARCH..."
     HOST_UID=$(id -u)
     HOST_GID=$(id -g)
-    docker run --rm --platform "$DOCKER_PLATFORM" -v "$DOWNLOAD_DIR:/out" alpine:latest sh -c \
+    docker run --rm --platform "$DOCKER_PLATFORM" -v "$DOWNLOAD_DIR:/out" "$ALPINE_IMAGE" sh -c \
         "apk add --no-cache apk-tools-static >/dev/null 2>&1 && cp /sbin/apk.static /out/apk-$TARGET_ARCH && chmod 755 /out/apk-$TARGET_ARCH && chown $HOST_UID:$HOST_GID /out/apk-$TARGET_ARCH 2>/dev/null || true"
     chmod +x "$APK_BIN" 2>/dev/null || true
 fi
@@ -188,9 +190,9 @@ echo "✓ ziroctl, ziropkg, and apk package backend installed"
 # --- 3. Build & Install ziro-init (PID 1) ---
 echo "--- [3/5] Building ziro-init PID 1 supervisor ($TARGET_ARCH) ---"
 INIT_BIN="$REPO_ROOT/init/ziro-init-$TARGET_ARCH"
-if [ ! -f "$INIT_BIN" ]; then
-    make -C "$REPO_ROOT/init" TARGET_ARCH="$TARGET_ARCH"
-fi
+# Always go through make: it rebuilds whenever ziro-init.c is newer than the binary,
+# so a stale PID 1 (missing security fixes) can never ship.
+make -C "$REPO_ROOT/init" TARGET_ARCH="$TARGET_ARCH"
 rm -f "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init" "$ROOTFS_FULL/bin/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/sbin/init"
@@ -219,7 +221,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e TARGET_ARCH="$TARGET_ARCH" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
-    alpine:latest sh -c '
+    "$ALPINE_IMAGE" sh -c '
         mkdir -p /rootfs/sbin /rootfs/bin /rootfs/usr/bin
         rm -f /rootfs/sbin/reboot /rootfs/sbin/poweroff /rootfs/sbin/halt /rootfs/sbin/shutdown
         rm -f /rootfs/bin/reboot /rootfs/bin/poweroff /rootfs/bin/halt /rootfs/bin/shutdown
@@ -280,21 +282,35 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ROOTFS_FULL:/rootfs" \
     -v "$BUILD_DIR:/out" \
     -e TARGET_ARCH="$TARGET_ARCH" \
+    -e BUILD_FROM_SOURCE="${BUILD_FROM_SOURCE:-0}" \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
-    alpine:latest sh -c '
-    # Install linux-virt kernel & drivers inside container and copy modules into rootfs
-    echo "Installing kernel drivers & modules (linux-virt, kmod)..."
-    apk add --no-cache linux-virt kmod >/dev/null 2>&1
+    "$ALPINE_IMAGE" sh -c '
+    # Kernel + modules always come from ONE source so their versions match:
+    #   BUILD_FROM_SOURCE=1 -> kernel/build-kernel.sh output (build/kernel-<arch>/)
+    #   default             -> Alpine linux-virt package
+    apk add --no-cache kmod >/dev/null 2>&1
     mkdir -p /rootfs/lib/modules /rootfs/boot
-    cp -a /lib/modules/* /rootfs/lib/modules/
-    if [ -f /boot/vmlinuz-virt ]; then
+    rm -rf /rootfs/lib/modules/*
+    SRC="/out/kernel-${TARGET_ARCH}"
+    if [ "${BUILD_FROM_SOURCE:-0}" = "1" ]; then
+        if [ ! -f "$SRC/vmlinuz" ] || [ ! -f "$SRC/kernel.release" ]; then
+            echo "BUILD_FROM_SOURCE=1 but $SRC has no kernel; run kernel/build-kernel.sh first" >&2
+            exit 1
+        fi
+        echo "Using source-built kernel $(cat "$SRC/kernel.release")..."
+        [ -d "$SRC/modroot/lib/modules" ] && cp -a "$SRC/modroot/lib/modules/." /rootfs/lib/modules/
+        cp "$SRC/vmlinuz" /rootfs/boot/vmlinuz
+        cp "$SRC/kernel.release" "/out/kernel-release-${TARGET_ARCH}"
+    else
+        echo "Installing kernel drivers & modules (linux-virt)..."
+        apk add --no-cache linux-virt >/dev/null 2>&1
+        cp -a /lib/modules/. /rootfs/lib/modules/
         cp /boot/vmlinuz-virt /rootfs/boot/vmlinuz
-        cp /boot/vmlinuz-virt "/out/vmlinuz-${TARGET_ARCH}"
-    elif [ -f /boot/vmlinuz ]; then
-        cp /boot/vmlinuz /rootfs/boot/vmlinuz
-        cp /boot/vmlinuz "/out/vmlinuz-${TARGET_ARCH}"
+        ls /lib/modules > "/out/kernel-release-${TARGET_ARCH}"
     fi
+    cp /rootfs/boot/vmlinuz "/out/vmlinuz-${TARGET_ARCH}"
+    chown "${HOST_UID}:${HOST_GID}" "/out/vmlinuz-${TARGET_ARCH}" "/out/kernel-release-${TARGET_ARCH}"
 
     # Run depmod to index all kernel modules for fast, clean modprobe at boot
     for kver in /rootfs/lib/modules/*; do
@@ -441,7 +457,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e TARGET_ARCH="$TARGET_ARCH" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
-    alpine:latest sh -c '
+    "$ALPINE_IMAGE" sh -c '
         rm -f /rootfs/lib/apk/db/lock /rootfs/var/run/*.pid /rootfs/run/*.pid
         for f in /rootfs/usr/lib/xtables/*.so; do
             [ -e "$f" ] || rm -f "$f"
@@ -455,7 +471,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         mknod -m 666 /rootfs/dev/tty0 c 4 0 2>/dev/null || true
         mknod -m 666 /rootfs/dev/tty1 c 4 1 2>/dev/null || true
         mknod -m 660 /rootfs/dev/ttyS0 c 4 64 2>/dev/null || true
-        mknod -m 660 /rootfs/dev/urandom c 1 9 2>/dev/null || true
+        mknod -m 666 /rootfs/dev/urandom c 1 9 2>/dev/null || true
 
         cd /rootfs
         if command -v pigz >/dev/null 2>&1; then

@@ -56,3 +56,35 @@ make docker-multiarch
 # Run unit tests and container smoke tests
 make test
 ```
+
+### QEMU boot test
+
+`make test-boot` boots `build/vmlinuz-<arch>` with its initramfs in QEMU. It then drives the serial console and
+checks that:
+
+- the kernel matches the shipped modules
+- `nf_tables`, `wireguard` and `overlay` load
+- containerd starts
+- Sentinel and the `inet ziro` firewall are active from boot
+- DHCP works
+- a real `nerdctl run` succeeds
+
+It needs `qemu-system-x86_64` or `qemu-system-aarch64` and uses KVM (Linux) or HVF (macOS) when available.
+Pass `--no-pull` to the script if the machine has no internet access. The serial log is written to
+`build/qemu-boot-<arch>.log`. CI runs this test on every PR.
+
+## 🐧 Kernel & Modules
+
+The kernel and its modules always come from **one** source, so their versions always match:
+
+| Mode | Kernel | Modules |
+|---|---|---|
+| default | Alpine `linux-virt` (installed by `packages/build-rootfs.sh`) | the same `linux-virt` package |
+| `BUILD_FROM_SOURCE=1` | `kernel/build-kernel.sh` using `kernel/configs/config-<arch>` | built by the same kernel build (`modules_install`) |
+
+For a source build, export the variable for the **whole** build:
+`BUILD_FROM_SOURCE=1 make image-iso TARGET_ARCH=x86_64`.
+
+`build/kernel-release-<arch>` records the kernel version. `images/iso/build-iso.sh` refuses to build an ISO when
+that version has no matching `lib/modules/<version>` in the rootfs. All build containers use the pinned
+`ALPINE_IMAGE` (default `alpine:3.24`); override it to move to a newer Alpine release.
