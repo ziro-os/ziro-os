@@ -1,7 +1,7 @@
 NAME="Ziro-OS"
-VERSION="1.0.11"
+VERSION="1.0.12"
 ID=ziro-os
-PRETTY_NAME="Ziro-OS 1.0.11"
+PRETTY_NAME="Ziro-OS 1.0.12"
 HOME_URL="https://github.com/ziro-os/ziro-os"
-BUILD_DATE="2026-09-28T17:25:46Z"
+BUILD_DATE="2026-09-28T17:26:30Z"
 ARCH="arm64"
