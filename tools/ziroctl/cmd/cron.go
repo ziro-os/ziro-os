@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -142,41 +141,44 @@ var cronRunCmd = &cobra.Command{
 	},
 }
 
-func readCronJobs() ([]CronJob, error) {
-	var jobs []CronJob
-	f, err := os.Open(crontabFile)
-	if err != nil {
-		return jobs, err
+// parseCronLine recognises "m h dom mon dow cmd" and "@reboot/@daily cmd" lines;
+// comments, blank lines and VAR=value lines are not jobs.
+func parseCronLine(line string) (sched, command string, ok bool) {
+	fields := strings.Fields(line)
+	switch {
+	case len(fields) >= 2 && strings.HasPrefix(fields[0], "@"):
+		return fields[0], strings.Join(fields[1:], " "), true
+	case len(fields) >= 6 && !strings.Contains(fields[0], "="):
+		return strings.Join(fields[:5], " "), strings.Join(fields[5:], " "), true
 	}
-	defer f.Close()
+	return "", "", false
+}
 
-	sc := bufio.NewScanner(f)
+func readCrontabLines() ([]string, error) {
+	data, err := os.ReadFile(crontabFile)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n"), nil
+}
+
+func readCronJobs() ([]CronJob, error) {
+	lines, err := readCrontabLines()
+	if err != nil {
+		return nil, err
+	}
+	var jobs []CronJob
 	currentComment := ""
-	id := 1
-
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "#") {
 			currentComment = strings.TrimSpace(strings.TrimPrefix(line, "#"))
 			continue
 		}
-
-		fields := strings.Fields(line)
-		if len(fields) >= 6 {
-			sched := strings.Join(fields[:5], " ")
-			cmdStr := strings.Join(fields[5:], " ")
-			jobs = append(jobs, CronJob{
-				ID:       id,
-				Schedule: sched,
-				Command:  cmdStr,
-				Comment:  currentComment,
-			})
-			id++
-			currentComment = ""
+		if sched, command, ok := parseCronLine(line); ok {
+			jobs = append(jobs, CronJob{ID: len(jobs) + 1, Schedule: sched, Command: command, Comment: currentComment})
 		}
+		currentComment = ""
 	}
 	return jobs, nil
 }
@@ -193,34 +195,32 @@ func appendCronLine(line string) error {
 	return err
 }
 
+// removeCronJob deletes one job (and its comment) and keeps every other line verbatim.
 func removeCronJob(id int) error {
-	jobs, err := readCronJobs()
+	lines, err := readCrontabLines()
 	if err != nil {
 		return err
 	}
-
-	var newLines []string
-	found := false
-	for _, j := range jobs {
-		if j.ID == id {
-			found = true
+	n := 0
+	for i, raw := range lines {
+		if _, _, ok := parseCronLine(strings.TrimSpace(raw)); !ok {
 			continue
 		}
-		if j.Comment != "" {
-			newLines = append(newLines, "# "+j.Comment)
+		if n++; n != id {
+			continue
 		}
-		newLines = append(newLines, fmt.Sprintf("%s %s", j.Schedule, j.Command))
+		start := i
+		if i > 0 && strings.HasPrefix(strings.TrimSpace(lines[i-1]), "#") {
+			start = i - 1
+		}
+		kept := append(append([]string{}, lines[:start]...), lines[i+1:]...)
+		content := strings.Join(kept, "\n")
+		if len(kept) > 0 {
+			content += "\n"
+		}
+		return os.WriteFile(crontabFile, []byte(content), 0600)
 	}
-
-	if !found {
-		return fmt.Errorf("job ID %d not found", id)
-	}
-
-	content := strings.Join(newLines, "\n")
-	if len(newLines) > 0 {
-		content += "\n"
-	}
-	return os.WriteFile(crontabFile, []byte(content), 0600)
+	return fmt.Errorf("job ID %d not found", id)
 }
 
 func init() {

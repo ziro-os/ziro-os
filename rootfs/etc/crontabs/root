@@ -1,0 +1,2 @@
+# Rotate service logs larger than 10MB
+0 * * * * /usr/bin/ziroctl service rotate-logs

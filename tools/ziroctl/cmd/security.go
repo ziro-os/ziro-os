@@ -161,17 +161,28 @@ var securityMonitorCmd = &cobra.Command{
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
+		lastAlert := ""
 		for {
 			rep := runSecurityScan()
-			if rep.ThreatsCount > 0 || !rep.CanaryOK || !rep.IntegrityOK {
+			// Log only when the alert set changes, so a persistent finding cannot fill the disk.
+			sig := fmt.Sprint(rep.CanaryOK, rep.IntegrityOK, rep.FIMIssues)
+			for _, t := range rep.Threats {
+				sig += fmt.Sprintf("|%s:%d", t.Type, t.PID)
+			}
+			changed := sig != lastAlert
+			lastAlert = sig
+			if changed && (rep.ThreatsCount > 0 || !rep.CanaryOK || !rep.IntegrityOK) {
 				fmt.Printf("[%s] 🚨 ALERT: %d threats detected! Canary: %v, FIM: %v\n",
 					time.Now().Format("15:04:05"), rep.ThreatsCount, rep.CanaryOK, rep.IntegrityOK)
-				// Auto-kill only when explicitly enforced: heuristics can false-positive on real workloads.
 				for _, t := range rep.Threats {
-					if sentinelEnforce && t.Severity == "CRITICAL" && t.PID > 1 {
-						fmt.Printf("    ⚡ Auto-mitigating CRITICAL threat: terminating PID %d (%s)...\n", t.PID, t.ProcessName)
-						_ = exec.Command("kill", "-9", strconv.Itoa(t.PID)).Run()
-					}
+					fmt.Printf("    [%s] %s PID %d (%s): %s\n", t.Severity, t.Type, t.PID, t.ProcessName, t.Details)
+				}
+			}
+			// Auto-kill only when explicitly enforced: heuristics can false-positive on real workloads.
+			for _, t := range rep.Threats {
+				if sentinelEnforce && t.Severity == "CRITICAL" && t.PID > 1 {
+					fmt.Printf("    ⚡ Auto-mitigating CRITICAL threat: terminating PID %d (%s)...\n", t.PID, t.ProcessName)
+					_ = exec.Command("kill", "-9", strconv.Itoa(t.PID)).Run()
 				}
 			}
 			<-ticker.C
@@ -189,8 +200,8 @@ var securityHardenCmd = &cobra.Command{
 
 		// 1. Kernel sysctl parameters
 		sysctls := map[string]string{
-			"/proc/sys/net/ipv4/conf/all/rp_filter":           "1",
-			"/proc/sys/net/ipv4/conf/default/rp_filter":       "1",
+			"/proc/sys/net/ipv4/conf/all/rp_filter":           "2",
+			"/proc/sys/net/ipv4/conf/default/rp_filter":       "2",
 			"/proc/sys/net/ipv4/tcp_syncookies":               "1",
 			"/proc/sys/net/ipv4/conf/all/accept_source_route": "0",
 			"/proc/sys/net/ipv4/conf/all/send_redirects":      "0",
@@ -210,8 +221,8 @@ var securityHardenCmd = &cobra.Command{
 		// Write persistent sysctl config
 		_ = os.MkdirAll("/etc/sysctl.d", 0755)
 		hardenedConf := `# Ziro-OS Hardened Cloud Security Configuration
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.all.send_redirects = 0

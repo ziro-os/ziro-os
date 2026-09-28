@@ -58,6 +58,8 @@ setup_layout() {
     # Copy tracked etc configuration skeleton
     cp -r "$REPO_ROOT/rootfs/etc/"* "$target/etc/"
     chmod 0600 "$target/etc/shadow" 2>/dev/null || true
+    chmod 0700 "$target/etc/crontabs" 2>/dev/null || true
+    chmod 0600 "$target/etc/crontabs/root" 2>/dev/null || true
     
     # Copy tracked usr skeleton (e.g. udhcpc default script)
     if [ -d "$REPO_ROOT/rootfs/usr" ]; then
