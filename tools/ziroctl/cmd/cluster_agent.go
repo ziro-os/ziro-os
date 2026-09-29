@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,6 +86,9 @@ func runArgs(a Assignment) []string {
 	for _, h := range a.Hosts {
 		args = append(args, "--add-host", h)
 	}
+	if a.IP != "" {
+		args = append(args, "--network", podNetName, "--ip", a.IP, "--dns", a.DNS, "--dns-search", meshDomain)
+	}
 	return append(append(args, "--", a.Image), a.Args...)
 }
 
@@ -106,8 +111,45 @@ func writeSecretEnv(a Assignment) error {
 	return os.WriteFile(secretEnvFile(a.Name), []byte(b.String()), 0600)
 }
 
+// setupPods converges the pod network (re-checked every minute in case it was changed under
+// us) and keeps the node's DNS responder running with the latest endpoints.
+func (ag *agent) setupPods(resp heartbeatResponse) error {
+	ip, err := netip.ParseAddr(resp.MeshIP)
+	if err != nil || resp.MeshPrefix == 0 {
+		return fmt.Errorf("mesh not ready")
+	}
+	meshNet, err := ip.Prefix(resp.MeshPrefix)
+	if err != nil {
+		return err
+	}
+	if time.Since(ag.podAt) > time.Minute {
+		podNetApplied.Store("")
+		ag.podAt = time.Now()
+	}
+	if err := applyPodNetwork(resp.PodCIDR, resp.PodNet, meshNet.String()); err != nil {
+		return err
+	}
+	if ag.dns == nil {
+		clients, _ := netip.ParsePrefix(resp.PodCIDR)
+		gw := podGateway(resp.PodCIDR)
+		ag.dns = &podDNS{clients: clients, upstreams: hostResolvers("/etc/resolv.conf", gw)}
+		go func(d *podDNS) {
+			for { // the address can briefly be missing while the link is (re)created: retry
+				if err := d.serve(net.JoinHostPort(gw, "53")); err != nil {
+					fmt.Printf("[agent] pod dns: %v\n", err)
+				}
+				time.Sleep(5 * time.Second)
+			}
+		}(ag.dns)
+	}
+	ag.dns.setEndpoints(resp.PodDNS)
+	return nil
+}
+
 // agent holds what the heartbeat loop learned and what the reconcile loop reports back.
 type agent struct {
+	dns     *podDNS
+	podAt   time.Time
 	mu      sync.Mutex
 	desired []Assignment
 	synced  bool              // at least one successful heartbeat
@@ -244,9 +286,6 @@ var clusterAgentCmd = &cobra.Command{
 			// On heartbeat failure the master is unreachable: keep workloads running as they are,
 			// never tear down on a network blip.
 			if err == nil {
-				ag.mu.Lock()
-				ag.desired, ag.synced = resp.Assignments, true
-				ag.mu.Unlock()
 				// Policy first, and fail closed: in deny mode the mesh is not (re)configured
 				// until its policy is in place. A failed nft transaction leaves the previous
 				// table intact. Re-applied every minute in case someone flushed the ruleset.
@@ -260,6 +299,19 @@ var clusterAgentCmd = &cobra.Command{
 				}
 				if merr == nil {
 					merr = applyMesh(resp.MeshIP, resp.MeshPrefix, resp.Peers)
+				}
+				// The pod network must exist before containers join it; while it cannot be set
+				// up, the desired set is frozen (running containers are left alone).
+				podOK := true
+				if merr == nil && resp.PodCIDR != "" {
+					if perr := ag.setupPods(resp); perr != nil {
+						merr, podOK = fmt.Errorf("pod network: %w", perr), false
+					}
+				}
+				if podOK {
+					ag.mu.Lock()
+					ag.desired, ag.synced = resp.Assignments, true
+					ag.mu.Unlock()
 				}
 				if merr == nil {
 					merr = writeHostsBlock(hostsFile, resp.Endpoints)

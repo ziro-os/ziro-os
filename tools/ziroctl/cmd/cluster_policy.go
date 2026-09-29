@@ -12,11 +12,13 @@ import (
 )
 
 // App network policy. A rule lives on the destination app (allow_from: [apps] or "*"); with the
-// cluster default "deny", traffic arriving over the mesh (ziro0) reaches an app's host port only
-// from nodes running an allowed app. Each agent enforces its node's rules in its own nft table,
-// ahead of the host firewall (which trusts ziro0): a drop in either base chain is final.
-// ponytail: sources are node mesh IPs (containers are masqueraded to them), so two apps on the
-// same node share an identity; per-container precision comes with per-node pod subnets.
+// cluster default "deny", an app is reachable only from the replicas of allowed apps. Each agent
+// enforces its node's rules in its own nft table, ahead of the host firewall (which trusts
+// ziro0): a drop in either base chain is final.
+// On the pod network sources and destinations are replica IPs, and same-node traffic is policed
+// too (ptp: every container is routed through the host). Replicas without a pod IP (clusters
+// without the pod network, or mid-migration) are identified by their node's mesh IP, since
+// their containers are masqueraded to it.
 const policyTable = "inet ziro_cluster"
 
 // MeshRule admits mesh traffic from Sources (mesh IPs) to a host port on the receiving node.
@@ -27,25 +29,39 @@ type MeshRule struct {
 	Sources []string `json:"sources"`
 }
 
-// MeshPolicy is one node's view of the policy, sent in heartbeat replies.
-type MeshPolicy struct {
-	Deny    bool       `json:"deny"`
-	Rules   []MeshRule `json:"rules,omitempty"`
-	Transit []string   `json:"transit,omitempty"` // hub only: remote peers it relays into the mesh
+// PodRule admits traffic from Src to the local replicas Dst of one app (all ports).
+type PodRule struct {
+	App string   `json:"app"`
+	Dst []string `json:"dst"`
+	Src []string `json:"src"`
 }
 
-// placedMeshIPs maps each app to the mesh IPs of nodes that hold one of its replicas. Placement
-// (not "running") is used so a client replica can connect while it starts up.
-func placedMeshIPs(st *ClusterState) map[string][]string {
+// MeshPolicy is one node's view of the policy, sent in heartbeat replies.
+type MeshPolicy struct {
+	Deny     bool       `json:"deny"`
+	Rules    []MeshRule `json:"rules,omitempty"`
+	Transit  []string   `json:"transit,omitempty"`   // hub only: remote peers it relays into the mesh
+	LocalPod string     `json:"local_pod,omitempty"` // this node's pod /24 (pod network on)
+	PodNet   string     `json:"pod_net,omitempty"`
+	PodRules []PodRule  `json:"pod_rules,omitempty"`
+}
+
+// placedSources maps each app to the addresses its placed replicas send from: the pod IP, or
+// the node's mesh IP without one. Placement (not "running") is used so a client replica can
+// connect while it starts up.
+func placedSources(st *ClusterState) map[string][]string {
 	out := map[string][]string{}
 	seen := map[string]bool{}
 	for _, r := range st.Replicas {
-		n := st.node(r.Node)
-		if n == nil || n.MeshIP == "" || seen[r.App+"\x00"+n.MeshIP] {
+		ip := r.IP
+		if n := st.node(r.Node); ip == "" && n != nil {
+			ip = n.MeshIP
+		}
+		if ip == "" || seen[r.App+"\x00"+ip] {
 			continue
 		}
-		seen[r.App+"\x00"+n.MeshIP] = true
-		out[r.App] = append(out[r.App], n.MeshIP)
+		seen[r.App+"\x00"+ip] = true
+		out[r.App] = append(out[r.App], ip)
 	}
 	return out
 }
@@ -97,7 +113,25 @@ func policyFor(st *ClusterState, nodeID string) *MeshPolicy {
 		}
 		sort.Strings(p.Transit)
 	}
-	placed := placedMeshIPs(st)
+	placed := placedSources(st)
+	if n := st.node(nodeID); n != nil && n.PodCIDR != "" && st.PodCIDR != "" {
+		p.LocalPod, p.PodNet = n.PodCIDR, st.PodCIDR
+		dst := map[string][]string{}
+		for _, r := range st.Replicas {
+			if r.Node == nodeID && r.IP != "" {
+				dst[r.App] = append(dst[r.App], r.IP)
+			}
+		}
+		for app, ips := range dst {
+			if a := st.app(app); a != nil {
+				if src := allowedSources(st, a, placed); len(src) > 0 {
+					sort.Strings(ips)
+					p.PodRules = append(p.PodRules, PodRule{App: app, Dst: ips, Src: src})
+				}
+			}
+		}
+		sort.Slice(p.PodRules, func(i, j int) bool { return p.PodRules[i].App < p.PodRules[j].App })
+	}
 	seen := map[string]bool{}
 	for _, r := range st.Replicas {
 		if r.Node != nodeID {
@@ -142,6 +176,26 @@ func buildPolicyScript(p *MeshPolicy) (string, error) {
 			return "", fmt.Errorf("invalid transit source %q", s)
 		}
 	}
+	var podRules []string
+	if p.LocalPod != "" {
+		for _, c := range []string{p.LocalPod, p.PodNet} {
+			if pr, err := netip.ParsePrefix(c); err != nil || !pr.Addr().Is4() {
+				return "", fmt.Errorf("invalid pod network %q", c)
+			}
+		}
+		for _, r := range p.PodRules {
+			for _, ip := range append(append([]string{}, r.Dst...), r.Src...) {
+				if a, err := netip.ParseAddr(ip); err != nil || !a.Is4() {
+					return "", fmt.Errorf("invalid pod rule address %q", ip)
+				}
+			}
+			if len(r.Dst) == 0 || len(r.Src) == 0 {
+				return "", fmt.Errorf("invalid pod rule for %q", r.App)
+			}
+			podRules = append(podRules, fmt.Sprintf("    ip saddr { %s } ip daddr { %s } accept\n",
+				strings.Join(r.Src, ", "), strings.Join(r.Dst, ", ")))
+		}
+	}
 	for _, r := range p.Rules {
 		if r.Port < 1 || r.Port > 65535 || (r.Proto != "tcp" && r.Proto != "udp") || len(r.Sources) == 0 {
 			return "", fmt.Errorf("invalid policy rule %d/%s", r.Port, r.Proto)
@@ -164,8 +218,21 @@ func buildPolicyScript(p *MeshPolicy) (string, error) {
 		if hook == "forward" && len(p.Transit) > 0 {
 			fmt.Fprintf(&sb, "    iifname %q oifname %q ip saddr { %s } accept\n", meshIface, meshIface, strings.Join(p.Transit, ", "))
 		}
+		if hook == "forward" && p.LocalPod != "" {
+			fmt.Fprintf(&sb, "    ip daddr %s ct state established,related accept\n", p.LocalPod)
+			fmt.Fprintf(&sb, "    ip daddr %s meta l4proto icmp accept\n", p.LocalPod)
+			// Published ports stay public for clients outside the cluster (host firewall rules);
+			// pods and mesh traffic hitting a published port are policed like any other.
+			fmt.Fprintf(&sb, "    ip daddr %s ct status dnat iifname != %q ip saddr != %s accept\n", p.LocalPod, meshIface, p.PodNet)
+		}
 		for _, r := range rules {
 			sb.WriteString(r)
+		}
+		if hook == "forward" && p.LocalPod != "" {
+			for _, r := range podRules {
+				sb.WriteString(r)
+			}
+			fmt.Fprintf(&sb, "    ip daddr %s drop\n", p.LocalPod)
 		}
 		fmt.Fprintf(&sb, "    iifname %q drop\n  }\n", meshIface)
 	}
@@ -255,7 +322,7 @@ var clusterPolicyLsCmd = &cobra.Command{
 		if v.Default == "" {
 			v.Default = "allow"
 		}
-		placed := placedMeshIPs(st)
+		placed := placedSources(st)
 		for i := range st.Apps {
 			a := &st.Apps[i]
 			av := appPolicyView{App: a.Name, Port: hostPortKey(a.Port), AllowFrom: a.AllowFrom, Sources: allowedSources(st, a, placed)}

@@ -21,6 +21,7 @@ type FirewallRule struct {
 	Port     int    `json:"port"`
 	Protocol string `json:"protocol"` // "tcp", "udp"
 	Comment  string `json:"comment"`
+	Source   string `json:"source,omitempty"` // IPv4 CIDR the rule is limited to (managed rules, e.g. pod DNS)
 }
 
 type BlockedIP struct {
@@ -116,7 +117,7 @@ var fwAllowCmd = &cobra.Command{
 		cfg := loadFirewallConfig()
 		// Avoid duplicate
 		for _, r := range cfg.AllowedPorts {
-			if r.Port == port && r.Protocol == proto {
+			if r.Port == port && r.Protocol == proto && r.Source == "" {
 				fmt.Printf("Port %d/%s is already allowed.\n", port, proto)
 				return nil
 			}
@@ -151,7 +152,7 @@ var fwDenyCmd = &cobra.Command{
 		var newRules []FirewallRule
 		found := false
 		for _, r := range cfg.AllowedPorts {
-			if r.Port == port && r.Protocol == proto {
+			if r.Port == port && r.Protocol == proto && r.Source == "" {
 				found = true
 				continue
 			}
@@ -263,7 +264,11 @@ var fwListCmd = &cobra.Command{
 		} else {
 			fmt.Printf("  %-12s %-8s %s\n", "PORT", "PROTO", "COMMENT")
 			for _, r := range cfg.AllowedPorts {
-				fmt.Printf("  %-12d %-8s %s\n", r.Port, strings.ToUpper(r.Protocol), r.Comment)
+				c := r.Comment
+				if r.Source != "" {
+					c += " (from " + r.Source + ")"
+				}
+				fmt.Printf("  %-12d %-8s %s\n", r.Port, strings.ToUpper(r.Protocol), c)
 			}
 		}
 
@@ -430,6 +435,14 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 		if r.Port < 1 || r.Port > 65535 || (r.Protocol != "tcp" && r.Protocol != "udp") {
 			return "", fmt.Errorf("invalid port rule %d/%s", r.Port, r.Protocol)
 		}
+		if r.Source != "" {
+			p, err := netip.ParsePrefix(r.Source)
+			if err != nil || !p.Addr().Is4() {
+				return "", fmt.Errorf("invalid rule source %q", r.Source)
+			}
+			sb.WriteString(fmt.Sprintf("    ip saddr %s %s dport %d accept\n", p.Masked(), r.Protocol, r.Port))
+			continue
+		}
 		sb.WriteString(fmt.Sprintf("    %s dport %d accept\n", r.Protocol, r.Port))
 	}
 	sb.WriteString("  }\n}\n")
@@ -484,7 +497,12 @@ func applyIptables(cfg FirewallConfig) error {
 		}
 		run("-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 		for _, r := range cfg.AllowedPorts {
-			run("-A", "INPUT", "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")
+			switch {
+			case r.Source == "":
+				run("-A", "INPUT", "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")
+			case bin == "iptables": // sources are IPv4 (validated by buildNftScript above)
+				run("-A", "INPUT", "-s", r.Source, "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")
+			}
 		}
 		run("-P", "INPUT", policy)
 		if ruleErr != nil {

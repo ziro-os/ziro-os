@@ -136,12 +136,16 @@ func gatewaySources(st *ClusterState, app string) []string {
 // gatewayConfigFor resolves routes to running upstreams (same health signal as discovery).
 func gatewayConfigFor(st *ClusterState) *GatewayConfig {
 	cfg := &GatewayConfig{ACME: st.GatewayACME, Routes: []GatewayRouteState{}}
-	eps := appEndpoints(st)
+	eps, pods := appEndpoints(st), podEndpoints(st)
 	for _, r := range st.Routes {
 		rs := GatewayRouteState{GatewayRoute: r, Upstreams: []string{}}
 		if a := st.app(r.App); a != nil {
 			if port, proto, _ := strings.Cut(hostPortKey(a.Port), "/"); port != "" && proto == "tcp" {
-				for _, ip := range eps[r.App] {
+				ips := eps[r.App]
+				if len(pods[r.App]) > 0 { // pod network: straight to the replicas' container port
+					ips, port = pods[r.App], portMapRe.FindStringSubmatch(a.Port)[2]
+				}
+				for _, ip := range ips {
 					rs.Upstreams = append(rs.Upstreams, net.JoinHostPort(ip, port))
 				}
 			}

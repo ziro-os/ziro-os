@@ -67,7 +67,9 @@ type Assignment struct {
 	Port      string            `json:"port"`
 	Env       map[string]string `json:"env"`
 	SecretEnv map[string]string `json:"secret_env,omitempty"` // written to a 0600 env file, never argv
-	Hosts     []string          `json:"hosts,omitempty"`      // --add-host entries (service discovery)
+	Hosts     []string          `json:"hosts,omitempty"`      // --add-host entries (host-port networking only)
+	IP        string            `json:"ip,omitempty"`         // pod IP on the ziro-cluster network (pod networking)
+	DNS       string            `json:"dns,omitempty"`        // the node's pod DNS responder
 }
 
 // MeshPeer is another node on the WireGuard mesh.
@@ -77,6 +79,7 @@ type MeshPeer struct {
 	Endpoint string   `json:"endpoint"`
 	MeshIP   string   `json:"mesh_ip"`
 	Routes   []string `json:"routes,omitempty"` // extra /32s reached through this peer (remote clients behind the hub)
+	PodCIDR  string   `json:"pod_cidr,omitempty"`
 }
 
 type heartbeatResponse struct {
@@ -86,7 +89,10 @@ type heartbeatResponse struct {
 	Peers       []MeshPeer          `json:"peers,omitempty"`
 	Endpoints   map[string][]string `json:"endpoints,omitempty"` // app -> mesh IPs
 	Policy      *MeshPolicy         `json:"policy,omitempty"`
-	Gateway     *GatewayConfig      `json:"gateway,omitempty"` // only for nodes labelled gateway
+	Gateway     *GatewayConfig      `json:"gateway,omitempty"`  // only for nodes labelled gateway
+	PodCIDR     string              `json:"pod_cidr,omitempty"` // this node's /24 (pod networking on)
+	PodNet      string              `json:"pod_net,omitempty"`  // the cluster pod network
+	PodDNS      map[string][]string `json:"pod_dns,omitempty"`  // app -> running pod IPs (DNS answers)
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -103,6 +109,9 @@ func specHash(a ClusteredApp) string {
 	}
 	if len(a.Secrets) > 0 || a.MeshOnly || len(a.Args) > 0 {
 		fmt.Fprintf(h, "\x00secrets=%s\x00mesh=%v\x00args=%q", strings.Join(a.Secrets, ","), a.MeshOnly, a.Args)
+	}
+	if a.Network != "" { // moving an app onto the pod network recreates its containers (rolling)
+		fmt.Fprintf(h, "\x00net=%s", a.Network)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }
@@ -252,6 +261,7 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 
 	rollOut(st)
 	rebalance(st, eligible, load, free, portOf, pick)
+	assignPodIPs(st)
 }
 
 // rollOut moves replicas to the current spec. Replicas of an old spec that are not running
@@ -375,8 +385,12 @@ func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[stri
 				senv[k] = v
 			}
 		}
-		out = append(out, Assignment{Name: replicaName(r.App, r.Index, r.Hash), App: r.App, Image: spec.Image, Args: spec.Args,
-			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts})
+		as := Assignment{Name: replicaName(r.App, r.Index, r.Hash), App: r.App, Image: spec.Image, Args: spec.Args,
+			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts}
+		if spec.Network == "pod" && r.IP != "" && n != nil && n.PodCIDR != "" {
+			as.IP, as.DNS, as.Hosts = r.IP, podGateway(n.PodCIDR), nil // discovery via DNS instead
+		}
+		out = append(out, as)
 	}
 	return out
 }
@@ -404,6 +418,9 @@ func meshView(st *ClusterState, self *ClusterNode, cidr string) (string, int, []
 		mp := MeshPeer{Node: n.ID, PubKey: n.WGPubKey, MeshIP: n.MeshIP, Endpoint: net.JoinHostPort(n.IP, strconv.Itoa(port))}
 		if hub != nil && hub.ID == n.ID {
 			mp.Routes = remote // replies to remote clients go back through the hub
+		}
+		if st.PodCIDR != "" {
+			mp.PodCIDR = n.PodCIDR
 		}
 		peers = append(peers, mp)
 	}
@@ -558,6 +575,13 @@ func (s *clusterServer) handleJoin(r *http.Request) (interface{}, error) {
 			}
 			n.MeshIP, resp.MeshIP = mip, mip
 		}
+		if st.PodCIDR != "" {
+			c, err := allocPodCIDR(st)
+			if err != nil {
+				return err
+			}
+			n.PodCIDR = c
+		}
 		st.Nodes = append(st.Nodes, n)
 		scheduleReplicas(st, time.Now())
 		return nil
@@ -616,6 +640,11 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 				}
 			}
 		}
+		if st.PodCIDR != "" && n.PodCIDR == "" {
+			if n.PodCIDR, err = allocPodCIDR(st); err != nil {
+				return err
+			}
+		}
 		// Failure accounting for this node's replicas: consecutive reported start failures.
 		running := map[string]bool{}
 		for _, c := range req.Running {
@@ -642,6 +671,11 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		resp.Assignments = assignmentsFor(st, n.ID, secrets)
 		resp.MeshIP, resp.MeshPrefix, resp.Peers = meshView(st, n, meshCIDR(cfg))
 		resp.Endpoints = appEndpoints(st)
+		if st.PodCIDR != "" && n.PodCIDR != "" {
+			resp.PodCIDR, resp.PodNet = n.PodCIDR, st.PodCIDR
+			resp.PodDNS = podEndpoints(st)
+			resp.Endpoints = resp.PodDNS // <app>.cluster.ziro means pod IPs everywhere on a pod network
+		}
 		resp.Policy = policyFor(st, n.ID)
 		if n.Gateway {
 			resp.Gateway = gatewayConfigFor(st)
