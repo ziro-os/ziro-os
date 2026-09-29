@@ -158,6 +158,20 @@ func uniqueAddrs(first, second string, rest []string) []string {
 	return out
 }
 
+// adoptNodeToken switches to a token the master accepted. If saving fails, the old token still
+// works for an hour and using it triggers another rotation, so the node is never locked out.
+func adoptNodeToken(cfg *ClusterConfig, tok string) {
+	cfg.NodeToken = tok
+	if cur, err := loadClusterConfig(); err == nil {
+		cur.NodeToken = tok
+		if err := saveClusterConfig(cur); err != nil {
+			fmt.Printf("[agent] save rotated node token: %v\n", err)
+			return
+		}
+	}
+	fmt.Println("[agent] node token rotated")
+}
+
 // adoptClusterCA switches this node's pin to the cluster CA the master sent over the channel it
 // already trusts (agents from before the CA pinned one master's own certificate), and records
 // every master for failover.
@@ -300,6 +314,7 @@ var clusterAgentCmd = &cobra.Command{
 		}()
 
 		lastErr, lastMesh, lastPolicy, active := "", "", "", ""
+		wantRotate := false
 		var policyAt time.Time
 		for {
 			actual, _ := listClusterContainers()
@@ -324,6 +339,11 @@ var clusterAgentCmd = &cobra.Command{
 			var resp heartbeatResponse
 			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh,
 				Caps: nodeCaps}
+			pending := ""
+			if wantRotate { // the new token is generated here and sent once, authenticated by the old one
+				pending = randomHex(32)
+				hb.RotateToken = pending
+			}
 			// Last good master first, then the configured one, then every other master (failover).
 			var err error
 			for _, addr := range uniqueAddrs(active, cfg.MasterAddr, cfg.Masters) {
@@ -333,6 +353,10 @@ var clusterAgentCmd = &cobra.Command{
 				}
 			}
 			if err == nil {
+				if pending != "" {
+					adoptNodeToken(cfg, pending)
+				}
+				wantRotate = resp.RotateToken
 				adoptClusterCA(cfg, resp.CA, resp.Masters)
 			}
 			// On heartbeat failure the master is unreachable: keep workloads running as they are,

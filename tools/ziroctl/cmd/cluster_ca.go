@@ -186,7 +186,10 @@ func masterKeyAndCSR() (string, error) {
 // missing, about to expire, or no longer chains to the CA.
 func ensureMasterCert(st *ClusterState, nodeID string, ips []net.IP) error {
 	if cur, err := os.ReadFile(masterCertPath()); err == nil {
-		if c, err := parseCertPEM(string(cur)); err == nil && time.Until(c.NotAfter) > renewBefore && verifyMaster(c, st.CACert) == nil {
+		// NotBefore is backdated an hour (clock skew), so +1h is when the cert was issued; cert
+		// times have one-second resolution, so compare at that resolution (else it re-issues in a loop).
+		if c, err := parseCertPEM(string(cur)); err == nil && time.Until(c.NotAfter) > renewBefore && verifyMaster(c, st.CACert) == nil &&
+			!c.NotBefore.Add(time.Hour).Before(st.RotateCertsBefore.Truncate(time.Second)) {
 			return nil
 		}
 	}
