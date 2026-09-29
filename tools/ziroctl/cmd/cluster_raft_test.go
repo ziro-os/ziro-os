@@ -93,7 +93,11 @@ func TestRaftControlPlane(t *testing.T) {
 
 	// Liveness-only changes are not committed; desired-state changes are.
 	_, idx := lead.fsm.latest()
-	if err := lead.mutate(func(st *ClusterState) error { st.node("n1").LastSeen = time.Now(); st.node("n1").Running = []string{"x"}; return nil }); err != nil {
+	if err := lead.mutate(func(st *ClusterState) error {
+		st.node("n1").LastSeen = time.Now()
+		st.node("n1").Running = []string{"x"}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, now := lead.fsm.latest(); now != idx {

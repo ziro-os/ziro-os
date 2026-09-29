@@ -223,6 +223,27 @@ def main():
                                lambda rc, o: "REVOKED" in o or "000" in o, 60)
             check("peer rm revokes access", ok and allowed, out)
 
+        # Secrets at rest: sealed with the cluster data key, delivered to the app, never on disk in clear.
+        rc, out = m.run("ziroctl cluster secret set db PASS=hunter2-ziro && "
+                        "ziroctl cluster deploy --name sec --image docker.io/library/nginx:alpine --secret db", timeout=60)
+        check("secret set + an app that uses it", rc == 0, out)
+        ok, out = bs.retry(m, "ziroctl cluster keys status --json",
+                           lambda rc, o: '"sealed": true' in o and re.search(r'"local_key": "(\w+)",\s*"cluster_key": "\1"', o), 90, every=5)
+        check("cluster secrets sealed with a data key this master holds", ok, out)
+        ok, out = bs.retry(m, "ziroctl cluster services", lambda rc, o: re.search(r"sec .*1/1 running", o) is not None, 300, every=10)
+        check("app with a secret running", ok, out)
+        env = ""
+        for c in (m, w):
+            rc, names = c.run("nerdctl ps --filter label=ziro.app=sec --format '{{.Names}}'", timeout=20)
+            name = re.search(r"zc-sec-\S+", names)
+            if name:
+                rc, env = c.run(f"nerdctl exec {name.group(0)} printenv PASS", timeout=20)
+                break
+        check("the app receives the secret", "hunter2-ziro" in env, env)
+        rc, out = m.run("test ! -e /etc/ziro/cluster/secrets.json && test ! -e /etc/ziro/cluster/ca.key && "
+                        "test -s /etc/ziro/cluster/sealed.bin && ! grep -rqs hunter2-ziro /etc/ziro/cluster && echo ATREST", timeout=30)
+        check("no plaintext secret or CA key at rest (state files and Raft data)", "ATREST" in out, out)
+
         rc, out = m.run("ziroctl audit verify && ziroctl audit log | grep -c -e 'cluster deploy' -e 'cluster node join'")
         check("audit: chain intact and records deploys and joins", rc == 0 and "chain intact" in out, out)
     finally:

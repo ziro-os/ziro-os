@@ -72,6 +72,7 @@ type ClusterNode struct {
 	WGPubKey   string            `json:"wg_pubkey,omitempty"`
 	WGPort     int               `json:"wg_port,omitempty"`
 	MeshError  string            `json:"mesh_error,omitempty"` // last mesh/policy apply error reported by the agent
+	Caps       []string          `json:"caps,omitempty"`       // features the node's ziroctl reported (upgrade gating)
 	Gateway    bool              `json:"gateway,omitempty"`    // runs zirogate for the cluster's routes
 	PodCIDR    string            `json:"pod_cidr,omitempty"`   // this node's /24 of the cluster pod network
 	LastSeen   time.Time         `json:"last_seen"`
@@ -118,6 +119,7 @@ type ClusterState struct {
 	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
 	Peers         []RemotePeer   `json:"peers,omitempty"`    // WireGuard remote-access clients
 	PodCIDR       string         `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
+	DEKID         string         `json:"dek_id,omitempty"`   // data key sealing Secrets and CAKey ("" = not sealed yet)
 	// Join credentials and the cluster CA are replicated so any master can admit nodes.
 	JoinToken        string `json:"join_token,omitempty"`
 	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never
@@ -125,6 +127,7 @@ type ClusterState struct {
 	// Kept out of state.json (own 0600 files, excluded from backups) and out of every view.
 	Secrets map[string]map[string]string `json:"-"` // name -> KEY -> value
 	CAKey   string                       `json:"-"` // PEM
+	sealed  []byte                       // sealed secrets kept as-is by a process without the data key
 }
 
 func isClusterMaster() bool {
@@ -190,22 +193,22 @@ func loadStateFile() (*ClusterState, error) {
 			return nil, fmt.Errorf("corrupt cluster state: %w", err)
 		}
 	}
-	if st.NodeTokens == nil {
-		st.NodeTokens = map[string]string{}
-	}
-	if st.History == nil {
-		st.History = map[string][]ClusteredApp{}
-	}
-	st.Secrets = map[string]map[string]string{}
-	if data, err := os.ReadFile(clusterSecretsPath()); err == nil {
-		if err := json.Unmarshal(data, &st.Secrets); err != nil {
-			return nil, fmt.Errorf("corrupt cluster secrets: %w", err)
+	initStateMaps(st)
+	if sealed, err := os.ReadFile(filepath.Join(clusterDir, "sealed.bin")); err == nil && st.DEKID != "" {
+		if err := openSealed(st, sealed); err != nil {
+			return nil, err
 		}
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-	if b, err := os.ReadFile(clusterCAKeyPath()); err == nil {
-		st.CAKey = string(b)
+	} else {
+		if data, err := os.ReadFile(clusterSecretsPath()); err == nil {
+			if err := json.Unmarshal(data, &st.Secrets); err != nil {
+				return nil, fmt.Errorf("corrupt cluster secrets: %w", err)
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		if b, err := os.ReadFile(clusterCAKeyPath()); err == nil {
+			st.CAKey = string(b)
+		}
 	}
 	if st.JoinToken == "" { // clusters from before the token was replicated kept it in config.json
 		if cfg, err := loadClusterConfig(); err == nil && cfg.Role == "master" && cfg.JoinToken != "" {
@@ -215,22 +218,13 @@ func loadStateFile() (*ClusterState, error) {
 	return st, nil
 }
 
-// saveStateFiles writes the state plus its separately stored secret parts into dir.
+// saveStateFiles writes the state (sealed when the cluster has a data key) into dir.
 func saveStateFiles(dir string, st *ClusterState) error {
-	if err := writeJSONAtomic(filepath.Join(dir, "state.json"), st); err != nil {
+	b, err := encodePayload(st)
+	if err != nil {
 		return err
 	}
-	secrets := st.Secrets
-	if secrets == nil {
-		secrets = map[string]map[string]string{}
-	}
-	if err := writeJSONAtomic(filepath.Join(dir, "secrets.json"), secrets); err != nil {
-		return err
-	}
-	if st.CAKey != "" {
-		return writeFileAtomic(filepath.Join(dir, "ca.key"), []byte(st.CAKey), 0600)
-	}
-	return nil
+	return persistPayload(dir, b)
 }
 
 // withState runs fn on the cluster state and saves it when fn returns nil. Inside

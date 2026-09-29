@@ -82,6 +82,10 @@ Output:
   (default for new clusters) that means from the allowed apps' own replica IPs, including same-node traffic. It
   is enforced in each node's `inet ziro_cluster` nftables table, and the agent does not configure the mesh until that table is in
   place. Check it with `ziroctl cluster policy ls`.
+- **Secrets at rest**: cluster secrets and the CA key are sealed (AES-256-GCM) with a cluster data key in Raft,
+  snapshots and files. Each master wraps its copy with a `file`, `tpm` (TPM 2.0, salted and encrypted sessions)
+  or `command` (KMS/Vault/HSM) provider. Masters fetch the key from each other only over mutual TLS, and every
+  fetch is audited. See [clustering.md](clustering.md#secrets-at-rest).
 - **Audit log**: every mutating `ziroctl` command run as root, ziro-api service action, and cluster join, leave
   or rejected credential is appended to `/var/log/ziro/audit.log` (0600). Each record holds the SHA-256 of the
   previous one. `ziroctl audit verify` exits non-zero at the first changed or removed record, and

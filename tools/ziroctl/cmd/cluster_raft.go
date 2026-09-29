@@ -51,18 +51,62 @@ func raftMode() bool {
 	return err == nil && cfg.Role == "master" && fileExists(filepath.Join(raftDir(), "raft.db"))
 }
 
+// raftPayload is one committed state. Once sealed (DEKID set), secrets and the CA key travel only
+// inside Sealed; the plaintext fields are used by pre-encryption clusters and by the local
+// socket / master-to-master channel.
 type raftPayload struct {
 	State   json.RawMessage              `json:"state"`
+	Secrets map[string]map[string]string `json:"secrets,omitempty"`
+	CAKey   string                       `json:"ca_key,omitempty"`
+	Sealed  []byte                       `json:"sealed,omitempty"` // AES-256-GCM(DEK) of sealedSecrets
+}
+
+type sealedSecrets struct {
 	Secrets map[string]map[string]string `json:"secrets"`
 	CAKey   string                       `json:"ca_key,omitempty"`
 }
 
+// encodePayload is the form for the Raft log and disk: sealed when the cluster has a data key.
+// A master without the key passes the sealed blob through unchanged and refuses to alter secrets.
 func encodePayload(st *ClusterState) ([]byte, error) {
 	s, err := json.Marshal(st)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(raftPayload{State: s, Secrets: st.Secrets, CAKey: st.CAKey})
+	p := raftPayload{State: s}
+	if st.DEKID == "" {
+		p.Secrets, p.CAKey = st.Secrets, st.CAKey
+		return json.Marshal(p)
+	}
+	key, id := currentKey()
+	switch {
+	case st.sealed == nil && key != nil && id == st.DEKID:
+		plain, err := json.Marshal(sealedSecrets{Secrets: st.Secrets, CAKey: st.CAKey})
+		if err != nil {
+			return nil, err
+		}
+		if p.Sealed, err = sealBlob(key, id, plain); err != nil {
+			return nil, err
+		}
+	case st.sealed != nil && len(st.Secrets) == 0 && st.CAKey == "":
+		p.Sealed = st.sealed
+	default:
+		return nil, errSecretsLocked
+	}
+	return json.Marshal(p)
+}
+
+// encodePlainPayload is the form for the root-only socket and mutual-TLS master links. The CA key
+// is left out: it never leaves the masters' own processes.
+func encodePlainPayload(st *ClusterState) ([]byte, error) {
+	if st.sealed != nil {
+		return nil, errSecretsLocked
+	}
+	s, err := json.Marshal(st)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(raftPayload{State: s, Secrets: st.Secrets})
 }
 
 func decodePayload(b []byte) (*ClusterState, error) {
@@ -74,20 +118,53 @@ func decodePayload(b []byte) (*ClusterState, error) {
 	if err := json.Unmarshal(p.State, st); err != nil {
 		return nil, err
 	}
+	initStateMaps(st)
+	if p.Sealed == nil {
+		st.Secrets, st.CAKey = p.Secrets, p.CAKey
+		if st.Secrets == nil {
+			st.Secrets = map[string]map[string]string{}
+		}
+		return st, nil
+	}
+	return st, openSealed(st, p.Sealed)
+}
+
+// openSealed decrypts sealed into st, or keeps it locked when this process lacks the key.
+func openSealed(st *ClusterState, sealed []byte) error {
+	key, id := currentKey()
+	if key == nil || id != st.DEKID {
+		st.sealed = sealed
+		return nil
+	}
+	plain, err := openBlob(key, id, sealed)
+	if err != nil {
+		return err
+	}
+	var ss sealedSecrets
+	if err := json.Unmarshal(plain, &ss); err != nil {
+		return err
+	}
+	st.Secrets, st.CAKey = ss.Secrets, ss.CAKey
+	if st.Secrets == nil {
+		st.Secrets = map[string]map[string]string{}
+	}
+	return nil
+}
+
+func initStateMaps(st *ClusterState) {
 	if st.NodeTokens == nil {
 		st.NodeTokens = map[string]string{}
 	}
 	if st.History == nil {
 		st.History = map[string][]ClusteredApp{}
 	}
-	st.Secrets, st.CAKey = p.Secrets, p.CAKey
 	if st.Secrets == nil {
 		st.Secrets = map[string]map[string]string{}
 	}
-	return st, nil
 }
 
 // hardKey is the state without per-heartbeat liveness fields: a change here is a Raft commit.
+// It never encrypts (sealing uses a random nonce), so equal states give equal keys.
 func hardKey(st *ClusterState) []byte {
 	cp := *st
 	cp.Nodes = append([]ClusterNode(nil), st.Nodes...)
@@ -95,20 +172,72 @@ func hardKey(st *ClusterState) []byte {
 		n := &cp.Nodes[i]
 		n.Status, n.LastSeen, n.Containers, n.Running, n.Failed, n.MeshError = "", time.Time{}, 0, nil, nil, ""
 	}
-	b, _ := encodePayload(&cp)
+	b, _ := json.Marshal(struct {
+		State   *ClusterState
+		Secrets map[string]map[string]string
+		CAKey   string
+		Sealed  []byte
+	}{&cp, st.Secrets, st.CAKey, st.sealed})
 	return b
 }
 
+// cloneState deep-copies st without any encryption.
 func cloneState(st *ClusterState) *ClusterState {
-	b, err := encodePayload(st)
+	b, err := json.Marshal(st)
 	if err != nil {
 		panic(err) // state always encodes
 	}
-	c, err := decodePayload(b)
-	if err != nil {
+	c := &ClusterState{}
+	if err := json.Unmarshal(b, c); err != nil {
 		panic(err)
 	}
+	initStateMaps(c)
+	for name, kv := range st.Secrets {
+		m := make(map[string]string, len(kv))
+		for k, v := range kv {
+			m[k] = v
+		}
+		c.Secrets[name] = m
+	}
+	c.CAKey = st.CAKey
+	if st.sealed != nil {
+		c.sealed = append([]byte(nil), st.sealed...)
+	}
 	return c
+}
+
+// persistPayload writes a committed payload to dir without decrypting it: sealed secrets stay
+// sealed on disk, and the plaintext files from before sealing are removed.
+func persistPayload(dir string, b []byte) error {
+	var p raftPayload
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(dir, "state.json"), p.State, 0600); err != nil {
+		return err
+	}
+	if p.Sealed != nil {
+		if err := writeFileAtomic(filepath.Join(dir, "sealed.bin"), p.Sealed, 0600); err != nil {
+			return err
+		}
+		_ = os.Remove(filepath.Join(dir, "secrets.json"))
+		_ = os.Remove(filepath.Join(dir, "ca.key"))
+		return nil
+	}
+	secrets := p.Secrets
+	if secrets == nil {
+		secrets = map[string]map[string]string{}
+	}
+	if err := writeJSONAtomic(filepath.Join(dir, "secrets.json"), secrets); err != nil {
+		return err
+	}
+	if p.CAKey != "" {
+		return writeFileAtomic(filepath.Join(dir, "ca.key"), []byte(p.CAKey), 0600)
+	}
+	return nil
 }
 
 // ---- FSM ----
@@ -130,13 +259,7 @@ func (f *raftFSM) Apply(l *raft.Log) any {
 	return f.persist(l.Data)
 }
 
-func (f *raftFSM) persist(b []byte) error {
-	st, err := decodePayload(b)
-	if err != nil {
-		return err
-	}
-	return saveStateFiles(f.dir, st)
-}
+func (f *raftFSM) persist(b []byte) error { return persistPayload(f.dir, b) }
 
 func (f *raftFSM) latest() ([]byte, uint64) {
 	f.mu.Lock()
@@ -191,6 +314,8 @@ type raftStore struct {
 	grace   time.Duration
 	// importFn supplies the initial state when this node bootstraps a new Raft group.
 	importFn func() (*ClusterState, error)
+	// fetchKey obtains the cluster data key with the given ID from another master.
+	fetchKey func(id string) error
 }
 
 func newRaftStore(id, dir string, trans raft.Transport, logs raft.LogStore, stable raft.StableStore,
@@ -256,6 +381,22 @@ func (rs *raftStore) onLeadership(leading bool) {
 	if err != nil {
 		fmt.Printf("[cluster] leader state: %v\n", err)
 		return
+	}
+	if st.sealed != nil { // sealed with a key this master does not hold yet
+		if rs.fetchKey != nil {
+			err = rs.fetchKey(st.DEKID)
+		} else {
+			err = errSecretsLocked
+		}
+		if err == nil {
+			st, err = decodePayload(payload)
+		}
+		if err != nil || st.sealed != nil {
+			// Let a master that holds the key lead instead of serving without secrets.
+			fmt.Printf("[cluster] leader cannot open the cluster secrets (%v); transferring leadership\n", err)
+			_ = rs.r.LeadershipTransfer().Error()
+			return
+		}
 	}
 	now := time.Now()
 	for i := range st.Nodes {
@@ -511,7 +652,8 @@ func openRaftStore(cfg *ClusterConfig, st *ClusterState, importFn func() (*Clust
 	if err != nil {
 		return nil, err
 	}
-	snaps, err := raft.NewFileSnapshotStore(raftDir(), 2, os.Stdout)
+	// One retained snapshot: with sealed secrets, a newer snapshot must fully replace older ones.
+	snaps, err := raft.NewFileSnapshotStore(raftDir(), 1, os.Stdout)
 	if err != nil {
 		return nil, err
 	}
@@ -552,12 +694,8 @@ type stateEnvelope struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// sanitizedPayload drops the CA key: it never leaves the masters' own processes.
-func sanitizedPayload(st *ClusterState) (json.RawMessage, error) {
-	cp := *st
-	cp.CAKey = ""
-	return encodePayload(&cp)
-}
+// sanitizedPayload is the plaintext form for ziroctl and other masters (never the CA key).
+func sanitizedPayload(st *ClusterState) (json.RawMessage, error) { return encodePlainPayload(st) }
 
 // localHandler serves ziroctl on the unix socket and other masters on /cluster/v1/internal/.
 // Requests a follower cannot answer are forwarded to the leader.
@@ -832,4 +970,73 @@ var clusterMemberRmCmd = &cobra.Command{
 func init() {
 	clusterMemberCmd.AddCommand(clusterMemberRmCmd)
 	clusterCmd.AddCommand(clusterMembersCmd, clusterMemberCmd)
+}
+
+// compactAfterSeal drops the log entries and snapshot from before the secrets were sealed (they
+// hold the old plaintext): one snapshot of the sealed state with no trailing log. It runs once per
+// master (marker file). Freed database pages may still hold old bytes, like any deleted file.
+func (rs *raftStore) compactAfterSeal() error {
+	marker := filepath.Join(rs.dir, "raft", "sealed-compacted")
+	if fileExists(marker) {
+		return nil
+	}
+	orig := rs.r.ReloadableConfig()
+	tmp := orig
+	tmp.TrailingLogs = 0
+	if err := rs.r.ReloadConfig(tmp); err != nil {
+		return err
+	}
+	defer rs.r.ReloadConfig(orig)
+	if err := rs.r.Snapshot().Error(); err != nil && !errors.Is(err, raft.ErrNothingNewToSnapshot) {
+		return err
+	}
+	fmt.Println("[cluster] compacted the Raft log: no pre-seal plaintext left in the log or snapshots")
+	return writeFileAtomic(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0600)
+}
+
+// fetchDEK obtains the cluster data key with the given ID from another master (mutual TLS) and
+// stores it with this master's own provider. A key whose fingerprint does not match is refused.
+func fetchDEK(rs *raftStore, cfg *ClusterConfig, id string) error {
+	if _, cur := currentKey(); cur == id {
+		return nil
+	}
+	st, _, err := rs.snapshot()
+	if err != nil {
+		return err
+	}
+	tc, err := masterClientTLS(st.CACert)
+	if err != nil {
+		return err
+	}
+	c := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tc}}
+	self := net.JoinHostPort(cfg.NodeIP, clusterPortOf(cfg))
+	var last error = errors.New("no other master holds it")
+	for _, addr := range masterAddrs(st, cfg) {
+		if addr == self {
+			continue
+		}
+		resp, err := c.Post("https://"+addr+"/cluster/v1/internal/dek", "application/json", nil)
+		if err != nil {
+			last = err
+			continue
+		}
+		var out struct{ Key []byte }
+		err = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK {
+			last = fmt.Errorf("%s: HTTP %d", addr, resp.StatusCode)
+			continue
+		}
+		if len(out.Key) != dekSize || dekFingerprint(out.Key) != id {
+			last = fmt.Errorf("%s holds a different data key", addr)
+			continue
+		}
+		if err := storeDEK(out.Key); err != nil {
+			return err
+		}
+		setKeyring(out.Key)
+		fmt.Printf("[cluster] cluster data key %s fetched from %s\n", id, addr)
+		return nil
+	}
+	return fmt.Errorf("cluster data key %s: %w", id, last)
 }

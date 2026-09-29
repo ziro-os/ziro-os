@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,6 +64,7 @@ type heartbeatRequest struct {
 	WGPubKey   string            `json:"wg_pubkey,omitempty"`
 	WGPort     int               `json:"wg_port,omitempty"`
 	MeshError  string            `json:"mesh_error,omitempty"` // mesh/policy apply failure on the node
+	Caps       []string          `json:"caps,omitempty"`       // features this node's ziroctl supports
 }
 
 // Assignment is one container the master wants running on a node.
@@ -657,6 +659,12 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		req.Failed[k] = sanitizeLabel(v, 200)
 	}
 	req.MeshError = sanitizeLabel(req.MeshError, 300)
+	if len(req.Caps) > 16 {
+		req.Caps = req.Caps[:16]
+	}
+	for i, c := range req.Caps {
+		req.Caps[i] = sanitizeLabel(c, 32)
+	}
 	cfg, err := requireMaster()
 	if err != nil {
 		return nil, err
@@ -671,7 +679,13 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		if n.Status != "Ready" {
 			fmt.Printf("[cluster] node %s is Ready again\n", n.ID)
 		}
+		if st.sealed != nil { // never hand out assignments without their secrets
+			return httpError{http.StatusServiceUnavailable, errSecretsLocked.Error()}
+		}
 		n.LastSeen, n.Containers, n.Running, n.Failed, n.MeshError = time.Now(), req.Containers, req.Running, req.Failed, req.MeshError
+		if strings.Join(n.Caps, ",") != strings.Join(req.Caps, ",") {
+			n.Caps = req.Caps
+		}
 		if n.Role != "master" {
 			n.IP = ip
 		}
@@ -761,11 +775,20 @@ var clusterServeCmd = &cobra.Command{
 
 		// The files hold the last replicated state (or, on a master's first start on this version,
 		// the pre-Raft state that becomes the first log entry). Joined masters bring the CA with them.
+		// This master's copy of the cluster data key (secrets at rest); a broken provider is fatal.
+		if key, err := loadStoredDEK(); err != nil {
+			return err
+		} else if key != nil {
+			setKeyring(key)
+		}
 		st, err := fileState()
 		if err != nil {
 			return err
 		}
-		if cfg.RaftJoined {
+		firstStart := !fileExists(filepath.Join(raftDir(), "raft.db"))
+		if cfg.RaftJoined || !firstStart {
+			// The CA and this master's certificate exist already; the replicated state (not these
+			// files) is authoritative from now on, and the renewal loop reissues from it.
 			if st.CACert == "" {
 				ca, err := os.ReadFile(clusterCAPath())
 				if err != nil {
@@ -773,7 +796,7 @@ var clusterServeCmd = &cobra.Command{
 				}
 				st.CACert = string(ca)
 			}
-		} else {
+		} else { // the founding master's first start on this version: create the CA
 			if err := ensureCA(st); err != nil {
 				return err
 			}
@@ -791,6 +814,7 @@ var clusterServeCmd = &cobra.Command{
 			return fmt.Errorf("raft: %w", err)
 		}
 		localRaft = rs
+		rs.fetchKey = func(id string) error { return fetchDEK(rs, cfg, id) }
 		p, _ := strconv.Atoi(port)
 		allowFirewall([]FirewallRule{{Port: p + 1, Protocol: "tcp", Comment: "Ziro cluster Raft (mutual TLS)"}}, "")
 
@@ -806,6 +830,16 @@ var clusterServeCmd = &cobra.Command{
 		cs := newClusterServer()
 		cs.port = port
 		mux := cs.handler().(*http.ServeMux)
+		// Another master asking for the cluster data key (mutual TLS, master certificates only).
+		mux.HandleFunc("/cluster/v1/internal/dek", func(w http.ResponseWriter, r *http.Request) {
+			key, _ := currentKey()
+			if !requestFromMaster(r.TLS, caPEM) || key == nil {
+				http.Error(w, "unavailable", http.StatusForbidden)
+				return
+			}
+			clusterAudit("master:"+r.TLS.PeerCertificates[0].Subject.CommonName, "cluster data key fetch", cfg.NodeID, nil)
+			_ = json.NewEncoder(w).Encode(map[string][]byte{"key": key})
+		})
 		mux.Handle("/cluster/v1/internal/", http.StripPrefix("/cluster/v1/internal", http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
 				if !requestFromMaster(r.TLS, caPEM) {
@@ -823,7 +857,10 @@ var clusterServeCmd = &cobra.Command{
 				if !rs.isLeader() {
 					continue
 				}
-				if err := withState(func(st *ClusterState) error { scheduleReplicas(st, time.Now()); return nil }); err != nil && !errors.Is(err, errNotLeader) {
+				if err := withState(func(st *ClusterState) error {
+					scheduleReplicas(st, time.Now())
+					return maybeSealSecrets(st)
+				}); err != nil && !errors.Is(err, errNotLeader) {
 					fmt.Printf("[cluster] schedule: %v\n", err)
 				}
 			}
@@ -840,6 +877,25 @@ var clusterServeCmd = &cobra.Command{
 		if cfg.RaftJoined {
 			go promoteSelf(rs, cfg)
 		}
+		// Followers pick up the cluster data key as soon as the state is sealed (or re-keyed), so
+		// any master can take over as leader.
+		go func() {
+			for ; ; time.Sleep(10 * time.Second) {
+				if b, _ := rs.fsm.latest(); len(b) > 0 {
+					cur, err := decodePayload(b)
+					if err == nil && cur.sealed != nil {
+						if err := fetchDEK(rs, cfg, cur.DEKID); err != nil {
+							fmt.Printf("[cluster] cluster data key: %v\n", err)
+						}
+					}
+					if err == nil && cur.DEKID != "" {
+						if err := rs.compactAfterSeal(); err != nil {
+							fmt.Printf("[cluster] compact after sealing: %v\n", err)
+						}
+					}
+				}
+			}
+		}()
 
 		srv := &http.Server{
 			Addr:    ":" + port,
