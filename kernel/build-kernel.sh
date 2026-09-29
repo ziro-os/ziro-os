@@ -72,7 +72,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$REPO_ROOT/kernel/configs:/configs:ro" \
     -v "$CCACHE_DIR_HOST:/ccache" -v "$DL_DIR:/dl" \
     -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=2G -e CCACHE_COMPILERCHECK=content \
-    -e KBUILD_BUILD_TIMESTAMP="ziro-$KERNEL_VER" -e KBUILD_BUILD_USER=ziro -e KBUILD_BUILD_HOST=ziro-build \
+    -e KBUILD_BUILD_TIMESTAMP="2026-01-01 00:00:00 UTC" -e KBUILD_BUILD_USER=ziro -e KBUILD_BUILD_HOST=ziro-build \
     -e KV="$KERNEL_VER" -e KARCH="$KERNEL_ARCH" -e TARCH="$TARGET_ARCH" \
     -e KTARGET="$KERNEL_TARGET" -e KOUT="$KERNEL_OUT_SRC" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \

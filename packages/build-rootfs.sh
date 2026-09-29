@@ -50,6 +50,24 @@ case "$KERNEL_FLAVOR" in
 esac
 ROOTFS_FULL="$BUILD_DIR/rootfs-full-$TARGET_ARCH$SUFFIX"
 
+# The rootfs is assembled on the host through a bind mount. On a case-insensitive filesystem
+# (the macOS default) files that differ only in case collide, e.g. iptables' libxt_MARK.so and
+# libxt_mark.so; the image then silently loses the MARK/DSCP/TTL... targets and container port
+# publishing (CNI portmap) breaks. Refuse to build a broken image.
+mkdir -p "$BUILD_DIR"
+probe="$BUILD_DIR/.case-probe-$$"
+rm -f "$probe" "$probe.X"; touch "$probe.x"
+if [ -e "$probe.X" ] && [ "${ZIRO_ALLOW_CASE_INSENSITIVE:-0}" != "1" ]; then
+    rm -f "$probe.x"
+    echo "❌ $BUILD_DIR is on a case-insensitive filesystem: the image would lose iptables extensions." >&2
+    echo "   Build from a case-sensitive volume, e.g. on macOS:" >&2
+    echo "     hdiutil create -size 40g -fs 'Case-sensitive APFS' -volname ziro -type SPARSE ~/ziro.sparseimage" >&2
+    echo "     hdiutil attach ~/ziro.sparseimage && git worktree add /Volumes/ziro/ziro-os" >&2
+    echo "   (ZIRO_ALLOW_CASE_INSENSITIVE=1 builds anyway, with broken container port publishing.)" >&2
+    exit 1
+fi
+rm -f "$probe.x"
+
 mkdir -p "$BUILD_DIR" "$DOWNLOAD_DIR"
 if [ -d "$ROOTFS_MINIMAL" ] || [ -d "$ROOTFS_FULL" ]; then
     docker run --rm -v "$BUILD_DIR:/b" "$ALPINE_IMAGE" rm -rf "/b/$(basename "$ROOTFS_MINIMAL")" "/b/$(basename "$ROOTFS_FULL")" 2>/dev/null || true
