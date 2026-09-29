@@ -107,6 +107,7 @@ type ClusterState struct {
 	PolicyDefault string         `json:"policy_default,omitempty"`
 	Routes        []GatewayRoute `json:"routes,omitempty"`
 	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
+	Peers         []RemotePeer   `json:"peers,omitempty"` // WireGuard remote-access clients
 }
 
 func isClusterMaster() bool {
@@ -374,10 +375,11 @@ func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 		return fmt.Errorf("too many allow_from entries")
 	}
 	for _, from := range a.AllowFrom {
-		if from != "*" {
-			if err := validName(from); err != nil {
-				return fmt.Errorf("allow_from: %w", err)
-			}
+		if from == "*" || from == "peers" {
+			continue
+		}
+		if err := validName(strings.TrimPrefix(from, "peer:")); err != nil {
+			return fmt.Errorf("allow_from: %w", err)
 		}
 	}
 	for _, s := range a.Secrets {
@@ -430,6 +432,9 @@ func allocMeshIP(st *ClusterState, cidr string) (string, error) {
 	used := map[string]bool{}
 	for _, n := range st.Nodes {
 		used[n.MeshIP] = true
+	}
+	for _, rp := range st.Peers {
+		used[rp.MeshIP] = true
 	}
 	p = p.Masked()
 	for a := p.Addr().Next(); p.Contains(a); a = a.Next() {
@@ -1348,7 +1353,7 @@ func init() {
 	clusterDeployCmd.Flags().StringArrayVar(&appSecrets, "secret", nil, "Cluster secret to inject as env (repeatable)")
 	clusterDeployCmd.Flags().StringArrayVar(&appArgs, "arg", nil, "Command/argument passed after the image (repeatable, in order)")
 	clusterDeployCmd.Flags().BoolVar(&appMeshOnly, "mesh-only", false, "Publish --port only on the node's mesh IP (not the public interface)")
-	clusterDeployCmd.Flags().StringSliceVar(&appAllow, "allow-from", nil, "Apps allowed to reach --port over the mesh (comma-separated, '*' = any cluster app, '' = none)")
+	clusterDeployCmd.Flags().StringSliceVar(&appAllow, "allow-from", nil, "Apps allowed to reach --port over the mesh (comma-separated; '*' = any cluster app, 'peer:<name>' or 'peers' = WireGuard remote peers, '' = none)")
 	clusterApplyCmd.Flags().StringVarP(&applyFile, "file", "f", "", "JSON manifest")
 	_ = clusterApplyCmd.MarkFlagRequired("file")
 

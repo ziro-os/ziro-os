@@ -82,6 +82,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | App network policy | `allow_from` per app → `inet ziro_cluster` nft table per node | every node | shipped |
 | Audit log | hash-chained JSONL, `/var/log/ziro/audit.log` | every host | shipped |
 | Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labelled gateway | shipped |
+| Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, DNS responder `<app>.cluster.ziro` | every node | Phase 3 |
 | HA control plane | 3 or 5 masters with Raft, cluster CA | masters | Phase 4 |
 | Enterprise controls | scoped API tokens, cert rotation, signed-image policy, `/metrics` | all | Phase 5 |
@@ -150,7 +151,7 @@ Known limits, each addressed by a later phase:
 
 ### 5.4 Roadmap designs
 
-- **Phase 2: zirogate** (shipped; see [gateway.md](gateway.md)). WireGuard remote-access peers are still to do.
+- **Phase 2: zirogate** (shipped). This covers HTTP(S) ingress and WireGuard remote-access peers relayed by a hub gateway node; see [gateway.md](gateway.md).
   - Routes (`host`, `path_prefix` → `app:port`, `tls: auto|off`, `allow_cidrs`, `rate_rps`, `max_body`) live in cluster state and are delivered in heartbeats to nodes labelled `gateway`.
   - The proxy is `httputil.ReverseProxy`. It round-robins over running endpoints on the mesh, marks an endpoint down for 10s after a dial error, and is itself an `allow_from` source, so apps opt in to being exposed.
   - TLS: `autocert` (HTTP-01), TLS 1.2 minimum.
