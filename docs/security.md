@@ -88,6 +88,9 @@ Output:
   (default for new clusters) that means from the allowed apps' own replica IPs, including same-node traffic. It
   is enforced in each node's `inet ziro_cluster` nftables table, and the agent does not configure the mesh until that table is in
   place. Check it with `ziroctl cluster policy ls`.
+- **Image policy**: `ziroctl cluster policy images` limits apps to allowed registries and can require cosign
+  signatures by your keys. Verified images are pinned by digest, so nodes run exactly what was verified. The leader
+  re-checks every changed image. See [clustering.md](clustering.md#image-policy).
 - **Secrets at rest**: cluster secrets and the CA key are sealed (AES-256-GCM) with a cluster data key in Raft,
   snapshots and files. Each master wraps its copy with a `file`, `tpm` (TPM 2.0, salted and encrypted sessions)
   or `command` (KMS/Vault/HSM) provider. Masters fetch the key from each other only over mutual TLS, and every

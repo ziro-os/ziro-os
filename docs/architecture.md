@@ -172,6 +172,6 @@ Known limits, each addressed by a later phase:
   - Secrets encrypted at rest: shipped (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
   - Scoped API tokens (viewer / operator / admin): shipped.
   - Rotation: node tokens (30 days or `cluster rotate tokens`) and master certificates (`cluster rotate certs`): shipped. The data key rotates in two phases (`cluster keys rotate`); rotating the CA is not planned yet.
-  - Registry allowlist and `nerdctl --verify=cosign` for signed images.
+  - Image policy: registry allowlist and cosign signature verification (native, key-based), with digest pinning: shipped.
   - Prometheus `/metrics`.
   - `docs/compliance.md` mapping controls to CIS and SOC 2.

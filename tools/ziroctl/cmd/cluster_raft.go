@@ -499,6 +499,15 @@ func (rs *raftStore) propose(version uint64, st *ClusterState) error {
 		}
 	}
 	st.CAKey = rs.cur.CAKey
+	// Defense in depth: every changed image passes the network-free part of the image policy here,
+	// whoever proposed the change.
+	for _, a := range st.Apps {
+		if cur := rs.cur.app(a.Name); cur == nil || cur.Image != a.Image {
+			if err := checkImage(st.ImagePolicy, a.Image); err != nil {
+				return err
+			}
+		}
+	}
 	if st.Secrets == nil {
 		st.Secrets = map[string]map[string]string{}
 	}

@@ -127,8 +127,9 @@ type ClusterState struct {
 	RotateTokensBefore time.Time                `json:"rotate_tokens_before,omitempty"`
 	RotateCertsBefore  time.Time                `json:"rotate_certs_before,omitempty"`
 	// Data key rotation: requested -> NextDEKID distributed to every master -> DEKID switched.
-	DEKRotateRequested time.Time `json:"dek_rotate_requested,omitempty"`
-	NextDEKID          string    `json:"next_dek_id,omitempty"`
+	DEKRotateRequested time.Time   `json:"dek_rotate_requested,omitempty"`
+	NextDEKID          string      `json:"next_dek_id,omitempty"`
+	ImagePolicy        ImagePolicy `json:"image_policy,omitempty"`
 	// Join credentials and the cluster CA are replicated so any master can admit nodes.
 	JoinToken        string `json:"join_token,omitempty"`
 	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never
@@ -970,6 +971,15 @@ func deployApp(mutate func(st *ClusterState) (*ClusteredApp, error)) error {
 			return err
 		}
 		*app = withPodNetwork(st, *app) // deploy, apply, scale and rollback all land on the pod network
+		// A new image passes the image policy here (verified and pinned by digest when signatures are
+		// required); an unchanged one was checked when it was set.
+		if cur := st.app(app.Name); cur == nil || cur.Image != app.Image {
+			img, err := enforceImagePolicy(st.ImagePolicy, app.Image)
+			if err != nil {
+				return err
+			}
+			app.Image = img
+		}
 		if err := validateApp(app, secrets); err != nil {
 			return err
 		}
