@@ -78,7 +78,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     "$ALPINE_IMAGE" sh -euc '
         apk add --no-cache build-base linux-headers bc bison flex openssl-dev elfutils-dev \
-            perl python3 xz bash curl diffutils findutils kmod gzip openssl gawk ccache >/dev/null
+            perl python3 xz bash curl diffutils findutils kmod gzip openssl gawk ccache pahole zstd gnupg >/dev/null
         # Kernel scripts (e.g. x86 scripts/orc_hash.sh) need GNU awk; BusyBox awk rejects
         # regexes like "^struct orc_entry {$". /usr/local/bin is first in PATH.
         mkdir -p /usr/local/bin && ln -sf "$(command -v gawk)" /usr/local/bin/awk
@@ -87,7 +87,17 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         TARBALL="linux-$KV.tar.xz"
         if [ ! -d "linux-$KV" ]; then
             BASE="https://cdn.kernel.org/pub/linux/kernel/v${KV%%.*}.x"
-            curl -fsSL "$BASE/sha256sums.asc" | grep " $TARBALL\$" > "/dl/$TARBALL.sha256"
+            # sha256sums.asc is signed by the kernel.org checksum autosigner; pin its fingerprint.
+            AUTOSIGNER=B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1
+            export GNUPGHOME=$(mktemp -d)
+            gpg -q --auto-key-locate clear,wkd --locate-keys autosigner@kernel.org >/dev/null 2>&1 || true
+            gpg -q --list-keys --with-colons "$AUTOSIGNER" 2>/dev/null | grep -q "^fpr:::::::::$AUTOSIGNER:" || {
+                echo "❌ could not fetch the kernel.org autosigner key $AUTOSIGNER" >&2; exit 1; }
+            curl -fsSL -o /tmp/sha256sums.asc "$BASE/sha256sums.asc"
+            gpg -q --status-fd 1 --verify /tmp/sha256sums.asc 2>/dev/null | grep -q "^\[GNUPG:\] VALIDSIG $AUTOSIGNER " || {
+                echo "❌ sha256sums.asc signature is not from the kernel.org autosigner" >&2; exit 1; }
+            gpg -q --decrypt /tmp/sha256sums.asc 2>/dev/null | grep " $TARBALL\$" > "/dl/$TARBALL.sha256"
+            [ -s "/dl/$TARBALL.sha256" ] || { echo "❌ $TARBALL not listed in signed sha256sums" >&2; exit 1; }
             # Cached tarball is re-verified; a mismatch (partial/corrupt download) refetches.
             if ! (cd /dl && sha256sum -c "$TARBALL.sha256" >/dev/null 2>&1); then
                 curl -fsSL -o "/dl/$TARBALL" "$BASE/$TARBALL"
@@ -103,6 +113,8 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         make -s ARCH=$KARCH CC="ccache gcc" olddefconfig
 
         # Every requested option must survive olddefconfig (renamed/unsatisfiable symbols fail the build).
+        # Drivers needed before any module can load (root disk, console, initramfs): must be =y.
+        CRITICAL=" VIRTIO_PCI VIRTIO_BLK SCSI_VIRTIO VIRTIO_NET BLK_DEV_NVME SATA_AHCI BLK_DEV_SD EXT4_FS HYPERV_STORAGE XEN_BLKDEV_FRONTEND DEVTMPFS DEVTMPFS_MOUNT EFI_STUB BLK_DEV_INITRD RD_GZIP RD_ZSTD SERIAL_8250_CONSOLE SERIAL_AMBA_PL011_CONSOLE "
         missing=""
         for frag in /configs/ziro-common.config "/configs/ziro-$TARCH.config"; do
             while IFS= read -r line; do
@@ -111,7 +123,10 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
                         sym=${line%%=*}; want=${line#*=}
                         got=$(grep -E "^$sym=" .config | cut -d= -f2- || true)
                         if [ "$want" = "y" ] && [ "$got" = "m" ]; then
-                            echo "  note: $sym built as module (a dependency is modular)"
+                            case "$CRITICAL" in
+                                *" ${sym#CONFIG_} "*) missing="$missing\n  $sym: boot-critical, must be built in (got m)" ;;
+                                *) echo "  note: $sym built as module (a dependency is modular)" ;;
+                            esac
                         elif [ "$got" != "$want" ]; then
                             missing="$missing\n  $sym: want $want, got ${got:-unset}"
                         fi

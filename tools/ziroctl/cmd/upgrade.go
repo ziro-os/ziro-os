@@ -512,7 +512,12 @@ func applyUpgrade(root, image string) (*upgradeState, error) {
 	}
 
 	fmt.Println("🥾 Installing kernel and boot image...")
-	if err := installBootFiles(root, filepath.Join(staging, "boot/vmlinuz"), image); err != nil {
+	// Images that ship the tiny boot initramfs boot with it; older images boot the full image.
+	bootImage := image
+	if tiny := filepath.Join(staging, "boot/initramfs-boot.cpio.gz"); fileExists(tiny) {
+		bootImage = tiny
+	}
+	if err := installBootFiles(root, filepath.Join(staging, "boot/vmlinuz"), bootImage); err != nil {
 		return nil, fmt.Errorf("boot files: %w (run 'ziroctl upgrade rollback')", err)
 	}
 	syscall.Sync()
@@ -548,10 +553,14 @@ func installBootFiles(root, kernel, initramfs string) error {
 }
 
 func addPrevGrubEntry(root string) error {
+	serial := "ttyS0"
+	if runtime.GOARCH == "arm64" {
+		serial = "ttyAMA0"
+	}
 	entry := `
 menuentry "` + prevGrubMarker + `" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz.prev root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0
+    linux /boot/vmlinuz.prev root=LABEL=ZIRO_ROOT rootflags=rw panic=10 console=tty0 console=` + serial + `,115200
     initrd /boot/initramfs.cpio.gz.prev
 }
 `
