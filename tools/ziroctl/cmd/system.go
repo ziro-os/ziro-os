@@ -30,12 +30,12 @@ var systemCmd = &cobra.Command{
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display Ziro-OS host status and services",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		status := inspectSystem()
 		if jsonOutput {
 			data, _ := json.MarshalIndent(status, "", "  ")
 			fmt.Println(string(data))
-			return
+			return nil
 		}
 
 		fmt.Println("=== Ziro-OS Host Status ===")
@@ -54,6 +54,7 @@ var statusCmd = &cobra.Command{
 		if status.TotalMemMB > 0 {
 			fmt.Printf("Memory:           %d MB used / %d MB total\n", status.TotalMemMB-status.FreeMemMB, status.TotalMemMB)
 		}
+		return nil
 	},
 }
 
@@ -120,7 +121,7 @@ func inspectSystem() SystemStatus {
 var rebootCmd = &cobra.Command{
 	Use:   "reboot",
 	Short: "Cleanly sync filesystems and reboot the host system",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Syncing filesystems and rebooting Ziro-OS host...")
 		_ = exec.Command("sync").Run()
 		if err := exec.Command("/sbin/reboot").Run(); err != nil {
@@ -128,6 +129,7 @@ var rebootCmd = &cobra.Command{
 				_ = exec.Command("kill", "-TERM", "1").Run()
 			}
 		}
+		return nil
 	},
 }
 
@@ -135,7 +137,7 @@ var poweroffCmd = &cobra.Command{
 	Use:     "poweroff",
 	Aliases: []string{"shutdown", "halt"},
 	Short:   "Cleanly sync filesystems and power off the host system",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Syncing filesystems and powering off Ziro-OS host...")
 		_ = exec.Command("sync").Run()
 		if err := exec.Command("/sbin/poweroff").Run(); err != nil {
@@ -143,6 +145,7 @@ var poweroffCmd = &cobra.Command{
 				_ = exec.Command("kill", "-USR2", "1").Run()
 			}
 		}
+		return nil
 	},
 }
 

@@ -1,16 +1,27 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
-const agentInterval = 10 * time.Second
+const (
+	agentInterval    = 10 * time.Second
+	reconcileEvery   = 3 * time.Second
+	imagePullTimeout = 10 * time.Minute
+)
+
+// secretEnvDir is tmpfs (/run): secret values never touch disk on workers or appear in argv.
+var secretEnvDir = "/run/ziro/cluster/secrets"
 
 // listClusterContainers returns cluster-managed containers on this node: name -> running.
 func listClusterContainers() (map[string]bool, error) {
@@ -51,6 +62,8 @@ func planReconcile(desired []Assignment, actual map[string]bool) (start []Assign
 	return start, restart, remove
 }
 
+func secretEnvFile(name string) string { return filepath.Join(secretEnvDir, name+".env") }
+
 func runArgs(a Assignment) []string {
 	args := []string{"run", "-d", "--name", a.Name, "--restart", "always",
 		"--label", "ziro.cluster=true", "--label", "ziro.app=" + a.App}
@@ -65,51 +78,109 @@ func runArgs(a Assignment) []string {
 	for _, k := range keys {
 		args = append(args, "-e", k+"="+a.Env[k])
 	}
-	return append(args, "--", a.Image)
+	if len(a.SecretEnv) > 0 {
+		args = append(args, "--env-file", secretEnvFile(a.Name))
+	}
+	for _, h := range a.Hosts {
+		args = append(args, "--add-host", h)
+	}
+	return append(append(args, "--", a.Image), a.Args...)
+}
+
+func writeSecretEnv(a Assignment) error {
+	if len(a.SecretEnv) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(secretEnvDir, 0700); err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(a.SecretEnv))
+	for k := range a.SecretEnv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k + "=" + a.SecretEnv[k] + "\n")
+	}
+	return os.WriteFile(secretEnvFile(a.Name), []byte(b.String()), 0600)
+}
+
+// agent holds what the heartbeat loop learned and what the reconcile loop reports back.
+type agent struct {
+	mu      sync.Mutex
+	desired []Assignment
+	synced  bool              // at least one successful heartbeat
+	failed  map[string]string // container -> last start error
+}
+
+func (ag *agent) setFailed(name string, err error) {
+	ag.mu.Lock()
+	defer ag.mu.Unlock()
+	if err == nil {
+		delete(ag.failed, name)
+		return
+	}
+	if ag.failed[name] == "" {
+		fmt.Printf("[agent] %s failed (reported to master, retrying): %v\n", name, err)
+	}
+	ag.failed[name] = err.Error()
+}
+
+func nerdctl(ctx context.Context, args ...string) error {
+	out, err := exec.CommandContext(ctx, "nerdctl", args...).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if i := strings.LastIndex(msg, "\n"); i >= 0 {
+			msg = msg[i+1:]
+		}
+		return fmt.Errorf("%v: %s", err, msg)
+	}
+	return nil
 }
 
 // reconcileContainers converges local cluster containers to desired.
 // Stale containers are removed first so a replaced replica can reuse its host port.
 func reconcileContainers(desired []Assignment) error {
+	return (&agent{failed: map[string]string{}}).reconcile(desired)
+}
+
+func (ag *agent) reconcile(desired []Assignment) error {
 	actual, err := listClusterContainers()
 	if err != nil {
 		return fmt.Errorf("list containers: %w", err)
 	}
 	start, restart, remove := planReconcile(desired, actual)
 	for _, name := range remove {
-		if nerdctlOnce("rm "+name, "rm", "-f", name) {
+		if err := nerdctl(context.Background(), "rm", "-f", name); err == nil {
 			fmt.Printf("[agent] removed %s\n", name)
+			_ = os.Remove(secretEnvFile(name))
 		}
+		ag.setFailed(name, nil)
 	}
 	for _, name := range restart {
-		nerdctlOnce("start "+name, "start", name)
+		ag.setFailed(name, nerdctl(context.Background(), "start", name))
 	}
 	for _, a := range start {
-		if nerdctlOnce("run "+a.Name, runArgs(a)...) {
+		ctx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
+		err := nerdctl(ctx, "pull", "-q", a.Image)
+		cancel()
+		if err == nil {
+			err = writeSecretEnv(a)
+		}
+		if err == nil {
+			err = nerdctl(context.Background(), runArgs(a)...)
+			// a failed run can leave a created container behind; remove it so the retry is clean
+			if err != nil {
+				_ = nerdctl(context.Background(), "rm", "-f", a.Name)
+			}
+		}
+		if err == nil {
 			fmt.Printf("[agent] started %s (%s)\n", a.Name, a.Image)
 		}
+		ag.setFailed(a.Name, err)
 	}
 	return nil
-}
-
-// agentFailing remembers failing actions so a persistently failing container
-// (bad image, port clash) is logged once, not every reconcile tick.
-var agentFailing = map[string]bool{}
-
-func nerdctlOnce(key string, args ...string) bool {
-	out, err := exec.Command("nerdctl", args...).CombinedOutput()
-	if err != nil {
-		if !agentFailing[key] {
-			fmt.Printf("[agent] %s failed (will keep retrying silently): %v %s\n", key, err, strings.TrimSpace(string(out)))
-			agentFailing[key] = true
-		}
-		return false
-	}
-	if agentFailing[key] {
-		fmt.Printf("[agent] %s recovered\n", key)
-		delete(agentFailing, key)
-	}
-	return true
 }
 
 var clusterAgentCmd = &cobra.Command{
@@ -121,8 +192,31 @@ var clusterAgentCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("not part of a cluster")
 		}
+		_, pub, err := meshKeypair()
+		if err != nil {
+			return err
+		}
+		ag := &agent{failed: map[string]string{}}
 		fmt.Printf("[agent] node %s reporting to %s every %s\n", cfg.NodeID, cfg.MasterAddr, agentInterval)
-		lastErr := ""
+
+		// Reconcile loop: image pulls and container starts can take minutes; they run here so
+		// they never delay heartbeats (a late heartbeat would mark this node NotReady).
+		go func() {
+			for {
+				ag.mu.Lock()
+				desired, synced := ag.desired, ag.synced
+				ag.mu.Unlock()
+				// Before the first successful heartbeat the desired set is unknown: never tear down.
+				if synced {
+					if err := ag.reconcile(desired); err != nil {
+						fmt.Printf("[agent] reconcile: %v\n", err)
+					}
+				}
+				time.Sleep(reconcileEvery)
+			}
+		}()
+
+		lastErr, lastMesh := "", ""
 		for {
 			actual, _ := listClusterContainers()
 			running := []string{}
@@ -136,14 +230,30 @@ var clusterAgentCmd = &cobra.Command{
 			if out, err := exec.Command("nerdctl", "ps", "-q").Output(); err == nil {
 				total = len(strings.Fields(string(out)))
 			}
+			ag.mu.Lock()
+			failed := make(map[string]string, len(ag.failed))
+			for k, v := range ag.failed {
+				failed[k] = v
+			}
+			ag.mu.Unlock()
 
 			var resp heartbeatResponse
 			err := clusterPost(cfg.MasterAddr, cfg.CAHash, "/cluster/v1/heartbeat", nodeAuth(cfg),
-				heartbeatRequest{Containers: total, Running: running}, &resp)
+				heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort}, &resp)
 			// On heartbeat failure the master is unreachable: keep workloads running as they are,
 			// never tear down on a network blip.
 			if err == nil {
-				err = reconcileContainers(resp.Assignments)
+				ag.mu.Lock()
+				ag.desired, ag.synced = resp.Assignments, true
+				ag.mu.Unlock()
+				merr := applyMesh(resp.MeshIP, resp.MeshPrefix, resp.Peers)
+				if merr == nil {
+					merr = writeHostsBlock(hostsFile, resp.Endpoints)
+				}
+				if msg := fmt.Sprint(merr); merr != nil && msg != lastMesh {
+					fmt.Printf("[agent] mesh: %v\n", merr)
+				}
+				lastMesh = fmt.Sprint(merr)
 			}
 			// Log errors only when they change, so a persistent failure cannot flood the log.
 			if msg := fmt.Sprint(err); err != nil && msg != lastErr {

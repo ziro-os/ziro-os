@@ -107,7 +107,9 @@ var securityScanCmd = &cobra.Command{
 	Use:   "scan",
 	Short: "Perform AI heuristic malware, ransomware, and reverse shell detection",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("🛡️  Starting Ziro-OS Sentinel Security & Threat Scan...")
+		if !jsonOutput {
+			fmt.Println("🛡️  Starting Ziro-OS Sentinel Security & Threat Scan...")
+		}
 		rep := runSecurityScan()
 
 		if jsonOutput {
