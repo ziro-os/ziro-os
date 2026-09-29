@@ -237,13 +237,16 @@ func TestMeshAddressingAndHosts(t *testing.T) {
 
 func TestJoinTokenExpiryAndLabels(t *testing.T) {
 	now := time.Now()
-	if joinTokenExpired(&ClusterConfig{}, now) {
+	if !joinTokenExpired(&ClusterState{}, now) {
+		t.Error("no token = no joins")
+	}
+	if joinTokenExpired(&ClusterState{JoinToken: "t"}, now) {
 		t.Error("no expiry = permanent")
 	}
-	if !joinTokenExpired(&ClusterConfig{JoinTokenExpires: now.Add(-time.Minute).Format(time.RFC3339)}, now) {
+	if !joinTokenExpired(&ClusterState{JoinToken: "t", JoinTokenExpires: now.Add(-time.Minute).Format(time.RFC3339)}, now) {
 		t.Error("past expiry must be expired")
 	}
-	if joinTokenExpired(&ClusterConfig{JoinTokenExpires: now.Add(time.Hour).Format(time.RFC3339)}, now) {
+	if joinTokenExpired(&ClusterState{JoinToken: "t", JoinTokenExpires: now.Add(time.Hour).Format(time.RFC3339)}, now) {
 		t.Error("future expiry must be valid")
 	}
 	if got := sanitizeLabel("evil\x1b[2J\nhost", 64); got != "evil[2Jhost" {

@@ -3,10 +3,12 @@ package cmd
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -27,6 +29,7 @@ var clusterDir = "/etc/ziro/cluster"
 func clusterConfigPath() string  { return filepath.Join(clusterDir, "config.json") }
 func clusterStatePath() string   { return filepath.Join(clusterDir, "state.json") }
 func clusterSecretsPath() string { return filepath.Join(clusterDir, "secrets.json") }
+func clusterCAKeyPath() string   { return filepath.Join(clusterDir, "ca.key") }
 
 const (
 	defaultMeshCIDR = "10.200.0.0/16"
@@ -36,19 +39,21 @@ const (
 
 // ClusterConfig is this node's identity and how it reaches the master.
 type ClusterConfig struct {
-	ClusterID        string `json:"cluster_id"`
-	Role             string `json:"role"` // "master" or "worker"
-	NodeID           string `json:"node_id"`
-	Hostname         string `json:"hostname"`
-	NodeIP           string `json:"node_ip"`
-	MasterAddr       string `json:"master_addr"` // host:port the local agent talks to
-	Advertise        string `json:"advertise,omitempty"`
-	JoinToken        string `json:"join_token,omitempty"`         // master only
-	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never
-	MeshCIDR         string `json:"mesh_cidr,omitempty"`          // master only
-	NodeToken        string `json:"node_token"`
-	CAHash           string `json:"ca_hash"` // "sha256:<hex>" of the master's TLS certificate
-	CreatedAt        string `json:"created_at"`
+	ClusterID        string   `json:"cluster_id"`
+	Role             string   `json:"role"` // "master" or "worker"
+	NodeID           string   `json:"node_id"`
+	Hostname         string   `json:"hostname"`
+	NodeIP           string   `json:"node_ip"`
+	MasterAddr       string   `json:"master_addr"` // host:port the local agent talks to
+	Advertise        string   `json:"advertise,omitempty"`
+	JoinToken        string   `json:"join_token,omitempty"`         // master only
+	JoinTokenExpires string   `json:"join_token_expires,omitempty"` // RFC3339; empty = never
+	MeshCIDR         string   `json:"mesh_cidr,omitempty"`          // master only
+	NodeToken        string   `json:"node_token"`
+	CAHash           string   `json:"ca_hash"`               // "sha256:<hex>" of the cluster CA (older agents: of the first master's certificate)
+	Masters          []string `json:"masters,omitempty"`     // every master's cluster API address (agent failover)
+	RaftJoined       bool     `json:"raft_joined,omitempty"` // master that joined an existing control plane
+	CreatedAt        string   `json:"created_at"`
 }
 
 type ClusterNode struct {
@@ -113,6 +118,13 @@ type ClusterState struct {
 	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
 	Peers         []RemotePeer   `json:"peers,omitempty"`    // WireGuard remote-access clients
 	PodCIDR       string         `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
+	// Join credentials and the cluster CA are replicated so any master can admit nodes.
+	JoinToken        string `json:"join_token,omitempty"`
+	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never
+	CACert           string `json:"ca_cert,omitempty"`            // PEM
+	// Kept out of state.json (own 0600 files, excluded from backups) and out of every view.
+	Secrets map[string]map[string]string `json:"-"` // name -> KEY -> value
+	CAKey   string                       `json:"-"` // PEM
 }
 
 func isClusterMaster() bool {
@@ -184,13 +196,54 @@ func loadStateFile() (*ClusterState, error) {
 	if st.History == nil {
 		st.History = map[string][]ClusteredApp{}
 	}
+	st.Secrets = map[string]map[string]string{}
+	if data, err := os.ReadFile(clusterSecretsPath()); err == nil {
+		if err := json.Unmarshal(data, &st.Secrets); err != nil {
+			return nil, fmt.Errorf("corrupt cluster secrets: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if b, err := os.ReadFile(clusterCAKeyPath()); err == nil {
+		st.CAKey = string(b)
+	}
+	if st.JoinToken == "" { // clusters from before the token was replicated kept it in config.json
+		if cfg, err := loadClusterConfig(); err == nil && cfg.Role == "master" && cfg.JoinToken != "" {
+			st.JoinToken, st.JoinTokenExpires = cfg.JoinToken, cfg.JoinTokenExpires
+		}
+	}
 	return st, nil
 }
 
-// withState runs fn on the master state under an exclusive flock, so the
-// cluster server and CLI commands never overwrite each other. The state is
-// saved when fn returns nil.
+// saveStateFiles writes the state plus its separately stored secret parts into dir.
+func saveStateFiles(dir string, st *ClusterState) error {
+	if err := writeJSONAtomic(filepath.Join(dir, "state.json"), st); err != nil {
+		return err
+	}
+	secrets := st.Secrets
+	if secrets == nil {
+		secrets = map[string]map[string]string{}
+	}
+	if err := writeJSONAtomic(filepath.Join(dir, "secrets.json"), secrets); err != nil {
+		return err
+	}
+	if st.CAKey != "" {
+		return writeFileAtomic(filepath.Join(dir, "ca.key"), []byte(st.CAKey), 0600)
+	}
+	return nil
+}
+
+// withState runs fn on the cluster state and saves it when fn returns nil. Inside
+// cluster-master it goes through Raft; ziroctl on a Raft master proposes through the local
+// socket; before the first cluster-master start (cluster init) and in tests it uses the files
+// under an exclusive flock.
 func withState(fn func(st *ClusterState) error) error {
+	switch {
+	case localRaft != nil:
+		return localRaft.mutate(fn)
+	case raftMode():
+		return socketMutate(fn)
+	}
 	lock, err := lockState(syscall.LOCK_EX)
 	if err != nil {
 		return err
@@ -203,30 +256,25 @@ func withState(fn func(st *ClusterState) error) error {
 	if err := fn(st); err != nil {
 		return err
 	}
-	return writeJSONAtomic(clusterStatePath(), st)
+	return saveStateFiles(clusterDir, st)
 }
 
-// readState is a shared-lock snapshot; it never rewrites the file.
+// readState returns a snapshot of the cluster state (live on the leader); it never writes.
 func readState() (*ClusterState, error) {
+	switch {
+	case localRaft != nil:
+		st, _, err := localRaft.snapshot()
+		return st, err
+	case raftMode():
+		st, _, err := socketFetch()
+		return st, err
+	}
 	lock, err := lockState(syscall.LOCK_SH)
 	if err != nil {
 		return nil, err
 	}
 	defer lock.Close()
 	return loadStateFile()
-}
-
-// Secrets: name -> KEY -> value, 0600, next to the state (callers hold the state lock).
-func loadSecrets() (map[string]map[string]string, error) {
-	out := map[string]map[string]string{}
-	data, err := os.ReadFile(clusterSecretsPath())
-	if os.IsNotExist(err) {
-		return out, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return out, json.Unmarshal(data, &out)
 }
 
 func randomHex(n int) string {
@@ -499,6 +547,7 @@ var (
 	joinTokenFlag    string
 	joinTokenFile    string
 	joinCAHashFlag   string
+	joinControlPlane bool
 	leaveForce       bool
 	tokenTTL         time.Duration
 )
@@ -529,11 +578,6 @@ var clusterInitCmd = &cobra.Command{
 		if err := ensureTLSCertificates(); err != nil {
 			return fmt.Errorf("TLS certificate: %w", err)
 		}
-		caHash, err := certHash(apiTLSCert)
-		if err != nil {
-			return err
-		}
-
 		host, _ := os.Hostname()
 		ip := clusterAdvertise
 		if ip == "" {
@@ -549,24 +593,24 @@ var clusterInitCmd = &cobra.Command{
 
 		nodeToken := randomHex(32)
 		cfg := &ClusterConfig{
-			ClusterID:        "ziro-" + randomHex(6),
-			Role:             "master",
-			NodeID:           "master-1",
-			Hostname:         host,
-			NodeIP:           ip,
-			MasterAddr:       fmt.Sprintf("127.0.0.1:%d", clusterPort),
-			Advertise:        fmt.Sprintf("%s:%d", ip, clusterPort),
-			JoinToken:        randomHex(16),
-			JoinTokenExpires: tokenExpiry(tokenTTL),
-			MeshCIDR:         clusterMeshCIDR,
-			NodeToken:        nodeToken,
-			CAHash:           caHash,
-			CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+			ClusterID:  "ziro-" + randomHex(6),
+			Role:       "master",
+			NodeID:     "master-1",
+			Hostname:   host,
+			NodeIP:     ip,
+			MasterAddr: fmt.Sprintf("127.0.0.1:%d", clusterPort),
+			Advertise:  fmt.Sprintf("%s:%d", ip, clusterPort),
+			MeshCIDR:   clusterMeshCIDR,
+			NodeToken:  nodeToken,
+			CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		}
 
 		err = withState(func(st *ClusterState) error {
 			*st = ClusterState{NodeTokens: map[string]string{cfg.NodeID: hashToken(nodeToken)}, History: map[string][]ClusteredApp{},
-				PolicyDefault: "deny", PodCIDR: podNet}
+				PolicyDefault: "deny", PodCIDR: podNet, JoinToken: randomHex(16), JoinTokenExpires: tokenExpiry(tokenTTL)}
+			if err := ensureCA(st); err != nil {
+				return err
+			}
 			st.Nodes = []ClusterNode{{
 				ID: cfg.NodeID, Hostname: host, IP: ip, Role: "master", Status: "Ready",
 				CPUs: runtime.NumCPU(), MemTotal: inspectSystem().TotalMemMB, LastSeen: time.Now(),
@@ -580,6 +624,12 @@ var clusterInitCmd = &cobra.Command{
 			if podNet != "" {
 				st.Nodes[0].PodCIDR, err = allocPodCIDR(st)
 			}
+			if err == nil { // the local agent trusts the cluster CA like every other node
+				cfg.CAHash, err = pemHash(st.CACert)
+			}
+			if err == nil {
+				err = writeFileAtomic(clusterCAPath(), []byte(st.CACert), 0644)
+			}
 			return err
 		})
 		if err != nil {
@@ -591,23 +641,37 @@ var clusterInitCmd = &cobra.Command{
 
 		openClusterFirewall(clusterPort)
 		startClusterServices("cluster-master", "cluster-agent")
+		if err := waitForLeader(30 * time.Second); err != nil {
+			return fmt.Errorf("the control plane did not come up: %w (see /var/log/cluster-master.log)", err)
+		}
 
 		fmt.Println("================================================================")
 		fmt.Println(" 🎉 Ziro-OS cluster initialized — this host is the MASTER")
 		fmt.Println("================================================================")
 		fmt.Printf(" Cluster ID: %s\n Master:     %s (%s)\n Mesh:       %s (WireGuard, udp/%d)\n\n", cfg.ClusterID, host, cfg.Advertise, cfg.MeshCIDR, meshPort)
-		printJoinCommand(cfg)
-		return nil
+		return printJoinCommand(cfg)
 	},
 }
 
-func printJoinCommand(cfg *ClusterConfig) {
+// printJoinCommand prints how to join; the pin is the cluster CA, so it stays valid across
+// master failovers and certificate renewals.
+func printJoinCommand(cfg *ClusterConfig) error {
+	st, err := readState()
+	if err != nil {
+		return err
+	}
+	caHash, err := pemHash(st.CACert)
+	if err != nil {
+		return fmt.Errorf("cluster CA: %w", err)
+	}
 	fmt.Println("To add a worker, run on it:")
-	fmt.Printf("  ZIRO_CLUSTER_TOKEN=%s ziroctl cluster join %s --ca-hash %s\n\n", cfg.JoinToken, cfg.Advertise, cfg.CAHash)
-	if cfg.JoinTokenExpires != "" {
-		fmt.Printf("The token expires %s. New token: ziroctl cluster token rotate\n", cfg.JoinTokenExpires)
+	fmt.Printf("  ZIRO_CLUSTER_TOKEN=%s ziroctl cluster join %s --ca-hash %s\n", st.JoinToken, cfg.Advertise, caHash)
+	fmt.Printf("For another control-plane master (HA: 3 or 5 in total), add --control-plane.\n\n")
+	if st.JoinTokenExpires != "" {
+		fmt.Printf("The token expires %s. New token: ziroctl cluster token rotate\n", st.JoinTokenExpires)
 	}
 	fmt.Println("Keep the token secret: anyone holding it can join this cluster.")
+	return nil
 }
 
 // openClusterFirewall allows the control plane (tcp) and mesh (udp) ports and trusts the
@@ -689,7 +753,7 @@ func joinToken() (string, error) {
 
 var clusterJoinCmd = &cobra.Command{
 	Use:   "join <master-ip:port>",
-	Short: "Join this host to a cluster as a worker",
+	Short: "Join this host to a cluster as a worker, or as another master with --control-plane",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		token, err := joinToken()
@@ -707,10 +771,31 @@ var clusterJoinCmd = &cobra.Command{
 			return err
 		}
 		host, _ := os.Hostname()
-		req := joinRequest{Hostname: host, CPUs: runtime.NumCPU(), MemTotal: inspectSystem().TotalMemMB, WGPubKey: pub, WGPort: meshPort}
+		_, port, err := net.SplitHostPort(args[0])
+		if err != nil {
+			return fmt.Errorf("want <master-ip:port>: %w", err)
+		}
+		req := joinRequest{Hostname: host, CPUs: runtime.NumCPU(), MemTotal: inspectSystem().TotalMemMB, WGPubKey: pub, WGPort: meshPort,
+			ControlPlane: joinControlPlane}
+		if joinControlPlane {
+			if req.CSR, err = masterKeyAndCSR(); err != nil { // the private key never leaves this host
+				return err
+			}
+		}
 		var resp joinResponse
 		if err := clusterPost(args[0], joinCAHashFlag, "/cluster/v1/join", "Bearer "+token, req, &resp); err != nil {
 			return fmt.Errorf("join failed: %w", err)
+		}
+		caHash := joinCAHashFlag
+		if resp.CACert != "" { // must be exactly the CA the operator pinned: no new trust from the wire
+			h, err := pemHash(resp.CACert)
+			if err != nil || subtle.ConstantTimeCompare([]byte(h), []byte(joinCAHashFlag)) != 1 {
+				return fmt.Errorf("the master's CA does not match --ca-hash")
+			}
+			if err := writeFileAtomic(clusterCAPath(), []byte(resp.CACert), 0644); err != nil {
+				return err
+			}
+			caHash = h
 		}
 
 		cfg := &ClusterConfig{
@@ -721,11 +806,30 @@ var clusterJoinCmd = &cobra.Command{
 			NodeIP:     resp.NodeIP,
 			MasterAddr: args[0],
 			NodeToken:  resp.NodeToken,
-			CAHash:     joinCAHashFlag,
+			CAHash:     caHash,
+			Masters:    resp.Masters,
 			CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		}
+		if joinControlPlane {
+			if resp.MasterCert == "" {
+				return fmt.Errorf("the master did not issue a control-plane certificate (older version?)")
+			}
+			if err := writeFileAtomic(masterCertPath(), []byte(resp.MasterCert), 0644); err != nil {
+				return err
+			}
+			cfg.Role, cfg.RaftJoined, cfg.MeshCIDR = "master", true, resp.MeshCIDR
+			cfg.MasterAddr, cfg.Advertise = "127.0.0.1:"+port, net.JoinHostPort(resp.NodeIP, port)
 		}
 		if err := saveClusterConfig(cfg); err != nil {
 			return err
+		}
+		if joinControlPlane {
+			p, _ := strconv.Atoi(port)
+			openClusterFirewall(p)
+			startClusterServices("cluster-master", "cluster-agent")
+			fmt.Printf("✓ Joined cluster %s as control-plane master %s (%s); it becomes a voter once it has caught up.\n", resp.ClusterID, resp.NodeID, host)
+			fmt.Println("  Check: ziroctl cluster members")
+			return nil
 		}
 		openClusterFirewall(0)
 		startClusterServices("cluster-agent")
@@ -742,6 +846,8 @@ type clusterStatusView struct {
 	NodesUp   int    `json:"nodes_ready,omitempty"`
 	Nodes     int    `json:"nodes,omitempty"`
 	Apps      int    `json:"apps,omitempty"`
+	Leader    string `json:"leader,omitempty"`  // Raft leader (masters)
+	Members   int    `json:"members,omitempty"` // control-plane masters
 }
 
 var clusterStatusCmd = &cobra.Command{
@@ -767,6 +873,17 @@ var clusterStatusCmd = &cobra.Command{
 				}
 			}
 			v.Nodes, v.Apps = len(st.Nodes), len(st.Apps)
+			var ms []memberView
+			if raftMode() {
+				if _, err := socketCall(http.MethodGet, "/members", nil, &ms); err == nil {
+					for _, m := range ms {
+						if m.Leader {
+							v.Leader = m.ID
+						}
+					}
+					v.Members = len(ms)
+				}
+			}
 		}
 		return printResult(v, func() {
 			fmt.Println("=== Ziro-OS Cluster Status ===")
@@ -776,6 +893,9 @@ var clusterStatusCmd = &cobra.Command{
 			if cfg.Role == "master" {
 				fmt.Printf("Nodes:       %d/%d Ready\n", v.NodesUp, v.Nodes)
 				fmt.Printf("Apps:        %d deployed\n", v.Apps)
+				if v.Members > 0 {
+					fmt.Printf("Control:     %d master(s), leader %s (ziroctl cluster members)\n", v.Members, v.Leader)
+				}
 			}
 		})
 	},
@@ -836,10 +956,7 @@ var (
 // deployApp validates and stores app under the state lock, then schedules.
 func deployApp(mutate func(st *ClusterState) (*ClusteredApp, error)) error {
 	return withState(func(st *ClusterState) error {
-		secrets, err := loadSecrets()
-		if err != nil {
-			return err
-		}
+		secrets := st.Secrets
 		app, err := mutate(st)
 		if err != nil {
 			return err
@@ -1203,11 +1320,14 @@ var clusterTokenCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if joinTokenExpired(cfg, time.Now()) {
-			return fmt.Errorf("the join token expired at %s; create a new one: ziroctl cluster token rotate", cfg.JoinTokenExpires)
+		st, err := readState()
+		if err != nil {
+			return err
 		}
-		printJoinCommand(cfg)
-		return nil
+		if joinTokenExpired(st, time.Now()) {
+			return fmt.Errorf("the join token expired at %s; create a new one: ziroctl cluster token rotate", st.JoinTokenExpires)
+		}
+		return printJoinCommand(cfg)
 	},
 }
 
@@ -1219,20 +1339,24 @@ var clusterTokenRotateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		cfg.JoinToken, cfg.JoinTokenExpires = randomHex(16), tokenExpiry(tokenTTL)
-		if err := saveClusterConfig(cfg); err != nil {
+		if err := withState(func(st *ClusterState) error {
+			st.JoinToken, st.JoinTokenExpires = randomHex(16), tokenExpiry(tokenTTL)
+			return nil
+		}); err != nil {
 			return err
 		}
-		printJoinCommand(cfg)
-		return nil
+		return printJoinCommand(cfg)
 	},
 }
 
-func joinTokenExpired(cfg *ClusterConfig, now time.Time) bool {
-	if cfg.JoinTokenExpires == "" {
+func joinTokenExpired(st *ClusterState, now time.Time) bool {
+	if st.JoinToken == "" {
+		return true
+	}
+	if st.JoinTokenExpires == "" {
 		return false
 	}
-	exp, err := time.Parse(time.RFC3339, cfg.JoinTokenExpires)
+	exp, err := time.Parse(time.RFC3339, st.JoinTokenExpires)
 	return err != nil || now.After(exp)
 }
 
@@ -1260,14 +1384,7 @@ var clusterSecretSetCmd = &cobra.Command{
 			kv[k] = v
 		}
 		return withState(func(st *ClusterState) error {
-			secrets, err := loadSecrets()
-			if err != nil {
-				return err
-			}
-			secrets[args[0]] = kv
-			if err := writeJSONAtomic(clusterSecretsPath(), secrets); err != nil {
-				return err
-			}
+			st.Secrets[args[0]] = kv
 			fmt.Printf("✓ secret '%s' saved (%d keys); apps using it pick it up on their next container start\n", args[0], len(kv))
 			return nil
 		})
@@ -1288,15 +1405,11 @@ var clusterSecretRmCmd = &cobra.Command{
 					}
 				}
 			}
-			secrets, err := loadSecrets()
-			if err != nil {
-				return err
-			}
-			if _, ok := secrets[args[0]]; !ok {
+			if _, ok := st.Secrets[args[0]]; !ok {
 				return fmt.Errorf("secret %q not found", args[0])
 			}
-			delete(secrets, args[0])
-			return writeJSONAtomic(clusterSecretsPath(), secrets)
+			delete(st.Secrets, args[0])
+			return nil
 		})
 	},
 }
@@ -1307,17 +1420,12 @@ var clusterSecretLsCmd = &cobra.Command{
 		if _, err := requireMaster(); err != nil {
 			return err
 		}
-		lock, err := lockState(syscall.LOCK_SH)
-		if err != nil {
-			return err
-		}
-		secrets, err := loadSecrets()
-		lock.Close()
+		st, err := readState()
 		if err != nil {
 			return err
 		}
 		view := map[string][]string{}
-		for name, kv := range secrets {
+		for name, kv := range st.Secrets {
 			for k := range kv {
 				view[name] = append(view[name], k)
 			}
@@ -1344,15 +1452,26 @@ var clusterLeaveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("not part of a cluster")
 		}
-		if cfg.Role == "master" {
-			st, err := readState()
-			if err == nil && len(st.Nodes) > 1 && !leaveForce {
-				return fmt.Errorf("%d worker(s) still joined; use --force to tear down the whole cluster", len(st.Nodes)-1)
+		var members []memberView
+		if cfg.Role == "master" && raftMode() {
+			_, _ = socketCall(http.MethodGet, "/members", nil, &members)
+		}
+		switch {
+		case cfg.Role == "master" && len(members) > 1:
+			// One of several masters: leave the control plane; the cluster carries on.
+			if _, err := socketCall(http.MethodPost, "/members/remove", map[string]string{"ID": cfg.NodeID}, nil); err != nil && !leaveForce {
+				return fmt.Errorf("could not leave the control plane (%v); --force leaves anyway", err)
 			}
 			stopClusterServices("cluster-agent", "cluster-master")
-			_ = os.Remove(clusterStatePath())
-			_ = os.Remove(clusterSecretsPath())
-		} else {
+			removeMasterFiles()
+		case cfg.Role == "master":
+			st, err := readState()
+			if err == nil && len(st.Nodes) > 1 && !leaveForce {
+				return fmt.Errorf("%d other node(s) still joined; use --force to tear down the whole cluster", len(st.Nodes)-1)
+			}
+			stopClusterServices("cluster-agent", "cluster-master")
+			removeMasterFiles()
+		default:
 			if err := clusterPost(cfg.MasterAddr, cfg.CAHash, "/cluster/v1/leave", nodeAuth(cfg), struct{}{}, nil); err != nil {
 				fmt.Printf("⚠ could not notify master (%v); remove it there with: ziroctl cluster node rm %s\n", err, cfg.NodeID)
 			}
@@ -1370,6 +1489,27 @@ var clusterLeaveCmd = &cobra.Command{
 	},
 }
 
+// waitForLeader blocks until the local cluster-master reports a Raft leader, so a join run right
+// after init (scripts, cloud-init) never races the first election.
+func waitForLeader(timeout time.Duration) error {
+	var last error
+	for deadline := time.Now().Add(timeout); time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
+		// Served only once a leader has loaded (or imported) the state: the exact readiness signal.
+		if _, _, last = socketFetch(); last == nil {
+			return nil
+		}
+	}
+	return last
+}
+
+// removeMasterFiles deletes a master's replicated state, Raft data and keys.
+func removeMasterFiles() {
+	for _, p := range []string{clusterStatePath(), clusterSecretsPath(), clusterCAKeyPath(), masterKeyPath(), masterCertPath(), clusterCAPath()} {
+		_ = os.Remove(p)
+	}
+	_ = os.RemoveAll(raftDir())
+}
+
 func init() {
 	clusterInitCmd.Flags().IntVarP(&clusterPort, "port", "p", 7443, "Cluster control plane listening port")
 	clusterInitCmd.Flags().StringVar(&clusterAdvertise, "advertise", "", "IP workers use to reach this master (default: IP of the default-route interface)")
@@ -1380,7 +1520,8 @@ func init() {
 	clusterTokenRotateCmd.Flags().DurationVar(&tokenTTL, "ttl", 24*time.Hour, "Join token lifetime (0 = never expires)")
 	clusterJoinCmd.Flags().StringVarP(&joinTokenFlag, "token", "t", "", "Cluster join token (prefer ZIRO_CLUSTER_TOKEN or --token-file: argv is visible in ps)")
 	clusterJoinCmd.Flags().StringVar(&joinTokenFile, "token-file", "", "File containing the join token")
-	clusterJoinCmd.Flags().StringVar(&joinCAHashFlag, "ca-hash", "", "Pinned master certificate hash (sha256:...)")
+	clusterJoinCmd.Flags().StringVar(&joinCAHashFlag, "ca-hash", "", "Pinned cluster CA hash (sha256:..., printed by 'cluster token')")
+	clusterJoinCmd.Flags().BoolVar(&joinControlPlane, "control-plane", false, "Join as another master (HA control plane; run 3 or 5 masters)")
 	clusterLeaveCmd.Flags().BoolVar(&leaveForce, "force", false, "On the master: tear down the cluster even if workers remain")
 
 	clusterDeployCmd.Flags().StringVarP(&appName, "name", "n", "", "App name")
