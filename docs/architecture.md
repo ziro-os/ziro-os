@@ -145,7 +145,7 @@ flowchart LR
 
 Known limits, each addressed by a later phase:
 
-- Secrets are 0600 files (and Raft data) on every master, not encrypted at rest; encryption with a KMS- or TPM-sealed key is Phase 5.
+- Secrets at rest are sealed with a cluster data key. Its protection is only as strong as each master's key provider (`file`, `tpm` or `command` for KMS/HSM).
 - Clusters without the pod network police per node rather than per container (`cluster network enable` migrates them).
 - Root on the master can rewrite the whole audit chain. Ship the log off-host, or record `ziroctl audit verify`'s head hash externally.
 
@@ -169,7 +169,7 @@ Known limits, each addressed by a later phase:
   - A cluster CA replaces the single-certificate pin. Master certificates are issued from CSRs, and existing agents receive the CA over the already-pinned channel (the old certificate is still served to clients without SNI).
   - Deferred: secrets encryption at rest moves to Phase 5 (a key on the same disk protects little; it needs a KMS or TPM).
 - **Phase 5: enterprise.**
-  - Secrets encrypted at rest with a KMS- or TPM-sealed key.
+  - Secrets encrypted at rest: shipped (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
   - Scoped API tokens (viewer / operator / admin).
   - `cluster rotate-certs` and node-token rotation.
   - Registry allowlist and `nerdctl --verify=cosign` for signed images.

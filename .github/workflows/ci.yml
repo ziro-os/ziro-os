@@ -35,11 +35,14 @@ jobs:
       - name: Install OpenSSH for effective-policy tests
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-server
+          sudo apt-get install -y openssh-server libssl-dev
           sudo mkdir -p /run/sshd
 
       - name: Run Unit Tests (ziroctl & ziropkg)
         run: make test-unit
+
+      - name: TPM 2.0 seal/unseal against the TPM simulator (cgo + OpenSSL headers)
+        run: cd tools/ziroctl && go test -tags tpmsim -run TestTPMSeal -v ./cmd
 
       - name: Test installer bootstrap transport
         run: python3 tests/security/test-userdata-transport.py

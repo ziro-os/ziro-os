@@ -150,7 +150,8 @@ func createBackup(out string) (string, error) {
 		// Cluster app secrets stay on the master unless explicitly requested.
 		tarArgs = append(tarArgs, "--exclude", strings.TrimPrefix(clusterSecretsPath(), "/"))
 		// The Raft log and snapshots replicate those secrets; CA and master keys are credentials.
-		for _, p := range []string{raftDir(), clusterCAKeyPath(), masterKeyPath()} {
+		// sealed.bin is ciphertext and stays in; the data key that opens it does not.
+		for _, p := range []string{raftDir(), clusterCAKeyPath(), masterKeyPath(), dekPath()} {
 			tarArgs = append(tarArgs, "--exclude", strings.TrimPrefix(p, "/"))
 		}
 	}

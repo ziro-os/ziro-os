@@ -322,7 +322,8 @@ var clusterAgentCmd = &cobra.Command{
 			ag.mu.Unlock()
 
 			var resp heartbeatResponse
-			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh}
+			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh,
+				Caps: nodeCaps}
 			// Last good master first, then the configured one, then every other master (failover).
 			var err error
 			for _, addr := range uniqueAddrs(active, cfg.MasterAddr, cfg.Masters) {

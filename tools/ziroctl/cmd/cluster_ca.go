@@ -73,7 +73,11 @@ func serial() *big.Int {
 
 // ensureCA creates the cluster CA once (ECDSA P-256, 10 years).
 func ensureCA(st *ClusterState) error {
-	if st.CACert != "" && st.CAKey != "" {
+	if st.CACert != "" {
+		// Never mint a second CA over an existing one: every node trusts the first.
+		if st.CAKey == "" {
+			return errors.New("the cluster CA key is not available on this master")
+		}
 		return nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

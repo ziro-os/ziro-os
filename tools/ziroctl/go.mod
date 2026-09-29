@@ -3,6 +3,7 @@ module github.com/ziro-os/ziroctl
 go 1.27.1
 
 require (
+	github.com/google/go-tpm v0.9.8
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/raft v1.8.0
 	github.com/hashicorp/raft-boltdb/v2 v2.4.2
@@ -13,6 +14,7 @@ require (
 require (
 	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/fatih/color v1.19.0 // indirect
+	github.com/google/go-tpm-tools v0.4.10 // indirect
 	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/go-metrics v0.7.0 // indirect
 	github.com/hashicorp/go-msgpack/v2 v2.1.5 // indirect

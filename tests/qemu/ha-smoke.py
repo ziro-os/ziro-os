@@ -103,8 +103,13 @@ def main():
         ok, out = bs.retry(n1, "ziroctl cluster nodes --json", lambda rc, o: o.count('"status": "Ready"') == 3, 120, every=5)
         check("all three nodes Ready", ok, out)
 
-        rc, out = n1.run("ziroctl cluster deploy --name web --image docker.io/library/nginx:alpine --replicas 3", timeout=60)
-        check("deploy web x3", rc == 0, out)
+        rc, out = n1.run("ziroctl cluster secret set db PASS=ha-secret && "
+                         "ziroctl cluster deploy --name web --image docker.io/library/nginx:alpine --replicas 3 --secret db", timeout=60)
+        check("deploy web x3 (with a secret)", rc == 0, out)
+        for i in (1, 2, 3):
+            ok, out = bs.retry(nodes[i], "ziroctl cluster keys status --json",
+                               lambda rc, o: '"sealed": true' in o and re.search(r'"local_key": "(\w+)",\s*"cluster_key": "\1"', o), 120, every=5)
+            check(f"node{i} holds the cluster data key (secrets sealed)", ok, out)
         ok, out = bs.retry(n1, "ziroctl cluster services", lambda rc, o: "3/3 running" in o and "updating" not in o, 400, every=10)
         check("3/3 replicas running", ok, out)
 
@@ -138,6 +143,10 @@ def main():
         check("writes keep working after failover", rc == 0 and "revision 3" in out, out)
         ok, out = bs.retry(survivor, "ziroctl cluster services", lambda rc, o: "3/3 running" in o and "updating" not in o, 400, every=10)
         check("the dead master's replicas are rescheduled (3/3 running on two nodes)", ok, out)
+        rc, names = survivor.run("nerdctl ps --filter label=ziro.app=web --format '{{.Names}}'", timeout=20)
+        name = re.search(r"zc-web-\S+", names)
+        rc, env = survivor.run(f"nerdctl exec {name.group(0) if name else 'missing'} printenv PASS", timeout=20)
+        check("containers started by the new leader still get their secret", "ha-secret" in env, env)
         ok, out = bs.retry(survivor, "ziroctl cluster nodes --json", lambda rc, o: o.count('"status": "Ready"') == 2, 120, every=5)
         check("surviving agents keep reporting to the new leader", ok, out)
         rc, out = survivor.run(f"ziroctl cluster member rm {leader_id} && ziroctl cluster members --json", timeout=60)

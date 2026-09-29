@@ -101,9 +101,12 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - Join is rate-limited per IP, and node descriptions are validated and sanitized.
 - **Node identity:** each node gets its own random 256-bit token. The master stores only its SHA-256. `leave` and `node rm` revoke it.
 - **Secrets:**
-  - Stored `0600` on the master, sent only over the pinned TLS channel to the nodes that run the app, and written to `0600` env files on tmpfs (`/run/ziro/cluster/secrets`).
+  - They are sealed at rest with a cluster data key (AES-256-GCM), in the Raft log, its snapshots and every
+    master's files (`sealed.bin`). See [Secrets at rest](#secrets-at-rest).
+  - They are sent only over the pinned TLS channel to the nodes that run the app, and written to `0600` env
+    files on tmpfs (`/run/ziro/cluster/secrets`).
   - They never appear in argv or `ps`.
-  - Backups leave them out unless you pass `--include-secrets`.
+  - Backups contain only the sealed form; the data key is left out unless you pass `--include-secrets`.
 - **Exposure:**
   - `cluster init`/`join` opens tcp/7443 and udp/51821 and trusts `ziro0`, whose peers are authenticated by their WireGuard keys. The network policy then narrows that trust. A firewall the admin disabled stays disabled.
   - The admin REST API stays on `127.0.0.1:8443`.
@@ -150,6 +153,42 @@ ziroctl cluster member rm <master-id>   # remove a dead master (and revoke its n
   it.
 - **Ports:** tcp/7443 (cluster API) and tcp/7444 (Raft; mutual TLS with CA-signed master
   certificates only) on masters.
+
+## Secrets at rest
+
+The cluster secrets and the CA key are sealed with one random **cluster data key** (AES-256-GCM, bound to
+the key's ID). The seal covers the Raft log, its snapshots and each master's files. Each master keeps its
+own copy of that key, wrapped by a **key provider** it chooses:
+
+| Provider | Protects against | Setup |
+|---|---|---|
+| `file` (default) | copied Raft data, backups | none: the key is a 0600 file, excluded from backups |
+| `tpm` | the disk or its image leaving the machine | TPM 2.0 (bare metal, cloud vTPM) and the `custom` kernel flavor (the `alpine` kernel has no TPM drivers) |
+| `command` | anything short of KMS or HSM compromise | two executables that call your KMS, Vault or HSM |
+
+```sh
+ziroctl cluster keys status                       # provider, and whether this master holds the key
+ziroctl cluster keys provider tpm                 # re-wrap this master's copy (per master)
+ziroctl cluster keys provider command --wrap /usr/local/bin/kms-wrap --unwrap /usr/local/bin/kms-unwrap
+```
+
+- **Command provider contract:** no shell. `wrap` reads the key (base64) on stdin and prints a wrapped blob.
+  `unwrap` reads that blob and prints the key (base64). Every new wrapping is unwrapped and checked before it
+  replaces the old one, and a provider that returns a different key is refused.
+- **TPM provider:** the key is sealed under the owner-hierarchy SRK. Sessions are salted and encrypted, so
+  the key never crosses the TPM bus in clear. It is not bound to PCRs, so kernel and OS upgrades keep
+  working.
+- **Distribution:** a master without the key fetches it from another master over mutual TLS (master
+  certificates only; every fetch is audited) and wraps it with its own provider. A leader that cannot open
+  the secrets hands leadership to a master that can, and it never hands out assignments without their
+  secrets.
+- **Upgrade:** automatic, and it waits for every master. The leader seals only once every master reports that
+  it understands sealed state, so the order of a rolling upgrade does not matter. Each master then compacts
+  its Raft log once, so no pre-seal plaintext stays in the log or snapshots. Freed database pages may still
+  hold old bytes, as with any deleted file.
+- **Keep one master's key recoverable:** a KMS key, a working TPM, or a backup made with `--include-secrets`.
+  Without the data key, sealed secrets cannot be recovered. Downgrading a master below this version after
+  sealing is not supported.
 
 ## Pod network
 
