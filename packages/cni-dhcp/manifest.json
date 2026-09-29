@@ -1,6 +1,6 @@
 {
   "name": "cni-dhcp",
-  "version": "1.9.1-ziro.1",
+  "version": "1.9.1-ziro.2",
   "source": "github.com/containernetworking/plugins/plugins/ipam/dhcp",
   "dependencies": {
     "github.com/containernetworking/plugins": "v1.9.1",

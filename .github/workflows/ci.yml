@@ -35,14 +35,25 @@ jobs:
       - name: Install OpenSSH for effective-policy tests
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-server libssl-dev
+          sudo apt-get install -y openssh-server swtpm
           sudo mkdir -p /run/sshd
 
       - name: Run Unit Tests (ziroctl & ziropkg)
         run: make test-unit
 
-      - name: TPM 2.0 seal/unseal against the TPM simulator (cgo + OpenSSL headers)
-        run: cd tools/ziroctl && go test -tags tpmsim -run TestTPMSeal -v ./cmd
+      - name: TPM 2.0 seal/unseal against swtpm (software TPM)
+        run: |
+          swtpm socket --tpm2 --server type=tcp,port=2321 --ctrl type=tcp,port=2322 \
+            --tpmstate dir="$(mktemp -d)" --flags not-need-init,startup-clear &
+          sleep 1
+          cd tools/ziroctl && ZIRO_TPM_SIM=127.0.0.1:2321 go test -run TestTPMSeal -v ./cmd
+
+      - name: Vulnerability scan (govulncheck, reachable code)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          (cd tools/ziroctl && govulncheck ./...)
+          (cd tools/ziropkg && govulncheck ./...)
+          (cd packages/cni-dhcp && GOOS=linux govulncheck github.com/containernetworking/plugins/plugins/ipam/dhcp)
 
       - name: Test installer bootstrap transport
         run: python3 tests/security/test-userdata-transport.py
