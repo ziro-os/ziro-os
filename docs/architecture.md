@@ -65,3 +65,111 @@ Ziro-OS implements standard OCI specifications:
 |---|---|---|---|
 | **x86_64** (amd64) | `vmlinuz-x86_64` (bzImage) | `ttyS0`, `tty0` | QEMU, KVM, VMware, VirtualBox, Proxmox, AWS EC2, GCP Compute |
 | **arm64** (aarch64) | `vmlinuz-arm64` (Image) | `ttyAMA0`, `tty0` | Apple Silicon (QEMU HVF), AWS Graviton, Ampere Altra, Raspberry Pi |
+
+---
+
+## 5. Cluster Platform Architecture
+
+Everything below ships inside `ziroctl`: one static Go binary, and no etcd, kube-proxy or sidecar images.
+A component is a subcommand run as a `ziro-init` service. **Status** shows what exists today and what is designed but not yet built.
+
+| Component | Command / service | Runs on | Status |
+|---|---|---|---|
+| CLI + admin API | `ziroctl`, `ziro-api` (127.0.0.1:8443) | every host | shipped |
+| Control plane | `cluster serve` → `cluster-master` (TLS :7443) | master(s) | shipped (single master) |
+| Node agent | `cluster agent` → `cluster-agent` | every node | shipped |
+| Mesh | WireGuard `ziro0`, udp/51821, keys distributed by the master | every node | shipped |
+| App network policy | `allow_from` per app → `inet ziro_cluster` nft table per node | every node | shipped |
+| Audit log | hash-chained JSONL, `/var/log/ziro/audit.log` | every host | shipped |
+| Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 | nodes labelled gateway | Phase 2 |
+| Pod network + DNS | per-node /24 over WireGuard, DNS responder `<app>.cluster.ziro` | every node | Phase 3 |
+| HA control plane | 3 or 5 masters with Raft, cluster CA | masters | Phase 4 |
+| Enterprise controls | scoped API tokens, cert rotation, signed-image policy, `/metrics` | all | Phase 5 |
+
+```mermaid
+flowchart LR
+  subgraph Internet
+    U[Clients]
+  end
+  subgraph Cluster["Ziro cluster (WireGuard mesh ziro0, 10.200.0.0/16)"]
+    direction LR
+    GW["zirogate (Phase 2)<br/>TLS, routing, rate limits"]
+    subgraph M["master(s)"]
+      CP["cluster-master<br/>state.json + secrets.json"]
+      A1[cluster-agent]
+    end
+    subgraph W["worker N"]
+      A2["cluster-agent<br/>nerdctl + nft ziro_cluster"]
+      C2[(app replicas)]
+    end
+  end
+  U -->|443| GW -->|mesh, policy-checked| C2
+  A2 -->|"heartbeat 10s: pinned TLS + node token"| CP
+  CP -->|"assignments, peers, endpoints, policy, secrets"| A2
+  A2 --> C2
+```
+
+### 5.1 Control loop
+
+1. **Join.** The worker pins the master's certificate hash (`--ca-hash`) and presents the expiring join token. It receives a node ID, a per-node 256-bit token (the master stores only its SHA-256) and a mesh IP.
+2. **Heartbeat** (every 10s, the only channel). The agent reports running containers, start failures and mesh errors. The reply is the node's complete desired state:
+   - container assignments, with secrets only for the apps the node runs
+   - WireGuard peers
+   - service endpoints
+   - its **MeshPolicy**
+3. **Converge.** The agent applies the policy first, then the mesh, then `/etc/hosts`. Containers run in a separate loop, so slow image pulls never delay heartbeats.
+4. **Schedule** (master). Replicas are placed least-loaded with host-port anti-affinity. Rollouts replace one replica at a time and pause on failure. A replica is rescheduled after 3 failed starts or 30s of node silence.
+5. **Partition behaviour.** Agents keep running workloads as they are while the master is unreachable, and never tear anything down on a network blip.
+
+### 5.2 Network policy (shipped)
+
+- Rules are attached to the **destination** app: `allow_from: ["web", "worker"]`, or `"*"` for any cluster app. There is no separate policy object to keep in sync.
+- New clusters start with `policy default deny`. Clusters created before policies existed stay on `allow` until an operator switches them.
+- **Enforcement:**
+  - Each agent owns an `inet ziro_cluster` table (input + forward, priority -10). It accepts established traffic and ICMP, then `ip saddr {allowed node mesh IPs}` to each app's published port, matched with `ct original proto-dst` so the rule holds before and after CNI DNAT. Everything else from `ziro0` is dropped.
+  - The host firewall (`inet ziro`) still trusts `ziro0`. In nftables, a drop in any base chain is final, so the cluster table narrows that trust without the two tables conflicting.
+- **Fail closed.** If the policy can't be applied, the agent doesn't configure the mesh and reports `MeshError` (shown in `cluster nodes`). A failed nft transaction leaves the previous rules in place.
+- **Granularity.** Sources are node mesh IPs, because containers are masqueraded to their node. Phase 3 tightens this to container IPs.
+
+### 5.3 Trust boundaries & threat model
+
+| Boundary | Control |
+|---|---|
+| Worker → master | TLS pinned to the master certificate hash; bearer node token checked in constant time; per-IP rate limit; 1 MiB body limit; audit record for rejected credentials (at most one per IP per 10 min) |
+| Master → worker data | Delivered only in heartbeat replies over that channel; the agent re-validates everything it passes to nft or nerdctl (IPs, ports, image after `--`) |
+| Node ↔ node | WireGuard (Curve25519 keys per node, distributed by the master); app policy on `ziro0` |
+| Secrets | `0600` on the master; sent only to nodes running the app; written to tmpfs env files, never argv; excluded from backups unless `--include-secrets`; never in audit records |
+| Operator actions | Every mutating `ziroctl` command, ziro-api service action and cluster join/leave is written to the audit chain, with `KEY=VALUE` values and credential flags redacted |
+| Admin API | Loopback only; bearer token; rate limited |
+
+Known limits, each addressed by a later phase:
+
+- The single master is a scheduling SPOF (Phase 4).
+- Policy is per node, not per container (Phase 3).
+- Root on the master can rewrite the whole audit chain. Ship the log off-host, or record `ziroctl audit verify`'s head hash externally.
+
+### 5.4 Roadmap designs
+
+- **Phase 2: zirogate.**
+  - Routes (`host`, `path_prefix` → `app:port`, `tls: auto|off`, `allow_cidrs`, `rate_rps`, `max_body`) live in cluster state and are delivered in heartbeats to nodes labelled `gateway`.
+  - The proxy is `httputil.ReverseProxy`. It round-robins over running endpoints on the mesh, marks an endpoint down for 10s after a dial error, and is itself an `allow_from` source, so apps opt in to being exposed.
+  - TLS: `autocert` (HTTP-01), TLS 1.2 minimum.
+  - Protection: HSTS and security headers; strict header, read and idle timeouts; per-client token bucket; JSON access log.
+  - `gateway peer add` issues WireGuard client configs for operator or site access to mesh-only apps.
+- **Phase 3: dynamic networking.**
+  - `--pod-cidr` (default `10.201.0.0/16`) gives each node its own /24. WireGuard AllowedIPs become mesh IP + pod CIDR.
+  - A `ziro-cluster` CNI bridge (MTU 1420) with masquerade only for traffic leaving the cluster.
+  - A stdlib DNS responder in the agent answers `<app>.cluster.ziro` with live container IPs. It replaces the hosts block, so endpoint changes no longer need a container restart.
+  - Policy sets switch to container IPs.
+- **Phase 4: HA.**
+  - `cluster init --ha` and `cluster join --control-plane` form a 3/5-member `hashicorp/raft` group.
+  - Raft replicates only the *desired* state (apps, placement, tokens, policy, routes, secrets). Node liveness stays soft state on the leader, so heartbeats never touch the log, and a new leader grants a 30s grace period.
+  - Followers answer writes with a redirect to the leader, and agents hold the master list.
+  - A cluster CA replaces the single-certificate pin. Existing clusters receive the new pin over the already-pinned channel.
+  - Secrets are encrypted at rest with AES-GCM.
+- **Phase 5: enterprise.**
+  - Scoped API tokens (viewer / operator / admin).
+  - `cluster rotate-certs` and node-token rotation.
+  - Registry allowlist and `nerdctl --verify=cosign` for signed images.
+  - Prometheus `/metrics`.
+  - `docs/compliance.md` mapping controls to CIS and SOC 2.

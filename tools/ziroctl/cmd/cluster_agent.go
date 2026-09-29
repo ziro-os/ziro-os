@@ -216,7 +216,8 @@ var clusterAgentCmd = &cobra.Command{
 			}
 		}()
 
-		lastErr, lastMesh := "", ""
+		lastErr, lastMesh, lastPolicy := "", "", ""
+		var policyAt time.Time
 		for {
 			actual, _ := listClusterContainers()
 			running := []string{}
@@ -239,21 +240,37 @@ var clusterAgentCmd = &cobra.Command{
 
 			var resp heartbeatResponse
 			err := clusterPost(cfg.MasterAddr, cfg.CAHash, "/cluster/v1/heartbeat", nodeAuth(cfg),
-				heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort}, &resp)
+				heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh}, &resp)
 			// On heartbeat failure the master is unreachable: keep workloads running as they are,
 			// never tear down on a network blip.
 			if err == nil {
 				ag.mu.Lock()
 				ag.desired, ag.synced = resp.Assignments, true
 				ag.mu.Unlock()
-				merr := applyMesh(resp.MeshIP, resp.MeshPrefix, resp.Peers)
+				// Policy first, and fail closed: in deny mode the mesh is not (re)configured
+				// until its policy is in place. A failed nft transaction leaves the previous
+				// table intact. Re-applied every minute in case someone flushed the ruleset.
+				var merr error
+				if script, _ := buildPolicyScript(resp.Policy); script != lastPolicy || time.Since(policyAt) > time.Minute {
+					if merr = applyClusterPolicy(resp.Policy); merr == nil {
+						lastPolicy, policyAt = script, time.Now()
+					} else {
+						lastPolicy = ""
+					}
+				}
+				if merr == nil {
+					merr = applyMesh(resp.MeshIP, resp.MeshPrefix, resp.Peers)
+				}
 				if merr == nil {
 					merr = writeHostsBlock(hostsFile, resp.Endpoints)
 				}
-				if msg := fmt.Sprint(merr); merr != nil && msg != lastMesh {
+				if merr != nil && merr.Error() != lastMesh {
 					fmt.Printf("[agent] mesh: %v\n", merr)
 				}
-				lastMesh = fmt.Sprint(merr)
+				lastMesh = ""
+				if merr != nil {
+					lastMesh = merr.Error()
+				}
 			}
 			// Log errors only when they change, so a persistent failure cannot flood the log.
 			if msg := fmt.Sprint(err); err != nil && msg != lastErr {

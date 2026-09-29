@@ -26,7 +26,9 @@ monitors containerd status, and enforces security configurations.`,
 
 // Execute runs the CLI; any command error exits non-zero so scripts and fleet tooling see it.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	c, err := rootCmd.ExecuteC()
+	auditCommand(c, err)
+	if err != nil {
 		if jsonOutput {
 			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "error", "error": err.Error()})
 		} else {

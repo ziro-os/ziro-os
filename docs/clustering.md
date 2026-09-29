@@ -37,14 +37,15 @@ The join token expires after 24 hours (`--token-ttl`, `0` = never). Print the jo
 | Maintenance | `ziroctl cluster node cordon\|uncordon\|drain <node>` |
 | Remove a dead worker and revoke its token | `ziroctl cluster node rm <node>` |
 | Secrets (names and keys are listed, never values) | `ziroctl cluster secret set\|rm\|ls` |
-| Machine-readable output | add `--json` to `status`, `nodes`, `services`, `endpoints`, `secret ls` |
+| Network policy: who may reach an app over the mesh | `ziroctl cluster deploy --name api --allow-from web,worker` (`'*'` = any app), `cluster policy ls`, `cluster policy default deny\|allow` |
+| Machine-readable output | add `--json` to `status`, `nodes`, `services`, `endpoints`, `secret ls`, `policy ls` |
 
 An `apps.json` manifest uses the same fields as the API:
 
 ```json
 [{"name": "web", "image": "nginx:alpine", "replicas": 3, "port": "8080:80", "env": {"MODE": "prod"}},
  {"name": "api", "image": "ghcr.io/acme/api:1.4", "replicas": 2, "port": "9000:9000", "mesh_only": true,
-  "secrets": ["db-creds"], "args": ["serve"]}]
+  "secrets": ["db-creds"], "args": ["serve"], "allow_from": ["web"]}]
 ```
 
 ## How it works
@@ -76,6 +77,20 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - Agents keep an `<app>.cluster.ziro` block in `/etc/hosts` that lists only nodes with a running replica, and cluster containers get the same entries (`--add-host`, refreshed when the container is recreated).
   - `--mesh-only` publishes a port only on the mesh IP.
 
+## Network policy
+
+- New clusters start with `policy default deny`. Traffic that arrives over the mesh reaches an app's port only
+  from nodes that run an app named in that app's `allow_from`. Traffic from anywhere else on `ziro0` is dropped;
+  ICMP is still allowed.
+- Changing `allow_from` doesn't create a new revision or restart containers. Agents apply it within one heartbeat.
+- Rules are per node, because containers are masqueraded to their node's mesh IP. Two apps on one node share an
+  identity.
+- Public (non `--mesh-only`) ports are still governed by the host firewall.
+- Clusters created before policies existed stay on `allow`. Switch with `ziroctl cluster policy default deny`
+  after adding `allow_from` to apps that talk to each other. `cluster policy ls` shows the admitted node IPs.
+- Enforcement lives in the agent's `inet ziro_cluster` nftables table. If it can't be applied, the node reports
+  `MeshError` in `cluster nodes` and the mesh isn't configured, so the node fails closed.
+
 ## Security model
 
 - **Join:**
@@ -88,7 +103,7 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - They never appear in argv or `ps`.
   - Backups leave them out unless you pass `--include-secrets`.
 - **Exposure:**
-  - `cluster init`/`join` opens tcp/7443 and udp/51821 and trusts `ziro0`, whose peers are authenticated by their WireGuard keys. A firewall the admin disabled stays disabled.
+  - `cluster init`/`join` opens tcp/7443 and udp/51821 and trusts `ziro0`, whose peers are authenticated by their WireGuard keys. The network policy then narrows that trust. A firewall the admin disabled stays disabled.
   - The admin REST API stays on `127.0.0.1:8443`.
   - `/api/v1/cluster` returns a redacted view with no tokens or secrets.
 - **Input:** app names, images, ports, env keys and secrets are validated, and images are passed after `--`.

@@ -65,6 +65,7 @@ type ClusterNode struct {
 	MeshIP     string            `json:"mesh_ip,omitempty"`
 	WGPubKey   string            `json:"wg_pubkey,omitempty"`
 	WGPort     int               `json:"wg_port,omitempty"`
+	MeshError  string            `json:"mesh_error,omitempty"` // last mesh/policy apply error reported by the agent
 	LastSeen   time.Time         `json:"last_seen"`
 }
 
@@ -72,11 +73,12 @@ type ClusteredApp struct {
 	Name      string            `json:"name"`
 	Image     string            `json:"image"`
 	Replicas  int               `json:"replicas"`
-	Port      string            `json:"port,omitempty"`      // host:container[/proto]
-	Env       map[string]string `json:"env,omitempty"`       // plain config (visible in the spec)
-	Args      []string          `json:"args,omitempty"`      // command/arguments after the image
-	Secrets   []string          `json:"secrets,omitempty"`   // cluster secrets injected as env files
-	MeshOnly  bool              `json:"mesh_only,omitempty"` // publish Port on the mesh IP only
+	Port      string            `json:"port,omitempty"`       // host:container[/proto]
+	Env       map[string]string `json:"env,omitempty"`        // plain config (visible in the spec)
+	Args      []string          `json:"args,omitempty"`       // command/arguments after the image
+	Secrets   []string          `json:"secrets,omitempty"`    // cluster secrets injected as env files
+	MeshOnly  bool              `json:"mesh_only,omitempty"`  // publish Port on the mesh IP only
+	AllowFrom []string          `json:"allow_from,omitempty"` // apps (or "*") allowed to reach Port over the mesh
 	Revision  int               `json:"revision,omitempty"`
 	CreatedAt string            `json:"created_at,omitempty"`
 }
@@ -99,6 +101,9 @@ type ClusterState struct {
 	Replicas   []Replica                 `json:"replicas"`
 	History    map[string][]ClusteredApp `json:"history,omitempty"` // previous specs, newest last
 	NodeTokens map[string]string         `json:"node_tokens"`       // node id -> sha256(node token)
+	// PolicyDefault is "deny" (mesh traffic to app ports needs an allow_from rule) or
+	// "allow"/"" (clusters created before policies existed keep working unchanged).
+	PolicyDefault string `json:"policy_default,omitempty"`
 }
 
 func isClusterMaster() bool {
@@ -362,6 +367,16 @@ func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 			return fmt.Errorf("invalid env %q", k)
 		}
 	}
+	if len(a.AllowFrom) > 256 {
+		return fmt.Errorf("too many allow_from entries")
+	}
+	for _, from := range a.AllowFrom {
+		if from != "*" {
+			if err := validName(from); err != nil {
+				return fmt.Errorf("allow_from: %w", err)
+			}
+		}
+	}
 	for _, s := range a.Secrets {
 		if err := validName(s); err != nil {
 			return err
@@ -527,7 +542,8 @@ var clusterInitCmd = &cobra.Command{
 		}
 
 		err = withState(func(st *ClusterState) error {
-			*st = ClusterState{NodeTokens: map[string]string{cfg.NodeID: hashToken(nodeToken)}, History: map[string][]ClusteredApp{}}
+			*st = ClusterState{NodeTokens: map[string]string{cfg.NodeID: hashToken(nodeToken)}, History: map[string][]ClusteredApp{},
+				PolicyDefault: "deny"}
 			st.Nodes = []ClusterNode{{
 				ID: cfg.NodeID, Hostname: host, IP: ip, Role: "master", Status: "Ready",
 				CPUs: runtime.NumCPU(), MemTotal: inspectSystem().TotalMemMB, LastSeen: time.Now(),
@@ -566,7 +582,8 @@ func printJoinCommand(cfg *ClusterConfig) {
 }
 
 // openClusterFirewall allows the control plane (tcp) and mesh (udp) ports and trusts the
-// WireGuard mesh interface (peers are authenticated by their keys). An admin-disabled
+// WireGuard mesh interface (peers are authenticated by their keys); the cluster agent's
+// ziro_cluster nft table then narrows ziro0 to the app policy (cluster policy). An admin-disabled
 // firewall stays disabled; the boot default (no config file) is enabled.
 func openClusterFirewall(port int) {
 	fw := loadFirewallConfig()
@@ -750,6 +767,9 @@ var clusterNodesCmd = &cobra.Command{
 				if n.Cordoned {
 					status += ",Cordoned"
 				}
+				if n.MeshError != "" {
+					status += ",MeshError"
+				}
 				fmt.Printf("%-14s %-16s %-16s %-14s %-7s %-19s %-5d %-8d %s ago\n", n.ID, n.Hostname, n.IP, n.MeshIP, n.Role, status, n.CPUs, count,
 					time.Since(n.LastSeen).Round(time.Second))
 			}
@@ -766,6 +786,7 @@ var (
 	appSecrets  []string
 	appArgs     []string
 	appMeshOnly bool
+	appAllow    []string
 	applyFile   string
 )
 
@@ -827,6 +848,14 @@ var clusterDeployCmd = &cobra.Command{
 			}
 			if f.Changed("arg") {
 				app.Args = appArgs
+			}
+			if f.Changed("allow-from") {
+				app.AllowFrom = nil
+				for _, a := range appAllow {
+					if a = strings.TrimSpace(a); a != "" {
+						app.AllowFrom = append(app.AllowFrom, a)
+					}
+				}
 			}
 			if f.Changed("secret") {
 				app.Secrets = appSecrets
@@ -926,7 +955,8 @@ var clusterRollbackCmd = &cobra.Command{
 			}
 			prev := h[len(h)-1]
 			st.History[args[0]] = h[:len(h)-1]
-			prev.Replicas = cur.Replicas // rollback restores the spec, not the scale
+			prev.Replicas = cur.Replicas   // rollback restores the spec, not the scale
+			prev.AllowFrom = cur.AllowFrom // ... nor an older (possibly looser) network policy
 			return &prev, nil
 		})
 	},
@@ -1301,6 +1331,7 @@ func init() {
 	clusterDeployCmd.Flags().StringArrayVar(&appSecrets, "secret", nil, "Cluster secret to inject as env (repeatable)")
 	clusterDeployCmd.Flags().StringArrayVar(&appArgs, "arg", nil, "Command/argument passed after the image (repeatable, in order)")
 	clusterDeployCmd.Flags().BoolVar(&appMeshOnly, "mesh-only", false, "Publish --port only on the node's mesh IP (not the public interface)")
+	clusterDeployCmd.Flags().StringSliceVar(&appAllow, "allow-from", nil, "Apps allowed to reach --port over the mesh (comma-separated, '*' = any cluster app, '' = none)")
 	clusterApplyCmd.Flags().StringVarP(&applyFile, "file", "f", "", "JSON manifest")
 	_ = clusterApplyCmd.MarkFlagRequired("file")
 
@@ -1310,7 +1341,8 @@ func init() {
 	clusterCmd.AddCommand(clusterInitCmd, clusterJoinCmd, clusterStatusCmd, clusterNodesCmd, clusterDeployCmd,
 		clusterApplyCmd, clusterScaleCmd, clusterRollbackCmd, clusterRemoveCmd, clusterServicesCmd,
 		clusterEndpointsCmd, clusterNodeCmd, clusterTokenCmd, clusterSecretCmd, clusterLeaveCmd,
-		clusterServeCmd, clusterAgentCmd)
+		clusterPolicyCmd, clusterServeCmd, clusterAgentCmd)
+	clusterPolicyCmd.AddCommand(clusterPolicyDefaultCmd, clusterPolicyLsCmd)
 	rootCmd.AddCommand(clusterCmd)
 }
 

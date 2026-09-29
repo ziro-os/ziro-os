@@ -87,6 +87,18 @@ def main():
             spread = False
         check("one replica per node (port anti-affinity)", spread, out)
 
+        # New clusters default to deny: node2 must not reach the master's replica over the mesh
+        # until web allows itself (both nodes run web).
+        rc, out = w.run("wget -qO- -T5 http://10.200.0.1:8080 >/dev/null && echo REACHED || echo BLOCKED", timeout=30)
+        check("policy: mesh traffic to an app is denied by default", "BLOCKED" in out, out)
+        rc, out = m.run("ziroctl cluster deploy --name web --allow-from web")
+        check("policy change does not start a new revision", rc == 0 and "unchanged" in out, out)
+        ok, out = bs.retry(w, "wget -qO- -T5 http://10.200.0.1:8080 | grep -o 'Welcome to nginx'",
+                           lambda rc, o: "Welcome to nginx" in o, 60)
+        check("policy: allow_from admits the allowed app's nodes", ok, out)
+        rc, out = m.run("ziroctl cluster policy ls --json")
+        check("policy ls shows the rule", '"default": "deny"' in out and '"10.200.0.2"' in out, out)
+
         ok, out = bs.retry(w, "grep -c 'web.cluster.ziro' /etc/hosts; wget -qO- -T5 http://web.cluster.ziro:8080 | grep -o 'Welcome to nginx'",
                            lambda rc, o: "Welcome to nginx" in o, 90)
         check("service discovery: web.cluster.ziro over the mesh", ok, out)
@@ -106,6 +118,9 @@ def main():
         rc, out = m.run("ziroctl cluster rollback web")
         ok, out = bs.retry(m, "ziroctl cluster services", lambda rc, o: "2/2 running" in o and "updating" not in o and "error" not in o, 300, every=10)
         check("rollback restores a healthy app", ok, out)
+
+        rc, out = m.run("ziroctl audit verify && ziroctl audit log | grep -c -e 'cluster deploy' -e 'cluster node join'")
+        check("audit: chain intact and records deploys and joins", rc == 0 and "chain intact" in out, out)
     finally:
         for c in (w, m):
             if c:

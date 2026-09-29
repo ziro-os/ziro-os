@@ -108,6 +108,7 @@ func teardownMesh() {
 	if linkExists(meshIface) {
 		_ = run("ip", "link", "del", "dev", meshIface)
 	}
+	removeClusterPolicy()
 	_ = writeHostsBlock(hostsFile, nil)
 	_ = os.Remove(meshKeyPath())
 }
