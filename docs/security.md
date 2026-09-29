@@ -61,8 +61,14 @@ Output:
   are active from boot. A service's PID is only signalled when its argv matches the service definition.
 - **Firewall**: rules live in their own `inet ziro` nftables table. CNI, nerdctl, WireGuard and kube-proxy rules
   are never flushed. ICMP/ICMPv6 are allowed, and so is SSH (22). Inputs are validated, and nft errors are reported.
-- **REST API**: binds `127.0.0.1:8443` by default, CORS is off, and the token is checked in constant time and never
+- **REST API**: binds `127.0.0.1:8443` by default, CORS is off, and tokens are checked in constant time and never
   logged. To expose it: `ziroctl api start --bind 0.0.0.0` plus `ziroctl firewall allow 8443`.
+  - Tokens are scoped: `ziroctl api token create <name> --role viewer|operator|admin [--ttl 90d]` prints the token
+    once. Only its SHA-256 is stored (`/etc/ziro/api-tokens.json`, 0600).
+  - `viewer` can only read. `operator` can also act (for example, restart a service). `admin` can do everything.
+  - Tokens expire (90 days by default). `ziroctl api token ls` lists them and `ziroctl api token revoke` removes one.
+  - Every action is audited under the token's name.
+  - The pre-RBAC token in `/etc/ziro/api.token` still works as admin; delete the file to disable it.
 - **Sentinel**: alert-only by default. Use `ziroctl security monitor --enforce` to SIGKILL CRITICAL detections.
   File integrity is checked against a baseline in `/etc/ziro/fim.db`. Refresh it after upgrades with
   `ziroctl security harden`.
@@ -86,6 +92,11 @@ Output:
   snapshots and files. Each master wraps its copy with a `file`, `tpm` (TPM 2.0, salted and encrypted sessions)
   or `command` (KMS/Vault/HSM) provider. Masters fetch the key from each other only over mutual TLS, and every
   fetch is audited. See [clustering.md](clustering.md#secrets-at-rest).
+- **Credential rotation**: node tokens rotate automatically every 30 days, and at once with
+  `ziroctl cluster rotate tokens`. The agent generates the new token and sends it over the authenticated channel. The
+  previous token stays valid for an hour, and using it triggers another rotation, so a lost reply never locks a node
+  out. Master certificates renew 30 days before expiry, and at once with `ziroctl cluster rotate certs`. Rotating the
+  cluster CA is not supported yet; it is valid for 10 years.
 - **Audit log**: every mutating `ziroctl` command run as root, ziro-api service action, and cluster join, leave
   or rejected credential is appended to `/var/log/ziro/audit.log` (0600). Each record holds the SHA-256 of the
   previous one. `ziroctl audit verify` exits non-zero at the first changed or removed record, and

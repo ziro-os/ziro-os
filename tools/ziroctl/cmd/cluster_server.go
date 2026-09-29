@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,13 +59,14 @@ type joinResponse struct {
 }
 
 type heartbeatRequest struct {
-	Containers int               `json:"containers"`
-	Running    []string          `json:"running"`
-	Failed     map[string]string `json:"failed,omitempty"` // container -> start error
-	WGPubKey   string            `json:"wg_pubkey,omitempty"`
-	WGPort     int               `json:"wg_port,omitempty"`
-	MeshError  string            `json:"mesh_error,omitempty"` // mesh/policy apply failure on the node
-	Caps       []string          `json:"caps,omitempty"`       // features this node's ziroctl supports
+	Containers  int               `json:"containers"`
+	Running     []string          `json:"running"`
+	Failed      map[string]string `json:"failed,omitempty"` // container -> start error
+	WGPubKey    string            `json:"wg_pubkey,omitempty"`
+	WGPort      int               `json:"wg_port,omitempty"`
+	MeshError   string            `json:"mesh_error,omitempty"`   // mesh/policy apply failure on the node
+	Caps        []string          `json:"caps,omitempty"`         // features this node's ziroctl supports
+	RotateToken string            `json:"rotate_token,omitempty"` // a new node token (64 hex), replacing the one this request uses
 }
 
 // Assignment is one container the master wants running on a node.
@@ -98,12 +100,13 @@ type heartbeatResponse struct {
 	Peers       []MeshPeer          `json:"peers,omitempty"`
 	Endpoints   map[string][]string `json:"endpoints,omitempty"` // app -> mesh IPs
 	Policy      *MeshPolicy         `json:"policy,omitempty"`
-	Gateway     *GatewayConfig      `json:"gateway,omitempty"`  // only for nodes labelled gateway
-	CA          string              `json:"ca,omitempty"`       // cluster CA: older agents switch their pin to it
-	Masters     []string            `json:"masters,omitempty"`  // every master's API address (failover)
-	PodCIDR     string              `json:"pod_cidr,omitempty"` // this node's /24 (pod networking on)
-	PodNet      string              `json:"pod_net,omitempty"`  // the cluster pod network
-	PodDNS      map[string][]string `json:"pod_dns,omitempty"`  // app -> running pod IPs (DNS answers)
+	Gateway     *GatewayConfig      `json:"gateway,omitempty"`      // only for nodes labelled gateway
+	CA          string              `json:"ca,omitempty"`           // cluster CA: older agents switch their pin to it
+	Masters     []string            `json:"masters,omitempty"`      // every master's API address (failover)
+	RotateToken bool                `json:"rotate_token,omitempty"` // the node should send a new token
+	PodCIDR     string              `json:"pod_cidr,omitempty"`     // this node's /24 (pod networking on)
+	PodNet      string              `json:"pod_net,omitempty"`      // the cluster pod network
+	PodDNS      map[string][]string `json:"pod_dns,omitempty"`      // app -> running pod IPs (DNS answers)
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -547,21 +550,60 @@ func nodeAuth(cfg *ClusterConfig) string {
 
 // authNode checks "Bearer <node-id>.<token>" against the stored token hash.
 func authNode(st *ClusterState, header string) (*ClusterNode, error) {
+	n, _, err := authNodeToken(st, header, time.Now())
+	return n, err
+}
+
+// authNodeToken also accepts a node's previous token for an hour after a rotation (the reply
+// carrying the switch may have been lost); prev reports that it was used.
+func authNodeToken(st *ClusterState, header string, now time.Time) (n *ClusterNode, prev bool, err error) {
 	cred, ok := strings.CutPrefix(header, "Bearer ")
 	if !ok {
-		return nil, errUnauthorized
+		return nil, false, errUnauthorized
 	}
 	id, tok, ok := strings.Cut(cred, ".")
+	if !ok {
+		return nil, false, errUnauthorized
+	}
+	h := []byte(hashToken(tok))
 	want, known := st.NodeTokens[id]
-	if !ok || !known || subtle.ConstantTimeCompare([]byte(hashToken(tok)), []byte(want)) != 1 {
-		return nil, errUnauthorized
+	switch {
+	case known && subtle.ConstantTimeCompare(h, []byte(want)) == 1:
+	case st.PrevNodeTokens[id].Hash != "" && now.Before(st.PrevNodeTokens[id].Until) &&
+		subtle.ConstantTimeCompare(h, []byte(st.PrevNodeTokens[id].Hash)) == 1:
+		prev = true
+	default:
+		return nil, false, errUnauthorized
 	}
-	n := st.node(id)
-	if n == nil {
-		return nil, errUnauthorized
+	if n = st.node(id); n == nil {
+		return nil, false, errUnauthorized
 	}
-	return n, nil
+	return n, prev, nil
 }
+
+// rotateNodeToken installs a node-generated token; the old one stays valid for an hour.
+func rotateNodeToken(st *ClusterState, n *ClusterNode, newTok string, now time.Time) error {
+	if !nodeTokenRe.MatchString(newTok) {
+		return httpError{http.StatusBadRequest, "invalid rotated token"}
+	}
+	if st.PrevNodeTokens == nil {
+		st.PrevNodeTokens = map[string]prevNodeToken{}
+	}
+	st.PrevNodeTokens[n.ID] = prevNodeToken{Hash: st.NodeTokens[n.ID], Until: now.Add(time.Hour)}
+	st.NodeTokens[n.ID] = hashToken(newTok)
+	n.TokenIssued = now
+	return nil
+}
+
+// needsTokenRotation: tokens live at most 30 days, operators can force a rotation, and a node
+// still using its previous token rotates again.
+func needsTokenRotation(st *ClusterState, n *ClusterNode, usedPrev bool, now time.Time) bool {
+	return usedPrev || now.Sub(n.TokenIssued) > nodeTokenMaxAge || n.TokenIssued.Before(st.RotateTokensBefore)
+}
+
+var nodeTokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+const nodeTokenMaxAge = 30 * 24 * time.Hour
 
 func (s *clusterServer) handleJoin(r *http.Request) (interface{}, error) {
 	cfg, err := requireMaster()
@@ -603,7 +645,7 @@ func (s *clusterServer) handleJoin(r *http.Request) (interface{}, error) {
 		resp.CACert, resp.Masters = st.CACert, masterAddrs(st, cfg)
 		st.NodeTokens[resp.NodeID] = hashToken(resp.NodeToken)
 		n := ClusterNode{
-			ID: resp.NodeID, Hostname: req.Hostname, IP: ip, Role: role, Status: "Ready",
+			ID: resp.NodeID, Hostname: req.Hostname, IP: ip, Role: role, Status: "Ready", TokenIssued: time.Now(),
 			CPUs: req.CPUs, MemTotal: req.MemTotal, LastSeen: time.Now(), WGPubKey: req.WGPubKey, WGPort: req.WGPort,
 		}
 		if n.WGPubKey != "" {
@@ -672,10 +714,24 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	var resp heartbeatResponse
 	err = withState(func(st *ClusterState) error {
-		n, err := authNode(st, r.Header.Get("Authorization"))
+		now := time.Now()
+		n, usedPrev, err := authNodeToken(st, r.Header.Get("Authorization"), now)
 		if err != nil {
 			return err
 		}
+		for id, p := range st.PrevNodeTokens {
+			if !now.Before(p.Until) {
+				delete(st.PrevNodeTokens, id)
+			}
+		}
+		if req.RotateToken != "" {
+			if err := rotateNodeToken(st, n, req.RotateToken, now); err != nil {
+				return err
+			}
+			usedPrev = false
+			clusterAudit("node:"+n.ID, "cluster node token rotate", n.ID, nil)
+		}
+		resp.RotateToken = needsTokenRotation(st, n, usedPrev, now)
 		if n.Status != "Ready" {
 			fmt.Printf("[cluster] node %s is Ready again\n", n.ID)
 		}
@@ -866,7 +922,7 @@ var clusterServeCmd = &cobra.Command{
 			}
 		}()
 		go func() {
-			for ; ; time.Sleep(12 * time.Hour) {
+			for ; ; time.Sleep(time.Minute) { // cheap when nothing is due (reads one file)
 				if cur, _, err := rs.snapshot(); err == nil && cur.CAKey != "" {
 					if err := ensureMasterCert(cur, cfg.NodeID, []net.IP{net.ParseIP(cfg.NodeIP)}); err != nil {
 						fmt.Printf("[cluster] certificate renewal: %v\n", err)

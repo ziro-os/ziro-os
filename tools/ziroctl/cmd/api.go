@@ -1,9 +1,9 @@
 package cmd
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -39,6 +39,8 @@ var (
 	apiCorsHost  string
 	apiStartTime time.Time
 )
+
+type apiCallerKey struct{}
 
 type APIMessage struct {
 	Status  string      `json:"status"`
@@ -309,15 +311,21 @@ func startAPIServer() {
 				return
 			}
 
-			// Authentication
+			// Authentication (scoped tokens or the pre-RBAC admin token) and role check.
 			if !isPublic {
 				authHeader := r.Header.Get("Authorization")
-				expected := "Bearer " + token
-				if subtle.ConstantTimeCompare([]byte(authHeader), []byte(expected)) != 1 {
+				name, role, ok := apiIdentity(trimBearer(authHeader), token, time.Now())
+				if !ok || !strings.HasPrefix(authHeader, "Bearer ") {
 					w.WriteHeader(http.StatusUnauthorized)
 					_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "Unauthorized: Invalid or missing Bearer token"})
 					return
 				}
+				if !apiAllowed(role, r.Method) {
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "Forbidden: the " + role + " role cannot " + r.Method})
+					return
+				}
+				r = r.WithContext(context.WithValue(r.Context(), apiCallerKey{}, "api-token:"+name+"("+role+")"))
 			}
 
 			h(w, r)
@@ -383,7 +391,8 @@ func startAPIServer() {
 				return
 			}
 			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-			if aerr := auditLog("api-token", "api:"+ip, "service "+action, name, err); aerr != nil {
+			caller, _ := r.Context().Value(apiCallerKey{}).(string)
+			if aerr := auditLog(caller, "api:"+ip, "service "+action, name, err); aerr != nil {
 				fmt.Printf("[api] audit log: %v\n", aerr)
 			}
 			if err != nil {

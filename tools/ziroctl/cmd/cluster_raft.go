@@ -1040,3 +1040,36 @@ func fetchDEK(rs *raftStore, cfg *ClusterConfig, id string) error {
 	}
 	return fmt.Errorf("cluster data key %s: %w", id, last)
 }
+
+var clusterRotateCmd = &cobra.Command{
+	Use:   "rotate tokens|certs",
+	Short: "Rotate every node token or every master certificate now",
+	Long: `Credentials also rotate on their own: node tokens after 30 days, master certificates 30 days
+before they expire.
+
+  tokens  every agent sends a new node token on its next heartbeat (~10 s); the previous one
+          stays valid for an hour
+  certs   every master re-issues its certificate from the cluster CA within a minute`,
+	Args:      cobra.ExactArgs(1),
+	ValidArgs: []string{"tokens", "certs"},
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := requireMaster(); err != nil {
+			return err
+		}
+		if args[0] != "tokens" && args[0] != "certs" {
+			return fmt.Errorf("want tokens or certs")
+		}
+		return withState(func(st *ClusterState) error {
+			if args[0] == "tokens" {
+				st.RotateTokensBefore = time.Now()
+				fmt.Printf("✓ %d node(s) rotate their tokens on their next heartbeat\n", len(st.Nodes))
+			} else {
+				st.RotateCertsBefore = time.Now()
+				fmt.Println("✓ masters re-issue their certificates within a minute")
+			}
+			return nil
+		})
+	},
+}
+
+func init() { clusterCmd.AddCommand(clusterRotateCmd) }

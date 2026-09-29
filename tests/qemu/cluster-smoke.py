@@ -209,7 +209,9 @@ def main():
                 f"{ns} /sbin/ip addr add {ip}/32 dev wgc", f"{ns} /sbin/ip link set wgc up", f"{ns} /sbin/ip route add 10.200.0.0/16 dev wgc",
                 "echo PEERUP"]), timeout=60)
             check("remote peer client configured", "PEERUP" in out, out)
-            ok, out = bs.retry(w, f"{ns} ping -c1 -W2 10.200.0.2 >/dev/null && echo RELAYOK", lambda rc, o: "RELAYOK" in o, 90)
+            # Bounded: a ping sent before the WireGuard handshake completes can hang past -W.
+            ok, out = bs.retry(w, f"timeout 5 {ns} ping -c1 -W2 10.200.0.2 >/dev/null && echo RELAYOK",
+                               lambda rc, o: "RELAYOK" in o, 150)
             check("peer reaches node2 through the hub (relay + return route)", ok, out)
             rc, out = w.run(f"{ns} curl -s -m5 -o /dev/null -w '%{{http_code}}' http://10.200.0.2:9090/ || echo BLOCKED", timeout=30)
             check("policy: peer denied by default", ok and ("BLOCKED" in out or "000" in out), out)
@@ -243,6 +245,32 @@ def main():
         rc, out = m.run("test ! -e /etc/ziro/cluster/secrets.json && test ! -e /etc/ziro/cluster/ca.key && "
                         "test -s /etc/ziro/cluster/sealed.bin && ! grep -rqs hunter2-ziro /etc/ziro/cluster && echo ATREST", timeout=30)
         check("no plaintext secret or CA key at rest (state files and Raft data)", "ATREST" in out, out)
+
+        # Scoped API tokens on the admin API.
+        api = "https://127.0.0.1:8443/api/v1"
+        rc, out = m.run("ziroctl service start ziro-api; sleep 2; "
+                        "V=$(ziroctl api token create viewer1 --role viewer 2>/dev/null); "
+                        "O=$(ziroctl api token create ops1 --role operator 2>/dev/null); "
+                        f"echo GET=$(curl -sk -o /dev/null -w '%{{http_code}}' -H \"Authorization: Bearer $V\" {api}/system) "
+                        f"VPOST=$(curl -sk -o /dev/null -w '%{{http_code}}' -X POST -H \"Authorization: Bearer $V\" {api}/services/crond/restart) "
+                        f"OPOST=$(curl -sk -o /dev/null -w '%{{http_code}}' -X POST -H \"Authorization: Bearer $O\" {api}/services/crond/restart); "
+                        "ziroctl api token revoke viewer1 >/dev/null; "
+                        f"echo REVOKED=$(curl -sk -o /dev/null -w '%{{http_code}}' -H \"Authorization: Bearer $V\" {api}/system)", timeout=90)
+        check("API RBAC: viewer reads, viewer cannot act, operator can, revoked is refused",
+              all(x in out for x in ("GET=200", "VPOST=403", "OPOST=200", "REVOKED=401")), out)
+
+        # Credential rotation: node tokens (agents send new ones) and master certificates.
+        rc, before = w.run("grep -o 'node_token\": \"[^\"]*' /etc/ziro/cluster/config.json", timeout=15)
+        rc, out = m.run("sha256sum /etc/ziro/cluster/master.crt | cut -c1-16; ziroctl cluster rotate tokens && ziroctl cluster rotate certs", timeout=60)
+        cert_before = out.strip().splitlines()[0] if out.strip() else ""
+        ok, out = bs.retry(w, "grep -o 'node_token\": \"[^\"]*' /etc/ziro/cluster/config.json",
+                           lambda rc, o: o.strip() and o.strip() != before.strip(), 90, every=5)
+        check("node token rotated by the agent", ok, before + " -> " + out)
+        ok, out = bs.retry(m, "sha256sum /etc/ziro/cluster/master.crt | cut -c1-16",
+                           lambda rc, o: o.strip() and o.strip() != cert_before, 150, every=10)
+        check("master certificate re-issued", ok, out)
+        ok, out = bs.retry(m, "ziroctl cluster nodes --json", lambda rc, o: o.count('"status": "Ready"') == 2, 90, every=5)
+        check("nodes stay Ready after rotating tokens and certificates", ok, out)
 
         rc, out = m.run("ziroctl audit verify && ziroctl audit log | grep -c -e 'cluster deploy' -e 'cluster node join'")
         check("audit: chain intact and records deploys and joins", rc == 0 and "chain intact" in out, out)

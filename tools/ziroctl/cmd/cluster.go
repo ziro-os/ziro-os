@@ -57,25 +57,26 @@ type ClusterConfig struct {
 }
 
 type ClusterNode struct {
-	ID         string            `json:"id"`
-	Hostname   string            `json:"hostname"`
-	IP         string            `json:"ip"`
-	Role       string            `json:"role"`
-	Status     string            `json:"status"` // Ready, NotReady
-	Cordoned   bool              `json:"cordoned,omitempty"`
-	CPUs       int               `json:"cpus"`
-	MemTotal   uint64            `json:"mem_total_mb"`
-	Containers int               `json:"containers"`
-	Running    []string          `json:"running"`          // cluster containers the agent reports running
-	Failed     map[string]string `json:"failed,omitempty"` // container -> last start error from the agent
-	MeshIP     string            `json:"mesh_ip,omitempty"`
-	WGPubKey   string            `json:"wg_pubkey,omitempty"`
-	WGPort     int               `json:"wg_port,omitempty"`
-	MeshError  string            `json:"mesh_error,omitempty"` // last mesh/policy apply error reported by the agent
-	Caps       []string          `json:"caps,omitempty"`       // features the node's ziroctl reported (upgrade gating)
-	Gateway    bool              `json:"gateway,omitempty"`    // runs zirogate for the cluster's routes
-	PodCIDR    string            `json:"pod_cidr,omitempty"`   // this node's /24 of the cluster pod network
-	LastSeen   time.Time         `json:"last_seen"`
+	ID          string            `json:"id"`
+	Hostname    string            `json:"hostname"`
+	IP          string            `json:"ip"`
+	Role        string            `json:"role"`
+	Status      string            `json:"status"` // Ready, NotReady
+	Cordoned    bool              `json:"cordoned,omitempty"`
+	CPUs        int               `json:"cpus"`
+	MemTotal    uint64            `json:"mem_total_mb"`
+	Containers  int               `json:"containers"`
+	Running     []string          `json:"running"`          // cluster containers the agent reports running
+	Failed      map[string]string `json:"failed,omitempty"` // container -> last start error from the agent
+	MeshIP      string            `json:"mesh_ip,omitempty"`
+	WGPubKey    string            `json:"wg_pubkey,omitempty"`
+	WGPort      int               `json:"wg_port,omitempty"`
+	MeshError   string            `json:"mesh_error,omitempty"`   // last mesh/policy apply error reported by the agent
+	Caps        []string          `json:"caps,omitempty"`         // features the node's ziroctl reported (upgrade gating)
+	TokenIssued time.Time         `json:"token_issued,omitempty"` // when the node's current token was issued
+	Gateway     bool              `json:"gateway,omitempty"`      // runs zirogate for the cluster's routes
+	PodCIDR     string            `json:"pod_cidr,omitempty"`     // this node's /24 of the cluster pod network
+	LastSeen    time.Time         `json:"last_seen"`
 }
 
 type ClusteredApp struct {
@@ -120,6 +121,10 @@ type ClusterState struct {
 	Peers         []RemotePeer   `json:"peers,omitempty"`    // WireGuard remote-access clients
 	PodCIDR       string         `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
 	DEKID         string         `json:"dek_id,omitempty"`   // data key sealing Secrets and CAKey ("" = not sealed yet)
+	// Rotation: previous node tokens stay valid briefly; nodes/masters re-issue what predates these.
+	PrevNodeTokens     map[string]prevNodeToken `json:"prev_node_tokens,omitempty"`
+	RotateTokensBefore time.Time                `json:"rotate_tokens_before,omitempty"`
+	RotateCertsBefore  time.Time                `json:"rotate_certs_before,omitempty"`
 	// Join credentials and the cluster CA are replicated so any master can admit nodes.
 	JoinToken        string `json:"join_token,omitempty"`
 	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never
@@ -128,6 +133,11 @@ type ClusterState struct {
 	Secrets map[string]map[string]string `json:"-"` // name -> KEY -> value
 	CAKey   string                       `json:"-"` // PEM
 	sealed  []byte                       // sealed secrets kept as-is by a process without the data key
+}
+
+type prevNodeToken struct {
+	Hash  string    `json:"hash"`
+	Until time.Time `json:"until"`
 }
 
 func isClusterMaster() bool {

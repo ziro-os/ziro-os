@@ -170,8 +170,8 @@ Known limits, each addressed by a later phase:
   - Deferred: secrets encryption at rest moves to Phase 5 (a key on the same disk protects little; it needs a KMS or TPM).
 - **Phase 5: enterprise.**
   - Secrets encrypted at rest: shipped (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
-  - Scoped API tokens (viewer / operator / admin).
-  - `cluster rotate-certs` and node-token rotation.
+  - Scoped API tokens (viewer / operator / admin): shipped.
+  - Rotation: node tokens (30 days or `cluster rotate tokens`) and master certificates (`cluster rotate certs`): shipped. Rotating the data key is next; rotating the CA is not planned yet.
   - Registry allowlist and `nerdctl --verify=cosign` for signed images.
   - Prometheus `/metrics`.
   - `docs/compliance.md` mapping controls to CIS and SOC 2.
