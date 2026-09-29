@@ -469,6 +469,8 @@ interactive_prompts() {
 find_boot_image() {
     INITR_SRC=""
     for candidate in /boot/initramfs* /initramfs* /build/ziro-initramfs*.cpio.gz; do
+        # initramfs-boot is the tiny boot loader image, not the OS image
+        case "$candidate" in */initramfs-boot*) continue ;; esac
         if [ -f "$candidate" ]; then
             INITR_SRC="$candidate"
             return 0
@@ -634,17 +636,19 @@ EOF
     # 5. Deploy Ziro-OS rootfs
     printf "${BOLD}[4/6] Installing Ziro-OS container host files...${RESET}\n"
     # Copy live operating system directories (guarantees exact, complete host OS with containerd, SSH, and drivers)
+    # A failed copy (ENOSPC, I/O error) must abort the install, never report success.
     for dir in bin sbin etc home lib lib64 opt root usr var; do
         if [ -e "/$dir" ]; then
-            cp -a "/$dir" "$TARGET_MNT/" 2>/dev/null || true
+            cp -a "/$dir" "$TARGET_MNT/"
         fi
     done
-
-    # Ensure kernel modules are installed to target disk
-    if [ -d /lib/modules ]; then
-        mkdir -p "$TARGET_MNT/lib/modules"
-        cp -a /lib/modules/* "$TARGET_MNT/lib/modules/" 2>/dev/null || true
-    fi
+    # Per-instance live-session state must not be cloned onto installs: every installed host
+    # generates its own SSH host keys on first boot and starts with empty runtime state/logs.
+    rm -f "$TARGET_MNT"/etc/ssh/ssh_host_*
+    rm -rf "$TARGET_MNT/var/lib/containerd" "$TARGET_MNT/var/lib/nerdctl" "$TARGET_MNT/var/lib/cni" \
+           "$TARGET_MNT/var/lib/ziro/upgrade"
+    find "$TARGET_MNT/var/log" -type f -delete 2>/dev/null || true
+    mkdir -p "$TARGET_MNT/var/lib/containerd" "$TARGET_MNT/var/log"
 
     # Create virtual mountpoint directories
     mkdir -p "$TARGET_MNT/dev" "$TARGET_MNT/proc" "$TARGET_MNT/sys" \
@@ -677,7 +681,13 @@ EOF
         cp /mnt/cdrom/boot/vmlinuz "$TARGET_MNT/boot/vmlinuz"
     fi
 
-    if [ -n "$INITR_SRC" ] && [ -f "$INITR_SRC" ]; then
+    # Installed hosts boot from the tiny boot initramfs shipped in the OS image (a few MB:
+    # storage drivers + fsck + switch_root). The full live image is only a fallback.
+    if [ -f /boot/initramfs-boot.cpio.gz ]; then
+        cp /boot/initramfs-boot.cpio.gz "$TARGET_MNT/boot/initramfs-boot.cpio.gz"
+        cp /boot/initramfs-boot.cpio.gz "$TARGET_MNT/boot/initramfs.cpio.gz"
+        echo "✓ Tiny boot initramfs installed"
+    elif [ -n "$INITR_SRC" ] && [ -f "$INITR_SRC" ]; then
         cp "$INITR_SRC" "$TARGET_MNT/boot/initramfs.cpio.gz"
         echo "✓ Boot initramfs copied from $INITR_SRC"
     fi
@@ -722,26 +732,31 @@ EOF
     mount --bind /proc "$TARGET_MNT/proc"
     mount --bind /sys "$TARGET_MNT/sys"
 
-    # Install BIOS/MBR bootloader (embeds core.img into Partition 1 on GPT)
-    echo "Installing GRUB for SeaBIOS / Legacy BIOS (i386-pc)..."
-    if grub-install --target=i386-pc --boot-directory="$TARGET_MNT/boot" --recheck "$TARGET_DISK"; then
+    case "$(uname -m)" in
+        aarch64|arm64) EFI_TARGET="arm64-efi"; SERIAL_CON="ttyAMA0" ;;
+        *)             EFI_TARGET="x86_64-efi"; SERIAL_CON="ttyS0" ;;
+    esac
+
+    # BIOS/MBR bootloader (x86 only; embeds core.img into Partition 1 on GPT)
+    if [ "$EFI_TARGET" = "x86_64-efi" ]; then
+        echo "Installing GRUB for SeaBIOS / Legacy BIOS (i386-pc)..."
+        if ! grub-install --target=i386-pc --boot-directory="$TARGET_MNT/boot" --recheck "$TARGET_DISK"; then
+            echo "Retrying grub-install i386-pc inside chroot..."
+            chroot "$TARGET_MNT" grub-install --target=i386-pc --recheck "$TARGET_DISK"
+        fi
         echo "✓ SeaBIOS / BIOS bootloader installed to $TARGET_DISK"
-    else
-        echo "Retrying grub-install i386-pc inside chroot..."
-        chroot "$TARGET_MNT" grub-install --target=i386-pc --recheck "$TARGET_DISK" || true
     fi
 
-    # Install UEFI bootloader (writes EFI binaries to Partition 2)
-    echo "Installing GRUB for UEFI / OVMF (x86_64-efi)..."
-    if grub-install --target=x86_64-efi --efi-directory="$TARGET_MNT/boot/efi" \
+    # UEFI bootloader (writes EFI binaries to Partition 2). Without it the disk cannot boot: fail.
+    echo "Installing GRUB for UEFI ($EFI_TARGET)..."
+    if ! grub-install --target="$EFI_TARGET" --efi-directory="$TARGET_MNT/boot/efi" \
                  --boot-directory="$TARGET_MNT/boot" --bootloader-id=ziro-os \
                  --recheck --removable; then
-        echo "✓ UEFI bootloader installed to /boot/efi"
-    else
-        echo "Retrying grub-install x86_64-efi inside chroot..."
-        chroot "$TARGET_MNT" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
-                     --bootloader-id=ziro-os --recheck --removable || true
+        echo "Retrying grub-install $EFI_TARGET inside chroot..."
+        chroot "$TARGET_MNT" grub-install --target="$EFI_TARGET" --efi-directory=/boot/efi \
+                     --bootloader-id=ziro-os --recheck --removable
     fi
+    echo "✓ UEFI bootloader installed to /boot/efi"
 
     # Write GRUB configuration with Dual Console support (VGA/NoVNC screen + Serial COM1)
     cat > "$TARGET_MNT/boot/grub/grub.cfg" << EOF
@@ -753,34 +768,35 @@ insmod all_video
 insmod gfxterm
 
 set default=0
-set timeout=3
+set timeout=1
 
 # Configure Dual Console (Screen/VGA + Serial COM1)
 serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1
 terminal_input --append console serial
 terminal_output --append console serial
 
+# The last console= is /dev/console: serial, so userspace reaches the cloud serial log.
 menuentry "Ziro-OS Container Host" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw panic=10 console=tty0 console=${SERIAL_CON},115200
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Ziro-OS Container Host (Quiet)" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0 quiet
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw panic=10 console=tty0 console=${SERIAL_CON},115200 quiet
     initrd /boot/initramfs.cpio.gz
 }
 
-menuentry "Ziro-OS Container Host (Serial Console Primary)" {
+menuentry "Ziro-OS Container Host (VGA Console Primary)" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw panic=10 console=${SERIAL_CON},115200 console=tty0
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Ziro-OS (Recovery Shell)" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0 ziro.recovery
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=tty0 console=${SERIAL_CON},115200 ziro.recovery
     initrd /boot/initramfs.cpio.gz
 }
 EOF

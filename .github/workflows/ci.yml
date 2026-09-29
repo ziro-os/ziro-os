@@ -99,14 +99,14 @@ jobs:
         run: make image-iso TARGET_ARCH=x86_64
 
       - name: QEMU Boot Smoke Test (kernel/modules, containerd, firewall, Sentinel, DHCP, container run)
-        run: make test-boot TARGET_ARCH=x86_64
+        run: make test-boot TARGET_ARCH=x86_64 BOOT_ARGS=--installed
 
       - name: Upload QEMU serial log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: qemu-boot-log-${{ github.sha }}
-          path: build/qemu-boot-x86_64-*.log
+          path: build/qemu-*.log
           if-no-files-found: ignore
 
       - name: Verify Artifacts & enforce image size goal (< 300 MB)

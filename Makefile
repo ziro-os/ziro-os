@@ -112,8 +112,9 @@ test-unit:
 	@cd tools/ziropkg && go test -v ./...
 
 # Boots build/vmlinuz + initramfs in QEMU and checks the running host (needs qemu-system-*)
+# BOOT_ARGS=--installed also installs to a virtual disk and boots it via the tiny initramfs
 test-boot:
-	@python3 tests/qemu/boot-smoke.py --arch $(ARCH_NORMALIZED) --flavor $(KERNEL_FLAVOR)
+	@python3 tests/qemu/boot-smoke.py --arch $(ARCH_NORMALIZED) --flavor $(KERNEL_FLAVOR) $(BOOT_ARGS)
 
 test-smoke:
 	@echo "Running container smoke test suite..."

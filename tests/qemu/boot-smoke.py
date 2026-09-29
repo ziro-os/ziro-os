@@ -5,7 +5,11 @@ Drives the live-mode serial console (stdlib only, no pexpect) and checks:
 kernel/modules match, module loading, containerd, boot-time services (firewall,
 Sentinel), DHCP networking, and running a real container.
 
-usage: tests/qemu/boot-smoke.py [--arch x86_64|arm64] [--build-dir build] [--no-pull]
+With --installed it also installs to a virtual disk from the live system, then boots that
+disk through the tiny boot initramfs (root=LABEL=ZIRO_ROOT) and checks the missing-disk path
+fails closed (no shell, reboot).
+
+usage: tests/qemu/boot-smoke.py [--arch x86_64|arm64] [--build-dir build] [--no-pull] [--installed]
 """
 import argparse
 import os
@@ -17,12 +21,13 @@ import threading
 import time
 
 BOOT_MARKER = "Live initialization complete"
+INSTALLED_MARKER = "Enterprise Container Host Status"
 
 
-def qemu_command(arch, build_dir, flavor):
+def qemu_command(arch, build_dir, flavor, initrd=None, append="rdinit=/init", disk=None):
     sfx = "" if flavor == "alpine" else f"-{flavor}"
     kernel = os.path.join(build_dir, f"vmlinuz-{arch}{sfx}")
-    initrd = os.path.join(build_dir, f"ziro-initramfs-{arch}{sfx}.cpio.gz")
+    initrd = initrd or os.path.join(build_dir, f"ziro-initramfs-{arch}{sfx}.cpio.gz")
     for f in (kernel, initrd):
         if not os.path.exists(f):
             sys.exit(f"missing {f}; run 'make rootfs TARGET_ARCH={arch} KERNEL_FLAVOR={flavor}' first")
@@ -38,13 +43,14 @@ def qemu_command(arch, build_dir, flavor):
     common = ["-m", "2048", "-smp", "2", "-nographic", "-no-reboot", "-accel", accel,
               "-kernel", kernel, "-initrd", initrd,
               "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"]
-    if arch == "x86_64":
-        cpu = "host" if accel in ("kvm", "hvf") else "max"
-        return ["qemu-system-x86_64", "-cpu", cpu, *common,
-                "-append", "console=ttyS0 rdinit=/init panic=-1"], accel
+    if disk:
+        common += ["-drive", f"file={disk},if=none,id=d0,format=raw", "-device", "virtio-blk-pci,drive=d0"]
     cpu = "host" if accel in ("kvm", "hvf") else "max"
+    if arch == "x86_64":
+        return ["qemu-system-x86_64", "-cpu", cpu, *common,
+                "-append", f"console=ttyS0 {append} panic=-1"], accel
     return ["qemu-system-aarch64", "-machine", "virt", "-cpu", cpu, *common,
-            "-append", "console=ttyAMA0 rdinit=/init panic=-1"], accel
+            "-append", f"console=ttyAMA0 {append} panic=-1"], accel
 
 
 class Console:
@@ -111,6 +117,37 @@ def retry(console, cmd, ok, timeout, every=3):
     return False, out
 
 
+def installed_checks(args, disk, check):
+    """Boot the installed disk through the tiny initramfs, then prove a missing disk fails closed."""
+    sfx = "" if args.flavor == "alpine" else f"-{args.flavor}"
+    tiny = os.path.join(args.build_dir, f"rootfs-full-{args.arch}{sfx}", "boot", "initramfs-boot.cpio.gz")
+    root = "root=LABEL=ZIRO_ROOT rootwait=30"
+    cmd, _ = qemu_command(args.arch, args.build_dir, args.flavor, initrd=tiny, append=root, disk=disk)
+    con = Console(cmd, os.path.join(args.build_dir, f"qemu-installed-{args.arch}-{args.flavor}.log"))
+    try:
+        t0 = time.time()
+        m = con.wait_for(re.escape(INSTALLED_MARKER) + "|FATAL|Kernel panic", args.boot_timeout)
+        ok = bool(m) and INSTALLED_MARKER in m.group(0)
+        check(f"installed disk boots via tiny initramfs ({time.time() - t0:.0f}s)", ok, m.group(0) if m else "timeout")
+        if ok:
+            con.proc.stdin.write(b"\n")
+            con.proc.stdin.flush()
+            check("installed console requires login", bool(con.wait_for(r"login:", 60)), "no login prompt")
+    finally:
+        con.close()
+
+    cmd, _ = qemu_command(args.arch, args.build_dir, args.flavor, initrd=tiny, append="root=LABEL=ZIRO_ROOT rootwait=3")
+    con = Console(cmd, os.path.join(args.build_dir, f"qemu-nodisk-{args.arch}-{args.flavor}.log"))
+    try:
+        m = con.wait_for(r"FATAL: root device not found.*rebooting in", 120)
+        with con.lock:
+            leaked = "emergency shell" in con.buf or "live environment" in con.buf
+        check("missing root disk fails closed (no live fallback, no shell)", bool(m) and not leaked,
+              con.buf[-400:] if not m else "")
+    finally:
+        con.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     default_arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
@@ -119,9 +156,15 @@ def main():
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--boot-timeout", type=int, default=600)
     ap.add_argument("--no-pull", action="store_true", help="skip the container run check (no internet)")
+    ap.add_argument("--installed", action="store_true", help="also install to a disk and boot it (tiny initramfs)")
     args = ap.parse_args()
 
-    cmd, accel = qemu_command(args.arch, args.build_dir, args.flavor)
+    disk = None
+    if args.installed:
+        disk = os.path.join(args.build_dir, f"install-test-{args.arch}-{args.flavor}.img")
+        with open(disk, "wb") as f:
+            f.truncate(4 << 30)   # sparse 4 GiB
+    cmd, accel = qemu_command(args.arch, args.build_dir, args.flavor, disk=disk)
     log_path = os.path.join(args.build_dir, f"qemu-boot-{args.arch}-{args.flavor}.log")
     print(f"booting {args.arch}/{args.flavor} kernel ({accel}); serial log: {log_path}")
     con = Console(cmd, log_path)
@@ -158,6 +201,11 @@ def main():
         if args.flavor == "custom":
             rc, out = con.run("cat /sys/module/module/parameters/sig_enforce")
             check("module signature enforcement active (custom kernel)", "Y" in out, out)
+            rc, out = con.run("cat /sys/kernel/security/lockdown /sys/kernel/security/lsm; echo; ls /sys/kernel/btf/vmlinux")
+            check("lockdown=integrity, landlock+bpf LSMs, BTF (custom kernel)",
+                  "[integrity]" in out and "landlock" in out and "bpf" in out and "/sys/kernel/btf/vmlinux" in out, out)
+        rc, out = con.run("sysctl -n kernel.io_uring_disabled; test -s /boot/initramfs-boot.cpio.gz && echo TINYOK")
+        check("io_uring restricted + tiny boot initramfs shipped", out.split()[:1] == ["1"] and "TINYOK" in out, out)
 
         ok, out = retry(con, "test -S /run/containerd/containerd.sock && echo CTRDOK", lambda rc, o: "CTRDOK" in o, 60)
         check("containerd socket ready", ok, out)
@@ -176,8 +224,16 @@ def main():
             ok, out = retry(con, "nerdctl run --rm docker.io/library/busybox:latest echo CONTAINER_OK",
                             lambda rc, o: "CONTAINER_OK" in o, 300, every=10)
             check("nerdctl run busybox", ok, out)
+        if args.installed:
+            rc, out = con.run("ziro-install --disk /dev/vda --yes --hostname ziro-itest --password Ziro-Test-9 "
+                              "</dev/null >/tmp/install.log 2>&1; echo INSTALL_RC=$?; tail -15 /tmp/install.log", timeout=600)
+            check("installer to /dev/vda (GRUB + tiny initramfs)", "INSTALL_RC=0" in out, out[-1500:])
+            con.run("sync")
     finally:
         con.close()
+
+    if args.installed and all(results):
+        installed_checks(args, disk, check)
 
     if not all(results):
         with open(log_path, encoding="utf-8", errors="replace") as f:

@@ -114,224 +114,122 @@ static int cmdline_has(const char *key) {
     return cmdline_find(key, NULL) != NULL;
 }
 
+/* Copy the value of "key=" from the kernel cmdline into out (empty if absent). */
+static void cmdline_copy(const char *key, char *out, size_t max_len) {
+    size_t vlen = 0;
+    const char *v = cmdline_find(key, &vlen);
+    if (!v || vlen >= max_len) return;
+    memcpy(out, v, vlen);
+    out[vlen] = '\0';
+}
+
+/* Make sure every partition listed by the kernel has a /dev node (no udev here). */
+static void ensure_partition_nodes(void) {
+    FILE *pf = fopen("/proc/partitions", "r");
+    if (!pf) return;
+    char pline[256];
+    while (fgets(pline, sizeof(pline), pf)) {
+        int maj = 0, min = 0;
+        long long blocks = 0;
+        char pname[128];
+        if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) != 4) continue;
+        char devpath[256];
+        snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
+        struct stat st;
+        if (stat(devpath, &st) != 0) mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
+    }
+    fclose(pf);
+}
+
+/* Resolve root=LABEL=x | UUID=x | /dev/x with a single blkid scan (was one fork per partition). */
 static void resolve_root_device(const char *spec, char *out_dev, size_t max_len) {
     out_dev[0] = '\0';
-    if (!spec || strlen(spec) == 0) return;
-
-    // First ensure all device nodes for recognized partitions in /proc/partitions exist in /dev
-    FILE *pf_init = fopen("/proc/partitions", "r");
-    if (pf_init) {
-        char pline[256];
-        while (fgets(pline, sizeof(pline), pf_init)) {
-            int maj = 0, min = 0;
-            long long blocks = 0;
-            char pname[128];
-            if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) == 4) {
-                if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
-                char devpath[256];
-                snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
-                struct stat st;
-                if (stat(devpath, &st) != 0) {
-                    mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
-                }
-            }
-        }
-        fclose(pf_init);
-    }
-
-    if (strncmp(spec, "LABEL=", 6) == 0) {
-        const char *label = spec + 6;
-        char by_label[PATH_MAX];
-        snprintf(by_label, sizeof(by_label), "/dev/disk/by-label/%.200s", label);
-        if (access(by_label, F_OK) == 0) {
-            char resolved[PATH_MAX];
-            if (realpath(by_label, resolved)) {
-                snprintf(out_dev, max_len, "%.200s", resolved);
-                return;
-            }
-            ssize_t r = readlink(by_label, resolved, sizeof(resolved) - 1);
-            if (r > 0) {
-                resolved[r] = '\0';
-                if (resolved[0] == '/') {
-                    snprintf(out_dev, max_len, "%.200s", resolved);
-                    return;
-                }
-            }
-            snprintf(out_dev, max_len, "%.200s", by_label);
-            return;
-        }
-
-        // Exhaustive partition scan via /proc/partitions
-        FILE *pf = fopen("/proc/partitions", "r");
-        if (pf) {
-            char pline[256];
-            while (fgets(pline, sizeof(pline), pf)) {
-                int maj = 0, min = 0;
-                long long blocks = 0;
-                char pname[128];
-                if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) == 4) {
-                    if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
-                    char devpath[256];
-                    snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
-                    struct stat st;
-                    if (stat(devpath, &st) != 0) {
-                        mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
-                    }
-                    if (access(devpath, F_OK) == 0) {
-                        char bcmd[512];
-                        snprintf(bcmd, sizeof(bcmd), "blkid -s LABEL -o value %.200s 2>/dev/null", devpath);
-                        FILE *bfp = popen(bcmd, "r");
-                        if (bfp) {
-                            char blabel[128];
-                            if (fgets(blabel, sizeof(blabel), bfp)) {
-                                char *bnl = strchr(blabel, '\n');
-                                if (bnl) *bnl = '\0';
-                                char *bcr = strchr(blabel, '\r');
-                                if (bcr) *bcr = '\0';
-                                if (strcmp(blabel, label) == 0) {
-                                    snprintf(out_dev, max_len, "%.200s", devpath);
-                                    pclose(bfp);
-                                    fclose(pf);
-                                    return;
-                                }
-                            }
-                            pclose(bfp);
-                        }
-                    }
-                }
-            }
-            fclose(pf);
-        }
-
-        // Search common partition nodes directly
-        static const char *prefixes[] = {
-            "/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb",
-            "/dev/nvme0n1p", "/dev/hda", "/dev/xvda", NULL
-        };
-        for (int p = 0; prefixes[p] != NULL; p++) {
-            for (int part = 1; part <= 8; part++) {
-                char candidate[64];
-                snprintf(candidate, sizeof(candidate), "%s%d", prefixes[p], part);
-                if (access(candidate, F_OK) == 0) {
-                    char cmd[512];
-                    snprintf(cmd, sizeof(cmd), "blkid -s LABEL -o value %s 2>/dev/null", candidate);
-                    FILE *bfp = popen(cmd, "r");
-                    if (bfp) {
-                        char blabel[128];
-                        if (fgets(blabel, sizeof(blabel), bfp)) {
-                            char *bnl = strchr(blabel, '\n');
-                            if (bnl) *bnl = '\0';
-                            char *br = strchr(blabel, '\r');
-                            if (br) *br = '\0';
-                            if (strcmp(blabel, label) == 0) {
-                                snprintf(out_dev, max_len, "%s", candidate);
-                                pclose(bfp);
-                                return;
-                            }
-                        }
-                        pclose(bfp);
-                    }
-                }
-            }
-        }
-    } else if (strncmp(spec, "UUID=", 5) == 0) {
-        const char *uuid = spec + 5;
-        char by_uuid[PATH_MAX];
-        snprintf(by_uuid, sizeof(by_uuid), "/dev/disk/by-uuid/%.200s", uuid);
-        if (access(by_uuid, F_OK) == 0) {
-            char resolved[PATH_MAX];
-            if (realpath(by_uuid, resolved)) {
-                snprintf(out_dev, max_len, "%.200s", resolved);
-                return;
-            }
-            ssize_t r = readlink(by_uuid, resolved, sizeof(resolved) - 1);
-            if (r > 0) {
-                resolved[r] = '\0';
-                if (resolved[0] == '/') {
-                    snprintf(out_dev, max_len, "%.200s", resolved);
-                    return;
-                }
-            }
-            snprintf(out_dev, max_len, "%.200s", by_uuid);
-            return;
-        }
-
-        // Exhaustive partition scan via /proc/partitions
-        FILE *pf = fopen("/proc/partitions", "r");
-        if (pf) {
-            char pline[256];
-            while (fgets(pline, sizeof(pline), pf)) {
-                int maj = 0, min = 0;
-                long long blocks = 0;
-                char pname[128];
-                if (sscanf(pline, "%d %d %lld %127s", &maj, &min, &blocks, pname) == 4) {
-                    if (pname[0] == '\0' || strcmp(pname, "name") == 0) continue;
-                    char devpath[256];
-                    snprintf(devpath, sizeof(devpath), "/dev/%s", pname);
-                    struct stat st;
-                    if (stat(devpath, &st) != 0) {
-                        mknod(devpath, S_IFBLK | 0660, makedev(maj, min));
-                    }
-                    if (access(devpath, F_OK) == 0) {
-                        char bcmd[512];
-                        snprintf(bcmd, sizeof(bcmd), "blkid -s UUID -o value %.200s 2>/dev/null", devpath);
-                        FILE *bfp = popen(bcmd, "r");
-                        if (bfp) {
-                            char buuid[128];
-                            if (fgets(buuid, sizeof(buuid), bfp)) {
-                                char *bnl = strchr(buuid, '\n');
-                                if (bnl) *bnl = '\0';
-                                char *bcr = strchr(buuid, '\r');
-                                if (bcr) *bcr = '\0';
-                                if (strcasecmp(buuid, uuid) == 0) {
-                                    snprintf(out_dev, max_len, "%.200s", devpath);
-                                    pclose(bfp);
-                                    fclose(pf);
-                                    return;
-                                }
-                            }
-                            pclose(bfp);
-                        }
-                    }
-                }
-            }
-            fclose(pf);
-        }
-
-        // Search common partition nodes directly
-        static const char *prefixes[] = {
-            "/dev/sda", "/dev/vda", "/dev/sdb", "/dev/vdb",
-            "/dev/nvme0n1p", "/dev/hda", "/dev/xvda", NULL
-        };
-        for (int p = 0; prefixes[p] != NULL; p++) {
-            for (int part = 1; part <= 8; part++) {
-                char candidate[64];
-                snprintf(candidate, sizeof(candidate), "%s%d", prefixes[p], part);
-                if (access(candidate, F_OK) == 0) {
-                    char bcmd[512];
-                    snprintf(bcmd, sizeof(bcmd), "blkid -s UUID -o value %s 2>/dev/null", candidate);
-                    FILE *bfp = popen(bcmd, "r");
-                    if (bfp) {
-                        char buuid[128];
-                        if (fgets(buuid, sizeof(buuid), bfp)) {
-                            char *bnl = strchr(buuid, '\n');
-                            if (bnl) *bnl = '\0';
-                            char *br = strchr(buuid, '\r');
-                            if (br) *br = '\0';
-                            if (strcasecmp(buuid, uuid) == 0) {
-                                snprintf(out_dev, max_len, "%s", candidate);
-                                pclose(bfp);
-                                return;
-                            }
-                        }
-                        pclose(bfp);
-                    }
-                }
-            }
-        }
-    } else if (strncmp(spec, "/dev/", 5) == 0) {
+    if (!spec || !*spec) return;
+    if (strncmp(spec, "/dev/", 5) == 0) {
         snprintf(out_dev, max_len, "%.200s", spec);
+        return;
     }
+    const char *pat, *want;
+    int is_uuid = 0;
+    if (strncmp(spec, "LABEL=", 6) == 0) {
+        pat = " LABEL=\""; want = spec + 6;
+    } else if (strncmp(spec, "UUID=", 5) == 0) {
+        pat = " UUID=\""; want = spec + 5; is_uuid = 1;   /* leading space: not PARTUUID= */
+    } else {
+        return;
+    }
+    ensure_partition_nodes();
+    FILE *bfp = popen("blkid 2>/dev/null", "r");
+    if (!bfp) return;
+    char line[512];
+    while (fgets(line, sizeof(line), bfp)) {
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        char *v = strstr(colon, pat);
+        if (!v) continue;
+        v += strlen(pat);
+        char *q = strchr(v, '"');
+        if (!q) continue;
+        *q = '\0';
+        if (is_uuid ? strcasecmp(v, want) == 0 : strcmp(v, want) == 0) {
+            *colon = '\0';
+            snprintf(out_dev, max_len, "%.200s", line);
+            break;
+        }
+    }
+    pclose(bfp);
+}
+
+/*
+ * The requested root disk is unusable. Never fall back to the live image (it has a
+ * passwordless console and runs workloads in RAM). With the explicit 'ziro.recovery'
+ * break-glass token, open a shell here; otherwise reboot so cloud VMs retry.
+ */
+static void root_fail(const char *what, const char *dev) {
+    fprintf(stderr, "\n[init] FATAL: %s (%s)\n", what, dev);
+    fprintf(stderr, "[init] Boot the 'Ziro-OS (Recovery Shell)' entry to repair the disk.\n");
+    mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+    mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    if (cmdline_has("ziro.recovery")) {
+        fprintf(stderr, "[init] ziro.recovery: starting emergency shell in the initramfs\n");
+        char *rargs[] = {"-sh", NULL};
+        execv("/bin/sh", rargs);
+        execv("/bin/busybox", rargs);
+    }
+    fprintf(stderr, "[init] rebooting in 30s...\n");
+    sync();
+    sleep(30);
+    reboot(RB_AUTOBOOT);
+    for (;;) pause();
+}
+
+/* e2fsck -p before the read-write mount. Returns 0 to continue. */
+static void check_root_fs(const char *dev, const char *fstype) {
+    if (strncmp(fstype, "ext", 3) != 0) return;
+    const char *fsck = access("/sbin/e2fsck", X_OK) == 0 ? "/sbin/e2fsck"
+                     : access("/usr/sbin/e2fsck", X_OK) == 0 ? "/usr/sbin/e2fsck" : NULL;
+    if (!fsck) {
+        printf("[init] e2fsck not available; skipping root filesystem check\n");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl(fsck, "e2fsck", "-p", dev, (char *)NULL);
+        _exit(8);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) < 0 || !WIFEXITED(st)) return;
+    int rc = WEXITSTATUS(st);
+    if (rc == 0) return;
+    if (rc == 1) { printf("[init] e2fsck repaired %s\n", dev); return; }
+    if (rc & 2) {
+        printf("[init] e2fsck repaired %s and requires a reboot\n", dev);
+        sync();
+        reboot(RB_AUTOBOOT);
+    }
+    if (rc & 4) root_fail("root filesystem has errors e2fsck -p could not fix", dev);
+    fprintf(stderr, "[init] warning: e2fsck exited %d on %s; continuing\n", rc, dev);
 }
 
 static void check_and_switch_root(void) {
@@ -373,77 +271,74 @@ static void check_and_switch_root(void) {
         root_spec[rlen] = '\0';
     }
 
-    // 4. If persistent root is requested (e.g. root=LABEL=ZIRO_ROOT), locate and mount disk
+    // 4. Persistent root requested (e.g. root=LABEL=ZIRO_ROOT): wait for it, check it, switch to it.
+    //    Fail closed: a missing or broken disk never falls back to the live image.
     if (!live_requested && root_spec[0] != '\0') {
-        printf("[init] root device requested: %s\n", root_spec);
+        char val[32] = "";
+        cmdline_copy("rootwait=", val, sizeof(val));
+        long wait_s = val[0] ? strtol(val, NULL, 10) : 90;
+        if (wait_s <= 0 || wait_s > 3600) wait_s = 90;
+        char fstype[32] = "ext4";
+        cmdline_copy("rootfstype=", fstype, sizeof(fstype));
+        printf("[init] root device requested: %s (%s, rootwait=%lds)\n", root_spec, fstype, wait_s);
+
         char root_dev[256] = {0};
-
-        // Poll for disk readiness (up to 6 seconds)
-        for (int retries = 0; retries < 30; retries++) {
+        struct timespec t0, now;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        useconds_t delay = 50000;
+        long last_note = 0;
+        for (;;) {
             resolve_root_device(root_spec, root_dev, sizeof(root_dev));
-            if (root_dev[0] != '\0' && access(root_dev, F_OK) == 0) {
-                break;
+            if (root_dev[0] != '\0' && access(root_dev, F_OK) == 0) break;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long waited = (long)(now.tv_sec - t0.tv_sec);
+            if (waited >= wait_s) root_fail("root device not found", root_spec);
+            if (waited >= last_note + 10) {
+                last_note = waited;
+                if (waited > 0) printf("[init] still waiting for %s (%lds/%lds)...\n", root_spec, waited, wait_s);
+                init_devices();   /* late controllers (USB, slow cloud volume attach) */
             }
-            usleep(200000); // 200ms
+            usleep(delay);
+            if (delay < 1000000) delay *= 2;
         }
+        printf("[init] resolved root device: %s\n", root_dev);
 
-        if (root_dev[0] != '\0' && access(root_dev, F_OK) == 0) {
-            printf("[init] resolved root device: %s\n", root_dev);
-            safe_mkdir("/sysroot", 0755);
-            if (mount(root_dev, "/sysroot", "ext4", MS_RELATIME, NULL) == 0) {
-                printf("[init] mounted %s on /sysroot (ext4)\n", root_dev);
+        check_root_fs(root_dev, fstype);
+        safe_mkdir("/sysroot", 0755);
+        if (mount(root_dev, "/sysroot", fstype, MS_RELATIME, NULL) != 0)
+            root_fail(strerror(errno), root_dev);
+        printf("[init] mounted %s on /sysroot (%s)\n", root_dev, fstype);
+        if (access("/sysroot/sbin/init", X_OK) != 0 && access("/sysroot/init", X_OK) != 0)
+            root_fail("no /sbin/init on the root filesystem", root_dev);
 
-                // Verify real init exists in persistent sysroot
-                if (access("/sysroot/sbin/init", X_OK) == 0 || access("/sysroot/init", X_OK) == 0) {
-                    int mfd = open("/sysroot/etc/.ziro_switched", O_WRONLY | O_CREAT, 0644);
-                    if (mfd >= 0) close(mfd);
+        int mfd = open("/sysroot/etc/.ziro_switched", O_WRONLY | O_CREAT, 0644);
+        if (mfd >= 0) close(mfd);
 
-                    // Ensure essential devnodes exist in /sysroot/dev for switch_root
-                    safe_mkdir("/sysroot/dev", 0755);
-                    mknod("/sysroot/dev/console", S_IFCHR | 0600, makedev(5, 1));
-                    mknod("/sysroot/dev/null", S_IFCHR | 0666, makedev(1, 3));
-                    mknod("/sysroot/dev/zero", S_IFCHR | 0666, makedev(1, 5));
-                    mknod("/sysroot/dev/tty", S_IFCHR | 0666, makedev(5, 0));
-                    mknod("/sysroot/dev/tty0", S_IFCHR | 0666, makedev(4, 0));
-                    mknod("/sysroot/dev/tty1", S_IFCHR | 0666, makedev(4, 1));
-                    mknod("/sysroot/dev/ttyS0", S_IFCHR | 0660, makedev(4, 64));
-                    mknod("/sysroot/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
+        // Ensure essential devnodes exist in /sysroot/dev for switch_root
+        safe_mkdir("/sysroot/dev", 0755);
+        mknod("/sysroot/dev/console", S_IFCHR | 0600, makedev(5, 1));
+        mknod("/sysroot/dev/null", S_IFCHR | 0666, makedev(1, 3));
+        mknod("/sysroot/dev/zero", S_IFCHR | 0666, makedev(1, 5));
+        mknod("/sysroot/dev/tty", S_IFCHR | 0666, makedev(5, 0));
+        mknod("/sysroot/dev/tty0", S_IFCHR | 0666, makedev(4, 0));
+        mknod("/sysroot/dev/tty1", S_IFCHR | 0666, makedev(4, 1));
+        mknod("/sysroot/dev/ttyS0", S_IFCHR | 0660, makedev(4, 64));
+        mknod("/sysroot/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
 
-                    umount2("/dev", MNT_DETACH);
-                    umount2("/proc", MNT_DETACH);
-                    umount2("/sys", MNT_DETACH);
+        umount2("/dev", MNT_DETACH);
+        umount2("/proc", MNT_DETACH);
+        umount2("/sys", MNT_DETACH);
 
-                    printf("[init] switching root to persistent disk (%s)...\n", root_dev);
-                    fflush(stdout);
-                    fflush(stderr);
+        printf("[init] switching root to persistent disk (%s)...\n", root_dev);
+        fflush(stdout);
+        fflush(stderr);
 
-                    const char *init_target = (access("/sysroot/sbin/init", X_OK) == 0) ? "/sbin/init" : "/init";
-                    execl("/sbin/switch_root", "switch_root", "/sysroot", init_target, NULL);
-                    execl("/bin/switch_root", "switch_root", "/sysroot", init_target, NULL);
-                    execl("/bin/busybox", "busybox", "switch_root", "/sysroot", init_target, NULL);
-                    execl("/bin/busybox", "switch_root", "/sysroot", init_target, NULL);
-                    execl("/sbin/busybox", "busybox", "switch_root", "/sysroot", init_target, NULL);
-                    execl("/sbin/busybox", "switch_root", "/sysroot", init_target, NULL);
-                    fprintf(stderr, "[init] FATAL: switch_root to %s failed: %s\n", root_dev, strerror(errno));
-
-                    // Emergency recovery shell if switch_root cannot execute
-                    mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
-                    mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
-                    mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
-                    fprintf(stderr, "[init] Dropping to emergency recovery shell...\n");
-                    char *rargs[] = {"-sh", NULL};
-                    execv("/bin/sh", rargs);
-                    execv("/bin/busybox", rargs);
-                } else {
-                    fprintf(stderr, "[init] /sysroot/sbin/init not found on %s, unmounting\n", root_dev);
-                    umount2("/sysroot", MNT_DETACH);
-                }
-            } else {
-                fprintf(stderr, "[init] failed to mount %s on /sysroot: %s\n", root_dev, strerror(errno));
-            }
-        } else {
-            printf("[init] persistent root device (%s) not found; falling back to live tmpfs\n", root_spec);
-        }
+        const char *init_target = (access("/sysroot/sbin/init", X_OK) == 0) ? "/sbin/init" : "/init";
+        execl("/sbin/switch_root", "switch_root", "/sysroot", init_target, NULL);
+        execl("/bin/switch_root", "switch_root", "/sysroot", init_target, NULL);
+        execl("/bin/busybox", "switch_root", "/sysroot", init_target, NULL);
+        execl("/sbin/busybox", "switch_root", "/sysroot", init_target, NULL);
+        root_fail("switch_root failed", root_dev);
     }
 
     // 5. Fallback: Live ISO tmpfs migration
@@ -458,7 +353,7 @@ static void check_and_switch_root(void) {
     if (cpid == 0) {
         char *argv[] = {
             "/bin/sh", "-c",
-            "for d in bin sbin etc home lib lib64 opt root usr var; do "
+            "for d in bin boot sbin etc home lib lib64 opt root usr var; do "
             "  if [ -e \"/$d\" ]; then cp -a \"/$d\" /sysroot/ 2>/dev/null || true; fi; "
             "done; "
             "mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/run /sysroot/tmp /sysroot/mnt; "
@@ -572,48 +467,20 @@ static void init_devices(void) {
         NULL
     };
 
+    // One modprobe for the whole list (was a fork+exec per module).
+    char cmd[2048] = "modprobe -qa";
     for (int i = 0; modules[i] != NULL; i++) {
-        pid_t p = fork();
-        if (p == 0) {
-            char *margs[] = {"modprobe", "-q", (char *)modules[i], NULL};
-            execv("/sbin/modprobe", margs);
-            execv("/bin/modprobe", margs);
-            execv("/usr/sbin/modprobe", margs);
-            _exit(0);
-        } else if (p > 0) {
-            int st;
-            waitpid(p, &st, 0);
-        }
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, modules[i], sizeof(cmd) - strlen(cmd) - 1);
     }
+    strncat(cmd, " 2>/dev/null", sizeof(cmd) - strlen(cmd) - 1);
+    if (system(cmd) != 0) {}
 
-    // Load any additional modules requested in /etc/modules
-    FILE *mf = fopen("/etc/modules", "r");
-    if (mf) {
-        char mline[128];
-        while (fgets(mline, sizeof(mline), mf)) {
-            mline[strcspn(mline, " \t\r\n#")] = '\0';
-            if (mline[0] == '\0') continue;
-            pid_t mp = fork();
-            if (mp == 0) {
-                char *margs[] = {"modprobe", "-q", mline, NULL};
-                execv("/sbin/modprobe", margs);
-                execv("/bin/modprobe", margs);
-                execv("/usr/sbin/modprobe", margs);
-                _exit(0);
-            } else if (mp > 0) {
-                int st;
-                waitpid(mp, &st, 0);
-            }
-        }
-        fclose(mf);
-    }
-
-    // 2. Hardware coldplug: probe modalias for all detected devices in /sys
-    DIR *sys_bus = opendir("/sys/bus");
-    if (sys_bus) {
-        closedir(sys_bus);
-        system("find /sys/bus /sys/devices -name modalias 2>/dev/null | while read -r f; do [ -f \"$f\" ] && read -r m < \"$f\" && [ -n \"$m\" ] && modprobe -q \"$m\" 2>/dev/null; done 2>/dev/null || true");
-    }
+    // Extra modules from /etc/modules, then hardware coldplug: every device modalias,
+    // de-duplicated, in a single modprobe (was a shell loop running modprobe per device).
+    if (system("[ -f /etc/modules ] && sed 's/#.*//' /etc/modules | xargs -r modprobe -qa 2>/dev/null; "
+               "find /sys/devices -name modalias 2>/dev/null | xargs -r cat 2>/dev/null | sort -u | "
+               "xargs -r modprobe -qa 2>/dev/null") != 0) {}
 
     // 3. Trigger mdev -s to populate /dev
     pid_t mp = fork();
@@ -1216,6 +1083,35 @@ static void restart_due_daemons(void) {
     }
 }
 
+/* Apply the host firewall synchronously so sshd and containerd never listen unfiltered.
+ * 'ziroctl service boot' applies it again later (idempotent). Skipped only when disabled. */
+static void apply_firewall_early(void) {
+    if (access("/usr/bin/ziroctl", X_OK) != 0) return;
+    char state[16] = "";
+    FILE *f = fopen("/etc/ziro/services/enabled/firewall", "r");
+    if (f) {
+        if (!fgets(state, sizeof(state), f)) state[0] = '\0';
+        fclose(f);
+    }
+    if (strncmp(state, "disabled", 8) == 0) return;
+    printf("[init] applying host firewall before network daemons...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        int log_fd = open("/var/log/firewall.log", O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
+        char *argv[] = {"ziroctl", "firewall", "apply", NULL};
+        execv("/usr/bin/ziroctl", argv);
+        _exit(1);
+    } else if (pid > 0) {
+        int st;
+        waitpid(pid, &st, 0);
+    }
+}
+
 /* Start everything enabled in /etc/ziro/services (firewall, sentinel, cloud-init, ...). */
 static void start_enabled_services(void) {
     if (access("/usr/bin/ziroctl", X_OK) != 0) return;
@@ -1401,6 +1297,7 @@ int main(int argc, char *argv[]) {
     init_cgroups();
     init_hostname();
     init_network();
+    apply_firewall_early();
     start_containerd();
     start_sshd();
     start_enabled_services();

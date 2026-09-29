@@ -497,6 +497,63 @@ if [ ! -f "$ROOTFS_FULL/bin/busybox" ] || [ -L "$ROOTFS_FULL/bin/busybox" ] || [
     exit 1
 fi
 
+# Tiny boot initramfs for installed hosts (/boot/initramfs-boot.cpio.gz inside the OS image).
+# It only has to find, fsck and switch to the root disk: ziro-init, static BusyBox, kmod's
+# modprobe, e2fsck and the storage/filesystem modules. The installer and 'ziroctl upgrade' boot
+# with it instead of the ~160 MB live image (faster GRUB load, far less RAM at boot).
+echo "Packaging tiny boot initramfs for installed hosts..."
+docker run --rm --platform "$DOCKER_PLATFORM" \
+    -v "$ROOTFS_FULL:/rootfs" \
+    -v "$BUILD_DIR:/out" \
+    -e TARGET_ARCH="$TARGET_ARCH" \
+    "$ALPINE_IMAGE" sh -c '
+        set -eu
+        mkdir -p "/out/apk-cache/$TARGET_ARCH"
+        apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" kmod >/dev/null
+        T=/tmp/tiny
+        mkdir -p $T/bin $T/sbin $T/lib $T/dev $T/proc $T/sys $T/sysroot $T/etc $T/run $T/tmp
+        cp /rootfs/init $T/init
+        cp /rootfs/sbin/init $T/sbin/init
+        cp /rootfs/bin/busybox $T/bin/busybox
+        for a in sh mount umount mknod mkdir cat ls find sort sed xargs blkid switch_root sleep mdev test; do
+            ln -sf /bin/busybox "$T/bin/$a"
+        done
+        # Dynamic tools with the musl libraries they link against.
+        LDSO=$(cd /rootfs/lib && ls ld-musl-*.so.1)
+        cp -L "/rootfs/lib/$LDSO" "$T/lib/$LDSO"
+        for b in /sbin/modprobe /sbin/e2fsck; do
+            real=$(chroot /rootfs readlink -f "$b")
+            mkdir -p "$T$(dirname "$real")" "$T$(dirname "$b")"
+            cp -L "/rootfs$real" "$T$real"
+            [ "$real" = "$b" ] || ln -sf "$real" "$T$b"
+            chroot /rootfs "/lib/$LDSO" --list "$real" 2>/dev/null | awk "/=>/{print \$3}" | while read -r lib; do
+                mkdir -p "$T$(dirname "$lib")"
+                cp -L "/rootfs$lib" "$T$lib"
+            done
+        done
+        # Storage + root filesystem modules and their dependencies (none for built-in drivers).
+        KVER=$(ls /rootfs/lib/modules | head -n1)
+        for m in virtio_pci virtio_mmio virtio_blk virtio_scsi nvme ahci ata_piix sd_mod \
+                 xen_blkfront hv_storvsc vmw_pvscsi megaraid_sas mpt3sas mmc_block sdhci_pci \
+                 usb_storage uas xhci_pci ehci_pci ext4 crc32c libcrc32c; do
+            chroot /rootfs modprobe -S "$KVER" --show-depends "$m" 2>/dev/null || true
+        done | awk "\$1==\"insmod\"{print \$2}" | sort -u | while read -r ko; do
+            mkdir -p "$T$(dirname "$ko")"
+            cp "/rootfs$ko" "$T$ko"
+        done
+        mkdir -p "$T/lib/modules/$KVER"
+        for f in modules.order modules.builtin modules.builtin.modinfo; do
+            [ -f "/rootfs/lib/modules/$KVER/$f" ] && cp "/rootfs/lib/modules/$KVER/$f" "$T/lib/modules/$KVER/"
+        done
+        depmod -b $T "$KVER"
+        mknod -m 600 $T/dev/console c 5 1
+        mknod -m 666 $T/dev/null c 1 3
+        mkdir -p /rootfs/boot
+        (cd $T && find . | cpio -o -H newc -R 0:0 2>/dev/null | gzip -9) > /rootfs/boot/initramfs-boot.cpio.gz
+        chmod 644 /rootfs/boot/initramfs-boot.cpio.gz
+        echo "✓ tiny boot initramfs: $(du -h /rootfs/boot/initramfs-boot.cpio.gz | cut -f1) ($(find $T/lib/modules -name "*.ko*" | wc -l) modules)"
+    '
+
 # Package Full Host OS Initramfs via Docker container (runs as root, eliminating permission denied errors on /var/empty or lock files)
 echo "Packaging Full Container OS Initramfs via Docker container..."
 FULL_INITRAMFS="$BUILD_DIR/ziro-initramfs-$TARGET_ARCH$SUFFIX.cpio.gz"
@@ -528,10 +585,16 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         mkdir -p "/out/apk-cache/$TARGET_ARCH"
         apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" pigz >/dev/null 2>&1 || true   # multi-threaded gzip; falls back below
         cd /rootfs
-        if command -v pigz >/dev/null 2>&1; then
-            find . | cpio -o -H newc -R 0:0 | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
-        else
-            find . | cpio -o -H newc -R 0:0 | gzip > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
+        Z=gzip
+        command -v pigz >/dev/null 2>&1 && Z=pigz
+        # Never leave a truncated image behind: it would still boot, with files missing.
+        # Only pack entries that stat: on a case-insensitive host bind mount (macOS) iptables
+        # names like libxt_DSCP.so/libxt_dscp.so collide and one of each pair cannot be stat-ed.
+        if ! { find . 2>/dev/null || true; } | while IFS= read -r p; do
+                if [ -e "$p" ] || [ -L "$p" ]; then printf "%s\n" "$p"; fi
+             done | cpio -o -H newc -R 0:0 | $Z > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"; then
+            rm -f "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
+            exit 1
         fi
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"
         chmod 644 "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"

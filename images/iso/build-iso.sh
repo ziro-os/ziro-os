@@ -91,46 +91,45 @@ terminal_input --append console serial
 terminal_output --append console serial
 
 set default=0
-set timeout=5
+set timeout=3
 
 menuentry "Ziro-OS Live Container Host & Installer" {
-    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init
+    linux /boot/vmlinuz console=tty0 console=${CONSOLE},115200 rdinit=/init
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Ziro-OS Live (Quiet Boot)" {
-    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init quiet
+    linux /boot/vmlinuz console=tty0 console=${CONSOLE},115200 rdinit=/init quiet
     initrd /boot/initramfs.cpio.gz
 }
 
-menuentry "Ziro-OS Live (Serial Console Primary)" {
-    linux /boot/vmlinuz console=tty0 console=ttyS0,115200 rdinit=/init
+menuentry "Ziro-OS Live (VGA Console Primary)" {
+    linux /boot/vmlinuz console=${CONSOLE},115200 console=tty0 rdinit=/init
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Ziro-OS Automated Terminal Installer" {
-    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.autoinstall
+    linux /boot/vmlinuz console=tty0 console=${CONSOLE},115200 rdinit=/init ziro.autoinstall
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Upgrade Existing Ziro-OS Install (keep all data)" {
-    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.autoinstall ziro.upgrade
+    linux /boot/vmlinuz console=tty0 console=${CONSOLE},115200 rdinit=/init ziro.autoinstall ziro.upgrade
     initrd /boot/initramfs.cpio.gz
 }
 
 menuentry "Boot Installed Ziro-OS from Hard Drive (auto-detect)" {
     search --no-floppy --label --set=root ZIRO_ROOT
-    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw console=ttyS0,115200 console=tty0
+    linux /boot/vmlinuz root=LABEL=ZIRO_ROOT rootflags=rw panic=10 console=tty0 console=${CONSOLE},115200
     initrd /boot/initramfs.cpio.gz
 }
 
-menuentry "Boot from Next Device / Local Disk (hd0)" {
-    set root=(hd0)
-    chainloader +1
+menuentry "Boot from Next Device / Local Disk" {
+    exit
 }
 
 menuentry "Ziro-OS (Recovery Shell)" {
-    linux /boot/vmlinuz console=ttyS0,115200 console=tty0 rdinit=/init ziro.recovery
+    linux /boot/vmlinuz console=tty0 console=${CONSOLE},115200 rdinit=/init ziro.recovery
     initrd /boot/initramfs.cpio.gz
 }
 EOF
