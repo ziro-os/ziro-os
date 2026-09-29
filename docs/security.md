@@ -74,6 +74,16 @@ Output:
 - **Clustering**: joins use a pinned master certificate plus a join token, and each node gets its own token (the
   master stores only hashes). See [clustering.md](clustering.md).
   A replica is reported running only when its assigned Ready node reports it.
+- **Cluster network policy**: new clusters default to `deny`. Mesh traffic reaches an app's port only from nodes
+  that run an app listed in its `allow_from` (`ziroctl cluster deploy --allow-from web`). It is enforced per node
+  in the `inet ziro_cluster` nftables table, and the agent does not configure the mesh until that table is in
+  place. Check it with `ziroctl cluster policy ls`.
+- **Audit log**: every mutating `ziroctl` command run as root, ziro-api service action, and cluster join, leave
+  or rejected credential is appended to `/var/log/ziro/audit.log` (0600). Each record holds the SHA-256 of the
+  previous one. `ziroctl audit verify` exits non-zero at the first changed or removed record, and
+  `ziroctl audit log --since 24h --json` exports records. `KEY=VALUE` values and credential flags are redacted.
+  The log rotates by rename at 10 MB and keeps 10 generations. Because root can rewrite the whole chain, forward
+  the log off-host or store the head hash printed by `verify` when you need non-repudiation.
 - **Kernel & sysctl**: the `custom` kernel flavor enforces module signing (ephemeral per-build key; unsigned modules are rejected). Its config fragments add KASLR, strict RWX, a strong stack protector, hardened
   usercopy, FORTIFY, the Yama and lockdown LSMs, unprivileged BPF off, and nftables/WireGuard built in. Shipped
   sysctls set `kptr_restrict=2`, `dmesg_restrict=1`, `unprivileged_bpf_disabled=1`, `ptrace_scope=1`, protected

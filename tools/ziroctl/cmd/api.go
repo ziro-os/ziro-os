@@ -382,6 +382,10 @@ func startAPIServer() {
 				http.Error(w, "Unknown action", http.StatusBadRequest)
 				return
 			}
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if aerr := auditLog("api-token", "api:"+ip, "service "+action, name, err); aerr != nil {
+				fmt.Printf("[api] audit log: %v\n", aerr)
+			}
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})

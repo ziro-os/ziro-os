@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -54,6 +55,7 @@ type heartbeatRequest struct {
 	Failed     map[string]string `json:"failed,omitempty"` // container -> start error
 	WGPubKey   string            `json:"wg_pubkey,omitempty"`
 	WGPort     int               `json:"wg_port,omitempty"`
+	MeshError  string            `json:"mesh_error,omitempty"` // mesh/policy apply failure on the node
 }
 
 // Assignment is one container the master wants running on a node.
@@ -82,6 +84,7 @@ type heartbeatResponse struct {
 	MeshPrefix  int                 `json:"mesh_prefix,omitempty"`
 	Peers       []MeshPeer          `json:"peers,omitempty"`
 	Endpoints   map[string][]string `json:"endpoints,omitempty"` // app -> mesh IPs
+	Policy      *MeshPolicy         `json:"policy,omitempty"`
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -401,10 +404,38 @@ func meshView(st *ClusterState, self *ClusterNode, cidr string) (string, int, []
 
 type clusterServer struct {
 	limiter *rateLimiter
+	mu      sync.Mutex
+	denied  map[string]time.Time // ip -> last audited auth failure
 }
 
 func newClusterServer() *clusterServer {
-	return &clusterServer{limiter: newRateLimiter(120, time.Minute)}
+	return &clusterServer{limiter: newRateLimiter(120, time.Minute), denied: map[string]time.Time{}}
+}
+
+// auditDenied records a rejected credential at most once per IP per 10 minutes, so a
+// revoked node that keeps heartbeating cannot flood the audit log.
+func (s *clusterServer) auditDenied(ip, path string) {
+	s.mu.Lock()
+	now := time.Now()
+	if now.Sub(s.denied[ip]) < 10*time.Minute {
+		s.mu.Unlock()
+		return
+	}
+	for k, t := range s.denied {
+		if now.Sub(t) >= 10*time.Minute {
+			delete(s.denied, k)
+		}
+	}
+	s.denied[ip] = now
+	s.mu.Unlock()
+	clusterAudit("ip:"+ip, "cluster auth denied", path, errUnauthorized)
+}
+
+// clusterAudit is the control plane's audit hook; a failing log never blocks cluster traffic.
+func clusterAudit(actor, action, target string, err error) {
+	if e := auditLog(actor, "cluster-master", action, target, err); e != nil {
+		fmt.Printf("[cluster] audit log: %v\n", e)
+	}
 }
 
 func (s *clusterServer) handler() http.Handler {
@@ -442,6 +473,9 @@ func (s *clusterServer) wrap(h func(r *http.Request) (interface{}, error)) http.
 			var he httpError
 			if errors.As(err, &he) {
 				code = he.code
+			}
+			if code == http.StatusUnauthorized {
+				s.auditDenied(ip, r.URL.Path)
 			}
 			w.WriteHeader(code)
 			_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
@@ -517,6 +551,7 @@ func (s *clusterServer) handleJoin(r *http.Request) (interface{}, error) {
 		return nil, err
 	}
 	fmt.Printf("[cluster] node %s (%s, %s) joined\n", resp.NodeID, req.Hostname, ip)
+	clusterAudit("ip:"+ip, "cluster node join", resp.NodeID+" ("+req.Hostname+")", nil)
 	return resp, nil
 }
 
@@ -539,6 +574,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 	for k, v := range req.Failed {
 		req.Failed[k] = sanitizeLabel(v, 200)
 	}
+	req.MeshError = sanitizeLabel(req.MeshError, 300)
 	cfg, err := requireMaster()
 	if err != nil {
 		return nil, err
@@ -553,7 +589,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		if n.Status != "Ready" {
 			fmt.Printf("[cluster] node %s is Ready again\n", n.ID)
 		}
-		n.LastSeen, n.Containers, n.Running, n.Failed = time.Now(), req.Containers, req.Running, req.Failed
+		n.LastSeen, n.Containers, n.Running, n.Failed, n.MeshError = time.Now(), req.Containers, req.Running, req.Failed, req.MeshError
 		if n.Role != "master" {
 			n.IP = ip
 		}
@@ -591,6 +627,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		resp.Assignments = assignmentsFor(st, n.ID, secrets)
 		resp.MeshIP, resp.MeshPrefix, resp.Peers = meshView(st, n, meshCIDR(cfg))
 		resp.Endpoints = appEndpoints(st)
+		resp.Policy = policyFor(st, n.ID)
 		return nil
 	})
 	return resp, err
@@ -609,6 +646,7 @@ func (s *clusterServer) handleLeave(r *http.Request) (interface{}, error) {
 		removeNode(st, id)
 		scheduleReplicas(st, time.Now())
 		fmt.Printf("[cluster] node %s left\n", id)
+		clusterAudit("node:"+id, "cluster node leave", id, nil)
 		return nil
 	})
 	return APIMessage{Status: "ok"}, err
