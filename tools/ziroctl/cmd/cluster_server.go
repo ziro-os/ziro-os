@@ -85,6 +85,7 @@ type heartbeatResponse struct {
 	Peers       []MeshPeer          `json:"peers,omitempty"`
 	Endpoints   map[string][]string `json:"endpoints,omitempty"` // app -> mesh IPs
 	Policy      *MeshPolicy         `json:"policy,omitempty"`
+	Gateway     *GatewayConfig      `json:"gateway,omitempty"` // only for nodes labelled gateway
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -628,6 +629,9 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		resp.MeshIP, resp.MeshPrefix, resp.Peers = meshView(st, n, meshCIDR(cfg))
 		resp.Endpoints = appEndpoints(st)
 		resp.Policy = policyFor(st, n.ID)
+		if n.Gateway {
+			resp.Gateway = gatewayConfigFor(st)
+		}
 		return nil
 	})
 	return resp, err

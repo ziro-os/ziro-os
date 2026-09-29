@@ -38,6 +38,7 @@ The join token expires after 24 hours (`--token-ttl`, `0` = never). Print the jo
 | Remove a dead worker and revoke its token | `ziroctl cluster node rm <node>` |
 | Secrets (names and keys are listed, never values) | `ziroctl cluster secret set\|rm\|ls` |
 | Network policy: who may reach an app over the mesh | `ziroctl cluster deploy --name api --allow-from web,worker` (`'*'` = any app), `cluster policy ls`, `cluster policy default deny\|allow` |
+| Expose apps over HTTP(S) with TLS, rate limits and IP allowlists | `ziroctl gateway node enable <node>`, `gateway route add <name> --host … --app …`; see [gateway.md](gateway.md) |
 | Machine-readable output | add `--json` to `status`, `nodes`, `services`, `endpoints`, `secret ls`, `policy ls` |
 
 An `apps.json` manifest uses the same fields as the API:

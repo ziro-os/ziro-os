@@ -66,6 +66,7 @@ type ClusterNode struct {
 	WGPubKey   string            `json:"wg_pubkey,omitempty"`
 	WGPort     int               `json:"wg_port,omitempty"`
 	MeshError  string            `json:"mesh_error,omitempty"` // last mesh/policy apply error reported by the agent
+	Gateway    bool              `json:"gateway,omitempty"`    // runs zirogate for the cluster's routes
 	LastSeen   time.Time         `json:"last_seen"`
 }
 
@@ -103,7 +104,9 @@ type ClusterState struct {
 	NodeTokens map[string]string         `json:"node_tokens"`       // node id -> sha256(node token)
 	// PolicyDefault is "deny" (mesh traffic to app ports needs an allow_from rule) or
 	// "allow"/"" (clusters created before policies existed keep working unchanged).
-	PolicyDefault string `json:"policy_default,omitempty"`
+	PolicyDefault string         `json:"policy_default,omitempty"`
+	Routes        []GatewayRoute `json:"routes,omitempty"`
+	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
 }
 
 func isClusterMaster() bool {
@@ -586,23 +589,34 @@ func printJoinCommand(cfg *ClusterConfig) {
 // ziro_cluster nft table then narrows ziro0 to the app policy (cluster policy). An admin-disabled
 // firewall stays disabled; the boot default (no config file) is enabled.
 func openClusterFirewall(port int) {
+	rules := []FirewallRule{{Port: meshPort, Protocol: "udp", Comment: "Ziro cluster WireGuard mesh"}}
+	if port > 0 {
+		rules = append(rules, FirewallRule{Port: port, Protocol: "tcp", Comment: "Ziro cluster control plane"})
+	}
+	allowFirewall(rules, meshIface)
+}
+
+// allowFirewall adds missing port rules (and a trusted interface) to the host firewall and
+// re-applies it when enabled.
+func allowFirewall(rules []FirewallRule, trust string) {
 	fw := loadFirewallConfig()
 	have := map[string]bool{}
 	for _, r := range fw.AllowedPorts {
 		have[fmt.Sprintf("%d/%s", r.Port, r.Protocol)] = true
 	}
-	if port > 0 && !have[fmt.Sprintf("%d/tcp", port)] {
-		fw.AllowedPorts = append(fw.AllowedPorts, FirewallRule{Port: port, Protocol: "tcp", Comment: "Ziro cluster control plane"})
+	for _, r := range rules {
+		if !have[fmt.Sprintf("%d/%s", r.Port, r.Protocol)] {
+			fw.AllowedPorts = append(fw.AllowedPorts, r)
+		}
 	}
-	if !have[fmt.Sprintf("%d/udp", meshPort)] {
-		fw.AllowedPorts = append(fw.AllowedPorts, FirewallRule{Port: meshPort, Protocol: "udp", Comment: "Ziro cluster WireGuard mesh"})
-	}
-	trusted := false
-	for _, i := range fw.TrustedInterfaces {
-		trusted = trusted || i == meshIface
-	}
-	if !trusted {
-		fw.TrustedInterfaces = append(fw.TrustedInterfaces, meshIface)
+	if trust != "" {
+		trusted := false
+		for _, i := range fw.TrustedInterfaces {
+			trusted = trusted || i == trust
+		}
+		if !trusted {
+			fw.TrustedInterfaces = append(fw.TrustedInterfaces, trust)
+		}
 	}
 	if err := saveFirewallConfig(fw); err != nil {
 		fmt.Printf("  ⚠ firewall config: %v\n", err)
@@ -769,6 +783,9 @@ var clusterNodesCmd = &cobra.Command{
 				}
 				if n.MeshError != "" {
 					status += ",MeshError"
+				}
+				if n.Gateway {
+					status += ",Gateway"
 				}
 				fmt.Printf("%-14s %-16s %-16s %-14s %-7s %-19s %-5d %-8d %s ago\n", n.ID, n.Hostname, n.IP, n.MeshIP, n.Role, status, n.CPUs, count,
 					time.Since(n.LastSeen).Round(time.Second))

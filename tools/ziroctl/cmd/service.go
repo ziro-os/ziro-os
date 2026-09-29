@@ -126,6 +126,15 @@ var defaultServices = []ServiceDef{
 		Autostart:   false,
 	},
 	{
+		Name:        "gateway",
+		Description: "zirogate cluster ingress (TLS, routing, rate limits)",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "gateway serve",
+		PIDFile:     "/run/ziro-gateway.pid",
+		LogFile:     "/var/log/gateway.log",
+		Autostart:   false,
+	},
+	{
 		Name:        "ziro-api",
 		Description: "Ziro Control Plane REST API Server",
 		Exec:        "/usr/bin/ziroctl",

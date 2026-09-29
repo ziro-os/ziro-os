@@ -49,8 +49,11 @@ func placedMeshIPs(st *ClusterState) map[string][]string {
 	return out
 }
 
-func allowedSources(app *ClusteredApp, placed map[string][]string) []string {
+func allowedSources(st *ClusterState, app *ClusteredApp, placed map[string][]string) []string {
 	set := map[string]bool{}
+	for _, ip := range gatewaySources(st, app.Name) {
+		set[ip] = true
+	}
 	for _, from := range app.AllowFrom {
 		if from == "*" {
 			for _, ips := range placed {
@@ -91,7 +94,7 @@ func policyFor(st *ClusterState, nodeID string) *MeshPolicy {
 			continue
 		}
 		seen[key] = true
-		src := allowedSources(cur, placed)
+		src := allowedSources(st, cur, placed)
 		if len(src) == 0 {
 			continue
 		}
@@ -231,7 +234,7 @@ var clusterPolicyLsCmd = &cobra.Command{
 		placed := placedMeshIPs(st)
 		for i := range st.Apps {
 			a := &st.Apps[i]
-			av := appPolicyView{App: a.Name, Port: hostPortKey(a.Port), AllowFrom: a.AllowFrom, Sources: allowedSources(a, placed)}
+			av := appPolicyView{App: a.Name, Port: hostPortKey(a.Port), AllowFrom: a.AllowFrom, Sources: allowedSources(st, a, placed)}
 			if av.AllowFrom == nil {
 				av.AllowFrom = []string{}
 			}
