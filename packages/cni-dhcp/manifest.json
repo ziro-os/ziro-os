@@ -1,0 +1,13 @@
+{
+  "name": "cni-dhcp",
+  "version": "1.9.1-ziro.1",
+  "source": "github.com/containernetworking/plugins/plugins/ipam/dhcp",
+  "dependencies": {
+    "github.com/containernetworking/plugins": "v1.9.1",
+    "github.com/insomniacslk/dhcp": "v0.0.0-20260719225207-c76316d4aa82",
+    "golang.org/x/net": "v0.59.0"
+  },
+  "go": "1.27.1",
+  "architectures": ["amd64", "arm64"],
+  "linking": "static"
+}

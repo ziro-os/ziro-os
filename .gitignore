@@ -108,7 +108,6 @@ kube-config
 # Docker and container artifacts
 .docker/
 docker-compose.override.yml
-.dockerignore
 
 # Packer artifacts
 packer_cache/

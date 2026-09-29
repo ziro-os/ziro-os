@@ -78,6 +78,9 @@ jobs:
       - name: Verify archive security metadata
         run: python3 tests/security/test-artifact-metadata.py build/ziro-rootfs-$TARGET_ARCH.tar.gz build/ziro-initramfs-$TARGET_ARCH-custom.cpio.gz
 
+      - name: Verify rebuilt DHCP CNI plugin
+        run: python3 tests/security/test-cni-dhcp.py build/rootfs-full-$TARGET_ARCH-custom $TARGET_ARCH
+
       - name: QEMU boot smoke test (custom kernel)
         run: make test-boot
 

@@ -56,7 +56,7 @@ mknod "$INITRAMFS_DIR/dev/zero" c 1 5 2>/dev/null || true
 
 # Create initramfs archive
 cd "$INITRAMFS_DIR"
-find . | cpio -o -H newc | gzip > "../initramfs.cpio.gz"
+find . | cpio -o -H newc -R 0:0 | gzip > "../initramfs.cpio.gz"
 cd - > /dev/null
 
 echo "Initramfs created: $(du -h $OUTPUT_DIR/initramfs.cpio.gz | cut -f1)"

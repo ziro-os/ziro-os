@@ -460,6 +460,20 @@ SH_SHUTDOWN
     chmod -R u+rwX /rootfs 2>/dev/null || true
 '
 
+# Alpine's DHCP CNI binary embeds an older x/net. Keep the CNI entry point and
+# upstream plugin version, but rebuild against Ziro's checksum-locked overrides.
+CNI_DHCP_BIN="$REPO_ROOT/bin/cni-dhcp-$TARGET_ARCH"
+(
+    cd "$REPO_ROOT/packages/cni-dhcp"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -mod=readonly -trimpath \
+        -ldflags="-s -w -X github.com/containernetworking/plugins/pkg/utils/buildversion.BuildVersion=v1.9.1-ziro.1" \
+        -o "$CNI_DHCP_BIN" github.com/containernetworking/plugins/plugins/ipam/dhcp
+)
+for destination in usr/libexec/cni/dhcp opt/cni/bin/dhcp; do
+    cp "$CNI_DHCP_BIN" "$ROOTFS_FULL/$destination"
+    chmod 0755 "$ROOTFS_FULL/$destination"
+done
+
 # Re-affirm ziro-init and BusyBox after package additions
 rm -f "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/init"
@@ -492,6 +506,8 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
     "$ALPINE_IMAGE" sh -c '
+        set -eu
+        set -o pipefail
         rm -f /rootfs/lib/apk/db/lock /rootfs/var/run/*.pid /rootfs/run/*.pid
         for f in /rootfs/usr/lib/xtables/*.so; do
             [ -e "$f" ] || rm -f "$f"

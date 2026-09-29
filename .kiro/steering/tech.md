@@ -89,6 +89,10 @@ with OpenSSH, and refuses active Includes until operators consolidate them. Fire
 precedes established/protocol accepts, with loopback deliberately trusted. Cluster health reports are
 scoped to the node assigned each replica.
 
+The host DHCP CNI plugin uses pinned upstream source with a checksum-locked x/net override
+under `packages/cni-dhcp`. Both installed copies are rebuilt statically; other CNI plugins
+retain their signed Alpine packaging. This avoids removing support for custom DHCP IPAM.
+
 ### 🧪 Testing & Validation
 
 - QEMU-based boot & basic function tests

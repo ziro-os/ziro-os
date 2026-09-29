@@ -126,7 +126,7 @@ sudo cp /tmp/bzImage /boot/ziro-os/vmlinuz
 
 # Create initramfs from rootfs
 cd /tmp
-sudo find rootfs | sudo cpio -o -H newc | sudo gzip > /boot/ziro-os/initramfs.cpio.gz
+sudo find rootfs | sudo cpio -o -H newc -R 0:0 | sudo gzip > /boot/ziro-os/initramfs.cpio.gz
 
 # Configure GRUB for Ziro-OS
 sudo tee /etc/grub.d/40_custom << 'GRUB_EOF'
