@@ -23,15 +23,24 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Snyk takes the Go standard-library version from the local toolchain: without the
+      # project's Go it reports the runner's older stdlib instead of what ships.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: tools/ziroctl/go.mod
+          cache-dependency-path: |
+            tools/ziroctl/go.sum
+            tools/ziropkg/go.sum
+            packages/cni-dhcp/go.sum
 
       - name: Set up Snyk CLI
-        uses: snyk/actions/setup@master
+        uses: snyk/actions/setup@b075801f26076be9bb50521154cafab73f44da0c # master, 2026-09-29
 
       - name: Verify Snyk
-        run: |
-          snyk --version
-          snyk auth "$SNYK_TOKEN"
+        run: snyk --version
 
       # -------------------------
       # Snyk Code / SAST
@@ -39,12 +48,11 @@ jobs:
 
       - name: Snyk Code test
         continue-on-error: true
-        run: |
-          snyk code test --sarif-file-output=snyk-code.sarif
+        run: snyk code test --sarif-file-output=snyk-code.sarif
 
       - name: Upload Snyk Code results
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('snyk-code.sarif') != ''
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         with:
           sarif_file: snyk-code.sarif
 
@@ -54,13 +62,11 @@ jobs:
 
       - name: Snyk Open Source test
         continue-on-error: true
-        run: |
-          snyk test --all-projects
+        run: snyk test --all-projects
 
       - name: Snyk Open Source monitor
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          snyk monitor --all-projects
+        run: snyk monitor --all-projects
 
       # -------------------------
       # Infrastructure as Code
@@ -68,27 +74,39 @@ jobs:
 
       - name: Snyk IaC test
         continue-on-error: true
-        run: |
-          snyk iac test
+        run: snyk iac test
 
       # -------------------------
       # Docker / Container
       # -------------------------
 
-      - name: Build Docker image
+      # The image is FROM scratch plus the minimal rootfs archive, which is a build output:
+      # build it first, exactly as CI does, then the image from the maintained Dockerfile.
+      - name: Install build dependencies
         run: |
-          docker build -t ziro-os:${{ github.sha }} .
+          sudo apt-get update
+          sudo apt-get install -y build-essential cpio gzip
+
+      - name: Build rootfs (x86_64)
+        run: |
+          make tools
+          make rootfs-x86_64
+
+      - name: Build Docker image
+        env:
+          IMAGE_TAG: ziro-os:${{ github.sha }}
+        run: ./images/docker/build-docker.sh x86_64
 
       - name: Snyk Container test
         continue-on-error: true
         run: |
           snyk container test \
             ziro-os:${{ github.sha }} \
-            --file=Dockerfile
+            --file=images/docker/Dockerfile
 
       - name: Snyk Container monitor
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           snyk container monitor \
             ziro-os:${{ github.sha }} \
-            --file=Dockerfile
+            --file=images/docker/Dockerfile

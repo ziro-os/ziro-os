@@ -1080,6 +1080,17 @@ func clusterPost(addr, caHash, path, auth string, body, out interface{}) error {
 // clusterDo sends one request. CA-aware masters are asked for their CA-signed certificate
 // (SNI); an agent still pinned to a pre-CA certificate falls back to asking without SNI.
 func clusterDo(addr, pin, path, auth string, data []byte) (*http.Response, error) {
+	// A node that already holds the pinned cluster CA verifies masters the standard way (chain
+	// + name); pin-only verification is left for the first join and for pre-CA agents.
+	if tc := caVerifiedTLS(pin); tc != nil {
+		req, err := http.NewRequest(http.MethodPost, "https://"+addr+path, bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", auth)
+		req.Header.Set("Content-Type", "application/json")
+		return (&http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: tc}}).Do(req)
+	}
 	var lastErr error
 	for _, sni := range []bool{true, false} {
 		req, err := http.NewRequest(http.MethodPost, "https://"+addr+path, bytes.NewReader(data))

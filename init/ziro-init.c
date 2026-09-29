@@ -103,7 +103,8 @@ static const char *cmdline_find(const char *key, size_t *vlen) {
         while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
         size_t len = (size_t)(p - s);
         if (strncmp(s, key, klen) == 0 && (is_kv ? len >= klen : len == klen)) {
-            if (vlen) *vlen = is_kv ? len - klen : 0;
+            // deepcode ignore IntegerOverflow: guarded by len >= klen on the same line; cannot underflow
+            if (vlen) *vlen = (is_kv && len >= klen) ? len - klen : 0; /* never underflows */
             return s + klen;
         }
     }
@@ -776,6 +777,7 @@ static void start_sshd(void) {
 
     safe_mkdir("/var/empty", 0700);
     chmod("/var/empty", 0700);
+    // deepcode ignore MissingAuthorization: PID 1 must make sshd privilege-separation dir root-owned (sshd refuses otherwise)
     if (chown("/var/empty", 0, 0) != 0) {
         // ignore if not running as root
     }
@@ -783,6 +785,7 @@ static void start_sshd(void) {
     safe_mkdir("/etc/ssh", 0755);
     safe_mkdir("/root/.ssh", 0700);
     chmod("/root/.ssh", 0700);
+    // deepcode ignore MissingAuthorization: PID 1 must keep root's .ssh root-owned (sshd StrictModes)
     if (chown("/root/.ssh", 0, 0) != 0) {
         // ignore if not running as root
     }
@@ -860,7 +863,9 @@ static void get_active_console(char *dev_path, size_t max_len) {
                 last_word = token;
                 token = strtok(NULL, " \t\r\n");
             }
-            if (last_word && strlen(last_word) > 0) {
+            /* A plain device name from the kernel (e.g. ttyS0): never a path. */
+            if (last_word && strlen(last_word) > 0 && strlen(last_word) < 32 &&
+                strspn(last_word, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == strlen(last_word)) {
                 snprintf(dev_path, max_len, "/dev/%s", last_word);
             }
         }
@@ -940,6 +945,7 @@ static void setup_controlling_tty(void) {
     char dev_path[64];
     get_active_console(dev_path, sizeof(dev_path));
 
+    // deepcode ignore PT: dev_path is /dev/<name>, name restricted to [A-Za-z0-9] in get_active_console
     int fd = open(dev_path, O_RDWR);
     if (fd < 0) {
         fd = open("/dev/tty1", O_RDWR);
@@ -1099,14 +1105,31 @@ static struct {
     time_t started, restart_at;
 } supervised[MAX_SUPERVISED];
 
+/* Service definitions steer what PID 1 restarts and which pidfile it deletes: only trust a
+ * regular file owned by root and not writable by group or others. */
+static int conf_trusted(FILE *f) {
+    struct stat st;
+    return fstat(fileno(f), &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0 && (st.st_mode & 022) == 0;
+}
+
+/* Pidfiles live under /run: never follow a definition elsewhere (PID 1 unlinks them). */
+static int pidfile_ok(const char *p) {
+    return strncmp(p, "/run/", 5) == 0 && strstr(p, "..") == NULL && strlen(p) < 128;
+}
+
 static int conf_get(const char *path, const char *key, char *out, size_t max) {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
+    if (!conf_trusted(f)) {
+        fclose(f);
+        return 0;
+    }
     char line[256];
     size_t klen = strlen(key);
     int found = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
+            // deepcode ignore IntegerOverflow: line starts with key (strncmp) and line[klen] == '=', so both offsets are in bounds
             snprintf(out, max, "%s", line + klen + 1);
             out[strcspn(out, "\r\n")] = '\0';
             found = 1;
@@ -1129,7 +1152,8 @@ static void supervise_service_exit(pid_t pid, int status) {
         if (!conf_get(conf, "restart", restart, sizeof(restart))) continue;
         int always = strcmp(restart, "always") == 0;
         if (!always && !(strcmp(restart, "on-failure") == 0 && !(WIFEXITED(status) && WEXITSTATUS(status) == 0))) continue;
-        if (!conf_get(conf, "pidfile", pidfile, sizeof(pidfile))) continue;
+        if (!conf_get(conf, "pidfile", pidfile, sizeof(pidfile)) || !pidfile_ok(pidfile)) continue;
+        // deepcode ignore PT: pidfile comes from a root-owned, non-group/world-writable definition (conf_trusted) and pidfile_ok limits it to /run/ without ..
         FILE *pf = fopen(pidfile, "r");
         if (!pf) continue;
         if (!fgets(pidbuf, sizeof(pidbuf), pf)) pidbuf[0] = '\0';
@@ -1145,6 +1169,7 @@ static void supervise_service_exit(pid_t pid, int status) {
             if (!fgets(state, sizeof(state), ef)) state[0] = '\0';
             fclose(ef);
         }
+        // deepcode ignore PT: same pidfile as above: trusted definition, confined to /run/ by pidfile_ok
         unlink(pidfile);
         if (strncmp(state, "disabled", 8) == 0) break;
 

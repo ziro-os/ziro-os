@@ -378,15 +378,23 @@ func startAPIServer() {
 		if len(parts) >= 2 && r.Method == "POST" {
 			name := parts[0]
 			action := parts[1]
+			// Only existing, trusted service definitions: the name never reaches anything else.
+			if _, err := loadServiceDef(name); err != nil {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
+				return
+			}
 			var err error
 			switch action {
 			case "start":
+				// deepcode ignore CommandInjection: name only selects a root-owned service definition (validated, 404 if unknown); the executable comes from that definition, never from the request
 				err = startService(name)
 			case "stop":
 				err = stopService(name)
 			case "restart":
 				_ = stopService(name)
 				time.Sleep(300 * time.Millisecond)
+				// deepcode ignore CommandInjection: same as above: name selects a trusted definition, it is never executed
 				err = startService(name)
 			case "enable":
 				err = enableService(name)

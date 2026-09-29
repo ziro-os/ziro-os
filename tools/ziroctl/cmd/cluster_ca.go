@@ -261,12 +261,30 @@ type pinError string
 
 func (e pinError) Error() string { return string(e) }
 
+// caVerifiedTLS returns standard verification against the local cluster CA when its hash is the
+// pin, or nil when this node does not hold that CA yet.
+func caVerifiedTLS(pin string) *tls.Config {
+	b, err := os.ReadFile(clusterCAPath())
+	if err != nil {
+		return nil
+	}
+	if h, err := pemHash(string(b)); err != nil || h != pin {
+		return nil
+	}
+	pool, err := caPool(string(b))
+	if err != nil {
+		return nil
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: clusterSNI}
+}
+
 // pinnedTLS trusts a master by pin. The pin is either the cluster CA hash (the leaf must chain to
 // that CA) or, for agents from before the cluster CA, the first master's own certificate hash.
 func pinnedTLS(pin string, sni bool) *tls.Config {
 	c := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		// Chain/hostname verification is replaced by the pin checks below.
+		// deepcode ignore TooPermissiveTrustManager: certificate pinning (kubeadm-style) replaces chain verification: VerifyConnection requires the pinned leaf, or a pinned CA that the leaf must chain to; nodes that hold the CA use caVerifiedTLS (standard verification)
 		InsecureSkipVerify: true, //nolint:gosec
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
