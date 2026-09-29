@@ -264,6 +264,9 @@ var clusterAgentCmd = &cobra.Command{
 				if merr == nil {
 					merr = writeHostsBlock(hostsFile, resp.Endpoints)
 				}
+				if gerr := syncGatewayConfig(resp.Gateway); gerr != nil && merr == nil {
+					merr = fmt.Errorf("gateway: %w", gerr)
+				}
 				if merr != nil && merr.Error() != lastMesh {
 					fmt.Printf("[agent] mesh: %v\n", merr)
 				}

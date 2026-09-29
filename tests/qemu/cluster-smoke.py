@@ -119,6 +119,22 @@ def main():
         ok, out = bs.retry(m, "ziroctl cluster services", lambda rc, o: "2/2 running" in o and "updating" not in o and "error" not in o, 300, every=10)
         check("rollback restores a healthy app", ok, out)
 
+        # zirogate: api is mesh-only with no allow_from, so under deny only the route admits the
+        # gateway (node1) to api's replica on node2.
+        rc, out = m.run("ziroctl cluster deploy --name api --image docker.io/library/nginx:alpine --replicas 2 --port 9090:80 --mesh-only")
+        ok, out = bs.retry(m, "ziroctl cluster services", lambda rc, o: re.search(r"api .*2/2 running", o) is not None, 400, every=10)
+        check("mesh-only api x2 running", ok, out)
+        rc, out = m.run("ziroctl gateway node enable master-1 && ziroctl gateway route add api --host api.test --app api --tls off --rate 5")
+        check("gateway route add", rc == 0, out)
+        gw = "curl -s -o /dev/null -w '%{http_code} ' -H 'Host: api.test' http://192.168.77.1/"
+        ok, out = bs.retry(w, f"for i in 1 2 3 4 5 6; do {gw}; sleep 0.3; done",
+                           lambda rc, o: o.split().count("200") == 6, 120, every=5)
+        check("gateway proxies to api on both nodes (route admits the gateway)", ok, out)
+        rc, out = w.run(f"for i in $(seq 1 25); do {gw}; done")
+        check("gateway rate limit returns 429", "429" in out and "200" in out, out)
+        rc, out = w.run("curl -s -o /dev/null -w '%{http_code}' -H 'Host: nope.test' http://192.168.77.1/")
+        check("gateway: unknown host is 404", out.strip().endswith("404"), out)
+
         rc, out = m.run("ziroctl audit verify && ziroctl audit log | grep -c -e 'cluster deploy' -e 'cluster node join'")
         check("audit: chain intact and records deploys and joins", rc == 0 and "chain intact" in out, out)
     finally:
