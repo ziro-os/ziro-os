@@ -54,3 +54,29 @@ Point DNS for `www.example.com` at the gateway nodes, or put a cloud load balanc
 - **Certificates on several gateway nodes:** each gateway node gets its own certificate, which counts against Let's Encrypt's limit of 50 certificates per domain per week. For many gateways, use a private CA or terminate TLS at a cloud load balancer and use `--tls off`.
 - **Behind a load balancer:** the client IP used for `--allow-cidr` and `--rate` is the TCP peer, which is the load balancer if there is one. There is no PROXY-protocol or trusted-proxy setting yet.
 - **Protocols:** HTTP(S) only. There is no TCP/UDP (L4) routing.
+
+## Remote access (WireGuard peers)
+
+Laptops, CI runners or other sites can join the mesh as WireGuard clients of the **hub**, the first gateway node by ID:
+
+```sh
+# On the client (recommended: the private key never leaves it)
+wg genkey | tee client.key | wg pubkey            # -> <pubkey>
+
+# On the master
+ziroctl gateway peer add alice --pubkey <pubkey> > alice.conf   # add --endpoint vpn.example.com:51821 behind NAT
+ziroctl cluster deploy --name api --allow-from web,peer:alice   # or 'peers' for every peer
+ziroctl gateway peer ls
+ziroctl gateway peer rm alice                                   # revoke
+```
+
+Put the client's private key into `alice.conf` and run `wg-quick up ./alice.conf`. Without `--pubkey`, the master generates a key pair and prints the private key **once**. It is never stored. Running `peer add` again with the same name rotates the key and keeps the mesh IP.
+
+How it works:
+- The peer gets a mesh IP from the mesh CIDR, and its `AllowedIPs` is the whole mesh.
+- The hub has it as an endpoint-less WireGuard peer and relays its traffic into `ziro0`. Every other node routes the peer's /32 back through the hub.
+- **Policy:** the hub only relays; its forward chain admits the peer's traffic as transit. Each destination node still enforces `allow_from`, so under the default deny a peer reaches nothing until an app names it. Clusters in `allow` mode give peers the whole mesh.
+- `ziroctl audit log` records `peer add` and `peer rm`, including the public key argument. The private key isn't recorded.
+- **Limits:**
+  - There is one hub. If the first gateway node changes, clients need a new config (`peer add` again).
+  - Peers get no DNS for `<app>.cluster.ziro`. Use mesh IPs from `ziroctl cluster endpoints`.

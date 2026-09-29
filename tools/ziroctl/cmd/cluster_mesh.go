@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,9 +87,24 @@ func applyMesh(meshIP string, prefix int, peers []MeshPeer) error {
 		if p.PubKey == selfPub || !validWGKey(p.PubKey) {
 			continue
 		}
+		allowed := []string{p.MeshIP + "/32"}
+		for _, r := range p.Routes {
+			allowed = append(allowed, r+"/32")
+		}
+		for _, a := range allowed {
+			if _, err := netip.ParsePrefix(a); err != nil {
+				return fmt.Errorf("invalid mesh address %q", a)
+			}
+		}
 		want[p.PubKey] = true
-		if err := run("wg", "set", meshIface, "peer", p.PubKey, "endpoint", p.Endpoint,
-			"allowed-ips", p.MeshIP+"/32", "persistent-keepalive", "25"); err != nil {
+		args := []string{"set", meshIface, "peer", p.PubKey, "allowed-ips", strings.Join(allowed, ",")}
+		if p.Endpoint != "" {
+			if _, err := netip.ParseAddrPort(p.Endpoint); err != nil {
+				return fmt.Errorf("invalid peer endpoint %q", p.Endpoint)
+			}
+			args = append(args, "endpoint", p.Endpoint, "persistent-keepalive", "25")
+		}
+		if err := run("wg", args...); err != nil {
 			return err
 		}
 	}

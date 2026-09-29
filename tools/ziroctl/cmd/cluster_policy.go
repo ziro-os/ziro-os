@@ -29,8 +29,9 @@ type MeshRule struct {
 
 // MeshPolicy is one node's view of the policy, sent in heartbeat replies.
 type MeshPolicy struct {
-	Deny  bool       `json:"deny"`
-	Rules []MeshRule `json:"rules,omitempty"`
+	Deny    bool       `json:"deny"`
+	Rules   []MeshRule `json:"rules,omitempty"`
+	Transit []string   `json:"transit,omitempty"` // hub only: remote peers it relays into the mesh
 }
 
 // placedMeshIPs maps each app to the mesh IPs of nodes that hold one of its replicas. Placement
@@ -55,6 +56,14 @@ func allowedSources(st *ClusterState, app *ClusteredApp, placed map[string][]str
 		set[ip] = true
 	}
 	for _, from := range app.AllowFrom {
+		if from == "peers" || strings.HasPrefix(from, "peer:") {
+			for _, rp := range st.Peers {
+				if from == "peers" || from == "peer:"+rp.Name {
+					set[rp.MeshIP] = true
+				}
+			}
+			continue
+		}
 		if from == "*" {
 			for _, ips := range placed {
 				for _, ip := range ips {
@@ -80,6 +89,13 @@ func policyFor(st *ClusterState, nodeID string) *MeshPolicy {
 	p := &MeshPolicy{Deny: st.PolicyDefault == "deny"}
 	if !p.Deny {
 		return p
+	}
+	// The hub only relays remote peers; each destination node still enforces allow_from.
+	if hub := peerHub(st); hub != nil && hub.ID == nodeID {
+		for _, rp := range st.Peers {
+			p.Transit = append(p.Transit, rp.MeshIP)
+		}
+		sort.Strings(p.Transit)
 	}
 	placed := placedMeshIPs(st)
 	seen := map[string]bool{}
@@ -121,6 +137,11 @@ func buildPolicyScript(p *MeshPolicy) (string, error) {
 		return sb.String(), nil
 	}
 	var rules []string
+	for _, s := range p.Transit {
+		if a, err := netip.ParseAddr(s); err != nil || !a.Is4() {
+			return "", fmt.Errorf("invalid transit source %q", s)
+		}
+	}
 	for _, r := range p.Rules {
 		if r.Port < 1 || r.Port > 65535 || (r.Proto != "tcp" && r.Proto != "udp") || len(r.Sources) == 0 {
 			return "", fmt.Errorf("invalid policy rule %d/%s", r.Port, r.Proto)
@@ -140,6 +161,9 @@ func buildPolicyScript(p *MeshPolicy) (string, error) {
 		fmt.Fprintf(&sb, "  chain %s {\n    type filter hook %s priority -10; policy accept;\n", hook, hook)
 		fmt.Fprintf(&sb, "    iifname %q ct state established,related accept\n", meshIface)
 		fmt.Fprintf(&sb, "    iifname %q meta l4proto icmp accept\n", meshIface)
+		if hook == "forward" && len(p.Transit) > 0 {
+			fmt.Fprintf(&sb, "    iifname %q oifname %q ip saddr { %s } accept\n", meshIface, meshIface, strings.Join(p.Transit, ", "))
+		}
 		for _, r := range rules {
 			sb.WriteString(r)
 		}

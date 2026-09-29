@@ -135,6 +135,41 @@ def main():
         rc, out = w.run("curl -s -o /dev/null -w '%{http_code}' -H 'Host: nope.test' http://192.168.77.1/")
         check("gateway: unknown host is 404", out.strip().endswith("404"), out)
 
+        # Remote peer "alice": a WireGuard client in a netns on node2 (own key, NATed out), relayed by
+        # the hub (node1, the gateway) into the mesh. Under deny it reaches api only once allowed.
+        rc, out = w.run("umask 077; wg genkey > /tmp/alice.key && wg pubkey < /tmp/alice.key")
+        pub = re.search(r"[A-Za-z0-9+/]{43}=", out)
+        rc, out = m.run(f"ziroctl gateway peer add alice --pubkey {pub.group(0) if pub else 'missing'}")
+        conf = re.search(r"Address = (\S+)/32.*PublicKey = (\S+).*Endpoint = (\S+)", out, re.S)
+        check("gateway peer add prints a client config", rc == 0 and conf is not None, out)
+        if conf:
+            ip, hubkey, ep = conf.groups()
+            ns = "/sbin/ip netns exec cli"  # iproute2: /bin/ip is BusyBox (no netns)
+            rc, out = w.run(" && ".join([
+                "/sbin/ip netns add cli", "/sbin/ip link add vcli0 type veth peer name vcli1", "/sbin/ip link set vcli1 netns cli",
+                "/sbin/ip addr add 10.99.0.1/30 dev vcli0", "/sbin/ip link set vcli0 up",
+                f"{ns} /sbin/ip addr add 10.99.0.2/30 dev vcli1", f"{ns} /sbin/ip link set vcli1 up", f"{ns} /sbin/ip link set lo up",
+                f"{ns} /sbin/ip route add default via 10.99.0.1",
+                "iptables -t nat -A POSTROUTING -s 10.99.0.0/30 -j MASQUERADE",
+                f"{ns} /sbin/ip link add wgc type wireguard",
+                f"{ns} wg set wgc private-key /tmp/alice.key peer {hubkey} endpoint {ep} allowed-ips 10.200.0.0/16 persistent-keepalive 25",
+                f"{ns} /sbin/ip addr add {ip}/32 dev wgc", f"{ns} /sbin/ip link set wgc up", f"{ns} /sbin/ip route add 10.200.0.0/16 dev wgc",
+                "echo PEERUP"]), timeout=60)
+            check("remote peer client configured", "PEERUP" in out, out)
+            ok, out = bs.retry(w, f"{ns} ping -c1 -W2 10.200.0.2 >/dev/null && echo RELAYOK", lambda rc, o: "RELAYOK" in o, 90)
+            check("peer reaches node2 through the hub (relay + return route)", ok, out)
+            rc, out = w.run(f"{ns} curl -s -m5 -o /dev/null -w '%{{http_code}}' http://10.200.0.2:9090/ || echo BLOCKED", timeout=30)
+            check("policy: peer denied by default", ok and ("BLOCKED" in out or "000" in out), out)
+            rc, out = m.run("ziroctl cluster deploy --name api --allow-from peer:alice")
+            ok, out = bs.retry(w, f"{ns} curl -s -m5 -o /dev/null -w '%{{http_code}}' http://10.200.0.2:9090/",
+                               lambda rc, o: "200" in o, 60)
+            allowed = ok
+            check("policy: allow_from peer:alice admits the peer", ok, out)
+            rc, out = m.run("ziroctl gateway peer rm alice")
+            ok, out = bs.retry(w, f"{ns} curl -s -m3 -o /dev/null -w '%{{http_code}}' http://10.200.0.2:9090/ || echo REVOKED",
+                               lambda rc, o: "REVOKED" in o or "000" in o, 60)
+            check("peer rm revokes access", ok and allowed, out)
+
         rc, out = m.run("ziroctl audit verify && ziroctl audit log | grep -c -e 'cluster deploy' -e 'cluster node join'")
         check("audit: chain intact and records deploys and joins", rc == 0 and "chain intact" in out, out)
     finally:

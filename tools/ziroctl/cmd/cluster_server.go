@@ -72,10 +72,11 @@ type Assignment struct {
 
 // MeshPeer is another node on the WireGuard mesh.
 type MeshPeer struct {
-	Node     string `json:"node"`
-	PubKey   string `json:"pubkey"`
-	Endpoint string `json:"endpoint"`
-	MeshIP   string `json:"mesh_ip"`
+	Node     string   `json:"node"`
+	PubKey   string   `json:"pubkey"`
+	Endpoint string   `json:"endpoint"`
+	MeshIP   string   `json:"mesh_ip"`
+	Routes   []string `json:"routes,omitempty"` // extra /32s reached through this peer (remote clients behind the hub)
 }
 
 type heartbeatResponse struct {
@@ -386,6 +387,11 @@ func meshView(st *ClusterState, self *ClusterNode, cidr string) (string, int, []
 	if p, err := netip.ParsePrefix(cidr); err == nil {
 		prefix = p.Bits()
 	}
+	hub := peerHub(st)
+	var remote []string
+	for _, rp := range st.Peers {
+		remote = append(remote, rp.MeshIP)
+	}
 	var peers []MeshPeer
 	for _, n := range st.Nodes {
 		if n.ID == self.ID || n.WGPubKey == "" || n.MeshIP == "" || n.IP == "" {
@@ -395,8 +401,16 @@ func meshView(st *ClusterState, self *ClusterNode, cidr string) (string, int, []
 		if port == 0 {
 			port = meshPort
 		}
-		peers = append(peers, MeshPeer{Node: n.ID, PubKey: n.WGPubKey, MeshIP: n.MeshIP,
-			Endpoint: net.JoinHostPort(n.IP, strconv.Itoa(port))})
+		mp := MeshPeer{Node: n.ID, PubKey: n.WGPubKey, MeshIP: n.MeshIP, Endpoint: net.JoinHostPort(n.IP, strconv.Itoa(port))}
+		if hub != nil && hub.ID == n.ID {
+			mp.Routes = remote // replies to remote clients go back through the hub
+		}
+		peers = append(peers, mp)
+	}
+	if hub != nil && hub.ID == self.ID {
+		for _, rp := range st.Peers { // roaming clients: no endpoint, they dial in
+			peers = append(peers, MeshPeer{Node: "peer:" + rp.Name, PubKey: rp.PubKey, MeshIP: rp.MeshIP})
+		}
 	}
 	return self.MeshIP, prefix, peers
 }
