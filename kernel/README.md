@@ -32,7 +32,7 @@ driver (virtio/NVMe/AHCI/Hyper-V/Xen storage, ext4, serial console, initramfs su
 - Hardening: stack protector, FORTIFY, hardened usercopy, init-on-alloc, freelist hardening and
   randomization, `LIST_HARDENED`, `BUG_ON_DATA_CORRUPTION`, randomized kmalloc caches, kstack offset
   randomization, `ZERO_CALL_USED_REGS`, no slab merging, `dmesg` restricted, no TIOCSTI, and no line
-  discipline autoload.
+  discipline autoload. (arm64 kernel BTI needs a clang build and is not enabled.)
 - Modules are signed (`MODULE_SIG_FORCE`) and zstd-compressed.
 
 ## Boot
