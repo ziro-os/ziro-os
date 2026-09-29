@@ -154,6 +154,30 @@ ziroctl cluster member rm <master-id>   # remove a dead master (and revoke its n
 - **Ports:** tcp/7443 (cluster API) and tcp/7444 (Raft; mutual TLS with CA-signed master
   certificates only) on masters.
 
+## Image policy
+
+Control which images apps may run:
+
+```sh
+ziroctl cluster policy images --allow-registry ghcr.io/acme --allow-registry docker.io/library
+ziroctl cluster policy images --require-signed --cosign-key cosign.pub     # repeat --cosign-key for several keys
+ziroctl cluster policy images                                              # show
+ziroctl cluster policy images --clear
+```
+
+- **Allowlist:** repository prefixes, matched on path boundaries (`ghcr.io/acme` does not match `ghcr.io/acmeevil`).
+  An image outside it cannot be deployed.
+- **Signatures:** with `--require-signed`, each deploy resolves the tag to a digest, verifies a cosign signature
+  over that digest by one of the keys, and **pins the app to `image@sha256:<digest>`**. Every node then pulls
+  exactly the verified content, with no tag drift between nodes and no gap between verifying and pulling.
+- **Leader check:** the leader re-checks every changed image against the allowlist and the digest pin, whichever
+  master proposed the change. Running apps are not touched when the policy changes; they are checked on their next
+  deploy.
+- **Supported signatures:** cosign key-based signatures in the classic layout (`cosign sign --key`,
+  `sha256-<digest>.sig` tag) with ECDSA, Ed25519 or RSA keys. Keyless (Fulcio/Rekor) signatures and the
+  OCI-referrers bundle format are not verified yet. Registries must allow anonymous pulls (Docker Hub, GHCR and
+  most public registries do).
+
 ## Secrets at rest
 
 The cluster secrets and the CA key are sealed with one random **cluster data key** (AES-256-GCM, bound to

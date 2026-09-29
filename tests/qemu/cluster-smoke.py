@@ -246,6 +246,21 @@ def main():
                         "test -s /etc/ziro/cluster/sealed.bin && ! grep -rqs hunter2-ziro /etc/ziro/cluster && echo ATREST", timeout=30)
         check("no plaintext secret or CA key at rest (state files and Raft data)", "ATREST" in out, out)
 
+        # Image policy: registry allowlist, and cosign signatures (verified against real Docker Hub).
+        rc, out = m.run("ziroctl cluster policy images --allow-registry ghcr.io/acme && "
+                        "ziroctl cluster deploy --name imgdeny --image docker.io/library/nginx:alpine; echo RC=$?", timeout=60)
+        check("image policy: a registry outside the allowlist is refused", "RC=1" in out and "not allowed" in out, out)
+        rc, out = m.run("ziroctl cluster policy images --clear >/dev/null && "
+                        "printf '%s\\n' '-----BEGIN PUBLIC KEY-----' "
+                        "'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAECjYMzMj+DYcyMIPM5dwTp7HwV8gn' "
+                        "'9bpRs/nAY8KSFROCZAfiNGJfnwZFCgrgytz6ak0AZIlkzrd4lfGxcI6nVQ==' '-----END PUBLIC KEY-----' > /tmp/untrusted.pub; "
+                        "ziroctl cluster policy images --require-signed --cosign-key /tmp/untrusted.pub; "
+                        "ziroctl cluster deploy --name imgsig --image docker.io/library/nginx:alpine; echo RC=$?", timeout=120)
+        check("image policy: an image without a signature by a trusted key is refused (after resolving its digest)",
+              "RC=1" in out and "sha256:" in out and ("cosign" in out or "signature" in out), out)
+        rc, out = m.run("ziroctl cluster policy images --clear && ziroctl cluster policy images", timeout=30)
+        check("image policy cleared", "none" in out, out)
+
         # Scoped API tokens on the admin API.
         api = "https://127.0.0.1:8443/api/v1"
         rc, out = m.run("ziroctl service start ziro-api; sleep 2; "
