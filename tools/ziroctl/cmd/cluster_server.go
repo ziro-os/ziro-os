@@ -67,6 +67,7 @@ type heartbeatRequest struct {
 	MeshError   string            `json:"mesh_error,omitempty"`   // mesh/policy apply failure on the node
 	Caps        []string          `json:"caps,omitempty"`         // features this node's ziroctl supports
 	RotateToken string            `json:"rotate_token,omitempty"` // a new node token (64 hex), replacing the one this request uses
+	Keys        []string          `json:"keys,omitempty"`         // data key IDs held by this node's master
 }
 
 // Assignment is one container the master wants running on a node.
@@ -742,6 +743,9 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		if strings.Join(n.Caps, ",") != strings.Join(req.Caps, ",") {
 			n.Caps = req.Caps
 		}
+		if len(req.Keys) <= 4 && strings.Join(n.Keys, ",") != strings.Join(req.Keys, ",") {
+			n.Keys = req.Keys
+		}
 		if n.Role != "master" {
 			n.IP = ip
 		}
@@ -837,6 +841,11 @@ var clusterServeCmd = &cobra.Command{
 		} else if key != nil {
 			setKeyring(key)
 		}
+		if next, err := loadWrapped(dekNextPath()); err != nil { // restarted mid-rotation
+			return err
+		} else if next != nil {
+			addKey(next)
+		}
 		st, err := fileState()
 		if err != nil {
 			return err
@@ -889,6 +898,9 @@ var clusterServeCmd = &cobra.Command{
 		// Another master asking for the cluster data key (mutual TLS, master certificates only).
 		mux.HandleFunc("/cluster/v1/internal/dek", func(w http.ResponseWriter, r *http.Request) {
 			key, _ := currentKey()
+			if id := r.URL.Query().Get("id"); id != "" {
+				key = keyByID(id) // the current key or, during a rotation, the next one
+			}
 			if !requestFromMaster(r.TLS, caPEM) || key == nil {
 				http.Error(w, "unavailable", http.StatusForbidden)
 				return
@@ -915,7 +927,10 @@ var clusterServeCmd = &cobra.Command{
 				}
 				if err := withState(func(st *ClusterState) error {
 					scheduleReplicas(st, time.Now())
-					return maybeSealSecrets(st)
+					if err := maybeSealSecrets(st); err != nil {
+						return err
+					}
+					return maybeRotateDEK(st)
 				}); err != nil && !errors.Is(err, errNotLeader) {
 					fmt.Printf("[cluster] schedule: %v\n", err)
 				}
@@ -943,6 +958,14 @@ var clusterServeCmd = &cobra.Command{
 						if err := fetchDEK(rs, cfg, cur.DEKID); err != nil {
 							fmt.Printf("[cluster] cluster data key: %v\n", err)
 						}
+					}
+					if err == nil && cur.NextDEKID != "" && keyByID(cur.NextDEKID) == nil {
+						if err := fetchDEK(rs, cfg, cur.NextDEKID); err != nil {
+							fmt.Printf("[cluster] next cluster data key: %v\n", err)
+						}
+					}
+					if err == nil && cur.DEKID != "" {
+						promoteRotatedKey(cur.DEKID, cur.NextDEKID)
 					}
 					if err == nil && cur.DEKID != "" {
 						if err := rs.compactAfterSeal(); err != nil {

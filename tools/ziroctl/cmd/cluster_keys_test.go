@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/raft"
 )
@@ -19,13 +20,13 @@ func withTempCluster(t *testing.T) string {
 	old := clusterDir
 	clusterDir = t.TempDir()
 	keyring.mu.Lock()
-	oldKey, oldID := keyring.key, keyring.id
-	keyring.key, keyring.id = nil, ""
+	oldKeys, oldPrimary := keyring.keys, keyring.primary
+	keyring.keys, keyring.primary = nil, ""
 	keyring.mu.Unlock()
 	t.Cleanup(func() {
 		clusterDir = old
 		keyring.mu.Lock()
-		keyring.key, keyring.id = oldKey, oldID
+		keyring.keys, keyring.primary = oldKeys, oldPrimary
 		keyring.mu.Unlock()
 	})
 	return clusterDir
@@ -99,7 +100,7 @@ func TestSealedPayload(t *testing.T) {
 
 	// Without the key: locked, passed through unchanged, never re-encrypted or altered.
 	keyring.mu.Lock()
-	keyring.key, keyring.id = nil, ""
+	keyring.keys, keyring.primary = nil, ""
 	keyring.mu.Unlock()
 	locked, err := decodePayload(b)
 	if err != nil || locked.sealed == nil || len(locked.Secrets) != 0 {
@@ -213,5 +214,68 @@ func TestCompactAfterSeal(t *testing.T) {
 	}
 	if err := rs.compactAfterSeal(); err != nil || !fileExists(filepath.Join(dir, "raft", "sealed-compacted")) {
 		t.Fatal("compaction must run once and leave its marker")
+	}
+}
+
+func TestDEKRotation(t *testing.T) {
+	withTempCluster(t)
+	st := &ClusterState{NodeTokens: map[string]string{}, History: map[string][]ClusteredApp{},
+		Secrets: map[string]map[string]string{"db": {"PASS": "rotate-me"}}, CAKey: "CAKEY",
+		Nodes: []ClusterNode{{ID: "m1", Role: "master", Caps: nodeCaps}, {ID: "m2", Role: "master", Caps: nodeCaps}}}
+	if err := maybeSealSecrets(st); err != nil {
+		t.Fatal(err)
+	}
+	oldID := st.DEKID
+	oldPayload, err := encodePayload(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := maybeRotateDEK(st); err != nil || st.NextDEKID != "" {
+		t.Fatal("no rotation without a request")
+	}
+	st.DEKRotateRequested = time.Now()
+	if err := maybeRotateDEK(st); err != nil || st.NextDEKID == "" || st.NextDEKID == oldID {
+		t.Fatalf("next key: %v %q", err, st.NextDEKID)
+	}
+	next := st.NextDEKID
+	if ids := storedKeyIDs(); len(ids) != 2 || ids[1] != next {
+		t.Fatalf("stored keys: %v", ids)
+	}
+	// Every master's background loop promotes/retires keys every few seconds: during a rotation it
+	// must keep the pending next key (a regression here stalled rotation in the QEMU HA test).
+	promoteRotatedKey(st.DEKID, st.NextDEKID)
+	if keyByID(next) == nil || keyByID(oldID) == nil {
+		t.Fatal("promotion during a rotation dropped a key still in use")
+	}
+	// The leader's loop can run before the next key is committed (it sees no NextDEKID yet):
+	// the key must survive because it is stored in dek-next.bin.
+	promoteRotatedKey(st.DEKID, "")
+	if keyByID(next) == nil {
+		t.Fatal("promotion dropped the uncommitted next key (rotation would stall)")
+	}
+	st.Nodes[0].Keys = storedKeyIDs() // m1 holds it, m2 does not yet
+	if _ = maybeRotateDEK(st); st.DEKID != oldID {
+		t.Fatal("switched before every master held the next key")
+	}
+	st.Nodes[1].Keys = []string{oldID, next}
+	if err := maybeRotateDEK(st); err != nil || st.DEKID != next || st.NextDEKID != "" {
+		t.Fatalf("switch: %v %q", err, st.DEKID)
+	}
+	b, err := encodePayload(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promoteRotatedKey(st.DEKID, st.NextDEKID)
+	if ids := storedKeyIDs(); len(ids) != 1 || ids[0] != next || keyringSize() != 1 {
+		t.Fatalf("after promotion: stored %v, keyring %d", ids, keyringSize())
+	}
+	got, err := decodePayload(b)
+	if err != nil || got.sealed != nil || got.Secrets["db"]["PASS"] != "rotate-me" || got.CAKey != "CAKEY" {
+		t.Fatalf("re-sealed state: %v", err)
+	}
+	// The retired key is gone: an entry sealed with it cannot be opened any more.
+	old, err := decodePayload(oldPayload)
+	if err != nil || old.sealed == nil {
+		t.Fatalf("old entry must stay sealed: %v", err)
 	}
 }

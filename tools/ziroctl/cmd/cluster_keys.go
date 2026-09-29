@@ -41,6 +41,7 @@ const dekSize = 32
 
 func keysConfigPath() string { return filepath.Join(clusterDir, "keys.json") }
 func dekPath() string        { return filepath.Join(clusterDir, "dek.bin") }
+func dekNextPath() string    { return filepath.Join(clusterDir, "dek-next.bin") } // during a rotation
 
 var tpmDevice = "/dev/tpmrm0"
 
@@ -99,6 +100,75 @@ func maybeSealSecrets(st *ClusterState) error {
 	return nil
 }
 
+// maybeRotateDEK advances a requested data key rotation (leader tick). A new key is created and
+// distributed first; the secrets are re-sealed with it only once every master holds it, so no
+// master is ever left unable to open them.
+func maybeRotateDEK(st *ClusterState) error {
+	if st.DEKID == "" {
+		return nil
+	}
+	if st.NextDEKID == "" {
+		if st.DEKRotateRequested.IsZero() {
+			return nil
+		}
+		key := newDEK()
+		if err := storeWrapped(dekNextPath(), key); err != nil {
+			return fmt.Errorf("store the next data key: %w", err)
+		}
+		st.NextDEKID, st.DEKRotateRequested = addKey(key), time.Time{}
+		fmt.Printf("[cluster] data key rotation: next key %s, waiting for every master to hold it\n", st.NextDEKID)
+		return nil
+	}
+	if keyByID(st.NextDEKID) == nil {
+		return nil // this leader has not fetched it yet
+	}
+	for i := range st.Nodes {
+		n := &st.Nodes[i]
+		if n.Role == "master" && !containsString(n.Keys, st.NextDEKID) {
+			return nil
+		}
+	}
+	st.DEKID, st.NextDEKID = st.NextDEKID, ""
+	fmt.Printf("[cluster] data key rotated: secrets re-sealed with %s\n", st.DEKID)
+	return nil
+}
+
+// promoteRotatedKey makes this master's stored next key its current one once the cluster
+// switched to it, and forgets retired keys. Retirement follows the key files, never the (possibly
+// not yet committed) state: a key still stored in dek.bin or dek-next.bin stays in memory. The
+// leader creates the next key before committing it, and dropping it in that window stalled
+// rotation in the QEMU HA test.
+func promoteRotatedKey(id, next string) {
+	var w wrappedDEK
+	if b, err := os.ReadFile(dekNextPath()); err == nil && json.Unmarshal(b, &w) == nil && w.ID == id {
+		if err := os.Rename(dekNextPath(), dekPath()); err != nil {
+			fmt.Printf("[cluster] promote data key: %v\n", err)
+			return
+		}
+	}
+	if keyByID(id) == nil {
+		return
+	}
+	keep := append(storedKeyIDs(), id, next)
+	keyring.mu.Lock()
+	defer keyring.mu.Unlock()
+	for k := range keyring.keys {
+		if !containsString(keep, k) {
+			delete(keyring.keys, k)
+		}
+	}
+	keyring.primary = id
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 func dekFingerprint(key []byte) string {
 	sum := sha256.Sum256(append([]byte("ziro-dek:"), key...))
 	return hex.EncodeToString(sum[:8])
@@ -106,22 +176,48 @@ func dekFingerprint(key []byte) string {
 
 // ---- keyring (this process's copy of the DEK) ----
 
+// keyring holds this process's data keys by ID: the current one and, during a rotation, the next.
 var keyring struct {
-	mu  sync.RWMutex
-	id  string
-	key []byte
+	mu      sync.RWMutex
+	keys    map[string][]byte
+	primary string
 }
 
+// setKeyring makes key the current key (and keeps any other key for a rotation in progress).
 func setKeyring(key []byte) {
+	id := addKey(key)
 	keyring.mu.Lock()
-	keyring.key, keyring.id = key, dekFingerprint(key)
+	keyring.primary = id
 	keyring.mu.Unlock()
+}
+
+func addKey(key []byte) string {
+	id := dekFingerprint(key)
+	keyring.mu.Lock()
+	if keyring.keys == nil {
+		keyring.keys = map[string][]byte{}
+	}
+	keyring.keys[id] = key
+	keyring.mu.Unlock()
+	return id
 }
 
 func currentKey() ([]byte, string) {
 	keyring.mu.RLock()
 	defer keyring.mu.RUnlock()
-	return keyring.key, keyring.id
+	return keyring.keys[keyring.primary], keyring.primary
+}
+
+func keyByID(id string) []byte {
+	keyring.mu.RLock()
+	defer keyring.mu.RUnlock()
+	return keyring.keys[id]
+}
+
+func keyringSize() int {
+	keyring.mu.RLock()
+	defer keyring.mu.RUnlock()
+	return len(keyring.keys)
 }
 
 func newDEK() []byte {
@@ -254,7 +350,9 @@ func unwrapDEK(w wrappedDEK, c keyProviderConfig) ([]byte, error) {
 
 // storeDEK wraps key with this master's provider and checks the round trip before replacing
 // the stored copy.
-func storeDEK(key []byte) error {
+func storeDEK(key []byte) error { return storeWrapped(dekPath(), key) }
+
+func storeWrapped(path string, key []byte) error {
 	c := loadKeyConfig()
 	if err := validateKeyConfig(c); err != nil {
 		return err
@@ -275,12 +373,27 @@ func storeDEK(key []byte) error {
 	if err := os.MkdirAll(clusterDir, 0700); err != nil {
 		return err
 	}
-	return writeFileAtomic(dekPath(), b, 0600)
+	return writeFileAtomic(path, b, 0600)
 }
 
 // loadStoredDEK unwraps this master's copy of the DEK (nil, nil when it has none yet).
-func loadStoredDEK() ([]byte, error) {
-	b, err := os.ReadFile(dekPath())
+func loadStoredDEK() ([]byte, error) { return loadWrapped(dekPath()) }
+
+// storedKeyIDs lists the data keys this master holds (current and next) without unwrapping
+// them; agents report it so the leader knows when every master can open a new key.
+func storedKeyIDs() []string {
+	var ids []string
+	for _, p := range []string{dekPath(), dekNextPath()} {
+		var w wrappedDEK
+		if b, err := os.ReadFile(p); err == nil && json.Unmarshal(b, &w) == nil && w.ID != "" {
+			ids = append(ids, w.ID)
+		}
+	}
+	return ids
+}
+
+func loadWrapped(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -289,7 +402,7 @@ func loadStoredDEK() ([]byte, error) {
 	}
 	var w wrappedDEK
 	if err := json.Unmarshal(b, &w); err != nil {
-		return nil, fmt.Errorf("%s: %w", dekPath(), err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	key, err := unwrapDEK(w, loadKeyConfig())
 	if err != nil {
@@ -389,11 +502,13 @@ func tpmUnseal(tpm transport.TPM, blob []byte) ([]byte, error) {
 var clusterKeysCmd = &cobra.Command{Use: "keys", Short: "Encryption of cluster secrets at rest (per-master key provider)"}
 
 type keysStatusView struct {
-	Provider   string `json:"provider"`
-	LocalKey   string `json:"local_key,omitempty"`   // fingerprint of this master's DEK copy
-	ClusterKey string `json:"cluster_key,omitempty"` // fingerprint the replicated secrets are sealed with
-	Sealed     bool   `json:"sealed"`
-	Error      string `json:"error,omitempty"`
+	Provider   string   `json:"provider"`
+	LocalKey   string   `json:"local_key,omitempty"`   // fingerprint of this master's DEK copy
+	ClusterKey string   `json:"cluster_key,omitempty"` // fingerprint the replicated secrets are sealed with
+	Sealed     bool     `json:"sealed"`
+	NextKey    string   `json:"next_key,omitempty"` // rotation in progress
+	Waiting    []string `json:"waiting_for,omitempty"`
+	Error      string   `json:"error,omitempty"`
 }
 
 var clusterKeysStatusCmd = &cobra.Command{
@@ -409,7 +524,12 @@ var clusterKeysStatusCmd = &cobra.Command{
 			v.LocalKey = dekFingerprint(key)
 		}
 		if st, err := readState(); err == nil {
-			v.ClusterKey, v.Sealed = st.DEKID, st.DEKID != ""
+			v.ClusterKey, v.Sealed, v.NextKey = st.DEKID, st.DEKID != "", st.NextDEKID
+			for _, n := range st.Nodes {
+				if v.NextKey != "" && n.Role == "master" && !containsString(n.Keys, v.NextKey) {
+					v.Waiting = append(v.Waiting, n.ID)
+				}
+			}
 		}
 		return printResult(v, func() {
 			fmt.Printf("Provider:      %s\n", v.Provider)
@@ -423,6 +543,9 @@ var clusterKeysStatusCmd = &cobra.Command{
 				fmt.Printf("This master:   ✗ holds key %s, the cluster uses %s\n", v.LocalKey, v.ClusterKey)
 			default:
 				fmt.Printf("This master:   ✓ holds key %s\n", v.LocalKey)
+			}
+			if v.NextKey != "" {
+				fmt.Printf("Rotation:      to %s, waiting for %v\n", v.NextKey, v.Waiting)
 			}
 		})
 	},
@@ -478,7 +601,33 @@ KMS, Vault or HSM CLI. The new wrapping is verified before the old one is replac
 	},
 }
 
+var clusterKeysRotateCmd = &cobra.Command{
+	Use:   "rotate",
+	Short: "Replace the cluster data key and re-seal every secret with the new one",
+	Long: `The leader creates a new data key, every master fetches it (mutual TLS) and wraps it with its
+own provider, and only when every master holds it are the secrets re-sealed with it. Each master
+then drops the old key and compacts its Raft log, so nothing sealed with the old key remains.
+Remove dead masters first ('cluster member rm'): the rotation waits for every master.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := requireMaster(); err != nil {
+			return err
+		}
+		return withState(func(st *ClusterState) error {
+			switch {
+			case st.DEKID == "":
+				return fmt.Errorf("the secrets are not sealed yet (every master must run this version)")
+			case st.NextDEKID != "":
+				return fmt.Errorf("a rotation to %s is in progress (cluster keys status)", st.NextDEKID)
+			}
+			st.DEKRotateRequested = time.Now()
+			fmt.Println("✓ data key rotation requested; follow it with: ziroctl cluster keys status")
+			return nil
+		})
+	},
+}
+
 func init() {
+	clusterKeysCmd.AddCommand(clusterKeysRotateCmd)
 	clusterKeysProviderCmd.Flags().StringVar(&keysWrap, "wrap", "", "command provider: wrap executable")
 	clusterKeysProviderCmd.Flags().StringVar(&keysUnwrap, "unwrap", "", "command provider: unwrap executable")
 	clusterKeysCmd.AddCommand(clusterKeysStatusCmd, clusterKeysProviderCmd)

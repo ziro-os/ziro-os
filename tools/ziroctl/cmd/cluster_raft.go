@@ -11,10 +11,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,9 +80,10 @@ func encodePayload(st *ClusterState) ([]byte, error) {
 		p.Secrets, p.CAKey = st.Secrets, st.CAKey
 		return json.Marshal(p)
 	}
-	key, id := currentKey()
+	id := st.DEKID
+	key := keyByID(id)
 	switch {
-	case st.sealed == nil && key != nil && id == st.DEKID:
+	case st.sealed == nil && key != nil:
 		plain, err := json.Marshal(sealedSecrets{Secrets: st.Secrets, CAKey: st.CAKey})
 		if err != nil {
 			return nil, err
@@ -131,8 +134,9 @@ func decodePayload(b []byte) (*ClusterState, error) {
 
 // openSealed decrypts sealed into st, or keeps it locked when this process lacks the key.
 func openSealed(st *ClusterState, sealed []byte) error {
-	key, id := currentKey()
-	if key == nil || id != st.DEKID {
+	id := st.DEKID
+	key := keyByID(id)
+	if key == nil {
 		st.sealed = sealed
 		return nil
 	}
@@ -975,9 +979,15 @@ func init() {
 // compactAfterSeal drops the log entries and snapshot from before the secrets were sealed (they
 // hold the old plaintext): one snapshot of the sealed state with no trailing log. It runs once per
 // master (marker file). Freed database pages may still hold old bytes, like any deleted file.
+// It runs again after every data key rotation (the marker holds the key ID), so no entry sealed
+// with a retired key survives either.
 func (rs *raftStore) compactAfterSeal() error {
+	st, _, err := rs.snapshot()
+	if err != nil || st.DEKID == "" {
+		return err
+	}
 	marker := filepath.Join(rs.dir, "raft", "sealed-compacted")
-	if fileExists(marker) {
+	if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == st.DEKID {
 		return nil
 	}
 	orig := rs.r.ReloadableConfig()
@@ -990,14 +1000,14 @@ func (rs *raftStore) compactAfterSeal() error {
 	if err := rs.r.Snapshot().Error(); err != nil && !errors.Is(err, raft.ErrNothingNewToSnapshot) {
 		return err
 	}
-	fmt.Println("[cluster] compacted the Raft log: no pre-seal plaintext left in the log or snapshots")
-	return writeFileAtomic(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0600)
+	fmt.Printf("[cluster] compacted the Raft log for data key %s: nothing older left in the log or snapshots\n", st.DEKID)
+	return writeFileAtomic(marker, []byte(st.DEKID+"\n"), 0600)
 }
 
 // fetchDEK obtains the cluster data key with the given ID from another master (mutual TLS) and
 // stores it with this master's own provider. A key whose fingerprint does not match is refused.
 func fetchDEK(rs *raftStore, cfg *ClusterConfig, id string) error {
-	if _, cur := currentKey(); cur == id {
+	if keyByID(id) != nil {
 		return nil
 	}
 	st, _, err := rs.snapshot()
@@ -1015,7 +1025,7 @@ func fetchDEK(rs *raftStore, cfg *ClusterConfig, id string) error {
 		if addr == self {
 			continue
 		}
-		resp, err := c.Post("https://"+addr+"/cluster/v1/internal/dek", "application/json", nil)
+		resp, err := c.Post("https://"+addr+"/cluster/v1/internal/dek?id="+url.QueryEscape(id), "application/json", nil)
 		if err != nil {
 			last = err
 			continue
@@ -1031,10 +1041,17 @@ func fetchDEK(rs *raftStore, cfg *ClusterConfig, id string) error {
 			last = fmt.Errorf("%s holds a different data key", addr)
 			continue
 		}
-		if err := storeDEK(out.Key); err != nil {
-			return err
+		if id == st.NextDEKID { // a rotation in progress: keep it beside the current key
+			if err := storeWrapped(dekNextPath(), out.Key); err != nil {
+				return err
+			}
+			addKey(out.Key)
+		} else {
+			if err := storeDEK(out.Key); err != nil {
+				return err
+			}
+			setKeyring(out.Key)
 		}
-		setKeyring(out.Key)
 		fmt.Printf("[cluster] cluster data key %s fetched from %s\n", id, addr)
 		return nil
 	}
