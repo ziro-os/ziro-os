@@ -75,7 +75,9 @@ rootfs-all: rootfs-x86_64 rootfs-arm64
 	@echo "✅ Multi-arch rootfs built for x86_64 and arm64"
 
 # --- Docker Base Image (Alpine-like) ---
-docker-image: rootfs
+# Image targets reuse an existing rootfs (their scripts build it only when missing);
+# run `make rootfs` first to pick up rootfs changes.
+docker-image:
 	@echo "Building Docker base image ($(IMAGE_TAG))..."
 	@./images/docker/build-docker.sh $(ARCH_NORMALIZED)
 
@@ -94,7 +96,7 @@ kernel:
 	@./kernel/build-kernel.sh $(ARCH_NORMALIZED)
 
 # --- Virtualization & ISO ---
-image-iso: kernel rootfs
+image-iso: kernel
 	@echo "Building bootable hybrid ISO..."
 	@./images/iso/build-iso.sh $(ARCH_NORMALIZED)
 
@@ -113,7 +115,7 @@ test-unit:
 test-boot:
 	@python3 tests/qemu/boot-smoke.py --arch $(ARCH_NORMALIZED) --flavor $(KERNEL_FLAVOR)
 
-test-smoke: docker-image
+test-smoke:
 	@echo "Running container smoke test suite..."
 	@./tests/smoke/test-docker-base.sh $(IMAGE_TAG)
 

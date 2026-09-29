@@ -50,6 +50,24 @@ case "$KERNEL_FLAVOR" in
 esac
 ROOTFS_FULL="$BUILD_DIR/rootfs-full-$TARGET_ARCH$SUFFIX"
 
+# The rootfs is assembled on the host through a bind mount. On a case-insensitive filesystem
+# (the macOS default) files that differ only in case collide, e.g. iptables' libxt_MARK.so and
+# libxt_mark.so; the image then silently loses the MARK/DSCP/TTL... targets and container port
+# publishing (CNI portmap) breaks. Refuse to build a broken image.
+mkdir -p "$BUILD_DIR"
+probe="$BUILD_DIR/.case-probe-$$"
+rm -f "$probe" "$probe.X"; touch "$probe.x"
+if [ -e "$probe.X" ] && [ "${ZIRO_ALLOW_CASE_INSENSITIVE:-0}" != "1" ]; then
+    rm -f "$probe.x"
+    echo "❌ $BUILD_DIR is on a case-insensitive filesystem: the image would lose iptables extensions." >&2
+    echo "   Build from a case-sensitive volume, e.g. on macOS:" >&2
+    echo "     hdiutil create -size 40g -fs 'Case-sensitive APFS' -volname ziro -type SPARSE ~/ziro.sparseimage" >&2
+    echo "     hdiutil attach ~/ziro.sparseimage && git worktree add /Volumes/ziro/ziro-os" >&2
+    echo "   (ZIRO_ALLOW_CASE_INSENSITIVE=1 builds anyway, with broken container port publishing.)" >&2
+    exit 1
+fi
+rm -f "$probe.x"
+
 mkdir -p "$BUILD_DIR" "$DOWNLOAD_DIR"
 if [ -d "$ROOTFS_MINIMAL" ] || [ -d "$ROOTFS_FULL" ]; then
     docker run --rm -v "$BUILD_DIR:/b" "$ALPINE_IMAGE" rm -rf "/b/$(basename "$ROOTFS_MINIMAL")" "/b/$(basename "$ROOTFS_FULL")" 2>/dev/null || true
@@ -277,7 +295,7 @@ SH_SHUTDOWN
         chroot /rootfs /bin/busybox sh -c "echo '\''✓ Minimal rootfs shell validated'\''"
 
         # GNU tar is build-only; override member ownership without changing modes.
-        apk add --no-cache tar >/dev/null || exit 1
+        mkdir -p "/out/apk-cache/$TARGET_ARCH" && apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" tar >/dev/null || exit 1
         cd /rootfs
         tar --numeric-owner --owner=0 --group=0 --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" . || exit 1
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
@@ -301,7 +319,9 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     # Kernel + modules always come from ONE source so their versions match:
     #   KERNEL_FLAVOR=custom -> kernel/build-kernel.sh output (build/kernel-custom-<arch>/)
     #   KERNEL_FLAVOR=alpine -> Alpine linux-virt package
-    apk add --no-cache kmod >/dev/null 2>&1
+    # Downloads are kept in build/apk-cache/<arch> (signatures are still verified on install).
+    mkdir -p "/out/apk-cache/$TARGET_ARCH"
+    apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" kmod >/dev/null 2>&1
     mkdir -p /rootfs/lib/modules /rootfs/boot
     rm -rf /rootfs/lib/modules/*
     if [ "$KERNEL_FLAVOR" = "custom" ]; then
@@ -316,7 +336,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         cp "$SRC/kernel.release" "/out/kernel-release-${TARGET_ARCH}${SUFFIX}"
     else
         echo "Installing Alpine linux-virt kernel & modules..."
-        apk add --no-cache linux-virt >/dev/null 2>&1
+        apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" linux-virt >/dev/null 2>&1
         cp -a /lib/modules/. /rootfs/lib/modules/
         cp /boot/vmlinuz-virt /rootfs/boot/vmlinuz
         ls /lib/modules > "/out/kernel-release-${TARGET_ARCH}${SUFFIX}"
@@ -353,7 +373,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         if apk --root /rootfs --initdb \
             --keys-dir /etc/apk/keys \
             --repositories-file /etc/apk/repositories \
-            add --no-cache \
+            add --cache-dir "/out/apk-cache/$TARGET_ARCH" \
             ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
             iptables openssh-server openssh-client linux-pam \
             e2fsprogs dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS; then
@@ -523,6 +543,8 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         mknod -m 660 /rootfs/dev/ttyS0 c 4 64 2>/dev/null || true
         mknod -m 666 /rootfs/dev/urandom c 1 9 2>/dev/null || true
 
+        mkdir -p "/out/apk-cache/$TARGET_ARCH"
+        apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" pigz >/dev/null 2>&1 || true   # multi-threaded gzip; falls back below
         cd /rootfs
         if command -v pigz >/dev/null 2>&1; then
             find . | cpio -o -H newc -R 0:0 | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"

@@ -50,6 +50,22 @@ make docker-multiarch
 
 ---
 
+### Building on macOS
+
+The rootfs is assembled through a Docker bind mount. On the default case-insensitive APFS volume,
+files that differ only in case collide: iptables' `libxt_MARK.so` and `libxt_mark.so`, for example.
+The image would lose those extensions, and container port publishing would break. The build refuses
+to run in that case, so build from a case-sensitive volume:
+
+```sh
+hdiutil create -size 40g -fs 'Case-sensitive APFS' -volname ziro -type SPARSE ~/ziro.sparseimage
+hdiutil attach ~/ziro.sparseimage
+git worktree add /Volumes/ziro/ziro-os && cd /Volumes/ziro/ziro-os && make rootfs TARGET_ARCH=arm64
+```
+
+Rebuilds are fast: `build/apk-cache` keeps packages, and the custom kernel is only rebuilt when
+`kernel/**` changes (ccache makes a config change a ~10 minute rebuild).
+
 ## 🧪 Verification & Testing
 
 ```bash

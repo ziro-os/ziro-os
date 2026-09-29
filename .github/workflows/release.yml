@@ -25,10 +25,12 @@ jobs:
     name: Custom kernel flavor
     uses: ./.github/workflows/kernel-custom.yml
 
-  release:
-    name: Build & Publish Release
-    needs: custom-kernel
+  # Runs in parallel with the custom-kernel jobs; only 'publish' waits for both.
+  build:
+    name: Build alpine flavor & tools
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
@@ -53,16 +55,12 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: '1.27.x'
-          check-latest: true
           cache-dependency-path: |
             tools/ziroctl/go.sum
             tools/ziropkg/go.sum
 
-      - name: Set up QEMU
+      - name: Set up QEMU (arm64 rootfs build containers)
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Install System Dependencies
         run: |
@@ -76,7 +74,7 @@ jobs:
         run: make rootfs-all
 
       - name: Build Bootable Hybrid ISO
-        run: make image-iso TARGET_ARCH=x86_64
+        run: ./images/iso/build-iso.sh x86_64
 
       - name: Enforce image size goal (< 300 MB)
         run: |
@@ -85,6 +83,42 @@ jobs:
             echo "$f: $((size / 1000000)) MB"
             [ "$size" -lt 300000000 ] || { echo "::error::$f exceeds the 300 MB image goal"; exit 1; }
           done
+
+      - name: Upload release build outputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-build
+          path: |
+            build/ziro-os-*.iso
+            build/ziro-rootfs-*.tar.gz
+            build/ziro-initramfs-*.cpio.gz
+            build/vmlinuz-*
+            bin/ziroctl-*
+            bin/ziropkg-*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish Release
+    needs: [build, custom-kernel]
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ needs.build.outputs.tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download release build outputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-build
+          path: .
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Download custom kernel flavor artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -102,7 +136,7 @@ jobs:
 
       - name: Build & Push Multi-Architecture Docker Base Image
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
+          TAG="${{ needs.build.outputs.tag }}"
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "Publishing container image to ghcr.io/${REPO}:${TAG}..."
           docker buildx build \
@@ -126,8 +160,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: "Ziro-OS ${{ steps.version.outputs.tag }}"
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: "Ziro-OS ${{ needs.build.outputs.tag }}"
           draft: false
           prerelease: false
           generate_release_notes: true
@@ -146,7 +180,7 @@ jobs:
 
   deploy-pages:
     name: Trigger Release Portal Deployment on Main
-    needs: release
+    needs: publish
     runs-on: ubuntu-latest
     permissions:
       actions: write

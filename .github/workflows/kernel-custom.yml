@@ -29,6 +29,12 @@ env:
 permissions:
   contents: read
 
+# A newer push to the same PR/branch supersedes an in-flight 45-min kernel build.
+# Calls from release.yml run under the caller's workflow name, so releases are never cancelled here.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   custom-kernel:
     name: Custom kernel (${{ matrix.arch }})
@@ -55,7 +61,6 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: '1.27.x'
-          check-latest: true
           cache-dependency-path: |
             tools/ziroctl/go.sum
             tools/ziropkg/go.sum
@@ -69,8 +74,54 @@ jobs:
             sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           fi
 
+      # The kernel only depends on kernel/** (fragments + build script), the version and the
+      # toolchain image. A hit skips the ~35-45 min compile (build-kernel.sh checks its stamp).
+      - name: Restore built kernel
+        id: kernel-out
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/kernel-custom-${{ matrix.arch }}/vmlinuz
+            build/kernel-custom-${{ matrix.arch }}/config
+            build/kernel-custom-${{ matrix.arch }}/kernel.release
+            build/kernel-custom-${{ matrix.arch }}/stamp
+            build/kernel-custom-${{ matrix.arch }}/modroot
+          key: kernel-out-${{ matrix.arch }}-${{ hashFiles('kernel/**') }}
+
+      # On a miss, ccache + the cached kernel.org tarball keep a config change to minutes.
+      - name: Restore ccache and kernel tarball
+        if: steps.kernel-out.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/ccache-${{ matrix.arch }}
+            build/dl
+          key: kernel-ccache-${{ matrix.arch }}-${{ github.run_id }}
+          restore-keys: kernel-ccache-${{ matrix.arch }}-
+
       - name: Build custom kernel (fails if any Ziro config option is dropped)
         run: make kernel
+
+      - name: Save built kernel
+        if: steps.kernel-out.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/kernel-custom-${{ matrix.arch }}/vmlinuz
+            build/kernel-custom-${{ matrix.arch }}/config
+            build/kernel-custom-${{ matrix.arch }}/kernel.release
+            build/kernel-custom-${{ matrix.arch }}/stamp
+            build/kernel-custom-${{ matrix.arch }}/modroot
+          key: ${{ steps.kernel-out.outputs.cache-primary-key }}
+
+      - name: Save ccache and kernel tarball
+        if: steps.kernel-out.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/ccache-${{ matrix.arch }}
+            build/dl
+          key: kernel-ccache-${{ matrix.arch }}-${{ github.run_id }}
 
       - name: Build host rootfs & initramfs with the custom kernel
         run: make rootfs
@@ -86,7 +137,7 @@ jobs:
 
       - name: Build hybrid ISO (x86_64)
         if: matrix.arch == 'x86_64'
-        run: make image-iso
+        run: ./images/iso/build-iso.sh $TARGET_ARCH
 
       - name: Enforce image size goal (< 300 MB)
         run: |
