@@ -423,6 +423,9 @@ static void init_filesystems(void) {
 
     mount_essential("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
     mount_essential("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    /* LSM state (lockdown, landlock, bpf) and pinned eBPF objects (Cilium, Tetragon, Falco) */
+    mount_essential("securityfs", "/sys/kernel/security", "securityfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    mount_essential("bpf", "/sys/fs/bpf", "bpf", MS_NOSUID | MS_NOEXEC | MS_NODEV, "mode=0700");
     mount_essential("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
     dev_links();
     safe_mkdir("/dev/pts", 0755);
