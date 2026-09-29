@@ -4,7 +4,7 @@
   "plugins": [
     {
       "type": "bridge",
-      "bridge": "ziro0",
+      "bridge": "ziro-br0",
       "isGateway": true,
       "ipMasq": true,
       "hairpinMode": true,

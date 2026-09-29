@@ -63,7 +63,8 @@ def main():
         m = vm(args, 1)
         w = vm(args, 2)
 
-        rc, out = m.run("ziroctl cluster init --advertise 192.168.77.1", timeout=60)
+        # Start without the pod network (legacy host-port checks below), then migrate to it.
+        rc, out = m.run("ziroctl cluster init --advertise 192.168.77.1 --pod-cidr none", timeout=60)
         tok = re.search(r"ZIRO_CLUSTER_TOKEN=(\w+) ziroctl cluster join (\S+) --ca-hash (\S+)", out)
         if not check("cluster init on node1", rc == 0 and tok, out):
             return 1
@@ -118,6 +119,44 @@ def main():
         rc, out = m.run("ziroctl cluster rollback web")
         ok, out = bs.retry(m, "ziroctl cluster services", lambda rc, o: "2/2 running" in o and "updating" not in o and "error" not in o, 300, every=10)
         check("rollback restores a healthy app", ok, out)
+
+        # Pod network: migrate the running cluster; apps roll onto routed pod IPs one by one.
+        rc, out = m.run("ziroctl cluster network enable")
+        check("pod network enable", rc == 0, out)
+        ok, out = bs.retry(m, "ziroctl cluster services", lambda rc, o: "2/2 running" in o and "updating" not in o, 400, every=10)
+        check("apps roll onto the pod network", ok, out)
+        rc, out = m.run("ziroctl cluster network status --json")
+        try:
+            net = json.loads(out[out.index("{"):])
+            ips = {(r["replica"].rsplit("-", 1)[0], r["node"]): r["ip"] for r in net["replicas"]}
+        except (ValueError, KeyError):
+            ips = {}
+        web_master = ips.get(("web", "master-1"), "")
+        web_worker = next((ip for (app, node), ip in ips.items() if app == "web" and node != "master-1"), "")
+        check("replicas have pod IPs in their node's /24", web_master.startswith("10.201.") and web_worker.startswith("10.201."), out)
+
+        def pod_of(c, app):
+            ok, out = bs.retry(c, f"nerdctl ps --filter label=ziro.app={app} --format '{{{{.Names}}}}'",
+                               lambda rc, o: f"zc-{app}-" in o, 300, every=10)
+            m_ = re.search(rf"zc-{app}-\S+", out)
+            return m_.group(0) if m_ else "missing"
+
+        wc = pod_of(w, "web")
+        ok, out = bs.retry(w, f"nerdctl exec {wc} wget -qO- -T5 http://{web_master}/ | grep -o 'Welcome to nginx'",
+                           lambda rc, o: "Welcome to nginx" in o, 90)
+        check("pod network: web pod on node2 reaches web pod on node1 (allow_from web)", ok, out)
+        ok, out = bs.retry(w, f"nerdctl exec {wc} wget -qO- -T5 http://web.cluster.ziro/ | grep -o 'Welcome to nginx'",
+                           lambda rc, o: "Welcome to nginx" in o, 60)
+        check("pod DNS: web.cluster.ziro resolves to pod IPs", ok, out)
+        rc, out = w.run(f"nerdctl exec {wc} nslookup docker.io", timeout=30)
+        check("pod DNS forwards external names", rc == 0 and "Address" in out.split("docker.io", 1)[-1], out)
+
+        rc, out = m.run("ziroctl cluster deploy --name other --image docker.io/library/nginx:alpine --replicas 2")
+        oc = pod_of(w, "other")
+        rc, out = w.run(f"nerdctl exec {oc} wget -qO- -T5 http://{web_master}/ >/dev/null && echo REACHED || echo BLOCKED", timeout=30)
+        check("pod policy: a disallowed app's pod is denied across nodes", "BLOCKED" in out, out)
+        rc, out = w.run(f"nerdctl exec {oc} wget -qO- -T5 http://{web_worker}/ >/dev/null && echo REACHED || echo BLOCKED", timeout=30)
+        check("pod policy: same-node pod traffic is policed too", "BLOCKED" in out, out)
 
         # zirogate: api is mesh-only with no allow_from, so under deny only the route admits the
         # gateway (node1) to api's replica on node2.

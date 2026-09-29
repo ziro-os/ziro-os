@@ -83,7 +83,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Audit log | hash-chained JSONL, `/var/log/ziro/audit.log` | every host | shipped |
 | Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labelled gateway | shipped |
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
-| Pod network + DNS | per-node /24 over WireGuard, DNS responder `<app>.cluster.ziro` | every node | Phase 3 |
+| Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
 | HA control plane | 3 or 5 masters with Raft, cluster CA | masters | Phase 4 |
 | Enterprise controls | scoped API tokens, cert rotation, signed-image policy, `/metrics` | all | Phase 5 |
 
@@ -130,7 +130,7 @@ flowchart LR
   - Each agent owns an `inet ziro_cluster` table (input + forward, priority -10). It accepts established traffic and ICMP, then `ip saddr {allowed node mesh IPs}` to each app's published port, matched with `ct original proto-dst` so the rule holds before and after CNI DNAT. Everything else from `ziro0` is dropped.
   - The host firewall (`inet ziro`) still trusts `ziro0`. In nftables, a drop in any base chain is final, so the cluster table narrows that trust without the two tables conflicting.
 - **Fail closed.** If the policy can't be applied, the agent doesn't configure the mesh and reports `MeshError` (shown in `cluster nodes`). A failed nft transaction leaves the previous rules in place.
-- **Granularity.** Sources are node mesh IPs, because containers are masqueraded to their node. Phase 3 tightens this to container IPs.
+- **Granularity.** On the pod network, sources and destinations are replica IPs, and same-node traffic is policed too. `ptp` routes every container through the host, and a `ct status dnat` exemption keeps published ports public only for clients outside the cluster. Without the pod network, sources are node mesh IPs.
 
 ### 5.3 Trust boundaries & threat model
 
@@ -146,7 +146,7 @@ flowchart LR
 Known limits, each addressed by a later phase:
 
 - The single master is a scheduling SPOF (Phase 4).
-- Policy is per node, not per container (Phase 3).
+- Clusters without the pod network police per node rather than per container (`cluster network enable` migrates them).
 - Root on the master can rewrite the whole audit chain. Ship the log off-host, or record `ziroctl audit verify`'s head hash externally.
 
 ### 5.4 Roadmap designs
@@ -157,11 +157,11 @@ Known limits, each addressed by a later phase:
   - TLS: `autocert` (HTTP-01), TLS 1.2 minimum.
   - Protection: HSTS and security headers; strict header, read and idle timeouts; per-client token bucket; JSON access log.
   - `gateway peer add` issues WireGuard client configs for operator or site access to mesh-only apps.
-- **Phase 3: dynamic networking.**
+- **Phase 3: dynamic networking** (shipped; see [clustering.md](clustering.md#pod-network)).
   - `--pod-cidr` (default `10.201.0.0/16`) gives each node its own /24. WireGuard AllowedIPs become mesh IP + pod CIDR.
-  - A `ziro-cluster` CNI bridge (MTU 1420) with masquerade only for traffic leaving the cluster.
-  - A stdlib DNS responder in the agent answers `<app>.cluster.ziro` with live container IPs. It replaces the hosts block, so endpoint changes no longer need a container restart.
-  - Policy sets switch to container IPs.
+  - The master assigns replica IPs at placement time. It uses a CNI `ptp` network (no bridge, MTU 1420), so even same-node traffic is routed and policed, with masquerade only for traffic leaving the cluster.
+  - A stdlib DNS responder in the agent answers `<app>.cluster.ziro` with live container IPs and relays other names.
+  - Policy sets are container IPs.
 - **Phase 4: HA.**
   - `cluster init --ha` and `cluster join --control-plane` form a 3/5-member `hashicorp/raft` group.
   - Raft replicates only the *desired* state (apps, placement, tokens, policy, routes, secrets). Node liveness stays soft state on the leader, so heartbeats never touch the log, and a new leader grants a 30s grace period.

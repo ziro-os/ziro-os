@@ -129,7 +129,11 @@ var gatewayPeerAddCmd = &cobra.Command{
 					ip = p.MeshIP
 				}
 			}
-			conf = peerClientConfig(priv, ip, hub.WGPubKey, ep, meshCIDR(cfg))
+			allowed := meshCIDR(cfg)
+			if st.PodCIDR != "" {
+				allowed += ", " + st.PodCIDR
+			}
+			conf = peerClientConfig(priv, ip, hub.WGPubKey, ep, allowed)
 			return nil
 		})
 		if err != nil {

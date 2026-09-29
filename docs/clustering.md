@@ -84,8 +84,9 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   from nodes that run an app named in that app's `allow_from`. Traffic from anywhere else on `ziro0` is dropped;
   ICMP is still allowed.
 - Changing `allow_from` doesn't create a new revision or restart containers. Agents apply it within one heartbeat.
-- Rules are per node, because containers are masqueraded to their node's mesh IP. Two apps on one node share an
-  identity.
+- On the pod network (the default for new clusters), rules are per container: an app is reachable only from the
+  pod IPs of allowed apps' replicas, on any node, including the same node. Without the pod network, rules are per
+  node, because containers are masqueraded to their node's mesh IP.
 - Public (non `--mesh-only`) ports are still governed by the host firewall.
 - Clusters created before policies existed stay on `allow`. Switch with `ziroctl cluster policy default deny`
   after adding `allow_from` to apps that talk to each other. `cluster policy ls` shows the admitted node IPs.
@@ -109,8 +110,35 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - `/api/v1/cluster` returns a redacted view with no tokens or secrets.
 - **Input:** app names, images, ports, env keys and secrets are validated, and images are passed after `--`.
 
+## Pod network
+
+New clusters give every replica its own routed IP. `cluster init --pod-cidr` defaults to `10.201.0.0/16`;
+`--pod-cidr none` turns this off and keeps host-port networking.
+
+```sh
+ziroctl cluster network status          # node /24s and replica IPs
+ziroctl cluster network enable          # migrate an existing cluster (apps roll over one replica at a time)
+```
+
+- Each node gets a /24, and the master assigns each replica an IP in its node's /24 when it places the replica.
+  So policy and DNS know the address before the container starts. A replica keeps its IP while it stays on a
+  node (rollouts replace the container in place) and gets a new one when it moves.
+- Containers attach with the CNI `ptp` plugin (a veth plus a /32 route each, MTU 1420). Every packet between
+  containers, even on the same node, is routed through the host and policed by nftables.
+- Nodes route each other's /24 over WireGuard. Only traffic leaving the cluster is masqueraded, so a
+  destination sees the real pod IP.
+- **DNS:** each node answers `<app>.cluster.ziro` on its `.1` address with the IPs of running replicas (TTL 5s).
+  Containers get it through `--dns`/`--dns-search cluster.ziro`, so plain `http://web` works too. Other names
+  are relayed to the node's own resolvers. It only answers the node's own containers. Endpoint changes are
+  live; containers are no longer restarted to see them.
+- **Ports:** inside the cluster, apps talk to the **container** port on pod IPs (`http://web.cluster.ziro`,
+  not `:8080`). `--port` host ports still publish apps outside the cluster, and the gateway goes straight to
+  the pod IP and container port. On nodes, `<app>.cluster.ziro` in `/etc/hosts` also lists pod IPs.
+- WireGuard remote peers get the pod network in their `AllowedIPs`.
+
 ## Limits (by design, for now)
 
 - There is a single master. If it is down, running workloads continue, but nothing new is scheduled.
 - Placement counts replicas, not CPU or memory.
-- Discovery uses hosts entries, not DNS. A container sees new endpoints when it is recreated.
+- Without the pod network, discovery uses hosts entries: a container sees new endpoints only when it is recreated.
+- IPv4 only; one pod /24 per node (253 replicas).

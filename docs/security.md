@@ -75,8 +75,9 @@ Output:
   master stores only hashes). See [clustering.md](clustering.md).
   A replica is reported running only when its assigned Ready node reports it.
 - **Cluster network policy**: new clusters default to `deny`. Mesh traffic reaches an app's port only from nodes
-  that run an app listed in its `allow_from` (`ziroctl cluster deploy --allow-from web`). It is enforced per node
-  in the `inet ziro_cluster` nftables table, and the agent does not configure the mesh until that table is in
+  that run an app listed in its `allow_from` (`ziroctl cluster deploy --allow-from web`). On the pod network
+  (default for new clusters) that means from the allowed apps' own replica IPs, including same-node traffic. It
+  is enforced in each node's `inet ziro_cluster` nftables table, and the agent does not configure the mesh until that table is in
   place. Check it with `ziroctl cluster policy ls`.
 - **Audit log**: every mutating `ziroctl` command run as root, ziro-api service action, and cluster join, leave
   or rejected credential is appended to `/var/log/ziro/audit.log` (0600). Each record holds the SHA-256 of the

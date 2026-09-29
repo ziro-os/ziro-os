@@ -257,7 +257,7 @@ echo ""
 
 echo "Network:"
 echo "  Interfaces: $(ip link show | grep -E '^[0-9]+:' | wc -l)"
-echo "  Bridge: $(ip link show | grep -c 'ziro0\|cni0' || echo '0')"
+echo "  Bridge: $(ip link show | grep -c 'ziro-br0\|ziro0\|cni0' || echo '0')"
 echo ""
 
 echo "Monitoring Services:"

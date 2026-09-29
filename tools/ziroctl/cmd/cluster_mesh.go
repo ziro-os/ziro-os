@@ -91,6 +91,9 @@ func applyMesh(meshIP string, prefix int, peers []MeshPeer) error {
 		for _, r := range p.Routes {
 			allowed = append(allowed, r+"/32")
 		}
+		if p.PodCIDR != "" {
+			allowed = append(allowed, p.PodCIDR)
+		}
 		for _, a := range allowed {
 			if _, err := netip.ParsePrefix(a); err != nil {
 				return fmt.Errorf("invalid mesh address %q", a)
@@ -125,6 +128,7 @@ func teardownMesh() {
 		_ = run("ip", "link", "del", "dev", meshIface)
 	}
 	removeClusterPolicy()
+	teardownPodNetwork()
 	_ = writeHostsBlock(hostsFile, nil)
 	_ = os.Remove(meshKeyPath())
 }

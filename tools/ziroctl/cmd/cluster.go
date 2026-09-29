@@ -30,6 +30,7 @@ func clusterSecretsPath() string { return filepath.Join(clusterDir, "secrets.jso
 
 const (
 	defaultMeshCIDR = "10.200.0.0/16"
+	defaultPodCIDR  = "10.201.0.0/16"
 	maxAppHistory   = 5
 )
 
@@ -67,6 +68,7 @@ type ClusterNode struct {
 	WGPort     int               `json:"wg_port,omitempty"`
 	MeshError  string            `json:"mesh_error,omitempty"` // last mesh/policy apply error reported by the agent
 	Gateway    bool              `json:"gateway,omitempty"`    // runs zirogate for the cluster's routes
+	PodCIDR    string            `json:"pod_cidr,omitempty"`   // this node's /24 of the cluster pod network
 	LastSeen   time.Time         `json:"last_seen"`
 }
 
@@ -80,6 +82,7 @@ type ClusteredApp struct {
 	Secrets   []string          `json:"secrets,omitempty"`    // cluster secrets injected as env files
 	MeshOnly  bool              `json:"mesh_only,omitempty"`  // publish Port on the mesh IP only
 	AllowFrom []string          `json:"allow_from,omitempty"` // apps (or "*") allowed to reach Port over the mesh
+	Network   string            `json:"network,omitempty"`    // "pod" (routed container IP) or "" (host ports only; pre-pod clusters)
 	Revision  int               `json:"revision,omitempty"`
 	CreatedAt string            `json:"created_at,omitempty"`
 }
@@ -93,6 +96,7 @@ type Replica struct {
 	Fails int    `json:"fails,omitempty"` // consecutive start failures reported by the node
 	Error string `json:"error,omitempty"`
 	Avoid string `json:"avoid,omitempty"` // node the replica kept failing on
+	IP    string `json:"ip,omitempty"`    // pod IP, assigned by the master while placed on a pod-network node
 }
 
 // ClusterState is the master's source of truth. Secret values live in secrets.json.
@@ -107,7 +111,8 @@ type ClusterState struct {
 	PolicyDefault string         `json:"policy_default,omitempty"`
 	Routes        []GatewayRoute `json:"routes,omitempty"`
 	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
-	Peers         []RemotePeer   `json:"peers,omitempty"` // WireGuard remote-access clients
+	Peers         []RemotePeer   `json:"peers,omitempty"`    // WireGuard remote-access clients
+	PodCIDR       string         `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
 }
 
 func isClusterMaster() bool {
@@ -363,6 +368,9 @@ func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 			return fmt.Errorf("invalid argument %q", arg)
 		}
 	}
+	if a.Network != "" && a.Network != "pod" {
+		return fmt.Errorf("network must be \"pod\" or empty")
+	}
 	if a.MeshOnly && a.Port == "" {
 		return fmt.Errorf("--mesh-only needs --port")
 	}
@@ -487,6 +495,7 @@ var (
 	clusterPort      int
 	clusterAdvertise string
 	clusterMeshCIDR  string
+	clusterPodCIDR   string
 	joinTokenFlag    string
 	joinTokenFile    string
 	joinCAHashFlag   string
@@ -510,6 +519,12 @@ var clusterInitCmd = &cobra.Command{
 		}
 		if _, err := netip.ParsePrefix(clusterMeshCIDR); err != nil {
 			return fmt.Errorf("invalid --mesh-cidr: %w", err)
+		}
+		podNet := clusterPodCIDR
+		if podNet == "none" {
+			podNet = ""
+		} else if err := validatePodCIDR(podNet, clusterMeshCIDR); err != nil {
+			return fmt.Errorf("--pod-cidr: %w", err)
 		}
 		if err := ensureTLSCertificates(); err != nil {
 			return fmt.Errorf("TLS certificate: %w", err)
@@ -551,14 +566,20 @@ var clusterInitCmd = &cobra.Command{
 
 		err = withState(func(st *ClusterState) error {
 			*st = ClusterState{NodeTokens: map[string]string{cfg.NodeID: hashToken(nodeToken)}, History: map[string][]ClusteredApp{},
-				PolicyDefault: "deny"}
+				PolicyDefault: "deny", PodCIDR: podNet}
 			st.Nodes = []ClusterNode{{
 				ID: cfg.NodeID, Hostname: host, IP: ip, Role: "master", Status: "Ready",
 				CPUs: runtime.NumCPU(), MemTotal: inspectSystem().TotalMemMB, LastSeen: time.Now(),
 				WGPubKey: pub, WGPort: meshPort,
 			}}
 			mip, err := allocMeshIP(st, cfg.MeshCIDR)
+			if err != nil {
+				return err
+			}
 			st.Nodes[0].MeshIP = mip
+			if podNet != "" {
+				st.Nodes[0].PodCIDR, err = allocPodCIDR(st)
+			}
 			return err
 		})
 		if err != nil {
@@ -607,10 +628,10 @@ func allowFirewall(rules []FirewallRule, trust string) {
 	fw := loadFirewallConfig()
 	have := map[string]bool{}
 	for _, r := range fw.AllowedPorts {
-		have[fmt.Sprintf("%d/%s", r.Port, r.Protocol)] = true
+		have[fmt.Sprintf("%d/%s/%s", r.Port, r.Protocol, r.Source)] = true
 	}
 	for _, r := range rules {
-		if !have[fmt.Sprintf("%d/%s", r.Port, r.Protocol)] {
+		if !have[fmt.Sprintf("%d/%s/%s", r.Port, r.Protocol, r.Source)] {
 			fw.AllowedPorts = append(fw.AllowedPorts, r)
 		}
 	}
@@ -823,6 +844,7 @@ func deployApp(mutate func(st *ClusterState) (*ClusteredApp, error)) error {
 		if err != nil {
 			return err
 		}
+		*app = withPodNetwork(st, *app) // deploy, apply, scale and rollback all land on the pod network
 		if err := validateApp(app, secrets); err != nil {
 			return err
 		}
@@ -1063,6 +1085,10 @@ var clusterEndpointsCmd = &cobra.Command{
 			return err
 		}
 		eps := appEndpoints(st)
+		pod := st.PodCIDR != ""
+		if pod {
+			eps = podEndpoints(st)
+		}
 		if len(args) == 1 {
 			eps = map[string][]string{args[0]: eps[args[0]]}
 		}
@@ -1074,13 +1100,23 @@ var clusterEndpointsCmd = &cobra.Command{
 			sort.Strings(names)
 			for _, n := range names {
 				port := ""
-				if a := st.app(n); a != nil && a.Port != "" {
-					port = ":" + strings.SplitN(a.Port, ":", 2)[0]
+				if m := portMapRe.FindStringSubmatch(portOfApp(st, n)); m != nil {
+					port = ":" + m[1]
+					if pod {
+						port = ":" + m[2] // pod IPs serve the container port
+					}
 				}
 				fmt.Printf("%s.%s%s -> %s\n", n, meshDomain, port, strings.Join(eps[n], ", "))
 			}
 		})
 	},
+}
+
+func portOfApp(st *ClusterState, name string) string {
+	if a := st.app(name); a != nil {
+		return a.Port
+	}
+	return ""
 }
 
 // ---- node operations ----
@@ -1338,6 +1374,8 @@ func init() {
 	clusterInitCmd.Flags().IntVarP(&clusterPort, "port", "p", 7443, "Cluster control plane listening port")
 	clusterInitCmd.Flags().StringVar(&clusterAdvertise, "advertise", "", "IP workers use to reach this master (default: IP of the default-route interface)")
 	clusterInitCmd.Flags().StringVar(&clusterMeshCIDR, "mesh-cidr", defaultMeshCIDR, "WireGuard mesh subnet for node-to-node traffic")
+	clusterInitCmd.Flags().StringVar(&clusterPodCIDR, "pod-cidr", defaultPodCIDR, "Routed container network (a /24 per node; 'none' = host ports only)")
+	clusterNetworkEnableCmd.Flags().StringVar(&clusterPodCIDR, "pod-cidr", defaultPodCIDR, "Routed container network (a /24 per node)")
 	clusterInitCmd.Flags().DurationVar(&tokenTTL, "token-ttl", 24*time.Hour, "Join token lifetime (0 = never expires)")
 	clusterTokenRotateCmd.Flags().DurationVar(&tokenTTL, "ttl", 24*time.Hour, "Join token lifetime (0 = never expires)")
 	clusterJoinCmd.Flags().StringVarP(&joinTokenFlag, "token", "t", "", "Cluster join token (prefer ZIRO_CLUSTER_TOKEN or --token-file: argv is visible in ps)")
