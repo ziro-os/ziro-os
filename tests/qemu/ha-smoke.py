@@ -110,6 +110,24 @@ def main():
             ok, out = bs.retry(nodes[i], "ziroctl cluster keys status --json",
                                lambda rc, o: '"sealed": true' in o and re.search(r'"local_key": "(\w+)",\s*"cluster_key": "\1"', o), 120, every=5)
             check(f"node{i} holds the cluster data key (secrets sealed)", ok, out)
+
+        # Data key rotation: distributed to every master first, then secrets re-sealed; the old key is retired.
+        rc, out = n1.run("ziroctl cluster keys status --json", timeout=30)
+        old = re.search(r'"cluster_key": "(\w+)"', out)
+        old_key = old.group(1) if old else "missing"
+        rc, out = n1.run("ziroctl cluster keys rotate", timeout=60)
+        check("data key rotation requested", rc == 0, out)
+        for i in (1, 2, 3):
+            ok, out = bs.retry(nodes[i], "ziroctl cluster keys status --json",
+                               lambda rc, o: re.search(r'"local_key": "(\w+)",\s*"cluster_key": "\1"', o) is not None
+                               and old_key not in o and '"next_key"' not in o, 180, every=5)
+            if not check(f"node{i} moved to the rotated data key", ok, out):
+                for j in (1, 2, 3):  # the masters' own view of what went wrong
+                    rc, log = nodes[j].run("grep -i -e 'data key' -e rotat -e 'dek' /var/log/cluster-master.log | tail -8; "
+                                           "ls -l /etc/ziro/cluster/dek*.bin", timeout=20)
+                    print(f"    node{j} cluster-master.log:\n" + "\n".join("      " + l for l in log.splitlines()), flush=True)
+            rc, out = nodes[i].run(f"grep -l {old_key} /etc/ziro/cluster/dek*.bin || echo RETIRED", timeout=15)
+            check(f"node{i} no longer stores the retired key", "RETIRED" in out, out)
         ok, out = bs.retry(n1, "ziroctl cluster services", lambda rc, o: "3/3 running" in o and "updating" not in o, 400, every=10)
         check("3/3 replicas running", ok, out)
 

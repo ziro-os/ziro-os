@@ -338,7 +338,7 @@ var clusterAgentCmd = &cobra.Command{
 
 			var resp heartbeatResponse
 			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh,
-				Caps: nodeCaps}
+				Caps: nodeCaps, Keys: storedKeyIDs()}
 			pending := ""
 			if wantRotate { // the new token is generated here and sent once, authenticated by the old one
 				pending = randomHex(32)

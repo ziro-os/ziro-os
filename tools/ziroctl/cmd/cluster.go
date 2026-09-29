@@ -74,6 +74,7 @@ type ClusterNode struct {
 	MeshError   string            `json:"mesh_error,omitempty"`   // last mesh/policy apply error reported by the agent
 	Caps        []string          `json:"caps,omitempty"`         // features the node's ziroctl reported (upgrade gating)
 	TokenIssued time.Time         `json:"token_issued,omitempty"` // when the node's current token was issued
+	Keys        []string          `json:"keys,omitempty"`         // data key IDs this node's master holds (rotation gating)
 	Gateway     bool              `json:"gateway,omitempty"`      // runs zirogate for the cluster's routes
 	PodCIDR     string            `json:"pod_cidr,omitempty"`     // this node's /24 of the cluster pod network
 	LastSeen    time.Time         `json:"last_seen"`
@@ -125,6 +126,9 @@ type ClusterState struct {
 	PrevNodeTokens     map[string]prevNodeToken `json:"prev_node_tokens,omitempty"`
 	RotateTokensBefore time.Time                `json:"rotate_tokens_before,omitempty"`
 	RotateCertsBefore  time.Time                `json:"rotate_certs_before,omitempty"`
+	// Data key rotation: requested -> NextDEKID distributed to every master -> DEKID switched.
+	DEKRotateRequested time.Time `json:"dek_rotate_requested,omitempty"`
+	NextDEKID          string    `json:"next_dek_id,omitempty"`
 	// Join credentials and the cluster CA are replicated so any master can admit nodes.
 	JoinToken        string `json:"join_token,omitempty"`
 	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never

@@ -186,6 +186,11 @@ ziroctl cluster keys provider command --wrap /usr/local/bin/kms-wrap --unwrap /u
   it understands sealed state, so the order of a rolling upgrade does not matter. Each master then compacts
   its Raft log once, so no pre-seal plaintext stays in the log or snapshots. Freed database pages may still
   hold old bytes, as with any deleted file.
+- **Rotating the data key:** `ziroctl cluster keys rotate`. The leader creates a new key, and every master
+  fetches it and wraps it with its own provider. Only when **every** master holds it are the secrets re-sealed
+  with it, so no master is ever left unable to open them. Each master then drops the old key and compacts its
+  Raft log, so nothing sealed with the old key remains. `cluster keys status` shows which masters it is waiting
+  for. Remove dead masters first (`cluster member rm`), because the rotation waits for every master.
 - **Keep one master's key recoverable:** a KMS key, a working TPM, or a backup made with `--include-secrets`.
   Without the data key, sealed secrets cannot be recovered. Downgrading a master below this version after
   sealing is not supported.

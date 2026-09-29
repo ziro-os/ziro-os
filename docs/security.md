@@ -95,8 +95,10 @@ Output:
 - **Credential rotation**: node tokens rotate automatically every 30 days, and at once with
   `ziroctl cluster rotate tokens`. The agent generates the new token and sends it over the authenticated channel. The
   previous token stays valid for an hour, and using it triggers another rotation, so a lost reply never locks a node
-  out. Master certificates renew 30 days before expiry, and at once with `ziroctl cluster rotate certs`. Rotating the
-  cluster CA is not supported yet; it is valid for 10 years.
+  out. Master certificates renew 30 days before expiry, and at once with `ziroctl cluster rotate certs`. The cluster
+  data key rotates with `ziroctl cluster keys rotate`: it is distributed to every master before the secrets are
+  re-sealed, then the old key is dropped and the Raft log compacted. Rotating the cluster CA is not supported yet;
+  it is valid for 10 years.
 - **Audit log**: every mutating `ziroctl` command run as root, ziro-api service action, and cluster join, leave
   or rejected credential is appended to `/var/log/ziro/audit.log` (0600). Each record holds the SHA-256 of the
   previous one. `ziroctl audit verify` exits non-zero at the first changed or removed record, and
