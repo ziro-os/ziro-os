@@ -95,6 +95,10 @@ Output:
   snapshots and files. Each master wraps its copy with a `file`, `tpm` (TPM 2.0, salted and encrypted sessions)
   or `command` (KMS/Vault/HSM) provider. Masters fetch the key from each other only over mutual TLS, and every
   fetch is audited. See [clustering.md](clustering.md#secrets-at-rest).
+- **Monitoring and compliance**: `GET /api/v1/metrics` (Prometheus text format; a `viewer` token is enough) reports
+  host health, service state and, on masters, node readiness, replica health, control-plane membership and which
+  security controls are in force. [compliance.md](compliance.md) maps the controls to NIST SP 800-190, CIS Controls
+  v8 and SOC 2, with the command that produces evidence for each and the known gaps.
 - **Credential rotation**: node tokens rotate automatically every 30 days, and at once with
   `ziroctl cluster rotate tokens`. The agent generates the new token and sends it over the authenticated channel. The
   previous token stays valid for an hour, and using it triggers another rotation, so a lost reply never locks a node

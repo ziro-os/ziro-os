@@ -332,6 +332,12 @@ func startAPIServer() {
 		}
 	}
 
+	// Prometheus metrics (any token; a viewer token is enough).
+	mux.HandleFunc("/api/v1/metrics", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(collectMetrics()))
+	}))
+
 	// 1. Health
 	mux.HandleFunc("/api/v1/health", wrapHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{

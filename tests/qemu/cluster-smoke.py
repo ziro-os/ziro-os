@@ -274,6 +274,14 @@ def main():
         check("API RBAC: viewer reads, viewer cannot act, operator can, revoked is refused",
               all(x in out for x in ("GET=200", "VPOST=403", "OPOST=200", "REVOKED=401")), out)
 
+        # Prometheus metrics with a viewer token.
+        rc, out = m.run("P=$(ziroctl api token create prom --role viewer 2>/dev/null); "
+                        "curl -sk -H \"Authorization: Bearer $P\" https://127.0.0.1:8443/api/v1/metrics", timeout=60)
+        check("metrics: host, services and cluster state in Prometheus format",
+              all(x in out for x in ("ziro_up 1", 'ziro_service_up{service="cluster-master"} 1',
+                                      'ziro_cluster_app_replicas{app="web",state="running"}',
+                                      'ziro_cluster_security{control="secrets_sealed"} 1', "# TYPE ziro_cluster_raft_leader gauge")), out)
+
         # Credential rotation: node tokens (agents send new ones) and master certificates.
         rc, before = w.run("grep -o 'node_token\": \"[^\"]*' /etc/ziro/cluster/config.json", timeout=15)
         rc, out = m.run("sha256sum /etc/ziro/cluster/master.crt | cut -c1-16; ziroctl cluster rotate tokens && ziroctl cluster rotate certs", timeout=60)

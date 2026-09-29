@@ -85,7 +85,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
 | HA control plane | Raft (hashicorp/raft + bbolt), cluster CA, mutual-TLS master links | masters | shipped |
-| Enterprise controls | scoped API tokens, cert rotation, signed-image policy, `/metrics` | all | Phase 5 |
+| Enterprise controls | scoped API tokens, credential and data-key rotation, signed-image policy, `/api/v1/metrics`, [compliance mapping](compliance.md) | all | shipped |
 
 ```mermaid
 flowchart LR
@@ -173,5 +173,5 @@ Known limits, each addressed by a later phase:
   - Scoped API tokens (viewer / operator / admin): shipped.
   - Rotation: node tokens (30 days or `cluster rotate tokens`) and master certificates (`cluster rotate certs`): shipped. The data key rotates in two phases (`cluster keys rotate`); rotating the CA is not planned yet.
   - Image policy: registry allowlist and cosign signature verification (native, key-based), with digest pinning: shipped.
-  - Prometheus `/metrics`.
-  - `docs/compliance.md` mapping controls to CIS and SOC 2.
+  - Prometheus `/api/v1/metrics` on the admin API (viewer token): shipped.
+  - [docs/compliance.md](compliance.md): NIST SP 800-190, CIS Controls v8 and SOC 2 mapping with evidence commands and known gaps: shipped.
