@@ -33,15 +33,14 @@ var composeCmd = &cobra.Command{
 var composeUpCmd = &cobra.Command{
 	Use:   "up",
 	Short: "Create and start multi-container services defined in docker-compose.yml",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		services, err := parseComposeFile(composeFile)
 		if err != nil {
-			fmt.Printf("Error reading %s: %v\n", composeFile, err)
-			return
+			return fmt.Errorf("reading %s: %w", composeFile, err)
 		}
 		if len(services) == 0 {
 			fmt.Println("No services found in compose file.")
-			return
+			return nil
 		}
 
 		projectName := getProjectName(composeFile)
@@ -69,7 +68,7 @@ var composeUpCmd = &cobra.Command{
 			for _, v := range s.Volumes {
 				runArgs = append(runArgs, "-v", v)
 			}
-			runArgs = append(runArgs, s.Image)
+			runArgs = append(runArgs, "--", s.Image) // "--": an image can never be read as a flag
 			if s.Command != "" {
 				runArgs = append(runArgs, strings.Fields(s.Command)...)
 			}
@@ -84,17 +83,17 @@ var composeUpCmd = &cobra.Command{
 				fmt.Printf("✓ Service '%s' started successfully.\n", s.Name)
 			}
 		}
+		return nil
 	},
 }
 
 var composeDownCmd = &cobra.Command{
 	Use:   "down",
 	Short: "Stop and remove containers defined in docker-compose.yml",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		services, err := parseComposeFile(composeFile)
 		if err != nil {
-			fmt.Printf("Error reading %s: %v\n", composeFile, err)
-			return
+			return fmt.Errorf("reading %s: %w", composeFile, err)
 		}
 
 		projectName := getProjectName(composeFile)
@@ -107,37 +106,40 @@ var composeDownCmd = &cobra.Command{
 			_ = exec.Command("nerdctl", "rm", "-f", containerName).Run()
 		}
 		fmt.Println("✓ All compose services stopped and removed.")
+		return nil
 	},
 }
 
 var composePsCmd = &cobra.Command{
 	Use:   "ps",
 	Short: "List containers for the current compose project",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := getProjectName(composeFile)
 		out, err := exec.Command("nerdctl", "ps", "-a", "--filter", fmt.Sprintf("name=%s_", projectName)).Output()
 		if err != nil || len(out) == 0 {
 			// Fallback standard listing
 			_ = exec.Command("nerdctl", "ps").Run()
-			return
+			return nil
 		}
 		fmt.Print(string(out))
+		return nil
 	},
 }
 
 var composeLogsCmd = &cobra.Command{
 	Use:   "logs [service]",
 	Short: "View output from containers",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := getProjectName(composeFile)
-		target := fmt.Sprintf("%s_", projectName)
-		if len(args) > 0 {
-			target = fmt.Sprintf("%s_%s_1", projectName, args[0])
+		if len(args) == 0 {
+			return fmt.Errorf("specify a service: ziroctl compose logs <service>")
 		}
+		target := fmt.Sprintf("%s_%s_1", projectName, args[0])
 		cmdRun := exec.Command("nerdctl", "logs", target)
 		cmdRun.Stdout = os.Stdout
 		cmdRun.Stderr = os.Stderr
 		_ = cmdRun.Run()
+		return nil
 	},
 }
 

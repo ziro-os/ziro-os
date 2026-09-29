@@ -980,6 +980,7 @@ var upgradeRollbackCmd = &cobra.Command{
 		if os.Geteuid() != 0 {
 			return errors.New("rollback must run as root")
 		}
+		defer jsonProgressToStderr()()
 		state, err := rollbackUpgrade(upgradeRoot)
 		if err != nil {
 			return err
@@ -1003,6 +1004,7 @@ var upgradeApplyCmd = &cobra.Command{
 		if !fileExists(filepath.Join(upgradeRoot, "etc/ziro-installed")) {
 			return fmt.Errorf("%s is not an installed Ziro-OS root", upgradeRoot)
 		}
+		defer jsonProgressToStderr()()
 		state, err := applyUpgrade(upgradeRoot, upgradeImage)
 		if err != nil {
 			return err
@@ -1011,10 +1013,23 @@ var upgradeApplyCmd = &cobra.Command{
 	},
 }
 
+// resultOut receives the machine-readable result. With --json, progress text (emoji lines,
+// doctor table, prompts) goes to stderr so stdout stays a single valid JSON document.
+var resultOut io.Writer = os.Stdout
+
+func jsonProgressToStderr() func() {
+	if !jsonOutput {
+		return func() {}
+	}
+	real := os.Stdout
+	resultOut, os.Stdout = real, os.Stderr
+	return func() { os.Stdout = real }
+}
+
 func reportUpgrade(state *upgradeState, msg string) error {
 	if jsonOutput {
 		data, _ := json.MarshalIndent(state, "", "  ")
-		fmt.Println(string(data))
+		fmt.Fprintln(resultOut, string(data))
 		return nil
 	}
 	fmt.Println(msg)
@@ -1022,6 +1037,7 @@ func reportUpgrade(state *upgradeState, msg string) error {
 }
 
 func runUpgrade(cmd *cobra.Command, args []string) error {
+	defer jsonProgressToStderr()()
 	if !upgradeCheckOnly {
 		if err := upgradeGuards(); err != nil {
 			return err
@@ -1041,7 +1057,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	if upgradeCheckOnly {
 		if jsonOutput {
 			data, _ := json.MarshalIndent(map[string]any{"current": current, "latest": latest, "update_available": cmpv > 0}, "", "  ")
-			fmt.Println(string(data))
+			fmt.Fprintln(resultOut, string(data))
 		} else if cmpv > 0 {
 			fmt.Printf("⬆️  Ziro-OS %s is available (installed: %s). Run 'ziroctl upgrade'.\n", latest, current)
 		} else {

@@ -145,7 +145,7 @@ var serviceCmd = &cobra.Command{
 var serviceListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all system services, state, and enabled status",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		services := listAllServices()
 		fmt.Printf("%-16s %-10s %-8s %-10s %s\n", "SERVICE", "STATUS", "PID", "ENABLED", "DESCRIPTION")
 		fmt.Println(strings.Repeat("-", 75))
@@ -160,6 +160,7 @@ var serviceListCmd = &cobra.Command{
 			}
 			fmt.Printf("%-16s %-10s %-8s %-10s %s\n", s.Name, s.Status, pidStr, enStr, s.Description)
 		}
+		return nil
 	},
 }
 
@@ -167,12 +168,11 @@ var serviceStatusCmd = &cobra.Command{
 	Use:   "status <service>",
 	Short: "Show detailed status and recent logs for a service",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		s, err := getServiceStatus(name)
 		if err != nil {
-			fmt.Printf("Service '%s' not found.\n", name)
-			return
+			return fmt.Errorf("service '%s' not found", name)
 		}
 		fmt.Printf("● %s - %s\n", s.Name, s.Description)
 		fmt.Printf("   Loaded:  %s (/etc/ziro/services/%s.conf; enabled: %v)\n", s.Name, s.Name, s.Enabled)
@@ -185,6 +185,7 @@ var serviceStatusCmd = &cobra.Command{
 			fmt.Printf("   Log:     %s\n", s.LogFile)
 			printRecentLogs(s.LogFile, 5)
 		}
+		return nil
 	},
 }
 
@@ -192,13 +193,13 @@ var serviceStartCmd = &cobra.Command{
 	Use:   "start <service>",
 	Short: "Start a system service",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := startService(name); err != nil {
-			fmt.Printf("Failed to start %s: %v\n", name, err)
-			return
+			return fmt.Errorf("start %s: %w", name, err)
 		}
 		fmt.Printf("Started service: %s\n", name)
+		return nil
 	},
 }
 
@@ -206,13 +207,13 @@ var serviceStopCmd = &cobra.Command{
 	Use:   "stop <service>",
 	Short: "Stop a running system service",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := stopService(name); err != nil {
-			fmt.Printf("Failed to stop %s: %v\n", name, err)
-			return
+			return fmt.Errorf("stop %s: %w", name, err)
 		}
 		fmt.Printf("Stopped service: %s\n", name)
+		return nil
 	},
 }
 
@@ -220,15 +221,15 @@ var serviceRestartCmd = &cobra.Command{
 	Use:   "restart <service>",
 	Short: "Restart a system service",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		_ = stopService(name)
 		time.Sleep(500 * time.Millisecond)
 		if err := startService(name); err != nil {
-			fmt.Printf("Failed to restart %s: %v\n", name, err)
-			return
+			return fmt.Errorf("restart %s: %w", name, err)
 		}
 		fmt.Printf("Restarted service: %s\n", name)
+		return nil
 	},
 }
 
@@ -236,13 +237,13 @@ var serviceEnableCmd = &cobra.Command{
 	Use:   "enable <service>",
 	Short: "Enable a system service to start automatically on boot",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := enableService(name); err != nil {
-			fmt.Printf("Failed to enable %s: %v\n", name, err)
-			return
+			return fmt.Errorf("enable %s: %w", name, err)
 		}
 		fmt.Printf("Enabled service '%s' for boot autostart.\n", name)
+		return nil
 	},
 }
 
@@ -250,13 +251,13 @@ var serviceDisableCmd = &cobra.Command{
 	Use:   "disable <service>",
 	Short: "Disable a system service from starting on boot",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := disableService(name); err != nil {
-			fmt.Printf("Failed to disable %s: %v\n", name, err)
-			return
+			return fmt.Errorf("disable %s: %w", name, err)
 		}
 		fmt.Printf("Disabled service '%s' from boot autostart.\n", name)
+		return nil
 	},
 }
 
@@ -264,18 +265,18 @@ var serviceLogsCmd = &cobra.Command{
 	Use:   "logs <service>",
 	Short: "View recent log output from a system service",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		s, err := getServiceStatus(name)
 		if err != nil {
-			fmt.Printf("Service '%s' not found.\n", name)
-			return
+			return fmt.Errorf("service '%s' not found", name)
 		}
 		if s.LogFile == "" || !fileExists(s.LogFile) {
 			fmt.Printf("No log file found for service %s.\n", name)
-			return
+			return nil
 		}
 		printRecentLogs(s.LogFile, 50)
+		return nil
 	},
 }
 
@@ -286,7 +287,7 @@ var serviceBootCmd = &cobra.Command{
 	Use:    "boot",
 	Short:  "Start all enabled services (invoked by ziro-init at boot)",
 	Hidden: true,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		for _, s := range listAllServices() {
 			if !s.Enabled || initManaged[s.Name] || s.Status == "RUNNING" {
 				continue
@@ -297,6 +298,7 @@ var serviceBootCmd = &cobra.Command{
 			}
 			fmt.Printf("[boot] started %s\n", s.Name)
 		}
+		return nil
 	},
 }
 
@@ -328,11 +330,12 @@ var serviceRotateLogsCmd = &cobra.Command{
 	Use:    "rotate-logs",
 	Short:  "Rotate /var/log/*.log files larger than 10MB (run hourly by crond)",
 	Hidden: true,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		logs, _ := filepath.Glob(filepath.Join(logsDir, "*.log"))
 		for _, l := range logs {
 			rotateLog(l)
 		}
+		return nil
 	},
 }
 
@@ -593,6 +596,11 @@ func stopService(name string) error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return err
+	}
+	// Remove the pidfile first: ziro-init restarts restart=always services whose pidfile
+	// still names the exited process, and a deliberate stop must not look like a crash.
+	if def.PIDFile != "" {
+		_ = os.Remove(def.PIDFile)
 	}
 
 	// Send SIGTERM

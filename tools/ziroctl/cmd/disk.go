@@ -19,7 +19,7 @@ var diskCmd = &cobra.Command{
 var diskListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List storage disks, partitions, models, and sizes",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("==================================================")
 		fmt.Println(" 💾 Ziro-OS Storage Disks & Partitions")
 		fmt.Println("==================================================")
@@ -30,10 +30,10 @@ var diskListCmd = &cobra.Command{
 			out, err := exec.Command("fdisk", "-l").CombinedOutput()
 			if err == nil && len(out) > 0 {
 				fmt.Println(string(out))
-				return
+				return nil
 			}
 			fmt.Println("No storage block devices detected.")
-			return
+			return nil
 		}
 
 		found := 0
@@ -89,19 +89,21 @@ var diskListCmd = &cobra.Command{
 			fmt.Println("Ensure virtio-blk, sd_mod, or nvme kernel drivers are loaded.")
 		}
 		fmt.Println("==================================================")
+		return nil
 	},
 }
 
 var diskUsageCmd = &cobra.Command{
 	Use:   "usage",
 	Short: "Show filesystem disk space and inode utilization",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		out, err := exec.Command("df", "-h").CombinedOutput()
 		if err == nil {
 			fmt.Println(string(out))
 		} else {
-			fmt.Printf("Error querying disk usage: %v\n", err)
+			return fmt.Errorf("query disk usage: %w", err)
 		}
+		return nil
 	},
 }
 
