@@ -10,25 +10,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 const (
-	wireguardDir    = "/etc/wireguard"
-	defaultWgIface  = "wg0"
-	defaultWgConf   = "/etc/wireguard/wg0.conf"
-	defaultWgPeers  = "/etc/wireguard/peers"
+	wireguardDir   = "/etc/wireguard"
+	defaultWgIface = "wg0"
+	defaultWgConf  = "/etc/wireguard/wg0.conf"
+	defaultWgPeers = "/etc/wireguard/peers"
 )
 
 var (
-	wgIface   string
-	wgCIDR    string
-	wgPort    int
-	peerName  string
-	peerIP    string
-	showQR    bool
+	wgIface  string
+	wgCIDR   string
+	wgPort   int
+	peerName string
+	peerIP   string
+	showQR   bool
 )
 
 var wireguardCmd = &cobra.Command{
@@ -40,33 +41,39 @@ var wireguardCmd = &cobra.Command{
 var wgInitCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize WireGuard server and cloud VPN mesh hub on this node",
-	Run: func(cmd *cobra.Command, args []string) {
-		_ = os.MkdirAll(wireguardDir, 0700)
-		_ = os.MkdirAll(defaultWgPeers, 0700)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validName(wgIface); err != nil {
+			return err
+		}
+		if _, _, err := net.ParseCIDR(wgCIDR); err != nil {
+			return fmt.Errorf("invalid --cidr %q: %v", wgCIDR, err)
+		}
+		confPath := filepath.Join(wireguardDir, wgIface+".conf")
+		if fileExists(confPath) {
+			return fmt.Errorf("%s already exists; refusing to overwrite the server key", confPath)
+		}
+		if err := os.MkdirAll(defaultWgPeers, 0700); err != nil {
+			return err
+		}
 
 		privKey, pubKey := generateWgKeypair()
 		egress := defaultRouteIface()
 
+		// No SaveConfig: 'wg-quick down' would rewrite the file from runtime state and drop
+		// the '# Peer:' markers that 'peer add/remove' rely on. Peers are persisted by ziroctl.
 		confContent := fmt.Sprintf(`# Ziro-OS WireGuard Cloud Mesh Interface
 [Interface]
 Address = %s
 ListenPort = %d
 PrivateKey = %s
-SaveConfig = true
 
 # Cloud mesh routing & container overlay rules
 PostUp = iptables -A FORWARD -i %s -j ACCEPT; iptables -t nat -A POSTROUTING -o %s -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -D FORWARD -i %s -j ACCEPT; iptables -t nat -D POSTROUTING -o %s -j MASQUERADE 2>/dev/null || true
 `, wgCIDR, wgPort, privKey, wgIface, egress, wgIface, egress)
 
-		confPath := filepath.Join(wireguardDir, wgIface+".conf")
-		if fileExists(confPath) {
-			fmt.Printf("%s already exists; refusing to overwrite the server key.\n", confPath)
-			return
-		}
 		if err := os.WriteFile(confPath, []byte(confContent), 0600); err != nil {
-			fmt.Printf("Failed to write config: %v\n", err)
-			return
+			return fmt.Errorf("write config: %w", err)
 		}
 
 		// Enable IPv4 packet forwarding
@@ -84,57 +91,120 @@ PostDown = iptables -D FORWARD -i %s -j ACCEPT; iptables -t nat -D POSTROUTING -
 		fmt.Printf("  ziroctl wireguard up\n")
 		fmt.Println("To add your first client or mesh peer:")
 		fmt.Printf("  ziroctl wireguard peer add --name client1\n")
+		return nil
 	},
 }
 
 var wgUpCmd = &cobra.Command{
 	Use:   "up",
-	Short: "Bring up the WireGuard network interface",
-	Run: func(cmd *cobra.Command, args []string) {
+	Short: "Bring up the WireGuard network interface (idempotent)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validName(wgIface); err != nil {
+			return err
+		}
 		confPath := filepath.Join(wireguardDir, wgIface+".conf")
 		if !fileExists(confPath) {
-			fmt.Printf("Config %s not found. Run 'ziroctl wireguard init' first.\n", confPath)
-			return
+			return fmt.Errorf("config %s not found; run 'ziroctl wireguard init' first", confPath)
 		}
 
-		// Try wg-quick first
-		out, err := exec.Command("wg-quick", "up", wgIface).CombinedOutput()
-		if err == nil {
-			fmt.Printf("✓ WireGuard interface '%s' is UP.\n", wgIface)
-			return
-		}
-
-		// Fallback without wg-quick: strip wg-quick keys, then ip + wg setconf
-		fmt.Printf("wg-quick unavailable or failed (%s); using ip/wg fallback\n", strings.TrimSpace(string(out)))
-		data, err := os.ReadFile(confPath)
-		if err != nil {
-			fmt.Printf("Failed to read %s: %v\n", confPath, err)
-			return
-		}
-		setconf := exec.Command("wg", "setconf", wgIface, "/dev/stdin")
-		setconf.Stdin = strings.NewReader(stripWgQuick(string(data)))
-		_ = exec.Command("ip", "link", "add", "dev", wgIface, "type", "wireguard").Run()
-		if out, err := setconf.CombinedOutput(); err != nil {
-			fmt.Printf("wg setconf failed: %v: %s\n", err, out)
-			return
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "Address" {
-				_ = exec.Command("ip", "address", "add", strings.TrimSpace(v), "dev", wgIface).Run()
+		if linkExists(wgIface) {
+			if wgConfigured(wgIface) && linkUp(wgIface) {
+				fmt.Printf("✓ WireGuard interface '%s' is already UP.\n", wgIface)
+				return nil
 			}
+			// Half-built leftover (e.g. an earlier failed 'up'): wg-quick refuses to touch it.
+			fmt.Printf("Removing stale interface '%s' left by an earlier attempt.\n", wgIface)
+			_ = exec.Command("ip", "link", "del", "dev", wgIface).Run()
 		}
-		_ = exec.Command("ip", "link", "set", "up", "dev", wgIface).Run()
-		fmt.Printf("✓ WireGuard interface '%s' is UP (fallback).\n", wgIface)
+
+		if _, err := exec.LookPath("wg-quick"); err == nil {
+			out, err := exec.Command("wg-quick", "up", wgIface).CombinedOutput()
+			if err == nil {
+				fmt.Printf("✓ WireGuard interface '%s' is UP.\n", wgIface)
+				return nil
+			}
+			fmt.Printf("wg-quick failed (%s); using ip/wg fallback\n", strings.TrimSpace(string(out)))
+			_ = exec.Command("ip", "link", "del", "dev", wgIface).Run()
+		}
+
+		if err := wgFallbackUp(wgIface, confPath); err != nil {
+			_ = exec.Command("ip", "link", "del", "dev", wgIface).Run()
+			return err
+		}
+		fmt.Printf("✓ WireGuard interface '%s' is UP (ip/wg fallback).\n", wgIface)
+		return nil
 	},
+}
+
+// wgFallbackUp brings the interface up with plain ip + wg, for hosts without a working
+// wg-quick. The config goes through a 0600 temp file: /dev/stdin may not exist.
+func wgFallbackUp(iface, confPath string) error {
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("/run", "ziro-wg-*.conf")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	_, err = tmp.WriteString(stripWgQuick(string(data)))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+
+	if out, err := exec.Command("ip", "link", "add", "dev", iface, "type", "wireguard").CombinedOutput(); err != nil {
+		return fmt.Errorf("ip link add: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("wg", "setconf", iface, tmp.Name()).CombinedOutput(); err != nil {
+		return fmt.Errorf("wg setconf: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	c := parseWgConf(string(data))
+	for _, a := range c.Address {
+		if out, err := exec.Command("ip", "address", "add", a, "dev", iface).CombinedOutput(); err != nil {
+			return fmt.Errorf("ip address add %s: %v: %s", a, err, strings.TrimSpace(string(out)))
+		}
+	}
+	if out, err := exec.Command("ip", "link", "set", "up", "dev", iface).CombinedOutput(); err != nil {
+		return fmt.Errorf("ip link set up: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	runWgHooks(c.PostUp, iface)
+	return nil
+}
+
+// runWgHooks runs PostUp/PostDown like wg-quick does (same root-owned 0600 config, same trust).
+func runWgHooks(hooks []string, iface string) {
+	for _, h := range hooks {
+		if out, err := exec.Command("sh", "-c", strings.ReplaceAll(h, "%i", iface)).CombinedOutput(); err != nil {
+			fmt.Printf("warning: hook %q failed: %v: %s\n", h, err, strings.TrimSpace(string(out)))
+		}
+	}
 }
 
 var wgDownCmd = &cobra.Command{
 	Use:   "down",
 	Short: "Bring down the WireGuard network interface",
-	Run: func(cmd *cobra.Command, args []string) {
-		_ = exec.Command("wg-quick", "down", wgIface).Run()
-		_ = exec.Command("ip", "link", "del", "dev", wgIface).Run()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validName(wgIface); err != nil {
+			return err
+		}
+		if !linkExists(wgIface) {
+			fmt.Printf("WireGuard interface '%s' is already DOWN.\n", wgIface)
+			return nil
+		}
+		if exec.Command("wg-quick", "down", wgIface).Run() != nil {
+			if data, err := os.ReadFile(filepath.Join(wireguardDir, wgIface+".conf")); err == nil {
+				runWgHooks(parseWgConf(string(data)).PostDown, wgIface)
+			}
+			if out, err := exec.Command("ip", "link", "del", "dev", wgIface).CombinedOutput(); err != nil && linkExists(wgIface) {
+				return fmt.Errorf("ip link del: %v: %s", err, strings.TrimSpace(string(out)))
+			}
+		}
 		fmt.Printf("✓ WireGuard interface '%s' is DOWN.\n", wgIface)
+		return nil
 	},
 }
 
@@ -156,36 +226,56 @@ var wgStatusCmd = &cobra.Command{
 var wgPeerAddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a client or node peer to the WireGuard mesh",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if peerName == "" {
-			fmt.Println("Error: --name is required for adding a peer.")
-			return
+			return fmt.Errorf("--name is required")
 		}
-
 		if err := validName(peerName); err != nil {
-			fmt.Printf("Error: %v\n", err)
-			return
+			return err
+		}
+		if err := validName(wgIface); err != nil {
+			return err
 		}
 		serverConfPath := filepath.Join(wireguardDir, wgIface+".conf")
 		serverConf, err := os.ReadFile(serverConfPath)
 		if err != nil {
-			fmt.Printf("Server config %s not found. Run 'ziroctl wireguard init' first.\n", serverConfPath)
-			return
+			return fmt.Errorf("server config %s not found; run 'ziroctl wireguard init' first", serverConfPath)
 		}
-		if fileExists(filepath.Join(defaultWgPeers, peerName+".conf")) {
-			fmt.Printf("Peer '%s' already exists.\n", peerName)
-			return
+		clientFilePath := filepath.Join(defaultWgPeers, peerName+".conf")
+		if fileExists(clientFilePath) || strings.Contains(string(serverConf), "# Peer: "+peerName+"\n") {
+			return fmt.Errorf("peer '%s' already exists", peerName)
+		}
+		sc := parseWgConf(string(serverConf))
+		serverPub, err := wgPublicKey(sc.PrivateKey)
+		if err != nil {
+			return fmt.Errorf("server config %s: %w", serverConfPath, err)
+		}
+		if len(sc.Address) == 0 {
+			return fmt.Errorf("server config %s has no Address", serverConfPath)
+		}
+		_, meshNet, err := net.ParseCIDR(sc.Address[0])
+		if err != nil {
+			return fmt.Errorf("server Address %q: %v", sc.Address[0], err)
+		}
+		port := sc.ListenPort
+		if cmd.Flags().Changed("port") || port == 0 {
+			port = wgPort
 		}
 
 		allocatedIP := peerIP
 		if allocatedIP == "" {
 			if allocatedIP, err = nextPeerIP(string(serverConf)); err != nil {
-				fmt.Printf("Error: %v\n", err)
-				return
+				return err
 			}
-		} else if strings.Contains(string(serverConf), "AllowedIPs = "+allocatedIP+"\n") {
-			fmt.Printf("Error: %s is already assigned to another peer.\n", allocatedIP)
-			return
+		} else {
+			ip := net.ParseIP(strings.TrimSuffix(allocatedIP, "/32"))
+			if ip == nil || ip.To4() == nil || !meshNet.Contains(ip) {
+				return fmt.Errorf("--ip %q must be an IPv4 address inside %s", peerIP, meshNet)
+			}
+			allocatedIP = ip.String() + "/32"
+			if strings.Contains(string(serverConf), "AllowedIPs = "+allocatedIP+"\n") {
+				return fmt.Errorf("%s is already assigned to another peer", allocatedIP)
+			}
 		}
 
 		clientPriv, clientPub := generateWgKeypair()
@@ -195,20 +285,18 @@ var wgPeerAddCmd = &cobra.Command{
 			serverHost = "YOUR_SERVER_IP"
 		}
 
-		// Read server public key
-		serverPub := "SERVER_PUBLIC_KEY"
-		if out, err := exec.Command("wg", "show", wgIface, "public-key").Output(); err == nil {
-			serverPub = strings.TrimSpace(string(out))
+		peerEntry := fmt.Sprintf("\n# Peer: %s\n[Peer]\nPublicKey = %s\nAllowedIPs = %s\n", peerName, clientPub, allocatedIP)
+		if err := appendToFile(serverConfPath, peerEntry); err != nil {
+			return fmt.Errorf("update %s: %w", serverConfPath, err)
 		}
 
-		// Add peer to server config
-		peerEntry := fmt.Sprintf("\n# Peer: %s\n[Peer]\nPublicKey = %s\nAllowedIPs = %s\n", peerName, clientPub, allocatedIP)
-		_ = appendToFile(serverConfPath, peerEntry)
+		// Apply live when the interface is up; otherwise 'up' picks it from the config.
+		if linkExists(wgIface) {
+			if out, err := exec.Command("wg", "set", wgIface, "peer", clientPub, "allowed-ips", allocatedIP).CombinedOutput(); err != nil {
+				fmt.Printf("warning: live update failed (%v: %s); applied on next 'up'\n", err, strings.TrimSpace(string(out)))
+			}
+		}
 
-		// Also apply dynamically if interface is up
-		_ = exec.Command("wg", "set", wgIface, "peer", clientPub, "allowed-ips", allocatedIP).Run()
-
-		// Generate client configuration
 		clientConf := fmt.Sprintf(`# Ziro-OS Client Mesh Configuration: %s
 [Interface]
 PrivateKey = %s
@@ -218,12 +306,16 @@ DNS = 1.1.1.1, 8.8.8.8
 [Peer]
 PublicKey = %s
 Endpoint = %s:%d
-AllowedIPs = 10.10.0.0/24
+AllowedIPs = %s
 PersistentKeepalive = 25
-`, peerName, clientPriv, allocatedIP, serverPub, serverHost, wgPort)
+`, peerName, clientPriv, allocatedIP, serverPub, serverHost, port, meshNet)
 
-		clientFilePath := filepath.Join(defaultWgPeers, fmt.Sprintf("%s.conf", peerName))
-		_ = os.WriteFile(clientFilePath, []byte(clientConf), 0600)
+		if err := os.MkdirAll(defaultWgPeers, 0700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(clientFilePath, []byte(clientConf), 0600); err != nil {
+			return fmt.Errorf("write %s: %w", clientFilePath, err)
+		}
 
 		fmt.Println("================================================================")
 		fmt.Printf(" ✓ Peer '%s' added successfully!\n", peerName)
@@ -234,7 +326,6 @@ PersistentKeepalive = 25
 		fmt.Println(clientConf)
 
 		if showQR {
-			// Check if qrencode is available
 			if _, err := exec.LookPath("qrencode"); err == nil {
 				qrCmd := exec.Command("qrencode", "-t", "ANSIUTF8")
 				qrCmd.Stdin = strings.NewReader(clientConf)
@@ -242,6 +333,41 @@ PersistentKeepalive = 25
 				_ = qrCmd.Run()
 			}
 		}
+		return nil
+	},
+}
+
+var wgPeerRemoveCmd = &cobra.Command{
+	Use:     "remove <name>",
+	Aliases: []string{"rm"},
+	Short:   "Remove a peer from the WireGuard mesh",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+		if err := validName(name); err != nil {
+			return err
+		}
+		if err := validName(wgIface); err != nil {
+			return err
+		}
+		serverConfPath := filepath.Join(wireguardDir, wgIface+".conf")
+		data, err := os.ReadFile(serverConfPath)
+		if err != nil {
+			return err
+		}
+		conf, pub, ok := removePeerBlock(string(data), name)
+		if !ok {
+			return fmt.Errorf("peer '%s' not found in %s", name, serverConfPath)
+		}
+		if err := writeFileAtomic(serverConfPath, []byte(conf), 0600); err != nil {
+			return err
+		}
+		if pub != "" && linkExists(wgIface) {
+			_ = exec.Command("wg", "set", wgIface, "peer", pub, "remove").Run()
+		}
+		_ = os.Remove(filepath.Join(defaultWgPeers, name+".conf"))
+		fmt.Printf("✓ Peer '%s' removed.\n", name)
+		return nil
 	},
 }
 
@@ -273,6 +399,116 @@ func generateWgKeypair() (string, string) {
 	}
 	return base64.StdEncoding.EncodeToString(priv.Bytes()),
 		base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes())
+}
+
+// wgPublicKey derives the base64 public key from a base64 WireGuard private key.
+func wgPublicKey(privB64 string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(privB64)
+	if err != nil || len(raw) != 32 {
+		return "", fmt.Errorf("invalid PrivateKey")
+	}
+	priv, err := ecdh.X25519().NewPrivateKey(raw)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
+}
+
+type wgConf struct {
+	PrivateKey string
+	ListenPort int
+	Address    []string
+	PostUp     []string
+	PostDown   []string
+}
+
+// parseWgConf reads the [Interface] section of a wg-quick style config.
+func parseWgConf(conf string) wgConf {
+	var c wgConf
+	inIface := false
+	for _, line := range strings.Split(conf, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inIface = strings.EqualFold(line, "[Interface]")
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !inIface || !ok || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch k {
+		case "PrivateKey":
+			c.PrivateKey = v
+		case "ListenPort":
+			c.ListenPort, _ = strconv.Atoi(v)
+		case "Address":
+			for _, a := range strings.Split(v, ",") {
+				if a = strings.TrimSpace(a); a != "" {
+					c.Address = append(c.Address, a)
+				}
+			}
+		case "PostUp":
+			c.PostUp = append(c.PostUp, v)
+		case "PostDown":
+			c.PostDown = append(c.PostDown, v)
+		}
+	}
+	return c
+}
+
+// removePeerBlock drops the '# Peer: <name>' marker and the [Peer] section after it.
+func removePeerBlock(conf, name string) (string, string, bool) {
+	lines := strings.Split(conf, "\n")
+	var out []string
+	pub, found, skipping := "", false, false
+	for i := 0; i < len(lines); i++ {
+		l := strings.TrimSpace(lines[i])
+		if !found && l == "# Peer: "+name {
+			found, skipping = true, true
+			// also drop the blank separator line 'peer add' wrote before the marker
+			if n := len(out); n > 0 && strings.TrimSpace(out[n-1]) == "" {
+				out = out[:n-1]
+			}
+			continue
+		}
+		if skipping {
+			if l == "[Peer]" && pub == "" {
+				continue
+			}
+			if l == "" || strings.HasPrefix(l, "[") || strings.HasPrefix(l, "#") {
+				skipping = false
+			} else {
+				if k, v, ok := strings.Cut(l, "="); ok && strings.TrimSpace(k) == "PublicKey" {
+					pub = strings.TrimSpace(v)
+				}
+				continue
+			}
+		}
+		out = append(out, lines[i])
+	}
+	return strings.Join(out, "\n"), pub, found
+}
+
+func linkExists(iface string) bool {
+	return fileExists("/sys/class/net/" + iface)
+}
+
+// linkUp reports the IFF_UP flag (wireguard links report operstate "unknown").
+func linkUp(iface string) bool {
+	b, err := os.ReadFile("/sys/class/net/" + iface + "/flags")
+	if err != nil {
+		return false
+	}
+	f, err := strconv.ParseUint(strings.TrimSpace(string(b)), 0, 32)
+	return err == nil && f&1 == 1
+}
+
+// wgConfigured is true once a private key has been loaded into the interface.
+func wgConfigured(iface string) bool {
+	out, err := exec.Command("wg", "show", iface, "private-key").Output()
+	k := strings.TrimSpace(string(out))
+	return err == nil && k != "" && k != "(none)"
 }
 
 // defaultRouteIface returns the interface of the IPv4 default route (for NAT).
@@ -367,14 +603,16 @@ func init() {
 	wgPeerAddCmd.Flags().StringVarP(&peerName, "name", "n", "", "Peer/client identifier name")
 	wgPeerAddCmd.Flags().StringVar(&peerIP, "ip", "", "Peer mesh IP (default: next free address in the mesh subnet)")
 	wgPeerAddCmd.Flags().StringVarP(&wgIface, "interface", "i", defaultWgIface, "Target WireGuard interface")
-	wgPeerAddCmd.Flags().IntVarP(&wgPort, "port", "p", 51820, "Server UDP port")
+	wgPeerAddCmd.Flags().IntVarP(&wgPort, "port", "p", 51820, "Server UDP port for the client Endpoint (default: the server's ListenPort)")
 	wgPeerAddCmd.Flags().BoolVar(&showQR, "qr", false, "Display ASCII QR code in terminal")
+	wgPeerRemoveCmd.Flags().StringVarP(&wgIface, "interface", "i", defaultWgIface, "Target WireGuard interface")
 
 	peerCmd := &cobra.Command{
 		Use:   "peer",
 		Short: "Manage WireGuard mesh peers and clients",
 	}
 	peerCmd.AddCommand(wgPeerAddCmd)
+	peerCmd.AddCommand(wgPeerRemoveCmd)
 	peerCmd.AddCommand(wgPeerListCmd)
 
 	wireguardCmd.AddCommand(wgInitCmd)

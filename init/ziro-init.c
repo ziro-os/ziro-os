@@ -70,6 +70,17 @@ static void safe_mkdir(const char *dir, mode_t mode) {
 
 static void init_devices(void);
 
+/* devtmpfs has no /dev/fd or /dev/std* (udev/mdev normally add them). bash process
+ * substitution, wg-quick and any "/dev/stdin" user need them. All devtmpfs mounts share
+ * one superblock, so creating them once covers every later mount. */
+static void dev_links(void) {
+    safe_mkdir("/dev", 0755);
+    symlink("/proc/self/fd", "/dev/fd");
+    symlink("/proc/self/fd/0", "/dev/stdin");
+    symlink("/proc/self/fd/1", "/dev/stdout");
+    symlink("/proc/self/fd/2", "/dev/stderr");
+}
+
 /* Kernel cmdline is matched per whitespace-separated token, never by substring. */
 static char kcmdline[1024];
 
@@ -342,6 +353,7 @@ static void check_and_switch_root(void) {
     // 1. Mount essential virtual filesystems in initramfs for device detection
     safe_mkdir("/dev", 0755);
     mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+    dev_links();
     safe_mkdir("/proc", 0755);
     mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
     safe_mkdir("/sys", 0755);
@@ -517,6 +529,7 @@ static void init_filesystems(void) {
     mount_essential("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
     mount_essential("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
     mount_essential("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+    dev_links();
     safe_mkdir("/dev/pts", 0755);
     mount_essential("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "gid=5,mode=620");
     safe_mkdir("/dev/shm", 0755);

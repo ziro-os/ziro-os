@@ -149,6 +149,11 @@ def main():
         check("kernel matches shipped modules", "KMATCH" in out, out)
         rc, out = con.run("modprobe nf_tables && modprobe wireguard && modprobe overlay && echo MODOK")
         check("modprobe nf_tables/wireguard/overlay", "MODOK" in out, out)
+        rc, out = con.run("test -e /dev/fd/0 && test -e /dev/stdin && bash -c 'cat <(echo PSUB)'")
+        check("/dev/fd + bash process substitution", "PSUB" in out, out)
+        rc, out = con.run("ziroctl wg init >/dev/null && ziroctl wg up && ziroctl wg up && "
+                          "wg show wg0 listen-port && ziroctl wg down && echo WGOK")
+        check("wireguard init/up/up(idempotent)/down", "WGOK" in out, out)
 
         if args.flavor == "custom":
             rc, out = con.run("cat /sys/module/module/parameters/sig_enforce")
