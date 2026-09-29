@@ -18,6 +18,9 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
     steps:
       - uses: actions/checkout@v7
 
@@ -37,26 +40,18 @@ jobs:
 
       - name: Snyk Code test
         run: snyk code test --sarif > snyk-code.sarif
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
       - name: Snyk Open Source monitor
         run: snyk monitor --all-projects
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
       - name: Snyk IaC test and report
         run: snyk iac test --report
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
       - name: Build a Docker image
         run: docker build -t ziro-os .
 
       - name: Snyk Container monitor
         run: snyk container monitor ziro-os --file=Dockerfile
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
       - name: Upload result to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v4
