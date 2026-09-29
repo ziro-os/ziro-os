@@ -149,6 +149,10 @@ func createBackup(out string) (string, error) {
 	if !backupIncludeSecrets {
 		// Cluster app secrets stay on the master unless explicitly requested.
 		tarArgs = append(tarArgs, "--exclude", strings.TrimPrefix(clusterSecretsPath(), "/"))
+		// The Raft log and snapshots replicate those secrets; CA and master keys are credentials.
+		for _, p := range []string{raftDir(), clusterCAKeyPath(), masterKeyPath()} {
+			tarArgs = append(tarArgs, "--exclude", strings.TrimPrefix(p, "/"))
+		}
 	}
 	tarArgs = append(tarArgs, existingPaths...)
 	archive := exec.Command("tar", tarArgs...)

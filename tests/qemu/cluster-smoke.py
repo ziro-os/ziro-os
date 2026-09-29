@@ -8,6 +8,8 @@ Needs internet in the guests (pulls nginx:alpine). Slow-ish: run nightly / on de
 usage: tests/qemu/cluster-smoke.py [--arch x86_64|arm64] [--flavor alpine|custom] [--build-dir build]
 """
 import argparse
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -74,6 +76,18 @@ def main():
         ok, out = bs.retry(m, "ziroctl cluster nodes --json",
                            lambda rc, o: o.count('"status": "Ready"') == 2 and o.count('"mesh_ip": "10.200.') == 2, 90)
         check("both nodes Ready with mesh IPs", ok, out)
+
+        # An agent from before the cluster CA (pinned to the first master's own certificate)
+        # must switch to the CA on its own, over the channel it already trusts.
+        rc, pem = m.run("cat /etc/ziro/tls/server.crt", timeout=15)
+        b64 = "".join(l for l in pem.splitlines() if l and "CERTIFICATE" not in l)
+        legacy = "sha256:" + hashlib.sha256(base64.b64decode(b64 + "==")).hexdigest() if b64 else "missing"
+        rc, reset = w.run("ziroctl service stop cluster-agent; "
+                        f"sed -i 's#\"ca_hash\": \"[^\"]*\"#\"ca_hash\": \"{legacy}\"#' /etc/ziro/cluster/config.json && "
+                        "rm -f /etc/ziro/cluster/ca.crt && ziroctl service start cluster-agent && echo RESET", timeout=60)
+        ok, out = bs.retry(w, "grep -o 'ca_hash\": \"[^\"]*' /etc/ziro/cluster/config.json; ls /etc/ziro/cluster/ca.crt",
+                           lambda rc, o: tok.group(3) in o and "No such file" not in o, 90, every=5)
+        check("a pre-CA agent adopts the cluster CA by itself", "RESET" in reset and ok, reset + out)
         ok, out = bs.retry(w, "ping -c1 -W2 10.200.0.1 >/dev/null && echo MESHOK", lambda rc, o: "MESHOK" in o, 90)
         check("WireGuard mesh: node2 -> node1 (10.200.0.1)", ok, out)
 

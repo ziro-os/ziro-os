@@ -146,6 +146,47 @@ func (ag *agent) setupPods(resp heartbeatResponse) error {
 	return nil
 }
 
+func uniqueAddrs(first, second string, rest []string) []string {
+	var out []string
+	seen := map[string]bool{"": true}
+	for _, a := range append([]string{first, second}, rest...) {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// adoptClusterCA switches this node's pin to the cluster CA the master sent over the channel it
+// already trusts (agents from before the CA pinned one master's own certificate), and records
+// every master for failover.
+func adoptClusterCA(cfg *ClusterConfig, caPEM string, masters []string) {
+	changed := false
+	if caPEM != "" {
+		if h, err := pemHash(caPEM); err == nil && h != cfg.CAHash {
+			if c, err := parseCertPEM(caPEM); err == nil && c.IsCA {
+				if err := writeFileAtomic(clusterCAPath(), []byte(caPEM), 0644); err == nil {
+					cfg.CAHash, changed = h, true
+					fmt.Println("[agent] now trusting the cluster CA", h)
+				}
+			}
+		}
+	}
+	if len(masters) > 0 && strings.Join(masters, ",") != strings.Join(cfg.Masters, ",") {
+		cfg.Masters, changed = masters, true
+	}
+	if changed {
+		// Re-read first: the config may have been changed by ziroctl since the agent started.
+		if cur, err := loadClusterConfig(); err == nil {
+			cur.CAHash, cur.Masters = cfg.CAHash, cfg.Masters
+			if err := saveClusterConfig(cur); err != nil {
+				fmt.Printf("[agent] save config: %v\n", err)
+			}
+		}
+	}
+}
+
 // agent holds what the heartbeat loop learned and what the reconcile loop reports back.
 type agent struct {
 	dns     *podDNS
@@ -258,7 +299,7 @@ var clusterAgentCmd = &cobra.Command{
 			}
 		}()
 
-		lastErr, lastMesh, lastPolicy := "", "", ""
+		lastErr, lastMesh, lastPolicy, active := "", "", "", ""
 		var policyAt time.Time
 		for {
 			actual, _ := listClusterContainers()
@@ -281,8 +322,18 @@ var clusterAgentCmd = &cobra.Command{
 			ag.mu.Unlock()
 
 			var resp heartbeatResponse
-			err := clusterPost(cfg.MasterAddr, cfg.CAHash, "/cluster/v1/heartbeat", nodeAuth(cfg),
-				heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh}, &resp)
+			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh}
+			// Last good master first, then the configured one, then every other master (failover).
+			var err error
+			for _, addr := range uniqueAddrs(active, cfg.MasterAddr, cfg.Masters) {
+				if err = clusterPost(addr, cfg.CAHash, "/cluster/v1/heartbeat", nodeAuth(cfg), hb, &resp); err == nil {
+					active = addr
+					break
+				}
+			}
+			if err == nil {
+				adoptClusterCA(cfg, resp.CA, resp.Masters)
+			}
 			// On heartbeat failure the master is unreachable: keep workloads running as they are,
 			// never tear down on a network blip.
 			if err == nil {

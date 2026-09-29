@@ -71,8 +71,11 @@ Output:
   Creation stages bytes in a private file, publishes the finished archive atomically, and refuses existing
   archive/checksum destinations. Output filesystems must enforce 0600 permissions and support hard links
   (for example ext4); unsupported filesystems fail before archiving secrets. Choose a trusted directory.
-- **Clustering**: joins use a pinned master certificate plus a join token, and each node gets its own token (the
-  master stores only hashes). See [clustering.md](clustering.md).
+- **Clustering**: joins pin the cluster CA (by hash) plus a join token, and each node gets its own token (masters
+  store only hashes). Masters hold CA-signed certificates issued from CSRs. Raft (tcp/7444) and master-to-master
+  API calls require mutual TLS with those certificates, and workers can never obtain one. ziroctl reaches its
+  local cluster-master through a root-only unix socket. Backups leave out the Raft data, the CA key and the
+  master key. See [clustering.md](clustering.md).
   A replica is reported running only when its assigned Ready node reports it.
 - **Cluster network policy**: new clusters default to `deny`. Mesh traffic reaches an app's port only from nodes
   that run an app listed in its `allow_from` (`ziroctl cluster deploy --allow-from web`). On the pod network

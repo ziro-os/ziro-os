@@ -53,7 +53,7 @@ An `apps.json` manifest uses the same fields as the API:
 
 | Piece | Runs on | Service | What it does |
 |---|---|---|---|
-| Control plane | master | `cluster-master` (`ziroctl cluster serve`, TLS :7443) | Join, heartbeat, leave, scheduling. Owns `/etc/ziro/cluster/state.json` (+ `secrets.json`). |
+| Control plane | every master | `cluster-master` (`ziroctl cluster serve`, TLS :7443, Raft :7444) | Join, heartbeat, leave, scheduling (the Raft leader). Each master holds the replicated state in `/etc/ziro/cluster/` (`state.json`, `secrets.json`, `raft/`). |
 | Agent | every node | `cluster-agent` (`ziroctl cluster agent`) | Heartbeat every 10s. Converges its containers with nerdctl, and the `ziro0` mesh and `/etc/hosts` block. |
 
 Both services use `restart=always`: ziro-init restarts them with a crash-loop backoff.
@@ -96,7 +96,7 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
 ## Security model
 
 - **Join:**
-  - The worker pins the SHA-256 of the master's TLS certificate (`--ca-hash`, same idea as kubeadm's `--discovery-token-ca-cert-hash`) and presents the join token.
+  - The joiner pins the SHA-256 of the **cluster CA** (`--ca-hash`, same idea as kubeadm's `--discovery-token-ca-cert-hash`) and presents the join token. Any master whose certificate chains to that CA is trusted, so the pin survives failovers and certificate renewals.
   - Both checks are constant-time, and tokens expire.
   - Join is rate-limited per IP, and node descriptions are validated and sanitized.
 - **Node identity:** each node gets its own random 256-bit token. The master stores only its SHA-256. `leave` and `node rm` revoke it.
@@ -109,6 +109,47 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - The admin REST API stays on `127.0.0.1:8443`.
   - `/api/v1/cluster` returns a redacted view with no tokens or secrets.
 - **Input:** app names, images, ports, env keys and secrets are validated, and images are passed after `--`.
+
+## High availability (control plane)
+
+Every master runs Raft; a single master is a one-voter group. Add masters for fault tolerance:
+
+```sh
+# On the first master: the join command also works for masters
+ziroctl cluster token
+# On two more hosts
+ZIRO_CLUSTER_TOKEN=<token> ziroctl cluster join 10.0.0.10:7443 --ca-hash sha256:<hash> --control-plane
+ziroctl cluster members                 # members, voters, leader, fault tolerance
+ziroctl cluster member rm <master-id>   # remove a dead master (and revoke its node token)
+```
+
+| Masters | Survives |
+|---|---|
+| 1 | no master failure (workloads keep running; nothing is scheduled while it is down) |
+| 3 | 1 master failure |
+| 5 | 2 master failures |
+
+- **What is replicated:** the desired state (apps, placement, node tokens, policy, routes, peers,
+  pod network, secrets, the join token, the CA). It is committed as one Raft entry per change and
+  written to `state.json`/`secrets.json` on every master.
+- **What is not replicated:** liveness (last heartbeat, running containers). It changes every 10 s
+  and lives in the leader's memory. A new leader gives every Ready node a full timeout (30 s) to
+  report in before it reschedules anything.
+- **Writes from any master:** `ziroctl` talks to its local `cluster-master` through a root-only
+  unix socket (`/run/ziro/cluster-master.sock`). Followers forward to the leader over mutual TLS.
+  Updates are compare-and-swap, so concurrent changes from different masters never overwrite each
+  other.
+- **Agents:** they know every master. A follower answers them with the leader's address (HTTP 421),
+  and an unreachable master is skipped.
+- **Joining:** a new master joins as a non-voter and asks to become a voter once it has caught up,
+  so a joiner that never comes up cannot stall the cluster. Its master certificate is issued from
+  a CSR, so its private key never leaves the host.
+- **Upgrading from a single-master version:** automatic. On its first start, `cluster-master`
+  imports the existing state into a new one-voter Raft group and creates the cluster CA. Agents
+  still pinned to the old master certificate receive the CA in their next heartbeat and switch to
+  it.
+- **Ports:** tcp/7443 (cluster API) and tcp/7444 (Raft; mutual TLS with CA-signed master
+  certificates only) on masters.
 
 ## Pod network
 
@@ -138,7 +179,7 @@ ziroctl cluster network enable          # migrate an existing cluster (apps roll
 
 ## Limits (by design, for now)
 
-- There is a single master. If it is down, running workloads continue, but nothing new is scheduled.
+- With one master, a master outage stops scheduling (running workloads continue). Run 3 or 5 masters for HA.
 - Placement counts replicas, not CPU or memory.
 - Without the pod network, discovery uses hosts entries: a container sees new endpoints only when it is recreated.
 - IPv4 only; one pod /24 per node (253 replicas).

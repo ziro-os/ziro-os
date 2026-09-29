@@ -7,9 +7,9 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -34,19 +35,25 @@ const (
 )
 
 type joinRequest struct {
-	Hostname string `json:"hostname"`
-	CPUs     int    `json:"cpus"`
-	MemTotal uint64 `json:"mem_total_mb"`
-	WGPubKey string `json:"wg_pubkey,omitempty"`
-	WGPort   int    `json:"wg_port,omitempty"`
+	Hostname     string `json:"hostname"`
+	CPUs         int    `json:"cpus"`
+	MemTotal     uint64 `json:"mem_total_mb"`
+	WGPubKey     string `json:"wg_pubkey,omitempty"`
+	WGPort       int    `json:"wg_port,omitempty"`
+	ControlPlane bool   `json:"control_plane,omitempty"` // join as another master (Raft member)
+	CSR          string `json:"csr,omitempty"`           // control plane: CSR for the master cert
 }
 
 type joinResponse struct {
-	ClusterID string `json:"cluster_id"`
-	NodeID    string `json:"node_id"`
-	NodeToken string `json:"node_token"`
-	NodeIP    string `json:"node_ip"`
-	MeshIP    string `json:"mesh_ip,omitempty"`
+	ClusterID  string   `json:"cluster_id"`
+	NodeID     string   `json:"node_id"`
+	NodeToken  string   `json:"node_token"`
+	NodeIP     string   `json:"node_ip"`
+	MeshIP     string   `json:"mesh_ip,omitempty"`
+	MeshCIDR   string   `json:"mesh_cidr,omitempty"`
+	CACert     string   `json:"ca_cert,omitempty"`
+	MasterCert string   `json:"master_cert,omitempty"` // control plane only
+	Masters    []string `json:"masters,omitempty"`     // API addresses of every master
 }
 
 type heartbeatRequest struct {
@@ -90,6 +97,8 @@ type heartbeatResponse struct {
 	Endpoints   map[string][]string `json:"endpoints,omitempty"` // app -> mesh IPs
 	Policy      *MeshPolicy         `json:"policy,omitempty"`
 	Gateway     *GatewayConfig      `json:"gateway,omitempty"`  // only for nodes labelled gateway
+	CA          string              `json:"ca,omitempty"`       // cluster CA: older agents switch their pin to it
+	Masters     []string            `json:"masters,omitempty"`  // every master's API address (failover)
 	PodCIDR     string              `json:"pod_cidr,omitempty"` // this node's /24 (pod networking on)
 	PodNet      string              `json:"pod_net,omitempty"`  // the cluster pod network
 	PodDNS      map[string][]string `json:"pod_dns,omitempty"`  // app -> running pod IPs (DNS answers)
@@ -435,6 +444,7 @@ func meshView(st *ClusterState, self *ClusterNode, cidr string) (string, int, []
 // ---- master HTTP server ----
 
 type clusterServer struct {
+	port    string // cluster API port (for leader redirects)
 	limiter *rateLimiter
 	mu      sync.Mutex
 	denied  map[string]time.Time // ip -> last audited auth failure
@@ -496,6 +506,16 @@ func (s *clusterServer) wrap(h func(r *http.Request) (interface{}, error)) http.
 			err = httpError{http.StatusMethodNotAllowed, "method not allowed"}
 		case !s.limiter.allow(ip):
 			err = httpError{http.StatusTooManyRequests, "rate limit exceeded"}
+		case localRaft != nil && !localRaft.isLeader():
+			// Agents and joiners talk to the leader; tell them where it is.
+			leader, lerr := localRaft.leaderAPI(s.port)
+			if lerr != nil {
+				err = httpError{http.StatusServiceUnavailable, lerr.Error()}
+				break
+			}
+			w.WriteHeader(http.StatusMisdirectedRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "redirect", "leader": leader})
+			return
 		default:
 			r.Body = http.MaxBytesReader(w, r.Body, clusterBodyLimit)
 			out, err = h(r)
@@ -546,10 +566,6 @@ func (s *clusterServer) handleJoin(r *http.Request) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+cfg.JoinToken)) != 1 ||
-		joinTokenExpired(cfg, time.Now()) {
-		return nil, errUnauthorized
-	}
 	var req joinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return nil, httpError{http.StatusBadRequest, "invalid body"}
@@ -560,12 +576,32 @@ func (s *clusterServer) handleJoin(r *http.Request) (interface{}, error) {
 	}
 	req.Hostname = sanitizeLabel(req.Hostname, 64)
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	resp := joinResponse{ClusterID: cfg.ClusterID, NodeID: "node-" + randomHex(4), NodeToken: randomHex(32), NodeIP: ip}
+	resp := joinResponse{ClusterID: cfg.ClusterID, NodeID: "node-" + randomHex(4), NodeToken: randomHex(32), NodeIP: ip,
+		MeshCIDR: meshCIDR(cfg)}
+	role := "worker"
+	if req.ControlPlane {
+		if localRaft == nil {
+			return nil, httpError{http.StatusBadRequest, "this master cannot add control-plane members"}
+		}
+		role, resp.NodeID = "master", "master-"+randomHex(4)
+	}
 
 	err = withState(func(st *ClusterState) error {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+st.JoinToken)) != 1 ||
+			joinTokenExpired(st, time.Now()) {
+			return errUnauthorized
+		}
+		if req.ControlPlane {
+			var err error
+			// The master cert names the address the join came from, never a self-reported one.
+			if resp.MasterCert, err = signMasterCSR(st, req.CSR, resp.NodeID, []net.IP{net.ParseIP(ip)}); err != nil {
+				return httpError{http.StatusBadRequest, "csr: " + err.Error()}
+			}
+		}
+		resp.CACert, resp.Masters = st.CACert, masterAddrs(st, cfg)
 		st.NodeTokens[resp.NodeID] = hashToken(resp.NodeToken)
 		n := ClusterNode{
-			ID: resp.NodeID, Hostname: req.Hostname, IP: ip, Role: "worker", Status: "Ready",
+			ID: resp.NodeID, Hostname: req.Hostname, IP: ip, Role: role, Status: "Ready",
 			CPUs: req.CPUs, MemTotal: req.MemTotal, LastSeen: time.Now(), WGPubKey: req.WGPubKey, WGPort: req.WGPort,
 		}
 		if n.WGPubKey != "" {
@@ -589,7 +625,14 @@ func (s *clusterServer) handleJoin(r *http.Request) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("[cluster] node %s (%s, %s) joined\n", resp.NodeID, req.Hostname, ip)
+	if req.ControlPlane {
+		// A non-voter first: it only counts toward quorum once it has caught up (it asks to be
+		// promoted), so a joiner that never comes up cannot stall the cluster.
+		if err := localRaft.addNonvoter(resp.NodeID, raftAddr(ip, cfg)); err != nil {
+			return nil, err
+		}
+	}
+	fmt.Printf("[cluster] %s %s (%s, %s) joined\n", role, resp.NodeID, req.Hostname, ip)
 	clusterAudit("ip:"+ip, "cluster node join", resp.NodeID+" ("+req.Hostname+")", nil)
 	return resp, nil
 }
@@ -664,11 +707,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 			}
 		}
 		scheduleReplicas(st, time.Now())
-		secrets, err := loadSecrets()
-		if err != nil {
-			return err
-		}
-		resp.Assignments = assignmentsFor(st, n.ID, secrets)
+		resp.Assignments = assignmentsFor(st, n.ID, st.Secrets)
 		resp.MeshIP, resp.MeshPrefix, resp.Peers = meshView(st, n, meshCIDR(cfg))
 		resp.Endpoints = appEndpoints(st)
 		if st.PodCIDR != "" && n.PodCIDR != "" {
@@ -677,6 +716,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 			resp.Endpoints = resp.PodDNS // <app>.cluster.ziro means pod IPs everywhere on a pod network
 		}
 		resp.Policy = policyFor(st, n.ID)
+		resp.CA, resp.Masters = st.CACert, masterAddrs(st, cfg)
 		if n.Gateway {
 			resp.Gateway = gatewayConfigFor(st)
 		}
@@ -713,98 +753,216 @@ var clusterServeCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		_, port, err := net.SplitHostPort(cfg.MasterAddr)
+		port := clusterPortOf(cfg)
+		if err := ensureTLSCertificates(); err != nil { // served to pre-CA agents (no SNI)
+			return err
+		}
+		legacy, _ := tls.LoadX509KeyPair(apiTLSCert, apiTLSKey)
+
+		// The files hold the last replicated state (or, on a master's first start on this version,
+		// the pre-Raft state that becomes the first log entry). Joined masters bring the CA with them.
+		st, err := fileState()
 		if err != nil {
 			return err
 		}
-		if err := ensureTLSCertificates(); err != nil {
+		if cfg.RaftJoined {
+			if st.CACert == "" {
+				ca, err := os.ReadFile(clusterCAPath())
+				if err != nil {
+					return fmt.Errorf("cluster CA missing: %w", err)
+				}
+				st.CACert = string(ca)
+			}
+		} else {
+			if err := ensureCA(st); err != nil {
+				return err
+			}
+			if err := ensureMasterCert(st, cfg.NodeID, []net.IP{net.ParseIP(cfg.NodeIP)}); err != nil {
+				return err
+			}
+		}
+		var importFn func() (*ClusterState, error) // only the founding master seeds a new group
+		if !cfg.RaftJoined {
+			imported := st
+			importFn = func() (*ClusterState, error) { return cloneState(imported), nil }
+		}
+		rs, err := openRaftStore(cfg, st, importFn)
+		if err != nil {
+			return fmt.Errorf("raft: %w", err)
+		}
+		localRaft = rs
+		p, _ := strconv.Atoi(port)
+		allowFirewall([]FirewallRule{{Port: p + 1, Protocol: "tcp", Comment: "Ziro cluster Raft (mutual TLS)"}}, "")
+
+		local := rs.localHandler(cfg, rs.forwarder(cfg))
+		if err := serveLocalSocket(local); err != nil {
 			return err
 		}
+		caPEM := st.CACert
+		pool, err := caPool(caPEM)
+		if err != nil {
+			return err
+		}
+		cs := newClusterServer()
+		cs.port = port
+		mux := cs.handler().(*http.ServeMux)
+		mux.Handle("/cluster/v1/internal/", http.StripPrefix("/cluster/v1/internal", http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if !requestFromMaster(r.TLS, caPEM) {
+					http.Error(w, "master certificate required", http.StatusForbidden)
+					return
+				}
+				local.ServeHTTP(w, r)
+			})))
 
-		// Periodic pass so dead nodes become NotReady and lose their replicas even without traffic.
+		// Leader-only duties: the periodic scheduling pass (dead nodes lose their replicas even
+		// without traffic). Every master: renew its certificate; a joined master asks to become a
+		// voter once it has caught up.
 		go func() {
 			for range time.Tick(agentInterval) {
-				if err := withState(func(st *ClusterState) error { scheduleReplicas(st, time.Now()); return nil }); err != nil {
+				if !rs.isLeader() {
+					continue
+				}
+				if err := withState(func(st *ClusterState) error { scheduleReplicas(st, time.Now()); return nil }); err != nil && !errors.Is(err, errNotLeader) {
 					fmt.Printf("[cluster] schedule: %v\n", err)
 				}
 			}
 		}()
+		go func() {
+			for ; ; time.Sleep(12 * time.Hour) {
+				if cur, _, err := rs.snapshot(); err == nil && cur.CAKey != "" {
+					if err := ensureMasterCert(cur, cfg.NodeID, []net.IP{net.ParseIP(cfg.NodeIP)}); err != nil {
+						fmt.Printf("[cluster] certificate renewal: %v\n", err)
+					}
+				}
+			}
+		}()
+		if cfg.RaftJoined {
+			go promoteSelf(rs, cfg)
+		}
 
 		srv := &http.Server{
-			Addr:              ":" + port,
-			Handler:           newClusterServer().handler(),
-			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+			Addr:    ":" + port,
+			Handler: mux,
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					if hello.ServerName != clusterSNI && legacy.Certificate != nil && !cfg.RaftJoined {
+						return &legacy, nil // agents from before the cluster CA pin this certificate
+					}
+					return loadMasterTLS()
+				},
+				ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool, // masters (internal API) present certs
+			},
 			ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      15 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
 			IdleTimeout:       60 * time.Second,
 		}
-		fmt.Printf("[cluster] master %s serving on :%s\n", cfg.ClusterID, port)
-		return srv.ListenAndServeTLS(apiTLSCert, apiTLSKey)
+		fmt.Printf("[cluster] master %s (%s) serving on :%s, raft on :%d\n", cfg.NodeID, cfg.ClusterID, port, p+1)
+		return srv.ListenAndServeTLS("", "")
 	},
+}
+
+// promoteSelf asks the leader to make this master a voter once it has replicated the state.
+func promoteSelf(rs *raftStore, cfg *ClusterConfig) {
+	fwd := rs.forwarder(cfg)
+	for ; ; time.Sleep(2 * time.Second) {
+		members, err := rs.members()
+		if err == nil {
+			for _, m := range members {
+				if m.ID == cfg.NodeID && m.Suffrage == "Voter" {
+					fmt.Println("[cluster] this master is a voting member")
+					return
+				}
+			}
+		}
+		_, applied := rs.fsm.latest()
+		if applied == 0 {
+			continue
+		}
+		body, _ := json.Marshal(map[string]any{"ID": cfg.NodeID, "Applied": applied})
+		if resp, err := fwd("/promote", body); err == nil {
+			resp.Body.Close()
+		}
+	}
+}
+
+// fileState reads the state files under a shared lock (no Raft).
+func fileState() (*ClusterState, error) {
+	lock, err := lockState(syscall.LOCK_SH)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	return loadStateFile()
 }
 
 // ---- client side ----
 
-func certHash(certPath string) (string, error) {
-	data, err := os.ReadFile(certPath)
-	if err != nil {
-		return "", err
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return "", fmt.Errorf("%s: no PEM certificate", certPath)
-	}
-	sum := sha256.Sum256(block.Bytes)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
-}
-
-// pinnedClient trusts exactly the master certificate whose hash was handed out
-// with the join command (same model as kubeadm's --discovery-token-ca-cert-hash).
-func pinnedClient(caHash string) *http.Client {
-	return &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			// Chain/hostname verification is replaced by the certificate pin below.
-			InsecureSkipVerify: true, //nolint:gosec
-			VerifyConnection: func(cs tls.ConnectionState) error {
-				if len(cs.PeerCertificates) == 0 {
-					return errors.New("master presented no certificate")
-				}
-				sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
-				if got := "sha256:" + hex.EncodeToString(sum[:]); subtle.ConstantTimeCompare([]byte(got), []byte(caHash)) != 1 {
-					return fmt.Errorf("master certificate %s does not match pinned %s", got, caHash)
-				}
-				return nil
-			},
-		}},
-	}
-}
-
+// clusterPost calls the cluster API of a master, trusted by pin (see pinnedTLS). A follower
+// answers 421 with the leader's address, which is followed (bounded).
 func clusterPost(addr, caHash, path, auth string, body, out interface{}) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, "https://"+addr+path, bytes.NewReader(data))
-	if err != nil {
-		return err
+	for hop, wait := 0, 0; ; hop++ {
+		resp, err := clusterDo(addr, caHash, path, auth, data)
+		if err != nil {
+			return err
+		}
+		// 503 while a leader is being elected (startup, failover): wait it out briefly.
+		if resp.StatusCode == http.StatusServiceUnavailable && wait < 30 {
+			resp.Body.Close()
+			wait++
+			time.Sleep(time.Second)
+			continue
+		}
+		if resp.StatusCode == http.StatusMisdirectedRequest && hop < 3 {
+			var m struct{ Leader string }
+			_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&m)
+			resp.Body.Close()
+			if _, _, err := net.SplitHostPort(m.Leader); err != nil {
+				return fmt.Errorf("master redirected to an invalid leader %q", m.Leader)
+			}
+			addr = m.Leader
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			var m APIMessage
+			_ = json.NewDecoder(resp.Body).Decode(&m)
+			return fmt.Errorf("master returned HTTP %d: %s", resp.StatusCode, m.Message)
+		}
+		if out == nil {
+			return nil
+		}
+		return json.NewDecoder(resp.Body).Decode(out)
 	}
-	req.Header.Set("Authorization", auth)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := pinnedClient(caHash).Do(req)
-	if err != nil {
-		return err
+}
+
+// clusterDo sends one request. CA-aware masters are asked for their CA-signed certificate
+// (SNI); an agent still pinned to a pre-CA certificate falls back to asking without SNI.
+func clusterDo(addr, pin, path, auth string, data []byte) (*http.Response, error) {
+	var lastErr error
+	for _, sni := range []bool{true, false} {
+		req, err := http.NewRequest(http.MethodPost, "https://"+addr+path, bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", auth)
+		req.Header.Set("Content-Type", "application/json")
+		c := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: pinnedTLS(pin, sni)}}
+		resp, err := c.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		var pe pinError
+		if !errors.As(err, &pe) {
+			break
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var m APIMessage
-		_ = json.NewDecoder(resp.Body).Decode(&m)
-		return fmt.Errorf("master returned HTTP %d: %s", resp.StatusCode, m.Message)
-	}
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return nil, lastErr
 }

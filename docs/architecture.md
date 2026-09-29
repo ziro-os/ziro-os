@@ -76,7 +76,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Component | Command / service | Runs on | Status |
 |---|---|---|---|
 | CLI + admin API | `ziroctl`, `ziro-api` (127.0.0.1:8443) | every host | shipped |
-| Control plane | `cluster serve` → `cluster-master` (TLS :7443) | master(s) | shipped (single master) |
+| Control plane | `cluster serve` → `cluster-master` (TLS :7443, Raft :7444) | every master | shipped (1, 3 or 5 masters) |
 | Node agent | `cluster agent` → `cluster-agent` | every node | shipped |
 | Mesh | WireGuard `ziro0`, udp/51821, keys distributed by the master | every node | shipped |
 | App network policy | `allow_from` per app → `inet ziro_cluster` nft table per node | every node | shipped |
@@ -84,7 +84,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labelled gateway | shipped |
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
-| HA control plane | 3 or 5 masters with Raft, cluster CA | masters | Phase 4 |
+| HA control plane | Raft (hashicorp/raft + bbolt), cluster CA, mutual-TLS master links | masters | shipped |
 | Enterprise controls | scoped API tokens, cert rotation, signed-image policy, `/metrics` | all | Phase 5 |
 
 ```mermaid
@@ -112,7 +112,7 @@ flowchart LR
 
 ### 5.1 Control loop
 
-1. **Join.** The worker pins the master's certificate hash (`--ca-hash`) and presents the expiring join token. It receives a node ID, a per-node 256-bit token (the master stores only its SHA-256) and a mesh IP.
+1. **Join.** The joiner pins the cluster CA hash (`--ca-hash`) and presents the expiring join token. It receives a node ID, a per-node 256-bit token (the master stores only its SHA-256) and a mesh IP.
 2. **Heartbeat** (every 10s, the only channel). The agent reports running containers, start failures and mesh errors. The reply is the node's complete desired state:
    - container assignments, with secrets only for the apps the node runs
    - WireGuard peers
@@ -145,7 +145,7 @@ flowchart LR
 
 Known limits, each addressed by a later phase:
 
-- The single master is a scheduling SPOF (Phase 4).
+- Secrets are 0600 files (and Raft data) on every master, not encrypted at rest; encryption with a KMS- or TPM-sealed key is Phase 5.
 - Clusters without the pod network police per node rather than per container (`cluster network enable` migrates them).
 - Root on the master can rewrite the whole audit chain. Ship the log off-host, or record `ziroctl audit verify`'s head hash externally.
 
@@ -162,13 +162,14 @@ Known limits, each addressed by a later phase:
   - The master assigns replica IPs at placement time. It uses a CNI `ptp` network (no bridge, MTU 1420), so even same-node traffic is routed and policed, with masquerade only for traffic leaving the cluster.
   - A stdlib DNS responder in the agent answers `<app>.cluster.ziro` with live container IPs and relays other names.
   - Policy sets are container IPs.
-- **Phase 4: HA.**
-  - `cluster init --ha` and `cluster join --control-plane` form a 3/5-member `hashicorp/raft` group.
-  - Raft replicates only the *desired* state (apps, placement, tokens, policy, routes, secrets). Node liveness stays soft state on the leader, so heartbeats never touch the log, and a new leader grants a 30s grace period.
-  - Followers answer writes with a redirect to the leader, and agents hold the master list.
-  - A cluster CA replaces the single-certificate pin. Existing clusters receive the new pin over the already-pinned channel.
-  - Secrets are encrypted at rest with AES-GCM.
+- **Phase 4: HA** (shipped; see [clustering.md](clustering.md#high-availability-control-plane)).
+  - Every master runs `hashicorp/raft` (a single master is a one-voter group; upgrades import the old state automatically). `cluster join --control-plane` adds masters: they join as non-voters and are promoted once caught up.
+  - Raft replicates only the *desired* state (apps, placement, tokens, policy, routes, secrets, CA). Node liveness stays soft state on the leader, so heartbeats never touch the log, and a new leader grants a 30s grace period to Ready nodes.
+  - ziroctl proposes compare-and-swap updates through a root-only local socket. Followers forward them to the leader over mutual TLS, and agents follow HTTP 421 redirects to the leader and fail over across all masters.
+  - A cluster CA replaces the single-certificate pin. Master certificates are issued from CSRs, and existing agents receive the CA over the already-pinned channel (the old certificate is still served to clients without SNI).
+  - Deferred: secrets encryption at rest moves to Phase 5 (a key on the same disk protects little; it needs a KMS or TPM).
 - **Phase 5: enterprise.**
+  - Secrets encrypted at rest with a KMS- or TPM-sealed key.
   - Scoped API tokens (viewer / operator / admin).
   - `cluster rotate-certs` and node-token rotation.
   - Registry allowlist and `nerdctl --verify=cosign` for signed images.
