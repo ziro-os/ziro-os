@@ -26,8 +26,18 @@ var doctorCmd = &cobra.Command{
 	Short: "Run comprehensive system and cloud-native health diagnostics",
 	Long: `ziroctl doctor runs an end-to-end audit of kernel modules, storage drivers,
 containerd runtime sockets, cgroups v2, networking, and cloud metadata.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		printDoctor(runDoctor())
+	RunE: func(cmd *cobra.Command, args []string) error {
+		checks := runDoctor()
+		if err := printResult(checks, func() { printDoctor(checks) }); err != nil {
+			return err
+		}
+		// Non-zero exit when a critical check fails, so automation can gate on it.
+		for _, c := range checks {
+			if c.Critical && !c.Passed {
+				return fmt.Errorf("critical check failed: %s", c.Name)
+			}
+		}
+		return nil
 	},
 }
 

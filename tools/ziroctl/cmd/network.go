@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -30,7 +32,7 @@ var networkCmd = &cobra.Command{
 var networkListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List active network interfaces and CNI plugins",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("=== Network Interfaces ===")
 		ifaces, err := net.Interfaces()
 		if err != nil {
@@ -65,21 +67,21 @@ var networkListCmd = &cobra.Command{
 				fmt.Printf("• %s\n", p.Name())
 			}
 		}
+		return nil
 	},
 }
 
 var networkStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show detailed network interfaces, default gateway, DNS, and connectivity",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("==================================================")
 		fmt.Println(" 🌐 Ziro-OS Network Status")
 		fmt.Println("==================================================")
 
 		ifaces, err := net.Interfaces()
 		if err != nil {
-			fmt.Printf("❌ Failed to query interfaces: %v\n", err)
-			return
+			return fmt.Errorf("query interfaces: %w", err)
 		}
 
 		for _, iface := range ifaces {
@@ -168,6 +170,7 @@ var networkStatusCmd = &cobra.Command{
 			fmt.Printf("⚠️ Offline (%v)\n", err)
 		}
 		fmt.Println("==================================================")
+		return nil
 	},
 }
 
@@ -257,6 +260,9 @@ It writes /etc/network/interfaces and /etc/resolv.conf and can immediately apply
 		if netSetupIface == "" {
 			netSetupIface = "eth0"
 		}
+		if err := validateNetSetup(); err != nil {
+			return err
+		}
 
 		// Save to /etc/network/interfaces
 		if err := os.MkdirAll("/etc/network", 0755); err != nil {
@@ -299,19 +305,27 @@ It writes /etc/network/interfaces and /etc/resolv.conf and can immediately apply
 		if netSetupApply {
 			fmt.Printf("Applying network configuration to %s...\n", netSetupIface)
 			if netSetupMode == "static" {
-				_ = exec.Command("ip", "link", "set", netSetupIface, "up").Run()
-				_ = exec.Command("ip", "-4", "addr", "flush", "dev", netSetupIface).Run()
-				_ = exec.Command("ip", "-4", "addr", "add", netSetupIP, "dev", netSetupIface).Run()
+				steps := [][]string{
+					{"link", "set", netSetupIface, "up"},
+					{"-4", "addr", "flush", "dev", netSetupIface},
+					{"-4", "addr", "add", netSetupIP, "dev", netSetupIface},
+				}
 				if netSetupGateway != "" {
-					_ = exec.Command("ip", "-4", "route", "add", "default", "via", netSetupGateway, "dev", netSetupIface).Run()
+					steps = append(steps, []string{"-4", "route", "replace", "default", "via", netSetupGateway, "dev", netSetupIface})
+				}
+				for _, st := range steps {
+					if out, err := exec.Command("ip", st...).CombinedOutput(); err != nil {
+						return fmt.Errorf("ip %s: %v: %s", strings.Join(st, " "), err, strings.TrimSpace(string(out)))
+					}
 				}
 				fmt.Printf("✅ Static IP %s assigned to %s\n", netSetupIP, netSetupIface)
 			} else {
 				_ = exec.Command("ip", "link", "set", netSetupIface, "up").Run()
 				_ = exec.Command("pkill", "-f", fmt.Sprintf("udhcpc.*%s", netSetupIface)).Run()
-				go func() {
-					_ = exec.Command("udhcpc", "-b", "-i", netSetupIface, "-s", "/usr/share/udhcpc/default.script").Run()
-				}()
+				// -b: udhcpc forks into the background itself once started.
+				if out, err := exec.Command("udhcpc", "-b", "-i", netSetupIface, "-s", "/usr/share/udhcpc/default.script").CombinedOutput(); err != nil {
+					return fmt.Errorf("udhcpc: %v: %s", err, strings.TrimSpace(string(out)))
+				}
 				fmt.Printf("✅ Launched DHCP client for %s\n", netSetupIface)
 			}
 		}
@@ -323,12 +337,11 @@ It writes /etc/network/interfaces and /etc/resolv.conf and can immediately apply
 var networkRestartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart networking interfaces and DHCP clients",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Restarting network interfaces...")
 		ifaces, err := net.Interfaces()
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			return
+			return fmt.Errorf("list interfaces: %w", err)
 		}
 
 		for _, ifc := range ifaces {
@@ -344,6 +357,7 @@ var networkRestartCmd = &cobra.Command{
 			}(ifc.Name)
 		}
 		fmt.Println("✅ Network interfaces cycled.")
+		return nil
 	},
 }
 
@@ -371,4 +385,31 @@ func init() {
 	networkCmd.AddCommand(networkRestartCmd)
 
 	rootCmd.AddCommand(networkCmd)
+}
+
+var ifaceNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+
+// validateNetSetup rejects malformed values before they reach /etc/network/interfaces,
+// /etc/resolv.conf or ip(8): a newline in any of them would inject extra config lines.
+func validateNetSetup() error {
+	if !ifaceNameRe.MatchString(netSetupIface) {
+		return fmt.Errorf("invalid interface name %q", netSetupIface)
+	}
+	if netSetupMode != "static" {
+		return nil
+	}
+	if p, err := netip.ParsePrefix(netSetupIP); err != nil || !p.Addr().Is4() {
+		return fmt.Errorf("invalid --ip %q (want IPv4 CIDR, e.g. 192.168.1.50/24)", netSetupIP)
+	}
+	if netSetupGateway != "" {
+		if a, err := netip.ParseAddr(netSetupGateway); err != nil || !a.Is4() {
+			return fmt.Errorf("invalid --gateway %q", netSetupGateway)
+		}
+	}
+	for _, ns := range strings.Fields(netSetupDNS) {
+		if _, err := netip.ParseAddr(ns); err != nil {
+			return fmt.Errorf("invalid DNS server %q", ns)
+		}
+	}
+	return nil
 }

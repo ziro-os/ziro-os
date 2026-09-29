@@ -31,15 +31,15 @@ var cronCmd = &cobra.Command{
 var cronListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all scheduled cron jobs",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		jobs, err := readCronJobs()
 		if err != nil {
 			fmt.Println("No active cron jobs found.")
-			return
+			return nil
 		}
 		if len(jobs) == 0 {
 			fmt.Println("No active cron jobs found.")
-			return
+			return nil
 		}
 
 		fmt.Printf("%-4s %-20s %-35s %s\n", "ID", "SCHEDULE", "COMMAND", "COMMENT")
@@ -47,6 +47,7 @@ var cronListCmd = &cobra.Command{
 		for _, j := range jobs {
 			fmt.Printf("%-4d %-20s %-35s %s\n", j.ID, j.Schedule, j.Command, j.Comment)
 		}
+		return nil
 	},
 }
 
@@ -59,10 +60,13 @@ var (
 var cronAddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a new scheduled cron job",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if cronSchedule == "" || cronCommand == "" {
-			fmt.Println("Error: Both --schedule and --command are required.")
-			return
+			return fmt.Errorf("both --schedule and --command are required")
+		}
+		// One job must stay one crontab line: a newline would inject extra root cron entries.
+		if strings.ContainsAny(cronSchedule+cronCommand+cronComment, "\r\n") {
+			return fmt.Errorf("--schedule, --command and --comment must not contain newlines")
 		}
 
 		jobLine := fmt.Sprintf("%s %s", cronSchedule, cronCommand)
@@ -71,11 +75,11 @@ var cronAddCmd = &cobra.Command{
 		}
 
 		if err := appendCronLine(jobLine); err != nil {
-			fmt.Printf("Failed to add cron job: %v\n", err)
-			return
+			return fmt.Errorf("add cron job: %w", err)
 		}
 
 		fmt.Printf("✓ Cron job added: [%s] %s\n", cronSchedule, cronCommand)
+		return nil
 	},
 }
 
@@ -83,19 +87,18 @@ var cronRemoveCmd = &cobra.Command{
 	Use:   "remove <id>",
 	Short: "Remove a scheduled cron job by its ID",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := strconv.Atoi(args[0])
 		if err != nil {
-			fmt.Println("Invalid ID: must be an integer")
-			return
+			return fmt.Errorf("invalid ID: must be an integer")
 		}
 
 		if err := removeCronJob(id); err != nil {
-			fmt.Printf("Failed to remove cron job: %v\n", err)
-			return
+			return fmt.Errorf("remove cron job: %w", err)
 		}
 
 		fmt.Printf("✓ Cron job ID %d removed successfully.\n", id)
+		return nil
 	},
 }
 
@@ -103,17 +106,15 @@ var cronRunCmd = &cobra.Command{
 	Use:   "run <id>",
 	Short: "Execute a scheduled cron job immediately",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := strconv.Atoi(args[0])
 		if err != nil {
-			fmt.Println("Invalid ID: must be an integer")
-			return
+			return fmt.Errorf("invalid ID: must be an integer")
 		}
 
 		jobs, err := readCronJobs()
 		if err != nil {
-			fmt.Printf("Failed to read jobs: %v\n", err)
-			return
+			return fmt.Errorf("read jobs: %w", err)
 		}
 
 		var target *CronJob
@@ -125,8 +126,7 @@ var cronRunCmd = &cobra.Command{
 		}
 
 		if target == nil {
-			fmt.Printf("Cron job with ID %d not found.\n", id)
-			return
+			return fmt.Errorf("cron job with ID %d not found", id)
 		}
 
 		fmt.Printf("Executing job: %s ...\n", target.Command)
@@ -134,10 +134,10 @@ var cronRunCmd = &cobra.Command{
 		cmdRun.Stdout = os.Stdout
 		cmdRun.Stderr = os.Stderr
 		if err := cmdRun.Run(); err != nil {
-			fmt.Printf("Job execution failed: %v\n", err)
-			return
+			return fmt.Errorf("job execution failed: %w", err)
 		}
 		fmt.Println("✓ Job executed successfully.")
+		return nil
 	},
 }
 

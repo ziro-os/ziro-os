@@ -37,7 +37,7 @@ func init() {
 	installCmd.Flags().StringVarP(&installDisk, "disk", "d", "", "Target disk device (e.g., /dev/vda, /dev/sda, /dev/nvme0n1)")
 	installCmd.Flags().StringVarP(&installHostname, "hostname", "n", "", "System hostname (default: ziro-host)")
 	installCmd.Flags().StringVarP(&installSSHKey, "ssh-key", "k", "", "SSH public key or path to public key file for root")
-	installCmd.Flags().StringVarP(&installPassword, "password", "p", "", "Root password")
+	installCmd.Flags().StringVarP(&installPassword, "password", "p", "", "Root password (prefer the ZIRO_ROOT_PASSWORD environment variable)")
 	installCmd.Flags().StringVarP(&installUserData, "user-data", "u", "", "URL or path to user-data / cloud post-install script")
 	installCmd.Flags().StringVar(&installNetMode, "net-mode", "", "Network mode: 'dhcp', 'static', or 'skip'")
 	installCmd.Flags().StringVar(&installIP, "ip", "", "Static IPv4 address and CIDR (e.g. 192.168.1.50/24)")
@@ -79,9 +79,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if installSSHKey != "" {
 		cmdArgs = append(cmdArgs, "--ssh-key", installSSHKey)
 	}
-	if installPassword != "" {
-		cmdArgs = append(cmdArgs, "--password", installPassword)
-	}
 	if installUserData != "" {
 		cmdArgs = append(cmdArgs, "--user-data", installUserData)
 	}
@@ -110,6 +107,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	execCmd.Env = os.Environ()
+	if installPassword != "" {
+		// Passed through the environment, never argv (visible to every user in ps/proc).
+		execCmd.Env = append(execCmd.Env, "ZIRO_ROOT_PASSWORD="+installPassword)
+	}
 
 	err := execCmd.Run()
 	if err != nil {

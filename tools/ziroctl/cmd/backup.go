@@ -84,9 +84,9 @@ func validateBackupArchive(path string) error {
 }
 
 var (
-	backupOutPath     string
-	backupIncludeData bool
-	backupForce       bool
+	backupOutPath        string
+	backupForce          bool
+	backupIncludeSecrets bool
 )
 
 var backupCmd = &cobra.Command{
@@ -145,7 +145,12 @@ func createBackup(out string) (string, error) {
 	if err := validateBackupStaging(f); err != nil {
 		return "", err
 	}
-	tarArgs := append([]string{"-czf", "-", "-C", "/"}, existingPaths...)
+	tarArgs := []string{"-czf", "-", "-C", "/"}
+	if !backupIncludeSecrets {
+		// Cluster app secrets stay on the master unless explicitly requested.
+		tarArgs = append(tarArgs, "--exclude", strings.TrimPrefix(clusterSecretsPath(), "/"))
+	}
+	tarArgs = append(tarArgs, existingPaths...)
 	archive := exec.Command("tar", tarArgs...)
 	archive.Stdout = f
 	archive.Stderr = os.Stderr
@@ -208,11 +213,11 @@ func validateBackupStaging(f *os.File) error {
 var backupListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List existing system backup archives",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		entries, err := os.ReadDir(defaultBackupDir)
 		if err != nil || len(entries) == 0 {
 			fmt.Printf("No backups found in %s\n", defaultBackupDir)
-			return
+			return nil
 		}
 
 		fmt.Printf("%-32s %-10s %-20s %s\n", "BACKUP ARCHIVE", "SIZE", "CREATED", "INTEGRITY")
@@ -234,6 +239,7 @@ var backupListCmd = &cobra.Command{
 				fmt.Printf("%-32s %-10s %-20s %s\n", e.Name(), sizeStr, modStr, integrity)
 			}
 		}
+		return nil
 	},
 }
 
@@ -241,7 +247,7 @@ var backupRestoreCmd = &cobra.Command{
 	Use:   "restore <backup-file>",
 	Short: "Restore system configurations from a backup archive",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		archivePath := args[0]
 		if !fileExists(archivePath) {
 			// Check default dir
@@ -249,8 +255,7 @@ var backupRestoreCmd = &cobra.Command{
 			if fileExists(altPath) {
 				archivePath = altPath
 			} else {
-				fmt.Printf("Backup file '%s' not found.\n", archivePath)
-				return
+				return fmt.Errorf("backup file '%s' not found", archivePath)
 			}
 		}
 
@@ -269,7 +274,7 @@ var backupRestoreCmd = &cobra.Command{
 				fmt.Printf("❌ Integrity failure! SHA256 mismatch.\nExpected: %s\nActual:   %s\n", expectedHash, actualHash)
 				if !backupForce {
 					fmt.Println("Aborting restore. Use --force to override.")
-					return
+					return nil
 				}
 			} else {
 				fmt.Println("✓ SHA-256 Checksum verified OK.")
@@ -278,20 +283,19 @@ var backupRestoreCmd = &cobra.Command{
 
 		fmt.Printf("Restoring configurations from %s to / ...\n", archivePath)
 		if err := validateBackupArchive(archivePath); err != nil {
-			fmt.Printf("❌ Refusing to restore: %v\n", err)
-			return
+			return fmt.Errorf("refusing to restore: %w", err)
 		}
 		// No -P: leading '/' is stripped and everything lands under -C /.
 		tarCmd := exec.Command("tar", "-xzf", archivePath, "-C", "/")
 		tarCmd.Stdout = os.Stdout
 		tarCmd.Stderr = os.Stderr
 		if err := tarCmd.Run(); err != nil {
-			fmt.Printf("Restore error: %v\n", err)
-			return
+			return fmt.Errorf("restore: %w", err)
 		}
 
 		fmt.Println("✓ System configurations restored successfully.")
 		fmt.Println("Note: You may need to reload or restart affected services (ziroctl service restart <name>).")
+		return nil
 	},
 }
 
@@ -311,7 +315,7 @@ func computeFileSHA256(path string) (string, error) {
 
 func init() {
 	backupCreateCmd.Flags().StringVarP(&backupOutPath, "output", "o", "", "Destination path for backup tar.gz")
-	backupCreateCmd.Flags().BoolVar(&backupIncludeData, "include-data", false, "Include persistent container volumes")
+	backupCreateCmd.Flags().BoolVar(&backupIncludeSecrets, "include-secrets", false, "Also include cluster app secrets (/etc/ziro/cluster/secrets.json)")
 	backupRestoreCmd.Flags().BoolVarP(&backupForce, "force", "f", false, "Force restore despite checksum mismatch")
 
 	backupCmd.AddCommand(backupCreateCmd)
