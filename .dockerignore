@@ -1,0 +1,8 @@
+# The container image needs only its Dockerfile and minimal rootfs archives.
+# Keep host rootfs device nodes, signing keys, credentials, and caches out.
+**
+!images/
+!images/docker/
+!images/docker/Dockerfile
+!build/
+!build/ziro-rootfs-*.tar.gz

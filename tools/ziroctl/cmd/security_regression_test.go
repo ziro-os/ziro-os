@@ -128,7 +128,7 @@ func TestSSHHardeningPrecedenceAndScopes(t *testing.T) {
 	if err != nil || !bytes.Equal(again, out) {
 		t.Fatalf("not idempotent: %v\n%s", err, again)
 	}
-	for _, line := range []string{"Include /etc/ssh/conf.d/*", "  iNcLuDe=/tmp/override", "\"Include\" \"/tmp/override\"", "Match all\nInclude conf.d/*"} {
+	for _, line := range []string{"Include /etc/ssh/conf.d/*", "  iNcLuDe=/tmp/override", "\"Include\" \"/tmp/override\"", "Match all\nInclude conf.d/*", "Match all\nInclude\r/tmp/override"} {
 		if _, err := hardenedSSHConfig([]byte(line)); err == nil {
 			t.Errorf("accepted include %q", line)
 		}
@@ -138,6 +138,49 @@ func TestSSHHardeningPrecedenceAndScopes(t *testing.T) {
 	}
 	if sshKeyOnlyConfig([]byte("Match User root\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitEmptyPasswords no\n")) {
 		t.Fatal("missing globals counted")
+	}
+}
+
+func TestCanonicalQuarantineTargets(t *testing.T) {
+	for _, c := range []struct{ input, family, target string }{
+		{"::ffff:203.0.113.8", "ip", "203.0.113.8"},
+		{"::ffff:203.0.113.8/120", "ip", "203.0.113.0/24"},
+		{"203.0.113.8/24", "ip", "203.0.113.0/24"},
+		{"2001:0db8::1/32", "ip6", "2001:db8::/32"},
+	} {
+		family, target, err := canonicalBlockTarget(c.input)
+		if err != nil || family != c.family || target != c.target {
+			t.Fatalf("%s: %s %s %v", c.input, family, target, err)
+		}
+		script, err := buildNftScript(FirewallConfig{BlockedIPs: []BlockedIP{{IP: c.input}}})
+		if err != nil || !strings.Contains(script, family+" saddr "+target+" drop") {
+			t.Fatalf("wrong generated rule: %s %v", script, err)
+		}
+	}
+	for _, input := range []string{"::ffff:203.0.113.0/64", "fe80::1%eth0", "1.2.3.4 accept"} {
+		if _, _, err := canonicalBlockTarget(input); err == nil {
+			t.Errorf("accepted %s", input)
+		}
+	}
+}
+
+func TestBackupRejectsReadableStaging(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "staging-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Chmod(0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBackupStaging(f); err == nil {
+		t.Fatal("readable staging accepted")
+	}
+	if err := f.Chmod(0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBackupStaging(f); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -198,6 +241,77 @@ func TestQuarantinePrecedesBroadAccepts(t *testing.T) {
 	}
 	if strings.Contains(string(data), "FORWARD") || strings.Contains(string(data), "-t nat") {
 		t.Fatal("container rules mutated")
+	}
+}
+
+func TestQuarantineBlockUnblockAliases(t *testing.T) {
+	old := firewallConfigFile
+	firewallConfigFile = filepath.Join(t.TempDir(), "firewall.json")
+	t.Cleanup(func() { firewallConfigFile = old })
+	for _, target := range []string{"203.0.113.9/24", "::ffff:203.0.113.8", "2001:0db8:0000:0000:0000:0000:0000:0001"} {
+		for _, legacy := range []bool{false, true} {
+			cfg := FirewallConfig{DefaultInput: "DROP"}
+			if legacy {
+				cfg.BlockedIPs = []BlockedIP{{IP: target}}
+			}
+			if err := saveFirewallConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := fwBlockIPCmd.RunE(fwBlockIPCmd, []string{target}); err != nil {
+				t.Fatal(err)
+			}
+			if len(loadFirewallConfig().BlockedIPs) != 1 {
+				t.Fatal("equivalent quarantine duplicated")
+			}
+			if err := fwUnblockIPCmd.RunE(fwUnblockIPCmd, []string{target}); err != nil {
+				t.Fatal(err)
+			}
+			if len(loadFirewallConfig().BlockedIPs) != 0 {
+				t.Fatalf("quarantine remains: %s legacy=%v", target, legacy)
+			}
+		}
+	}
+}
+
+func TestIptablesRebuildFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "rules")
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		script := "#!/bin/sh\nprintf '%s %s\\n' \"${0##*/}\" \"$*\" >> \"$RULE_LOG\"\nif [ \"$FAIL_APPEND\" = 1 ] && [ \"$1\" = '-A' ]; then exit 1; fi\n"
+		if err := os.WriteFile(filepath.Join(dir, bin), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("RULE_LOG", log)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := FirewallConfig{DefaultInput: "ACCEPT", BlockedIPs: []BlockedIP{{IP: "203.0.113.8"}, {IP: "2001:db8::1"}}}
+	for _, fail := range []string{"0", "1"} {
+		t.Setenv("FAIL_APPEND", fail)
+		os.WriteFile(log, nil, 0600)
+		err := applyIptables(cfg)
+		if (err != nil) != (fail == "1") {
+			t.Fatalf("append failure result: %v", err)
+		}
+		data, _ := os.ReadFile(log)
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		if lines[0] != "iptables -P INPUT DROP" || lines[1] != "iptables -F INPUT" {
+			t.Fatalf("flush without DROP: %s", data)
+		}
+		if fail == "1" {
+			if strings.Contains(string(data), "-P INPUT ACCEPT") {
+				t.Fatalf("failed rebuild reopened input: %s", data)
+			}
+		} else {
+			for _, bin := range []string{"iptables", "ip6tables"} {
+				accept := strings.Index(string(data), bin+" -P INPUT ACCEPT")
+				drop := strings.Index(string(data), bin+" -A INPUT -s ")
+				flush := strings.Index(string(data), bin+" -F INPUT")
+				guard := strings.Index(string(data), bin+" -P INPUT DROP")
+				if guard < 0 || guard >= flush || drop < flush || accept < drop {
+					t.Fatalf("unsafe replacement: %s", data)
+				}
+			}
+		}
 	}
 }
 
@@ -308,12 +422,12 @@ func TestSSHEffectivePolicy(t *testing.T) {
 		t.Fatalf("host key: %v %s", err, out)
 	}
 	path := filepath.Join(dir, "sshd_config")
-	input := "HostKey " + key + "\nPasswordAuthentication yes\nChallengeResponseAuthentication yes\nPermitRootLogin no\nMaxAuthTries 2\nMatch User root\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nX11Forwarding yes\nMatch Address 203.0.113.0/24\nPasswordAuthentication yes\nMaxAuthTries 1\n"
+	input := "HostKey " + key + "\nPasswordAuthentication yes\nChallengeResponseAuthentication yes\nPermitRootLogin no\nMaxAuthTries 2\nMatch User root\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nX11Forwarding yes\nMatch Address 203.0.113.0/24\nPasswordAuthentication\ryes\nMaxAuthTries 1\n"
 	os.WriteFile(path, []byte(input), 0600)
 	if err := hardenSSHFile(path); err != nil {
 		t.Fatal(err)
 	}
-	for _, context := range []string{"user=root,host=test,addr=203.0.113.1", "user=worker,host=test,addr=198.51.100.1"} {
+	for _, context := range []string{"user=root,host=test,addr=203.0.113.1", "user=worker,host=test,addr=198.51.100.1", "user=worker,host=test,addr=203.0.113.1"} {
 		out, err := exec.Command(sshd, "-T", "-f", path, "-C", context).CombinedOutput()
 		if err != nil {
 			t.Fatalf("effective policy: %v %s", err, out)

@@ -277,7 +277,7 @@ SH_SHUTDOWN
         chroot /rootfs /bin/busybox sh -c "echo '\''✓ Minimal rootfs shell validated'\''"
 
         # GNU tar is build-only; override member ownership without changing modes.
-        apk add --no-cache tar >/dev/null || exit 1
+        mkdir -p "/out/apk-cache/$TARGET_ARCH" && apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" tar >/dev/null || exit 1
         cd /rootfs
         tar --numeric-owner --owner=0 --group=0 --exclude="./dev/*" -czf "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz" . || exit 1
         chown "${HOST_UID}:${HOST_GID}" "/out/ziro-rootfs-${TARGET_ARCH}.tar.gz"
@@ -301,7 +301,9 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     # Kernel + modules always come from ONE source so their versions match:
     #   KERNEL_FLAVOR=custom -> kernel/build-kernel.sh output (build/kernel-custom-<arch>/)
     #   KERNEL_FLAVOR=alpine -> Alpine linux-virt package
-    apk add --no-cache kmod >/dev/null 2>&1
+    # Downloads are kept in build/apk-cache/<arch> (signatures are still verified on install).
+    mkdir -p "/out/apk-cache/$TARGET_ARCH"
+    apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" kmod >/dev/null 2>&1
     mkdir -p /rootfs/lib/modules /rootfs/boot
     rm -rf /rootfs/lib/modules/*
     if [ "$KERNEL_FLAVOR" = "custom" ]; then
@@ -316,7 +318,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         cp "$SRC/kernel.release" "/out/kernel-release-${TARGET_ARCH}${SUFFIX}"
     else
         echo "Installing Alpine linux-virt kernel & modules..."
-        apk add --no-cache linux-virt >/dev/null 2>&1
+        apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" linux-virt >/dev/null 2>&1
         cp -a /lib/modules/. /rootfs/lib/modules/
         cp /boot/vmlinuz-virt /rootfs/boot/vmlinuz
         ls /lib/modules > "/out/kernel-release-${TARGET_ARCH}${SUFFIX}"
@@ -353,7 +355,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         if apk --root /rootfs --initdb \
             --keys-dir /etc/apk/keys \
             --repositories-file /etc/apk/repositories \
-            add --no-cache \
+            add --cache-dir "/out/apk-cache/$TARGET_ARCH" \
             ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
             iptables openssh-server openssh-client linux-pam \
             e2fsprogs dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS; then
@@ -460,6 +462,20 @@ SH_SHUTDOWN
     chmod -R u+rwX /rootfs 2>/dev/null || true
 '
 
+# Alpine's DHCP CNI binary embeds an older x/net. Keep the CNI entry point and
+# upstream plugin version, but rebuild against Ziro's checksum-locked overrides.
+CNI_DHCP_BIN="$REPO_ROOT/bin/cni-dhcp-$TARGET_ARCH"
+(
+    cd "$REPO_ROOT/packages/cni-dhcp"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -mod=readonly -trimpath \
+        -ldflags="-s -w -X github.com/containernetworking/plugins/pkg/utils/buildversion.BuildVersion=v1.9.1-ziro.1" \
+        -o "$CNI_DHCP_BIN" github.com/containernetworking/plugins/plugins/ipam/dhcp
+)
+for destination in usr/libexec/cni/dhcp opt/cni/bin/dhcp; do
+    cp "$CNI_DHCP_BIN" "$ROOTFS_FULL/$destination"
+    chmod 0755 "$ROOTFS_FULL/$destination"
+done
+
 # Re-affirm ziro-init and BusyBox after package additions
 rm -f "$ROOTFS_FULL/init" "$ROOTFS_FULL/sbin/init"
 cp "$INIT_BIN" "$ROOTFS_FULL/init"
@@ -492,6 +508,8 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
     "$ALPINE_IMAGE" sh -c '
+        set -eu
+        set -o pipefail
         rm -f /rootfs/lib/apk/db/lock /rootfs/var/run/*.pid /rootfs/run/*.pid
         for f in /rootfs/usr/lib/xtables/*.so; do
             [ -e "$f" ] || rm -f "$f"
@@ -507,6 +525,8 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         mknod -m 660 /rootfs/dev/ttyS0 c 4 64 2>/dev/null || true
         mknod -m 666 /rootfs/dev/urandom c 1 9 2>/dev/null || true
 
+        mkdir -p "/out/apk-cache/$TARGET_ARCH"
+        apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" pigz >/dev/null 2>&1 || true   # multi-threaded gzip; falls back below
         cd /rootfs
         if command -v pigz >/dev/null 2>&1; then
             find . | cpio -o -H newc -R 0:0 | pigz > "/out/ziro-initramfs-${TARGET_ARCH}${SUFFIX}.cpio.gz"

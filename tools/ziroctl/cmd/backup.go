@@ -142,6 +142,9 @@ func createBackup(out string) (string, error) {
 		f.Close()
 		os.Remove(f.Name())
 	}()
+	if err := validateBackupStaging(f); err != nil {
+		return "", err
+	}
 	tarArgs := append([]string{"-czf", "-", "-C", "/"}, existingPaths...)
 	archive := exec.Command("tar", tarArgs...)
 	archive.Stdout = f
@@ -184,6 +187,22 @@ func createBackup(out string) (string, error) {
 	fmt.Printf(" ✓ SHA-256 Manifest:           %s\n", hashStr)
 	fmt.Println("================================================================")
 	return out, nil
+}
+
+func validateBackupStaging(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		return fmt.Errorf("backup filesystem must enforce private 0600 files")
+	}
+	// Refuse filesystems without safe exclusive publication before reading keys.
+	probe := f.Name() + ".link-check"
+	if err := os.Link(f.Name(), probe); err != nil {
+		return fmt.Errorf("backup filesystem must support hard links: %w", err)
+	}
+	return os.Remove(probe)
 }
 
 var backupListCmd = &cobra.Command{

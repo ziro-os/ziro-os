@@ -3,16 +3,17 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"net"
+	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-const (
+var (
 	firewallConfigFile = "/etc/ziro/firewall.json"
 )
 
@@ -173,14 +174,15 @@ var fwBlockIPCmd = &cobra.Command{
 	Short: "Quarantine incoming traffic from an IP address or CIDR (loopback is trusted)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ip := strings.TrimSpace(args[0])
-		if _, err := parseBlockTarget(ip); err != nil {
+		_, ip, err := canonicalBlockTarget(strings.TrimSpace(args[0]))
+		if err != nil {
 			return err
 		}
 
 		cfg := loadFirewallConfig()
 		for _, b := range cfg.BlockedIPs {
-			if b.IP == ip {
+			_, saved, err := canonicalBlockTarget(b.IP)
+			if err == nil && saved == ip {
 				if cfg.Enabled {
 					return applyFirewallRules(cfg)
 				}
@@ -212,13 +214,17 @@ var fwUnblockIPCmd = &cobra.Command{
 	Use:   "unblock-ip <ip-or-cidr>",
 	Short: "Remove IP quarantine and allow communication",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		ip := strings.TrimSpace(args[0])
+	RunE: func(cmd *cobra.Command, args []string) error {
+		_, ip, err := canonicalBlockTarget(strings.TrimSpace(args[0]))
+		if err != nil {
+			return err
+		}
 		cfg := loadFirewallConfig()
 		var newBlocked []BlockedIP
 		found := false
 		for _, b := range cfg.BlockedIPs {
-			if b.IP == ip {
+			_, saved, err := canonicalBlockTarget(b.IP)
+			if err == nil && saved == ip {
 				found = true
 				continue
 			}
@@ -227,15 +233,20 @@ var fwUnblockIPCmd = &cobra.Command{
 
 		if !found {
 			fmt.Printf("IP %s was not found in blocked list.\n", ip)
-			return
+			return nil
 		}
 
 		cfg.BlockedIPs = newBlocked
-		_ = saveFirewallConfig(cfg)
+		if err := saveFirewallConfig(cfg); err != nil {
+			return err
+		}
 		if cfg.Enabled {
-			applyFirewallRules(cfg)
+			if err := applyFirewallRules(cfg); err != nil {
+				return err
+			}
 		}
 		fmt.Printf("✓ Unblocked IP: %s\n", ip)
+		return nil
 	},
 }
 
@@ -297,17 +308,34 @@ func parsePortProto(s string) (int, string) {
 
 // parseBlockTarget validates an IP or CIDR and returns its nft family ("ip" or "ip6").
 func parseBlockTarget(s string) (string, error) {
-	ip := net.ParseIP(s)
-	if ip == nil {
-		var err error
-		if ip, _, err = net.ParseCIDR(s); err != nil {
-			return "", fmt.Errorf("invalid IP or CIDR %q", s)
+	family, _, err := canonicalBlockTarget(s)
+	return family, err
+}
+
+func canonicalBlockTarget(s string) (string, string, error) {
+	if prefix, err := netip.ParsePrefix(s); err == nil {
+		if prefix.Addr().Is4In6() {
+			if prefix.Bits() < 96 {
+				return "", "", fmt.Errorf("mapped IPv4 prefix must be at least /96")
+			}
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
 		}
+		family := "ip6"
+		if prefix.Addr().Is4() {
+			family = "ip"
+		}
+		return family, prefix.Masked().String(), nil
 	}
-	if ip.To4() != nil {
-		return "ip", nil
+	addr, err := netip.ParseAddr(s)
+	if err != nil || addr.Zone() != "" {
+		return "", "", fmt.Errorf("invalid IP or CIDR %q", s)
 	}
-	return "ip6", nil
+	addr = addr.Unmap()
+	family := "ip6"
+	if addr.Is4() {
+		family = "ip"
+	}
+	return family, addr.String(), nil
 }
 
 func loadFirewallConfig() FirewallConfig {
@@ -334,7 +362,9 @@ func loadFirewallConfig() FirewallConfig {
 }
 
 func saveFirewallConfig(cfg FirewallConfig) error {
-	_ = os.MkdirAll("/etc/ziro", 0755)
+	if err := os.MkdirAll(filepath.Dir(firewallConfigFile), 0755); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -376,11 +406,11 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 	sb.WriteString("    ct state invalid drop\n")
 
 	for _, b := range cfg.BlockedIPs {
-		fam, err := parseBlockTarget(b.IP)
+		fam, target, err := canonicalBlockTarget(b.IP)
 		if err != nil {
 			return "", err
 		}
-		sb.WriteString(fmt.Sprintf("    %s saddr %s drop\n", fam, b.IP))
+		sb.WriteString(fmt.Sprintf("    %s saddr %s drop\n", fam, target))
 	}
 	// Loopback remains trusted; quarantine every other source before broad accepts.
 	sb.WriteString("    ct state established,related accept\n")
@@ -430,18 +460,20 @@ func applyIptables(cfg FirewallConfig) error {
 				ruleErr = fmt.Errorf("%s: %w: %s", bin, err, strings.TrimSpace(string(out)))
 			}
 		}
-		run("-P", "INPUT", policy)
+		// Fail closed while rebuilding, including when the final policy is ACCEPT.
+		run("-P", "INPUT", "DROP")
 		run("-F", "INPUT")
 		run("-A", "INPUT", "-i", "lo", "-j", "ACCEPT")
 		for _, b := range cfg.BlockedIPs {
-			if fam, _ := parseBlockTarget(b.IP); (fam == "ip") == (bin == "iptables") {
-				run("-A", "INPUT", "-s", b.IP, "-j", "DROP")
+			if fam, target, _ := canonicalBlockTarget(b.IP); (fam == "ip") == (bin == "iptables") {
+				run("-A", "INPUT", "-s", target, "-j", "DROP")
 			}
 		}
 		run("-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 		for _, r := range cfg.AllowedPorts {
 			run("-A", "INPUT", "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")
 		}
+		run("-P", "INPUT", policy)
 		if ruleErr != nil {
 			return ruleErr
 		}
