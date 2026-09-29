@@ -33,6 +33,8 @@ type FirewallConfig struct {
 	DefaultInput string         `json:"default_input"` // "DROP" or "ACCEPT"
 	AllowedPorts []FirewallRule `json:"allowed_ports"`
 	BlockedIPs   []BlockedIP    `json:"blocked_ips"`
+	// Interfaces whose traffic is authenticated elsewhere (the WireGuard cluster mesh).
+	TrustedInterfaces []string `json:"trusted_interfaces,omitempty"`
 }
 
 var (
@@ -48,7 +50,7 @@ var firewallCmd = &cobra.Command{
 var fwStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display firewall status and summary of active protections",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
 		statusStr := "\033[1;31mINACTIVE (Disabled)\033[0m"
 		if cfg.Enabled {
@@ -66,6 +68,7 @@ var fwStatusCmd = &cobra.Command{
 		fmt.Printf("Default Policy: INPUT %s, FORWARD ACCEPT, OUTPUT ACCEPT\n", cfg.DefaultInput)
 		fmt.Printf("Allowed Ports: %d port rule(s)\n", len(cfg.AllowedPorts))
 		fmt.Printf("Blocked IPs:   %d IP(s) quarantined\n", len(cfg.BlockedIPs))
+		return nil
 	},
 }
 
@@ -89,12 +92,13 @@ var fwEnableCmd = &cobra.Command{
 var fwDisableCmd = &cobra.Command{
 	Use:   "disable",
 	Short: "Disable firewall and permit all incoming traffic",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
 		cfg.Enabled = false
 		_ = saveFirewallConfig(cfg)
 		flushFirewallRules()
 		fmt.Println("✓ Ziro-OS Cloud Firewall DISABLED (All traffic allowed).")
+		return nil
 	},
 }
 
@@ -102,12 +106,11 @@ var fwAllowCmd = &cobra.Command{
 	Use:   "allow <port[/proto]>",
 	Short: "Allow inbound network traffic on a port (e.g. 8443, 80/tcp, 51820/udp)",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		spec := args[0]
 		port, proto := parsePortProto(spec)
 		if port <= 0 {
-			fmt.Printf("Invalid port specification: %s\n", spec)
-			return
+			return fmt.Errorf("invalid port specification: %s", spec)
 		}
 
 		cfg := loadFirewallConfig()
@@ -115,7 +118,7 @@ var fwAllowCmd = &cobra.Command{
 		for _, r := range cfg.AllowedPorts {
 			if r.Port == port && r.Protocol == proto {
 				fmt.Printf("Port %d/%s is already allowed.\n", port, proto)
-				return
+				return nil
 			}
 		}
 
@@ -129,6 +132,7 @@ var fwAllowCmd = &cobra.Command{
 			applyFirewallRules(cfg)
 		}
 		fmt.Printf("✓ Allowed incoming traffic on port %d/%s\n", port, proto)
+		return nil
 	},
 }
 
@@ -136,12 +140,11 @@ var fwDenyCmd = &cobra.Command{
 	Use:   "deny <port[/proto]>",
 	Short: "Deny and remove inbound allowance for a port",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		spec := args[0]
 		port, proto := parsePortProto(spec)
 		if port <= 0 {
-			fmt.Printf("Invalid port specification: %s\n", spec)
-			return
+			return fmt.Errorf("invalid port specification: %s", spec)
 		}
 
 		cfg := loadFirewallConfig()
@@ -156,8 +159,7 @@ var fwDenyCmd = &cobra.Command{
 		}
 
 		if !found {
-			fmt.Printf("Port %d/%s was not found in allow list.\n", port, proto)
-			return
+			return fmt.Errorf("port %d/%s is not in the allow list", port, proto)
 		}
 
 		cfg.AllowedPorts = newRules
@@ -166,6 +168,7 @@ var fwDenyCmd = &cobra.Command{
 			applyFirewallRules(cfg)
 		}
 		fmt.Printf("✓ Denied/removed port %d/%s from firewall allow list.\n", port, proto)
+		return nil
 	},
 }
 
@@ -232,8 +235,7 @@ var fwUnblockIPCmd = &cobra.Command{
 		}
 
 		if !found {
-			fmt.Printf("IP %s was not found in blocked list.\n", ip)
-			return nil
+			return fmt.Errorf("IP %s is not in the blocked list", ip)
 		}
 
 		cfg.BlockedIPs = newBlocked
@@ -253,7 +255,7 @@ var fwUnblockIPCmd = &cobra.Command{
 var fwListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all active firewall rules, allowed ports, and blocked IPs",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
 		fmt.Println("--- Allowed Inbound Ports ---")
 		if len(cfg.AllowedPorts) == 0 {
@@ -274,6 +276,7 @@ var fwListCmd = &cobra.Command{
 				fmt.Printf("  %-20s %s\n", b.IP, b.Comment)
 			}
 		}
+		return nil
 	},
 }
 
@@ -281,13 +284,14 @@ var fwApplyCmd = &cobra.Command{
 	Use:    "apply",
 	Hidden: true,
 	Short:  "Apply saved firewall rules (internal service helper)",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
 		if cfg.Enabled {
 			if err := applyFirewallRules(cfg); err != nil {
 				os.Exit(1)
 			}
 		}
+		return nil
 	},
 }
 
@@ -413,6 +417,12 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 		sb.WriteString(fmt.Sprintf("    %s saddr %s drop\n", fam, target))
 	}
 	// Loopback remains trusted; quarantine every other source before broad accepts.
+	for _, ifc := range cfg.TrustedInterfaces {
+		if !ifaceNameRe.MatchString(ifc) {
+			return "", fmt.Errorf("invalid trusted interface %q", ifc)
+		}
+		sb.WriteString(fmt.Sprintf("    iifname %q accept\n", ifc))
+	}
 	sb.WriteString("    ct state established,related accept\n")
 	sb.WriteString("    ip protocol icmp accept\n")
 	sb.WriteString("    ip6 nexthdr icmpv6 accept\n")
@@ -468,6 +478,9 @@ func applyIptables(cfg FirewallConfig) error {
 			if fam, target, _ := canonicalBlockTarget(b.IP); (fam == "ip") == (bin == "iptables") {
 				run("-A", "INPUT", "-s", target, "-j", "DROP")
 			}
+		}
+		for _, ifc := range cfg.TrustedInterfaces {
+			run("-A", "INPUT", "-i", ifc, "-j", "ACCEPT")
 		}
 		run("-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 		for _, r := range cfg.AllowedPorts {

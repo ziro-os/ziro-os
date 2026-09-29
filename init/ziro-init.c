@@ -1086,6 +1086,102 @@ static void restart_due_daemons(void) {
     }
 }
 
+/*
+ * Supervision for /etc/ziro/services/<name>.conf with restart=always|on-failure (containerd and
+ * sshd have their own supervisors above). Services started by 'ziroctl service start' are
+ * reparented to PID 1; when one exits and its pidfile still names it (ziroctl stop removes the
+ * pidfile first), it is restarted with the same crash-loop backoff.
+ */
+#define MAX_SUPERVISED 32
+static struct {
+    char name[64];
+    int fails;
+    time_t started, restart_at;
+} supervised[MAX_SUPERVISED];
+
+static int conf_get(const char *path, const char *key, char *out, size_t max) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[256];
+    size_t klen = strlen(key);
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
+            snprintf(out, max, "%s", line + klen + 1);
+            out[strcspn(out, "\r\n")] = '\0';
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static void supervise_service_exit(pid_t pid, int status) {
+    DIR *d = opendir("/etc/ziro/services");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t n = strlen(e->d_name);
+        if (n < 6 || n > 60 || strcmp(e->d_name + n - 5, ".conf") != 0) continue;
+        char conf[320], restart[32] = "", pidfile[200] = "", pidbuf[32] = "", state[16] = "";
+        snprintf(conf, sizeof(conf), "/etc/ziro/services/%s", e->d_name);
+        if (!conf_get(conf, "restart", restart, sizeof(restart))) continue;
+        int always = strcmp(restart, "always") == 0;
+        if (!always && !(strcmp(restart, "on-failure") == 0 && !(WIFEXITED(status) && WEXITSTATUS(status) == 0))) continue;
+        if (!conf_get(conf, "pidfile", pidfile, sizeof(pidfile))) continue;
+        FILE *pf = fopen(pidfile, "r");
+        if (!pf) continue;
+        if (!fgets(pidbuf, sizeof(pidbuf), pf)) pidbuf[0] = '\0';
+        fclose(pf);
+        if (atoi(pidbuf) != pid) continue;
+
+        char name[64];
+        snprintf(name, sizeof(name), "%.*s", (int)(n - 5), e->d_name);
+        char enabled[320];
+        snprintf(enabled, sizeof(enabled), "/etc/ziro/services/enabled/%s", name);
+        FILE *ef = fopen(enabled, "r");
+        if (ef) {
+            if (!fgets(state, sizeof(state), ef)) state[0] = '\0';
+            fclose(ef);
+        }
+        unlink(pidfile);
+        if (strncmp(state, "disabled", 8) == 0) break;
+
+        time_t now = time(NULL);
+        int slot = -1;
+        for (int i = 0; i < MAX_SUPERVISED; i++) {
+            if (strcmp(supervised[i].name, name) == 0) { slot = i; break; }
+            if (slot < 0 && supervised[i].name[0] == '\0') slot = i;
+        }
+        if (slot < 0) break;
+        snprintf(supervised[slot].name, sizeof(supervised[slot].name), "%s", name);
+        supervised[slot].fails = (now - supervised[slot].started < 10) ? supervised[slot].fails + 1 : 0;
+        supervised[slot].restart_at = now + schedule_backoff(supervised[slot].fails);
+        printf("[init] service %s (PID %d) exited with status %d; restarting in %lds\n",
+               name, pid, status, (long)(supervised[slot].restart_at - now));
+        break;
+    }
+    closedir(d);
+}
+
+static void restart_due_services(void) {
+    time_t now = time(NULL);
+    for (int i = 0; i < MAX_SUPERVISED; i++) {
+        if (!supervised[i].restart_at || now < supervised[i].restart_at) continue;
+        supervised[i].restart_at = 0;
+        supervised[i].started = now;
+        pid_t p = fork();
+        if (p == 0) {
+            char *argv[] = {"ziroctl", "service", "start", supervised[i].name, NULL};
+            execv("/usr/bin/ziroctl", argv);
+            _exit(1);
+        } else if (p > 0) {
+            waitpid(p, NULL, 0);
+        }
+    }
+}
+
 /* Apply the host firewall synchronously so sshd and containerd never listen unfiltered.
  * 'ziroctl service boot' applies it again later (idempotent). Skipped only when disabled. */
 static void apply_firewall_early(void) {
@@ -1151,6 +1247,12 @@ static void handle_child_exit(pid_t pid, int status) {
     }
     if (pid == console_fallback_pid) {
         console_fallback_pid = 0;
+        return;
+    }
+    int is_term = 0;
+    for (size_t i = 0; i < NUM_TERM_SESSIONS; i++) is_term |= term_sessions[i].pid == pid;
+    if (!is_term) {
+        supervise_service_exit(pid, status);
         return;
     }
 
@@ -1341,6 +1443,7 @@ int main(int argc, char *argv[]) {
     while (!shutdown_requested && !reboot_requested) {
         supervise_terminals();
         restart_due_daemons();
+        restart_due_services();
 
         int status;
         pid_t exited = waitpid(-1, &status, WNOHANG);
