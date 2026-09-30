@@ -386,14 +386,8 @@ func startAPIServer() {
 			}
 			var err error
 			switch action {
-			case "start":
-				// deepcode ignore CommandInjection: name only selects a root-owned service definition (validated, 404 if unknown); the executable comes from that definition, never from the request
-				err = startService(name)
-			case "stop":
-				err = stopService(name)
-			case "restart":
-				// deepcode ignore CommandInjection: same as above: name selects a trusted definition, it is never executed
-				err = restartService(name)
+			case "start", "stop", "restart":
+				err = runServiceCLI(serviceActions[action], name)
 			case "enable":
 				err = enableService(name)
 			case "disable":
@@ -535,4 +529,23 @@ func init() {
 	apiCmd.AddCommand(apiTokenCmd)
 	apiCmd.AddCommand(apiGenCertsCmd)
 	rootCmd.AddCommand(apiCmd)
+}
+
+// serviceActions maps the request's action to a constant, so the request never supplies argv text.
+var serviceActions = map[string]string{"start": "start", "stop": "stop", "restart": "restart"}
+
+// runServiceCLI applies a service action through the ziroctl CLI (fixed binary, argv, no shell).
+// The network-facing API never spawns daemons itself: the CLI re-validates the name and the
+// root-owned definition exactly as for a local operator, and the daemon is not tied to the API.
+func runServiceCLI(action, name string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	out, err := exec.Command(self, "service", action, name).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimPrefix(strings.TrimSpace(string(out)), "Error: ")
+		return fmt.Errorf("%s", strings.TrimSpace(strings.SplitN(msg, "\n", 2)[0]))
+	}
+	return nil
 }

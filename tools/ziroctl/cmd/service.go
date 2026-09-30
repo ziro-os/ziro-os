@@ -411,11 +411,13 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
-	// First check /etc/ziro/services/<name>.conf
+	// First check /etc/ziro/services/<name>.conf, opened through os.Root: the name can only
+	// select a file inside servicesDir, never follow ".." or a symlink out of it.
 	confPath := filepath.Join(servicesDir, name+".conf")
-	if fileExists(confPath) {
+	if root, err := os.OpenRoot(servicesDir); err == nil {
+		defer root.Close()
 		def := &ServiceDef{Name: name}
-		f, err := os.Open(confPath)
+		f, err := root.Open(name + ".conf")
 		if err == nil {
 			defer f.Close()
 			// A service definition decides what runs as root: trust only root-owned files that
