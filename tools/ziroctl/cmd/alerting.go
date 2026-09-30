@@ -47,7 +47,7 @@ const (
 var alertSeverities = map[string]int{"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 var alertCategories = map[string]bool{"ban": true, "threat": true, "fim": true, "canary": true,
-	"av": true, "disk": true, "service": true, "test": true}
+	"av": true, "disk": true, "service": true, "module": true, "test": true}
 
 var alertNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
@@ -464,7 +464,7 @@ func addAlertEndpoint(name, rawURL, minSev, format string, events []string) (Ale
 	}
 	for _, ev := range events {
 		if !alertCategories[ev] {
-			return AlertEndpoint{}, fmt.Errorf("unknown event %q (ban, threat, fim, canary, av, disk, service)", ev)
+			return AlertEndpoint{}, fmt.Errorf("unknown event %q (ban, threat, fim, canary, av, disk, service, module)", ev)
 		}
 	}
 	cfg, err := loadAlertConfig()

@@ -22,6 +22,7 @@ Trust Services Criteria (2017, revised points of focus).
 | Host hardening | `ziroctl security audit --json` (every host; CIS Linux Benchmark sections per check) |
 | Intrusion prevention state | `ziroctl security protect status --json`, `ziroctl security bans list --json` |
 | Alert routing | `ziroctl security alerting list --json` |
+| Malware protection and audit trail | `ziroctl module list --json`, `ausearch -k identity` (with the `security` module) |
 
 ## NIST SP 800-190
 
@@ -48,6 +49,7 @@ Trust Services Criteria (2017, revised points of focus).
 | 4.1/4.2 Secure configuration of assets | Hardened defaults (firewall default-deny, API on loopback, deny-by-default mesh policy for new clusters) |
 | 4.7 Manage default accounts | No default passwords; login required on installed systems |
 | 5.2/6.x Access control and credential management | Unique scoped tokens; expiry; revocation; automatic rotation of node tokens (30 days) and master certificates |
+| 10.1/10.2 Anti-malware software and signature updates | `clamav` module: clamd plus freshclam updates every 2 hours, daily scans, alerts on detection |
 | 8.2/8.5/8.9 Audit log management | Tamper-evident, hash-chained audit log on every host; forward it to a central collector (8.9) |
 | 12.2/13.4 Network segmentation and traffic filtering | App policy on the mesh; gateway CIDR allowlists and per-client rate limits |
 | 13.1/8.11 Monitoring and alerting | Prometheus metrics (node readiness, replica health, control-plane membership, security-control state); signed webhook alerts for threats, integrity changes and bans |
@@ -62,7 +64,7 @@ Trust Services Criteria (2017, revised points of focus).
 | CC6.2/CC6.3 Provisioning and removal | `api token create/revoke`; `cluster member rm` and `node rm` revoke credentials immediately |
 | CC6.6 Boundary protection | Host firewall; mesh policy; gateway allowlists, rate limits and TLS |
 | CC6.7 Transmission of data | TLS, WireGuard, mutual TLS |
-| CC6.8 Prevent unauthorized or malicious software | Registry allowlist and signature verification with digest pinning |
+| CC6.8 Prevent unauthorized or malicious software | Registry allowlist and signature verification with digest pinning; `clamav` module scans hosts and volumes |
 | CC7.1 Configuration management | Declarative `cluster apply`; every spec change is a new revision |
 | CC7.2 Monitoring for anomalies | Metrics endpoint; audit log; Sentinel detections pushed as signed webhook alerts |
 | CC7.3/CC7.4 Incident response | Automatic bans of brute-force and scanning sources; alerts with host, node and cluster context |
