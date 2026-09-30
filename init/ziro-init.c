@@ -100,12 +100,13 @@ static const char *cmdline_find(const char *key, size_t *vlen) {
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == '\n') p++;
         const char *s = p;
-        while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
-        size_t len = (size_t)(p - s);
-        if (strncmp(s, key, klen) == 0 && (is_kv ? len >= klen : len == klen)) {
-            // deepcode ignore IntegerOverflow: guarded by len >= klen on the same line; cannot underflow
-            if (vlen) *vlen = (is_kv && len >= klen) ? len - klen : 0; /* never underflows */
-            return s + klen;
+        p += strcspn(p, " \t\n");
+        /* strncmp matching klen whitespace-free chars keeps s + klen inside this token, so
+         * lengths come from strcspn: no arithmetic on cmdline-derived values. */
+        if (strncmp(s, key, klen) == 0 && (is_kv || s + klen == p)) {
+            const char *v = s + klen;
+            if (vlen) *vlen = strcspn(v, " \t\n");
+            return v;
         }
     }
     return NULL;
@@ -1129,8 +1130,8 @@ static int conf_get(const char *path, const char *key, char *out, size_t max) {
     int found = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
-            // deepcode ignore IntegerOverflow: line starts with key (strncmp) and line[klen] == '=', so both offsets are in bounds
-            snprintf(out, max, "%s", line + klen + 1);
+            /* the value starts after the first '=' (line[klen]): take it from strchr, no offset math */
+            snprintf(out, max, "%s", strchr(line, '=') + 1);
             out[strcspn(out, "\r\n")] = '\0';
             found = 1;
             break;
