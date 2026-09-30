@@ -70,7 +70,7 @@ rm -f "$probe.x"
 
 mkdir -p "$BUILD_DIR" "$DOWNLOAD_DIR"
 if [ -d "$ROOTFS_MINIMAL" ] || [ -d "$ROOTFS_FULL" ]; then
-    docker run --rm -v "$BUILD_DIR:/b" "$ALPINE_IMAGE" rm -rf "/b/$(basename "$ROOTFS_MINIMAL")" "/b/$(basename "$ROOTFS_FULL")" 2>/dev/null || true
+    docker run --rm --platform "$DOCKER_PLATFORM" -v "$BUILD_DIR:/b" "$ALPINE_IMAGE" rm -rf "/b/$(basename "$ROOTFS_MINIMAL")" "/b/$(basename "$ROOTFS_FULL")" 2>/dev/null || true
     rm -rf "$ROOTFS_MINIMAL" "$ROOTFS_FULL" 2>/dev/null || true
 fi
 mkdir -p "$ROOTFS_MINIMAL" "$ROOTFS_FULL"

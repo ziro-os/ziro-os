@@ -12,14 +12,17 @@ case "$RAW_ARCH" in
     x86_64|amd64)
         TARGET_ARCH="x86_64"
         CONSOLE="ttyS0"
+        DOCKER_PLATFORM="linux/amd64"
         ;;
     arm64|aarch64)
         TARGET_ARCH="arm64"
         CONSOLE="ttyAMA0"
+        DOCKER_PLATFORM="linux/arm64"
         ;;
     *)
         TARGET_ARCH="x86_64"
         CONSOLE="ttyS0"
+        DOCKER_PLATFORM="linux/amd64"
         ;;
 esac
 
@@ -145,7 +148,9 @@ HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 
 echo "Building true hybrid BIOS + UEFI ISO for $TARGET_ARCH with grub-mkrescue..."
-docker run --rm \
+# --platform: grub-mkrescue needs the target's GRUB (grub-bios exists only on x86_64), and the
+# local alpine tag may hold the other architecture after a multi-arch rootfs build.
+docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ISO_STAGING:/iso" \
     -v "$BUILD_DIR:/out" \
     -e TARGET_ARCH="$TARGET_ARCH" \
@@ -156,7 +161,7 @@ docker run --rm \
     "${ALPINE_IMAGE:-alpine:3.24}" sh -c '
         set -e
         echo "Installing xorriso, mtools, and bootloader tools (${GRUB_PACKAGES})..."
-        apk add --no-cache xorriso mtools ${GRUB_PACKAGES} >/dev/null 2>&1
+        apk add --no-cache --quiet xorriso mtools ${GRUB_PACKAGES}
         # Lets the installer detect corrupt media before an upgrade touches the disk
         (cd /iso && sha256sum boot/vmlinuz boot/initramfs.cpio.gz > SHA256SUMS)
         echo "Generating hybrid bootable ISO image with El Torito BIOS + UEFI catalogs..."
