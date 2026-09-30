@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ type ServiceDef struct {
 	Args        string `json:"args"`
 	PIDFile     string `json:"pidfile"`
 	LogFile     string `json:"logfile"`
+	Check       string `json:"check,omitempty"` // args that make exec validate its config (sshd: -t)
 	Autostart   bool   `json:"autostart"`
 }
 
@@ -60,13 +62,14 @@ var defaultServices = []ServiceDef{
 		Args:        "-D -e",
 		PIDFile:     "/run/sshd.pid",
 		LogFile:     "/var/log/sshd.log",
+		Check:       "-t",
 		Autostart:   true,
 	},
 	{
 		Name:        "crond",
 		Description: "Periodic Cronjob Scheduler Daemon",
 		Exec:        "/usr/sbin/crond",
-		Args:        "-f -l 5",
+		Args:        "-f -d 5 -c /etc/crontabs", // -d: log to stderr (no syslogd); crontabs live in /etc
 		PIDFile:     "/run/crond.pid",
 		LogFile:     "/var/log/crond.log",
 		Autostart:   true,
@@ -232,9 +235,7 @@ var serviceRestartCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
-		_ = stopService(name)
-		time.Sleep(500 * time.Millisecond)
-		if err := startService(name); err != nil {
+		if err := restartService(name); err != nil {
 			return fmt.Errorf("restart %s: %w", name, err)
 		}
 		fmt.Printf("Restarted service: %s\n", name)
@@ -289,25 +290,35 @@ var serviceLogsCmd = &cobra.Command{
 	},
 }
 
-// initManaged daemons are supervised (and restarted) by ziro-init itself.
+// initManaged daemons are supervised (and restarted) by ziro-init itself. To stop one, ziroctl
+// drops a marker in stopMarkerDir, which makes init hold the restart until it is removed.
 var initManaged = map[string]bool{"containerd": true, "sshd": true}
+
+const stopMarkerDir = "/run/ziro/stopped"
 
 var serviceBootCmd = &cobra.Command{
 	Use:    "boot",
 	Short:  "Start all enabled services (invoked by ziro-init at boot)",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// In parallel: init waits for this, and each start watches its daemon for up to 1s.
+		var wg sync.WaitGroup
 		for _, s := range listAllServices() {
 			if !s.Enabled || initManaged[s.Name] || s.Status == "RUNNING" {
 				continue
 			}
-			// deepcode ignore CommandInjection: names come from root-owned definitions in /etc/ziro/services; startService re-validates the definition and its executable
-			if err := startService(s.Name); err != nil {
-				fmt.Printf("[boot] %s: %v\n", s.Name, err)
-				continue
-			}
-			fmt.Printf("[boot] started %s\n", s.Name)
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				// deepcode ignore CommandInjection: names come from root-owned definitions in /etc/ziro/services; startService re-validates the definition and its executable
+				if err := startService(name); err != nil {
+					fmt.Printf("[boot] %s: %v\n", name, err)
+					return
+				}
+				fmt.Printf("[boot] started %s\n", name)
+			}(s.Name)
 		}
+		wg.Wait()
 		return nil
 	},
 }
@@ -400,11 +411,13 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
-	// First check /etc/ziro/services/<name>.conf
+	// First check /etc/ziro/services/<name>.conf, opened through os.Root: the name can only
+	// select a file inside servicesDir, never follow ".." or a symlink out of it.
 	confPath := filepath.Join(servicesDir, name+".conf")
-	if fileExists(confPath) {
+	if root, err := os.OpenRoot(servicesDir); err == nil {
+		defer root.Close()
 		def := &ServiceDef{Name: name}
-		f, err := os.Open(confPath)
+		f, err := root.Open(name + ".conf")
 		if err == nil {
 			defer f.Close()
 			// A service definition decides what runs as root: trust only root-owned files that
@@ -433,6 +446,8 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 						def.PIDFile = v
 					case "logfile":
 						def.LogFile = v
+					case "check":
+						def.Check = v
 					case "autostart":
 						def.Autostart = (v == "true" || v == "1" || v == "yes")
 					}
@@ -490,7 +505,7 @@ func getServicePID(def *ServiceDef) int {
 	if def.PIDFile != "" {
 		if data, err := os.ReadFile(def.PIDFile); err == nil {
 			pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-			if pid > 0 && pidMatches(def, pid) {
+			if pid > 0 && (pidMatches(def, pid) || retitled(def, pid)) {
 				return pid
 			}
 		}
@@ -526,6 +541,20 @@ func pidMatches(def *ServiceDef, pid int) bool {
 		}
 	}
 	return true
+}
+
+// retitled reports whether the pidfile's process is def.Exec after it rewrote its argv into
+// one title (sshd: "sshd: /usr/sbin/sshd -D -e [listener] ..."). Only trusted for a pidfile
+// PID, and only when the running binary is def.Exec, so a recycled PID never matches.
+func retitled(def *ServiceDef, pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	title := strings.TrimRight(string(data), "\x00")
+	if err != nil || strings.Contains(title, "\x00") || !strings.HasPrefix(title, filepath.Base(def.Exec)) {
+		return false
+	}
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	want, werr := filepath.EvalSymlinks(def.Exec)
+	return err == nil && werr == nil && exe == want
 }
 
 func isPIDRunning(pid int) bool {
@@ -590,6 +619,9 @@ func startService(name string) error {
 	if pid > 0 {
 		return fmt.Errorf("service '%s' is already running (PID %d)", name, pid)
 	}
+	if initManaged[name] {
+		return releaseToInit(def)
+	}
 
 	if err := trustedExecutable(def.Exec); err != nil {
 		return err
@@ -624,17 +656,65 @@ func startService(name string) error {
 		_ = os.WriteFile(def.PIDFile, []byte(strconv.Itoa(newPID)), 0644)
 	}
 
+	done := make(chan error, 1)
 	go func() {
-		_ = cmd.Wait()
+		err := cmd.Wait()
 		if logF != nil {
 			logF.Close()
 		}
 		if def.PIDFile != "" {
 			_ = os.Remove(def.PIDFile)
 		}
+		done <- err
 	}()
 
+	// Report a daemon that dies on startup (bad config, port in use) instead of claiming
+	// success. A clean exit is fine: firewall/cloud-init are one-shot.
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("exited during startup (%v); see %s", err, def.LogFile)
+		}
+	case <-time.After(time.Second):
+	}
 	return nil
+}
+
+// releaseToInit starts an init-supervised daemon: remove the stop marker and wait for
+// ziro-init to spawn it (init resets its backoff for a held daemon).
+func releaseToInit(def *ServiceDef) error {
+	if err := os.Remove(filepath.Join(stopMarkerDir, def.Name)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for i := 0; i < 50; i++ {
+		time.Sleep(200 * time.Millisecond)
+		if getServicePID(def) > 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("ziro-init did not start it within 10s; see %s", def.LogFile)
+}
+
+// restartService validates the config first (a broken sshd_config must not take down the
+// running sshd and lock everyone out), then stops and starts.
+func restartService(name string) error {
+	def, err := loadServiceDef(name)
+	if err != nil {
+		return err
+	}
+	if def.Check != "" {
+		if err := trustedExecutable(def.Exec); err != nil {
+			return err
+		}
+		// deepcode ignore CommandInjection: same trusted, root-owned definition and executable as startService; argv, no shell
+		if out, err := exec.Command(def.Exec, strings.Fields(def.Check)...).CombinedOutput(); err != nil {
+			return fmt.Errorf("config check failed, service left running: %s", strings.TrimSpace(string(out)))
+		}
+	}
+	if err := stopService(name); err != nil {
+		return err
+	}
+	return startService(name)
 }
 
 func stopService(name string) error {
@@ -651,32 +731,46 @@ func stopService(name string) error {
 	if err != nil {
 		return err
 	}
+	if initManaged[name] {
+		if err := os.MkdirAll(stopMarkerDir, 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(stopMarkerDir, name), nil, 0644); err != nil {
+			return err
+		}
+	}
 	// Remove the pidfile first: ziro-init restarts restart=always services whose pidfile
 	// still names the exited process, and a deliberate stop must not look like a crash.
 	if def.PIDFile != "" {
 		_ = os.Remove(def.PIDFile)
 	}
 
-	// Send SIGTERM
 	_ = proc.Signal(syscall.SIGTERM)
-
-	// Wait up to 3 seconds for graceful shutdown
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if !isPIDRunning(pid) {
-			if def.PIDFile != "" {
-				_ = os.Remove(def.PIDFile)
-			}
-			return nil
+	if !waitGone(pid, 3*time.Second) {
+		_ = proc.Signal(syscall.SIGKILL)
+		if !waitGone(pid, 2*time.Second) {
+			return fmt.Errorf("PID %d did not exit", pid)
 		}
 	}
-
-	// Force kill if still running
-	_ = proc.Signal(syscall.SIGKILL)
 	if def.PIDFile != "" {
 		_ = os.Remove(def.PIDFile)
 	}
+	if initManaged[name] {
+		// Let ziro-init's supervisor loop (250ms) see the marker before a restart removes it.
+		time.Sleep(400 * time.Millisecond)
+	}
 	return nil
+}
+
+// waitGone waits until pid is gone from /proc (exited and reaped).
+func waitGone(pid int, d time.Duration) bool {
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+		if !isPIDRunning(pid) {
+			return true
+		}
+	}
+	return false
 }
 
 func enableService(name string) error {

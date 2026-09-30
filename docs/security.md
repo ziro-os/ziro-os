@@ -58,7 +58,13 @@ Output:
   `/root/.ssh/authorized_keys` and runs shell user-data once per instance. It only trusts `169.254.169.254` on
   EC2-compatible clouds detected by DMI (override with `touch /etc/ziro/cloud-init.force`).
 - **Services**: `ziro-init` starts every enabled service (`ziroctl service boot`), so the firewall and Sentinel
-  are active from boot. A service's PID is only signalled when its argv matches the service definition.
+  are active from boot. A service's PID is only signalled when its argv matches the service definition, or, for
+  a daemon that rewrites its title (sshd), when its pidfile names a process running that exact binary.
+  - `ziro-init` itself supervises containerd and sshd. `ziroctl service stop` leaves a marker in
+    `/run/ziro/stopped/`, which holds init's restart, and `start` removes the marker so init respawns the daemon.
+  - `restart` validates the config first (`check=` in the definition; sshd uses `sshd -t`). A broken
+    `sshd_config` is refused and the running sshd is kept, so a typo can't lock you out.
+  - `start` reports a daemon that exits during its first second, instead of claiming success.
 - **Firewall**: rules live in their own `inet ziro` nftables table. CNI, nerdctl, WireGuard and kube-proxy rules
   are never flushed. ICMP/ICMPv6 are allowed, and so is SSH (22). Inputs are validated, and nft errors are reported.
 - **REST API**: binds `127.0.0.1:8443` by default, CORS is off, and tokens are checked in constant time and never

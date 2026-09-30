@@ -730,6 +730,22 @@ static void init_network(void) {
     system("sysctl -p /etc/sysctl.conf 2>/dev/null || true");
 }
 
+/* Pidfile for a daemon PID 1 supervises, so 'ziroctl service' finds it even when it
+ * rewrites its process title (sshd shows "sshd: /usr/sbin/sshd -D -e [listener] ..."). */
+static void write_pidfile(const char *path, pid_t pid) {
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", (int)pid);
+    fclose(f);
+}
+
+/* 'ziroctl service stop' drops /run/ziro/stopped/<name>: hold the restart until it is gone. */
+static int daemon_held(const char *name) {
+    char p[64];
+    snprintf(p, sizeof(p), "/run/ziro/stopped/%s", name);
+    return access(p, F_OK) == 0;
+}
+
 static void start_containerd(void) {
     if (access("/usr/bin/containerd", X_OK) != 0 && access("/bin/containerd", X_OK) != 0) {
         printf("[init] containerd not found; skipping container engine startup\n");
@@ -757,6 +773,7 @@ static void start_containerd(void) {
     } else if (pid > 0) {
         containerd_pid = pid;
         containerd_started = time(NULL);
+        write_pidfile("/run/containerd/containerd.pid", pid);
         printf("[init] containerd spawned (PID: %d)\n", pid);
 
         // Quick check for socket readiness (up to 3 seconds)
@@ -823,6 +840,7 @@ static void start_sshd(void) {
     } else if (pid > 0) {
         sshd_pid = pid;
         sshd_started = time(NULL);
+        write_pidfile("/run/sshd.pid", pid);
         printf("[init] OpenSSH daemon ready: port 22 (PID: %d)\n", pid);
     }
 }
@@ -1081,13 +1099,21 @@ static time_t schedule_backoff(int fails) {
     return fails >= 6 ? 60 : (time_t)1 << fails;
 }
 
+/* A deliberate stop (held) is not a crash: reset the backoff so the daemon comes back as soon
+ * as 'ziroctl service start/restart' releases it. */
 static void restart_due_daemons(void) {
     time_t now = time(NULL);
-    if (containerd_restart_at && now >= containerd_restart_at) {
+    if (containerd_restart_at && daemon_held("containerd")) {
+        containerd_fails = 0;
+        containerd_restart_at = now;
+    } else if (containerd_restart_at && now >= containerd_restart_at) {
         containerd_restart_at = 0;
         start_containerd();
     }
-    if (sshd_restart_at && now >= sshd_restart_at) {
+    if (sshd_restart_at && daemon_held("sshd")) {
+        sshd_fails = 0;
+        sshd_restart_at = now;
+    } else if (sshd_restart_at && now >= sshd_restart_at) {
         sshd_restart_at = 0;
         start_sshd();
     }

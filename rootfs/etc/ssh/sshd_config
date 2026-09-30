@@ -32,12 +32,10 @@ PermitEmptyPasswords no
 KbdInteractiveAuthentication no
 
 # PAM integration
-UsePAM yes
 
 # Session & Forwarding Hardening
 X11Forwarding no
 PrintMotd no
-PrintLastLog yes
 TCPKeepAlive yes
 ClientAliveInterval 300
 ClientAliveCountMax 2
