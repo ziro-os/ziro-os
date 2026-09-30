@@ -95,9 +95,12 @@ type ClusteredApp struct {
 	AllowPrivilegeEscalation bool `json:"allow_privilege_escalation,omitempty"`
 	// Egress, when set, is the only outside world the app's pods may reach: IPv4 CIDRs and domain
 	// names (subdomains included). Enforced per node; needs the pod network.
-	Egress    []string `json:"egress,omitempty"`
-	Revision  int      `json:"revision,omitempty"`
-	CreatedAt string   `json:"created_at,omitempty"`
+	Egress []string `json:"egress,omitempty"`
+	// Volumes are cluster shares bind-mounted into the containers: "share:/path[:ro]".
+	Volumes     []string `json:"volumes,omitempty"`
+	VolumeEpoch int      `json:"volume_epoch,omitempty"` // bumped by storage failover: consumers restart
+	Revision    int      `json:"revision,omitempty"`
+	CreatedAt   string   `json:"created_at,omitempty"`
 }
 
 // Replica is one placed (or pending, Node == "") instance of an app.
@@ -124,6 +127,7 @@ type ClusterState struct {
 	PolicyDefault string         `json:"policy_default,omitempty"`
 	Routes        []GatewayRoute `json:"routes,omitempty"`
 	DNSRecords    []DNSRecord    `json:"dns_records,omitempty"` // cluster-wide records served by every node's smart DNS
+	Shares        []ClusterShare `json:"shares,omitempty"`      // NFS shares served over the mesh
 	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
 	Peers         []RemotePeer   `json:"peers,omitempty"`    // WireGuard remote-access clients
 	PodCIDR       string         `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
@@ -436,6 +440,9 @@ func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 	}
 	if a.MeshOnly && a.Port == "" {
 		return fmt.Errorf("--mesh-only needs --port")
+	}
+	if err := validateVolumes(a); err != nil {
+		return err
 	}
 	if len(a.Egress) > 0 {
 		if a.Network != "pod" {
@@ -975,6 +982,7 @@ var (
 	appPrivEsc  bool
 	appAllow    []string
 	appEgress   []string
+	appVolumes  []string
 	applyFile   string
 )
 
@@ -998,6 +1006,11 @@ func deployApp(mutate func(st *ClusterState) (*ClusteredApp, error)) error {
 		}
 		if err := validateApp(app, secrets); err != nil {
 			return err
+		}
+		for _, v := range app.Volumes {
+			if s, _, _, _ := parseVolume(v); st.share(s) == nil {
+				return fmt.Errorf("share %q not found (ziroctl cluster storage add %s --node <node>)", s, s)
+			}
 		}
 		changed := upsertApp(st, *app)
 		scheduleReplicas(st, time.Now())
@@ -1046,6 +1059,14 @@ var clusterDeployCmd = &cobra.Command{
 			}
 			if f.Changed("arg") {
 				app.Args = appArgs
+			}
+			if f.Changed("volume") {
+				app.Volumes = nil
+				for _, v := range appVolumes {
+					if v = strings.TrimSpace(v); v != "" {
+						app.Volumes = append(app.Volumes, v)
+					}
+				}
 			}
 			if f.Changed("egress") {
 				app.Egress = nil
@@ -1578,6 +1599,7 @@ func init() {
 	clusterDeployCmd.Flags().StringArrayVar(&appArgs, "arg", nil, "Command/argument passed after the image (repeatable, in order)")
 	clusterDeployCmd.Flags().BoolVar(&appMeshOnly, "mesh-only", false, "Publish --port only on the node's mesh IP (not the public interface)")
 	clusterDeployCmd.Flags().BoolVar(&appPrivEsc, "allow-privilege-escalation", false, "Run without no-new-privileges and keep NET_RAW (setuid binaries, ping); off by default")
+	clusterDeployCmd.Flags().StringArrayVar(&appVolumes, "volume", nil, "Cluster share to mount: <share>:/path[:ro] (repeatable; '' = none)")
 	clusterDeployCmd.Flags().StringSliceVar(&appEgress, "egress", nil, "Only outside destinations the app may reach: IPv4 CIDRs and domains, comma-separated ('' = unrestricted); pod network only")
 	clusterDeployCmd.Flags().StringSliceVar(&appAllow, "allow-from", nil, "Apps allowed to reach --port over the mesh (comma-separated; '*' = any cluster app, 'peer:<name>' or 'peers' = WireGuard remote peers, '' = none)")
 	clusterApplyCmd.Flags().StringVarP(&applyFile, "file", "f", "", "JSON manifest")

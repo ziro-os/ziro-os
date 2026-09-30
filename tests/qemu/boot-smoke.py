@@ -418,6 +418,17 @@ def main():
                               "ls /etc/ziro/services/auditd.conf /etc/ziro/modules/auditd.json 2>&1 | grep -c 'No such'", timeout=120)
             check("module disable auditd removes packages, service and state",
                   "Module auditd disabled" in out and out.split()[-1] == "2", out)
+            # NFS: the first export installs the server (nfs module); the kernel mounts NFSv4 directly.
+            rc, out = con.run("mkdir -p /srv/share && chmod 0777 /srv/share && ziroctl nfs export add /srv/share --clients 127.0.0.1 2>&1 | tail -1; "
+                              "cat /proc/fs/nfsd/versions", timeout=600)
+            check("nfs export: server installed on demand, NFSv4 only (no v2/v3)",
+                  "Exported /srv/share" in out and "-3" in out and "+4.2" in out, out)
+            # A fresh NFSv4 server has a 30s grace period: the first write waits for it.
+            rc, out = con.run("ziroctl nfs mount 127.0.0.1:/srv/share /mnt/nfs 2>&1 | tail -1; echo hi > /mnt/nfs/t.txt; "
+                              "cat /srv/share/t.txt; stat -c %U /srv/share/t.txt; awk '$2==\"/mnt/nfs\"{print $3, $4}' /proc/mounts", timeout=180)
+            check("nfs mount (kernel client, v4.2): write lands on the export; root is squashed",
+                  "hi" in out and "nobody" in out and "nfs4" in out and "vers=4.2" in out, out)
+            con.run("ziroctl nfs umount /mnt/nfs; ziroctl nfs export remove /srv/share", timeout=60)
         if args.modules:
             rc, out = con.run("(sleep 300 | nc -l -p 9998 > /tmp/av.txt &); "
                               "ziroctl security alerting add av --url http://127.0.0.1:9998/h --events av >/dev/null; "

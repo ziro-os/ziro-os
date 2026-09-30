@@ -41,3 +41,45 @@ ziroctl disk remove /data                                # unmount and forget; t
 
 API: `GET /api/v1/disks` (viewer); `POST /api/v1/disks` `{"device", "mount", "label"}` and
 `POST /api/v1/disks/expand` (admin).
+
+## NFS file sharing
+
+NFSv4.2 only (no v2/v3, TCP only). Nothing is preinstalled. The first export enables the `nfs` module (NFS
+server). Clients need nothing extra: the kernel mounts NFSv4 directly.
+
+```sh
+ziroctl nfs export add /srv/media --clients 10.0.0.0/24 [--ro]   # opens 2049/tcp to those clients only
+ziroctl nfs mount 10.0.0.5:/srv/media /mnt/media [--ro]           # persistent across reboots
+ziroctl nfs list
+ziroctl nfs umount /mnt/media
+ziroctl nfs export remove /srv/media
+```
+
+- **Export options:** always `root_squash,sync,no_subtree_check,sec=sys` with a stable `fsid`. Exporting system
+  paths, or to `0.0.0.0/0`, is refused. Client root becomes `nobody`, so make the directory writable for your
+  apps (`chmod 0777`, or `chown` it to their uid).
+- **Mount options:** `vers=4.2,proto=tcp,hard,nconnect=4,rsize=wsize=1M,noatime,nodev,nosuid`.
+- **Unmounted shares:** the empty mount point is made immutable, so nothing can be written to the local disk
+  while the share is down.
+- **Server restarts:** clients reclaim their state within a 30-second grace period.
+
+## Cluster storage
+
+Shares are served by one node to the cluster over the WireGuard mesh, so traffic is encrypted:
+
+```sh
+ziroctl cluster storage add media --node storage-1 --standby storage-2
+ziroctl cluster deploy --name web --image nginx:alpine --replicas 3 --volume media:/usr/share/nginx/html:ro
+ziroctl cluster storage ls
+ziroctl cluster storage failover media --to storage-2
+ziroctl cluster storage rm media      # refused while an app uses it; the data stays on the node
+```
+
+- **Serving:** the storage node installs the NFS server on demand and exports `/var/lib/ziro/storage/<share>` only
+  to the mesh IPs of nodes that run an app using the share. In deny mode, the mesh policy opens 2049/tcp to
+  exactly those nodes.
+- **Consuming:** consumer nodes mount the share at `/var/lib/ziro/volumes/<share>` before starting the app's
+  containers, and bind-mount it into them. A replica whose share can't be mounted on its node is not started.
+- **`failover`:** serves the share from another node and restarts its consumers one replica at a time. There is
+  no replication: failover is for data that is available on the other node (shared block storage, a restored
+  backup). Replicated storage is planned as a module.

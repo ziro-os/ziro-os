@@ -304,6 +304,7 @@ var serviceBootCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_ = expandAll(false, true) // a disk resized while the host was off
 		reconcileModules()         // packages vanish after an OS upgrade; /run is empty every boot
+		nfsBoot()                  // standalone NFS mounts (the network is up)
 		// In parallel: init waits for this, and each start watches its daemon for up to 1s.
 		var wg sync.WaitGroup
 		for _, s := range listAllServices() {

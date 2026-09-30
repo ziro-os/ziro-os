@@ -83,6 +83,7 @@ type Assignment struct {
 	IP        string            `json:"ip,omitempty"`         // pod IP on the ziro-cluster network (pod networking)
 	DNS       string            `json:"dns,omitempty"`        // the node's pod DNS responder
 	PrivEsc   bool              `json:"priv_esc,omitempty"`   // opt out of no-new-privileges / NET_RAW drop
+	Volumes   []string          `json:"volumes,omitempty"`    // host:container[:ro] bind mounts of NFS shares
 }
 
 // MeshPeer is another node on the WireGuard mesh.
@@ -111,6 +112,8 @@ type heartbeatResponse struct {
 	PodDNS      map[string][]string `json:"pod_dns,omitempty"`      // app -> running pod IPs (DNS answers)
 	DNSRecords  []DNSRecord         `json:"dns_records,omitempty"`  // cluster-wide records for the host resolver
 	Egress      map[string][]string `json:"egress,omitempty"`       // app -> allowed outside destinations
+	NFSExports  []clusterExport     `json:"nfs_exports,omitempty"`  // shares this node serves
+	NFSMounts   []clusterMount      `json:"nfs_mounts,omitempty"`   // shares its replicas use
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -133,6 +136,9 @@ func specHash(a ClusteredApp) string {
 	}
 	if a.AllowPrivilegeEscalation { // only when set, so existing apps keep their hash
 		h.Write([]byte("\x00privesc"))
+	}
+	if len(a.Volumes) > 0 || a.VolumeEpoch > 0 {
+		fmt.Fprintf(h, "\x00volumes=%q\x00epoch=%d", a.Volumes, a.VolumeEpoch)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }
@@ -407,7 +413,8 @@ func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[stri
 			}
 		}
 		as := Assignment{Name: replicaName(r.App, r.Index, r.Hash), App: r.App, Image: spec.Image, Args: spec.Args,
-			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts, PrivEsc: spec.AllowPrivilegeEscalation}
+			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts, PrivEsc: spec.AllowPrivilegeEscalation,
+			Volumes: volumeArgs(spec.Volumes)}
 		if spec.Network == "pod" && r.IP != "" && n != nil && n.PodCIDR != "" {
 			as.IP, as.DNS, as.Hosts = r.IP, podGateway(n.PodCIDR), nil // discovery via DNS instead
 		}
@@ -797,6 +804,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		}
 		resp.Policy = policyFor(st, n.ID)
 		resp.DNSRecords = st.DNSRecords
+		resp.NFSExports, resp.NFSMounts = storageFor(st, n.ID)
 		for _, a := range st.Apps {
 			if len(a.Egress) > 0 {
 				if resp.Egress == nil {
