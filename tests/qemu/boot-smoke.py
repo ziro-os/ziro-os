@@ -218,7 +218,7 @@ def disk_checks(con, check, qmp):
 def apps_checks(con, check):
     """Official signed catalogs end to end: plugins (s3-ziro + rclone backups) and apps."""
     rc, out = con.run("ziroctl plugin update", timeout=120)
-    check("plugin update: both official catalogs verify", rc == 0 and out.count("✓") == 2, out)
+    check("plugin update: both official catalogs verify", rc == 0 and "modules (serial" in out and "apps (serial" in out, out)
     rc, out = con.run("ziroctl plugin enable s3-ziro --set capacity=1G 2>&1 | tail -1; ziroctl plugin enable rclone-ziro 2>&1 | tail -1; "
                       "ziroctl backup create --remote ziro_s3:ziro-backups 2>&1 | tail -1", timeout=600)
     check("s3-ziro + rclone-ziro: backup uploaded to local S3", "Uploaded to ziro_s3:ziro-backups" in out, out)
@@ -226,7 +226,7 @@ def apps_checks(con, check):
                       "nerdctl exec ziro-app-postgres psql \"$U\" -tAc 'select 40+2'", timeout=900)
     check("apps deploy postgres: ready, credentials work", out.strip().endswith("42"), out)
     rc, out = con.run("ps -o args | grep -c '[p]assword'; ziroctl apps rm postgres | tail -1; ls /etc/ziro/apps/postgres.secrets "
-                      "/var/lib/ziro/apps/postgres/0 >/dev/null && echo KEPT", timeout=120)
+                      "/var/lib/ziro/apps/postgres/1 >/dev/null && echo KEPT", timeout=120)
     check("apps rm keeps data and credentials; no password in argv", out.split()[0] == "0" and "KEPT" in out, out)
     rc, out = con.run("ziroctl apps deploy valkey 2>&1 | tail -1; P=$(ziroctl apps credentials valkey | awk '/^password:/{print $2}'); "
                       "nerdctl exec -e VALKEYCLI_AUTH=$P ziro-app-valkey valkey-cli set k v; "
