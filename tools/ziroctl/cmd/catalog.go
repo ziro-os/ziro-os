@@ -69,11 +69,9 @@ type CatalogItem struct {
 }
 
 // Official repositories and the public halves of their signing keys (the private keys are CI
-// secrets of each repo). The pkgs key vouches for software that runs as root; the apps key only
-// for container definitions, so they are kept apart.
+// secrets of each repo).
 var officialRepos = []CatalogRepo{
 	{Name: "ziro", URL: "https://ziro-os.github.io/pkgs", Kind: "module", Official: true, Key: pkgsCatalogKey},
-	{Name: "ziro-apps", URL: "https://ziro-os.github.io/apps", Kind: "app", Official: true, Key: appsCatalogKey},
 }
 
 var (
