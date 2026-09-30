@@ -392,10 +392,8 @@ func startAPIServer() {
 			case "stop":
 				err = stopService(name)
 			case "restart":
-				_ = stopService(name)
-				time.Sleep(300 * time.Millisecond)
 				// deepcode ignore CommandInjection: same as above: name selects a trusted definition, it is never executed
-				err = startService(name)
+				err = restartService(name)
 			case "enable":
 				err = enableService(name)
 			case "disable":

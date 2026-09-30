@@ -212,6 +212,8 @@ def main():
 
         ok, out = retry(con, "ziroctl service status sentinel", lambda rc, o: "RUNNING" in o, 60)
         check("Sentinel started at boot (service boot)", ok, out)
+        rc, out = con.run("ziroctl service status crond")
+        check("crond started at boot", "RUNNING" in out, out)
         ok, out = retry(con, "nft list table inet ziro", lambda rc, o: rc == 0 and "policy drop" in o, 60)
         check("firewall table 'inet ziro' applied at boot", ok, out)
 
@@ -224,6 +226,26 @@ def main():
             ok, out = retry(con, "nerdctl run --rm docker.io/library/busybox:latest echo CONTAINER_OK",
                             lambda rc, o: "CONTAINER_OK" in o, 300, every=10)
             check("nerdctl run busybox", ok, out)
+
+        # Service lifecycle for init-supervised daemons. sshd rewrites its process title and
+        # ziro-init respawns both, so status/stop/restart must go through init, not around it.
+        rc, out = con.run("ziroctl service status sshd")
+        check("service status finds sshd (retitled process)", "RUNNING" in out, out)
+        con.run("cp /etc/ssh/sshd_config /tmp/sshd_config.bak && printf 'Port 22\\nPort 2222\\n' >> /etc/ssh/sshd_config")
+        rc, out = con.run("ziroctl service restart sshd && netstat -ltn | grep -c ':2222 ' && ps -o args | grep -c '[l]istener'")
+        check("service restart sshd applies new config (one listener)", rc == 0 and out.split()[-2:] == ["2", "1"], out)
+        con.run("echo 'NoSuchOption yes' >> /etc/ssh/sshd_config")
+        rc, out = con.run("P=$(cat /run/sshd.pid); ziroctl service restart sshd; [ \"$(cat /run/sshd.pid)\" = \"$P\" ] && echo KEPT")
+        check("broken sshd_config: restart refused, sshd kept", "config check failed" in out and "KEPT" in out, out)
+        con.run("cp /tmp/sshd_config.bak /etc/ssh/sshd_config")
+        rc, out = con.run("ziroctl service stop sshd && sleep 3 && ziroctl service status sshd; ps -o args | grep -c '[l]istener'")
+        check("service stop sshd stays stopped (init holds restart)", "STOPPED" in out and out.split()[-1] == "0", out)
+        rc, out = con.run("ziroctl service start sshd && ziroctl service status sshd && { netstat -ltn | grep -c ':2222 ' || true; }")
+        check("service start sshd (released to init, old config back)", rc == 0 and "RUNNING" in out and out.split()[-1] == "0", out)
+        rc, out = con.run("P=$(cat /run/containerd/containerd.pid); ziroctl service restart containerd && "
+                          "[ \"$(cat /run/containerd/containerd.pid)\" != \"$P\" ] && sleep 2 && "
+                          "nerdctl info >/dev/null && echo CRESTART")
+        check("service restart containerd (no race with init)", "CRESTART" in out, out)
         if args.installed:
             rc, out = con.run("ziro-install --disk /dev/vda --yes --hostname ziro-itest --password Ziro-Test-9 "
                               "</dev/null >/tmp/install.log 2>&1; echo INSTALL_RC=$?; tail -15 /tmp/install.log", timeout=600)
