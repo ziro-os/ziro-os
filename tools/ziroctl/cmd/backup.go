@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -84,6 +86,7 @@ func validateBackupArchive(path string) error {
 }
 
 var (
+	backupRemote         string
 	backupOutPath        string
 	backupForce          bool
 	backupIncludeSecrets bool
@@ -99,9 +102,65 @@ var backupCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a compressed (unencrypted, root-only) backup of system configurations and cluster state",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, err := createBackup(backupOutPath)
-		return err
+		if backupRemote != "" {
+			if err := checkRemote(backupRemote); err != nil {
+				return err
+			}
+		}
+		out, err := createBackup(backupOutPath)
+		if err != nil || backupRemote == "" {
+			return err
+		}
+		dst := strings.TrimSuffix(backupRemote, "/") + "/" + filepath.Base(out)
+		for _, f := range []string{out + ".sha256", out} { // checksum first: a remote archive is never without one
+			if err := rclone("copyto", f, dst+strings.TrimPrefix(f, out)); err != nil {
+				return err
+			}
+		}
+		fmt.Printf(" ✓ Uploaded to %s\n", dst)
+		return nil
 	},
+}
+
+// rclone remotes: the operator's in rcloneConfig (rclone-ziro plugin), and plugin-provided ones
+// as env files in rcloneEnvDir (RCLONE_CONFIG_<NAME>_*; s3-ziro adds ziro_s3). Env files are
+// accepted only root-owned and not world-readable (readEnvFile).
+var (
+	rcloneConfig = "/etc/ziro/rclone.conf"
+	rcloneEnvDir = "/etc/ziro/rclone.d"
+	remoteRe     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}:[A-Za-z0-9._/-]{0,512}$`)
+)
+
+// checkRemote accepts "remote:path" only: no flags, no "..", no local paths.
+func checkRemote(r string) error {
+	if !remoteRe.MatchString(r) || strings.Contains(r, "..") {
+		return fmt.Errorf("invalid remote %q (want name:path, e.g. ziro_s3:ziro-backups)", r)
+	}
+	return nil
+}
+
+func isRemoteRef(s string) bool { return !fileExists(s) && remoteRe.MatchString(s) }
+
+func rclone(args ...string) error {
+	bin, err := exec.LookPath("rclone")
+	if err != nil {
+		return fmt.Errorf("rclone not found (ziroctl plugin enable rclone-ziro)")
+	}
+	c := exec.Command(bin, append([]string{"--config", rcloneConfig}, args...)...)
+	c.Env = os.Environ()
+	envFiles, _ := filepath.Glob(filepath.Join(rcloneEnvDir, "*.env"))
+	for _, f := range envFiles {
+		env, err := readEnvFile(f)
+		if err != nil {
+			return err
+		}
+		c.Env = append(c.Env, env...)
+	}
+	c.Stdout, c.Stderr = os.Stdout, os.Stderr
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("rclone %s: %w", args[0], err)
+	}
+	return nil
 }
 
 // createBackup archives backupPaths into out (default: timestamped file in
@@ -154,6 +213,10 @@ func createBackup(out string) (string, error) {
 		for _, p := range []string{raftDir(), clusterCAKeyPath(), masterKeyPath(), dekPath()} {
 			tarArgs = append(tarArgs, "--exclude", strings.TrimPrefix(p, "/"))
 		}
+		// Plugin secrets and storage credentials: a backup shipped to that same storage must not
+		// carry the keys to it.
+		tarArgs = append(tarArgs, "--exclude", strings.TrimPrefix(moduleStateDir, "/")+"/*.secrets",
+			"--exclude", strings.TrimPrefix(rcloneConfig, "/"), "--exclude", strings.TrimPrefix(rcloneEnvDir, "/"))
 	}
 	tarArgs = append(tarArgs, existingPaths...)
 	archive := exec.Command("tar", tarArgs...)
@@ -249,11 +312,27 @@ var backupListCmd = &cobra.Command{
 }
 
 var backupRestoreCmd = &cobra.Command{
-	Use:   "restore <backup-file>",
+	Use:   "restore <backup-file | remote:path/file>",
 	Short: "Restore system configurations from a backup archive",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		archivePath := args[0]
+		if isRemoteRef(archivePath) {
+			// Fetch the archive and its checksum; a remote archive is restored only when both match.
+			if err := os.MkdirAll(defaultBackupDir, 0700); err != nil {
+				return err
+			}
+			local := filepath.Join(defaultBackupDir, path.Base(archivePath))
+			if fileExists(local) {
+				return fmt.Errorf("%s already exists locally; restore it by name", local)
+			}
+			for _, sfx := range []string{".sha256", ""} {
+				if err := rclone("copyto", archivePath+sfx, local+sfx); err != nil {
+					return err
+				}
+			}
+			archivePath = local
+		}
 		if !fileExists(archivePath) {
 			// Check default dir
 			altPath := filepath.Join(defaultBackupDir, archivePath)
@@ -319,6 +398,7 @@ func computeFileSHA256(path string) (string, error) {
 }
 
 func init() {
+	backupCreateCmd.Flags().StringVar(&backupRemote, "remote", "", "Also upload to an rclone remote (name:path, e.g. ziro_s3:ziro-backups; needs the rclone-ziro plugin)")
 	backupCreateCmd.Flags().StringVarP(&backupOutPath, "output", "o", "", "Destination path for backup tar.gz")
 	backupCreateCmd.Flags().BoolVar(&backupIncludeSecrets, "include-secrets", false, "Also include cluster app secrets (/etc/ziro/cluster/secrets.json)")
 	backupRestoreCmd.Flags().BoolVarP(&backupForce, "force", "f", false, "Force restore despite checksum mismatch")

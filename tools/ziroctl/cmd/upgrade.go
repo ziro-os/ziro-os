@@ -783,13 +783,18 @@ func fetchRelease(ctx context.Context, tag string) (*ghRelease, error) {
 // download streams url to dst (via dst.part), hashing while writing, and
 // returns the hex SHA-256. Bodies larger than max are rejected.
 func download(rawURL, dst string, max int64) (string, error) {
+	return downloadWith(upgradeHTTP, isTrustedURL, rawURL, dst, max)
+}
+
+// downloadWith is download with the caller's client (redirect policy) and URL trust check.
+func downloadWith(client *http.Client, trusted func(*url.URL) bool, rawURL, dst string, max int64) (string, error) {
 	u, err := url.Parse(rawURL)
-	if err != nil || !isTrustedURL(u) {
+	if err != nil || !trusted(u) {
 		return "", fmt.Errorf("refusing untrusted download URL %q", rawURL)
 	}
 	req, _ := http.NewRequest(http.MethodGet, rawURL, nil)
 	req.Header.Set("User-Agent", "ziroctl/"+Version)
-	resp, err := upgradeHTTP.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

@@ -2,30 +2,39 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-
-	"github.com/spf13/cobra"
 )
 
-// Modules: opt-in feature packs (security scanners, audit, ...). Nothing is preinstalled; enabling
-// a module installs its packages from the pinned Alpine repositories (apk verifies signatures),
-// writes hardened configuration, registers supervised services and checks health. The manifests
-// are embedded in ziroctl, so they are versioned and reviewed with it and cannot be altered on a
-// host. Adding a module is one JSON file in modules/ (see docs/modules.md).
+// Modules (also called plugins): opt-in feature packs (security scanners, audit, S3 storage, ...).
+// Nothing is preinstalled; enabling a module installs its packages from the pinned Alpine
+// repositories (apk verifies signatures) and its sha256-pinned artifacts, writes hardened
+// configuration, registers supervised services and checks health.
+//
+// Manifests come from two places:
+//   - built in: embedded in ziroctl (modules/*.json), reviewed and versioned with it
+//   - catalogs: signed repositories (ziro-os/pkgs, or a repo the admin added with its key; see
+//     catalog.go). A catalog can't shadow a built-in name, nor a third-party repo an official one.
+//
+// Enabling saves a copy of the manifest it used, so disable, upgrade and boot reconciliation keep
+// working when a catalog later changes or drops the module. See docs/modules.md.
 
 //go:embed modules/*.json
 var moduleFS embed.FS
@@ -40,18 +49,14 @@ type ModuleCmd struct {
 	Expect  string   `json:"expect,omitempty"`  // output must contain this (health checks)
 }
 
-type ModuleService struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Exec        string `json:"exec"`
-	Args        string `json:"args,omitempty"`
-	PIDFile     string `json:"pidfile"`
-	LogFile     string `json:"logfile"`
-}
+// ModuleService is a supervised daemon (/etc/ziro/services/<name>.conf, restart=always). User runs
+// it unprivileged; EnvFile (root-owned, not world-readable) passes it secrets outside argv.
+type ModuleService = ServiceDef
 
 type ModuleFile struct {
 	Path    string `json:"path"`
-	Mode    string `json:"mode"` // octal, e.g. "0644"
+	Mode    string `json:"mode"`            // octal, e.g. "0644"
+	Owner   string `json:"owner,omitempty"` // user[:group]; e.g. root:garage with 0640 for a daemon's config
 	Content string `json:"content"`
 }
 
@@ -61,21 +66,36 @@ type ModuleDir struct {
 	Owner string `json:"owner,omitempty"` // user[:group]
 }
 
+// ModuleArtifact is a file that isn't an Alpine package (a static binary, a helper script),
+// downloaded over https and checked against its sha256. It lives under /var/lib/ziro/plugins/<name>/
+// (kept across OS upgrades) and is removed on disable.
+type ModuleArtifact struct {
+	URL    string `json:"url"`
+	SHA256 string `json:"sha256"`
+	Path   string `json:"path"`
+	Mode   string `json:"mode"`
+	Arch   string `json:"arch,omitempty"` // x86_64 or aarch64; empty for any
+}
+
 type ModuleManifest struct {
-	Name        string          `json:"name"`
-	Version     string          `json:"version"`
-	Description string          `json:"description"`
-	Requires    []string        `json:"requires,omitempty"`
-	Packages    []string        `json:"packages,omitempty"`
-	MinMemoryMB int             `json:"min_memory_mb,omitempty"`
-	Dirs        []ModuleDir     `json:"dirs,omitempty"`
-	Files       []ModuleFile    `json:"files,omitempty"`
-	Cron        []string        `json:"cron,omitempty"`
-	Prepare     []ModuleCmd     `json:"prepare,omitempty"`    // after files, before services
-	Services    []ModuleService `json:"services,omitempty"`   // restart=always under ziro-init
-	PostStart   []ModuleCmd     `json:"post_start,omitempty"` // after services start
-	Stop        []ModuleCmd     `json:"stop,omitempty"`       // on disable, before services stop
-	Health      *ModuleCmd      `json:"health,omitempty"`
+	Name        string            `json:"name"`
+	Version     string            `json:"version"`
+	Description string            `json:"description"`
+	Source      string            `json:"source,omitempty"` // set when loaded: builtin, a repo name, or local
+	Requires    []string          `json:"requires,omitempty"`
+	Packages    []string          `json:"packages,omitempty"`
+	MinMemoryMB int               `json:"min_memory_mb,omitempty"`
+	Settings    []Setting         `json:"settings,omitempty"` // --set name=value; {{setting.name}}
+	Secrets     map[string]string `json:"secrets,omitempty"`  // name -> hex:N|base64:N|alnum:N; {{secret.name}}
+	Artifacts   []ModuleArtifact  `json:"artifacts,omitempty"`
+	Dirs        []ModuleDir       `json:"dirs,omitempty"`
+	Files       []ModuleFile      `json:"files,omitempty"`
+	Cron        []string          `json:"cron,omitempty"`
+	Prepare     []ModuleCmd       `json:"prepare,omitempty"`    // after files, before services
+	Services    []ModuleService   `json:"services,omitempty"`   // restart=always under ziro-init
+	PostStart   []ModuleCmd       `json:"post_start,omitempty"` // after services start
+	Stop        []ModuleCmd       `json:"stop,omitempty"`       // on disable, before services stop
+	Health      *ModuleCmd        `json:"health,omitempty"`
 }
 
 // ModuleState records exactly what enabling changed, so disable undoes only that.
@@ -88,9 +108,21 @@ type ModuleState struct {
 	Packages  []string          `json:"packages,omitempty"`
 	Files     map[string]string `json:"files,omitempty"` // path -> sha256 we wrote
 	Services  []string          `json:"services,omitempty"`
+	Artifacts []string          `json:"artifacts,omitempty"` // paths we downloaded
+	Settings  map[string]string `json:"settings,omitempty"`  // resolved --set values, reused by upgrade and re-enable
+	Source    string            `json:"source,omitempty"`
 	UpdatedAt string            `json:"updated_at"`
 }
 
+// moduleOpts are the operator's choices for an enable.
+type moduleOpts struct {
+	Auto  bool              // enabled only as a dependency
+	Force bool              // ignore the memory gate
+	Set   map[string]string // --set values
+}
+
+// loadManifests returns the built-in manifests, then verified catalog modules whose names are not
+// taken yet (official repos come first). A broken catalog is reported, never fatal.
 func loadManifests() (map[string]ModuleManifest, error) {
 	ents, err := moduleFS.ReadDir("modules")
 	if err != nil {
@@ -102,16 +134,64 @@ func loadManifests() (map[string]ModuleManifest, error) {
 		if err != nil {
 			return nil, err
 		}
-		var m ModuleManifest
-		if err := json.Unmarshal(b, &m); err != nil {
+		m, err := parseManifest(b)
+		if err != nil {
 			return nil, fmt.Errorf("%s: %w", e.Name(), err)
 		}
-		if err := m.validate(); err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Name(), err)
-		}
+		m.Source = "builtin"
 		out[m.Name] = m
 	}
+	items, errs := catalogItems("module")
+	for _, it := range items {
+		m, err := parseManifest(it.Data)
+		if err == nil && m.Name != it.Name {
+			err = fmt.Errorf("manifest name %q differs from its index entry", m.Name)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("repo %s: %s: %w", it.Repo, it.Name, err))
+			continue
+		}
+		if prev, taken := out[m.Name]; taken {
+			if prev.Source != it.Repo {
+				errs = append(errs, fmt.Errorf("repo %s: %s is already provided by %s; ignored", it.Repo, m.Name, prev.Source))
+			}
+			continue
+		}
+		m.Source = it.Repo
+		out[m.Name] = m
+	}
+	for _, err := range errs {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
 	return out, nil
+}
+
+// parseManifest decodes strictly (unknown fields are errors: a typo must not silently drop a
+// hardening setting) and validates.
+func parseManifest(b []byte) (ModuleManifest, error) {
+	var m ModuleManifest
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		return m, err
+	}
+	return m, m.validate()
+}
+
+func manifestSnapshotPath(name string) string { return filepath.Join(moduleStateDir, name+".manifest") }
+func moduleSecretsPath(name string) string    { return filepath.Join(moduleStateDir, name+".secrets") }
+
+// installedManifest is the manifest an enabled module was installed with (falling back to the
+// available one for modules enabled before snapshots existed).
+func installedManifest(all map[string]ModuleManifest, name string) (ModuleManifest, bool) {
+	if b, err := os.ReadFile(manifestSnapshotPath(name)); err == nil {
+		var m ModuleManifest
+		if json.Unmarshal(b, &m) == nil && m.validate() == nil {
+			return m, true
+		}
+	}
+	m, ok := all[name]
+	return m, ok
 }
 
 func (m ModuleManifest) validate() error {
@@ -124,13 +204,71 @@ func (m ModuleManifest) validate() error {
 		}
 		return nil
 	}
+	if err := validateSettings(m.Settings); err != nil {
+		return err
+	}
+	for k, spec := range m.Secrets {
+		if !settingNameRe.MatchString(k) {
+			return fmt.Errorf("secret %q: bad name", k)
+		}
+		if err := validSecretSpec(spec); err != nil {
+			return err
+		}
+	}
+	for _, p := range m.Packages {
+		if !apkNameRe.MatchString(p) {
+			return fmt.Errorf("bad package name %q", p)
+		}
+	}
+	for _, r := range m.Requires {
+		if err := validName(r); err != nil {
+			return err
+		}
+	}
+	pluginDir := filepath.Join(pluginRoot, m.Name) + "/"
+	for _, a := range m.Artifacts {
+		u, err := url.Parse(a.URL)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("artifact %s: URL must be https", a.Path)
+		}
+		if len(a.SHA256) != 64 || strings.Trim(a.SHA256, "0123456789abcdef") != "" {
+			return fmt.Errorf("artifact %s: sha256 must be 64 lowercase hex digits", a.Path)
+		}
+		if err := abs(a.Path); err != nil || !strings.HasPrefix(a.Path, pluginDir) {
+			return fmt.Errorf("artifact path %q must be under %s", a.Path, pluginDir)
+		}
+		if mode, err := strconv.ParseUint(a.Mode, 8, 32); err != nil || mode&0o022 != 0 {
+			return fmt.Errorf("artifact %s: mode %q must be octal and not group/world-writable", a.Path, a.Mode)
+		}
+		if a.Arch != "" && a.Arch != "x86_64" && a.Arch != "aarch64" {
+			return fmt.Errorf("artifact %s: arch must be x86_64 or aarch64", a.Path)
+		}
+	}
+	vars := m.placeholderNames()
 	for _, f := range m.Files {
 		if err := abs(f.Path); err != nil {
 			return err
 		}
-		if _, err := strconv.ParseUint(f.Mode, 8, 32); err != nil {
+		mode, err := strconv.ParseUint(f.Mode, 8, 32)
+		if err != nil {
 			return fmt.Errorf("file %s: bad mode %q", f.Path, f.Mode)
 		}
+		if _, err := expand(f.Content, vars); err != nil {
+			return fmt.Errorf("file %s: %w", f.Path, err)
+		}
+		if usesSecret(f.Content) && mode&0o007 != 0 {
+			return fmt.Errorf("file %s holds secrets: mode %s must not give others access", f.Path, f.Mode)
+		}
+	}
+	// Secrets go into files (0600/0640) or env files, never argv or crontabs (visible in ps).
+	noSecret := func(what, s string) error {
+		if usesSecret(s) {
+			return fmt.Errorf("%s: secrets can't be passed on a command line (use a file or env_file)", what)
+		}
+		if _, err := expand(s, vars); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
 	}
 	for _, d := range m.Dirs {
 		if err := abs(d.Path); err != nil {
@@ -146,8 +284,24 @@ func (m ModuleManifest) validate() error {
 		if err := abs(c.Exec); err != nil {
 			return err
 		}
+		for _, a := range c.Args {
+			if err := noSecret(c.Exec, a); err != nil {
+				return err
+			}
+		}
 	}
 	for _, s := range m.Services {
+		if err := noSecret("service "+s.Name, s.Args); err != nil {
+			return err
+		}
+		if s.User != "" && !userNameRe.MatchString(s.User) {
+			return fmt.Errorf("service %s: bad user %q", s.Name, s.User)
+		}
+		if s.EnvFile != "" {
+			if err := abs(s.EnvFile); err != nil {
+				return err
+			}
+		}
 		if err := validName(s.Name); err != nil {
 			return err
 		}
@@ -162,8 +316,83 @@ func (m ModuleManifest) validate() error {
 		if strings.ContainsAny(c, "\n\r") || len(strings.Fields(c)) < 6 {
 			return fmt.Errorf("bad cron line %q", c)
 		}
+		if err := noSecret("cron", c); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+var (
+	apkNameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,63}$`)
+	userNameRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	pluginRoot = "/var/lib/ziro/plugins"
+)
+
+func usesSecret(s string) bool {
+	for _, m := range placeholderRe.FindAllStringSubmatch(s, -1) {
+		if strings.HasPrefix(m[1], "secret.") {
+			return true
+		}
+	}
+	return false
+}
+
+// placeholderNames lists the placeholders a manifest may use (values empty: for validation).
+func (m ModuleManifest) placeholderNames() map[string]string {
+	v := map[string]string{}
+	for _, s := range m.Settings {
+		v["setting."+s.Name] = s.Default
+	}
+	for k := range m.Secrets {
+		v["secret."+k] = "x"
+	}
+	return v
+}
+
+// render expands placeholders in everything an install writes or runs.
+func (m ModuleManifest) render(vars map[string]string) (ModuleManifest, error) {
+	var err error
+	ex := func(s string) string {
+		if err != nil {
+			return s
+		}
+		var out string
+		out, err = expand(s, vars)
+		return out
+	}
+	r := m
+	r.Files = append([]ModuleFile(nil), m.Files...)
+	for i := range r.Files {
+		r.Files[i].Content = ex(r.Files[i].Content)
+	}
+	r.Cron = append([]string(nil), m.Cron...)
+	for i := range r.Cron {
+		r.Cron[i] = ex(r.Cron[i])
+		if strings.ContainsAny(r.Cron[i], "\n\r") {
+			return r, errors.New("cron line contains a newline after expansion")
+		}
+	}
+	r.Services = append([]ModuleService(nil), m.Services...)
+	for i := range r.Services {
+		r.Services[i].Args = ex(r.Services[i].Args)
+	}
+	cmds := func(in []ModuleCmd) []ModuleCmd {
+		out := append([]ModuleCmd(nil), in...)
+		for i := range out {
+			out[i].Args = append([]string(nil), out[i].Args...)
+			for j := range out[i].Args {
+				out[i].Args[j] = ex(out[i].Args[j])
+			}
+		}
+		return out
+	}
+	r.Prepare, r.PostStart, r.Stop = cmds(m.Prepare), cmds(m.PostStart), cmds(m.Stop)
+	if m.Health != nil {
+		h := cmds([]ModuleCmd{*m.Health})[0]
+		r.Health = &h
+	}
+	return r, err
 }
 
 func moduleStatePath(name string) string { return filepath.Join(moduleStateDir, name+".json") }
@@ -254,6 +483,7 @@ var (
 		}
 		return 0
 	}
+	artifactDownload   = func(rawURL, dst string, max int64) (string, error) { return catalogDownload(rawURL, dst, max) }
 	startModuleService = startService
 	stopModuleService  = stopService
 	cronPath           = "/etc/crontabs/root"
@@ -392,6 +622,9 @@ func writeModuleFiles(m ModuleManifest, st *ModuleState) error {
 		if err := writeFileAtomic(f.Path, []byte(f.Content), os.FileMode(mode)); err != nil {
 			return err
 		}
+		if err := moduleChown(f.Path, f.Owner); err != nil {
+			return err
+		}
 		st.Files[f.Path] = want
 	}
 	return nil
@@ -426,19 +659,54 @@ func setCron(name string, lines []string) error {
 	return writeFileAtomic(cronPath, []byte(strings.Join(kept, "\n")+"\n"), 0600)
 }
 
-func serviceConf(s ModuleService) string {
-	return fmt.Sprintf("name=%s\ndescription=%s\nexec=%s\nargs=%s\npidfile=%s\nlogfile=%s\nautostart=true\nrestart=always\n",
-		s.Name, s.Description, s.Exec, s.Args, s.PIDFile, s.LogFile)
+func serviceConf(s ModuleService) string { return supervisedConf(s) }
+
+// fetchArtifacts downloads the artifacts for this host's architecture unless a file with the
+// pinned sha256 is already in place.
+func fetchArtifacts(m ModuleManifest, st *ModuleState) error {
+	for _, a := range m.Artifacts {
+		if a.Arch != "" && a.Arch != strings.Replace(hostArch(), "arm64", "aarch64", 1) {
+			continue
+		}
+		p := modPath(a.Path)
+		if b, err := os.ReadFile(p); err != nil || sha256Hex(b) != a.SHA256 {
+			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+				return err
+			}
+			fmt.Printf("  downloading %s\n", filepath.Base(a.Path))
+			sum, err := artifactDownload(a.URL, p+".dl", 512<<20)
+			if err == nil && sum != a.SHA256 {
+				err = fmt.Errorf("%s: sha256 mismatch", a.URL)
+			}
+			if err != nil {
+				_ = os.Remove(p + ".dl")
+				return err
+			}
+			if err := os.Rename(p+".dl", p); err != nil {
+				return err
+			}
+		}
+		mode, _ := strconv.ParseUint(a.Mode, 8, 32)
+		if err := os.Chmod(p, os.FileMode(mode)); err != nil {
+			return err
+		}
+		st.Artifacts = uniq(append(st.Artifacts, p))
+	}
+	return nil
 }
 
 // ---- enable / disable ----
 
-// enableModule enables name and its dependencies (auto marks it as dependency-only).
-func enableModule(name string, auto, force bool) error {
+// enableModule enables name and its dependencies (opts.Auto marks it as dependency-only).
+func enableModule(name string, opts moduleOpts) error {
 	all, err := loadManifests()
 	if err != nil {
 		return err
 	}
+	return enableFrom(all, name, opts)
+}
+
+func enableFrom(all map[string]ModuleManifest, name string, opts moduleOpts) error {
 	order, err := enableOrder(all, name)
 	if err != nil {
 		return err
@@ -446,30 +714,49 @@ func enableModule(name string, auto, force bool) error {
 	enabled := enabledModules()
 	for _, n := range order {
 		if s := enabled[n]; s != nil && s.Status == "enabled" {
-			if n == name && !auto && s.Auto { // explicitly enabled now: no longer dependency-only
+			if n == name && !opts.Auto && s.Auto { // explicitly enabled now: no longer dependency-only
 				s.Auto = false
 				_ = saveModuleState(s)
 			}
 			continue
 		}
-		if err := installModule(all[n], auto || n != name, force); err != nil {
+		o := moduleOpts{Auto: opts.Auto || n != name, Force: opts.Force}
+		if n == name {
+			o.Set = opts.Set // --set applies to the module named, not its dependencies
+		}
+		if err := installModule(all[n], o); err != nil {
 			return fmt.Errorf("module %s: %w", n, err)
 		}
 	}
 	return nil
 }
 
-func installModule(m ModuleManifest, auto, force bool) error {
+func installModule(m ModuleManifest, opts moduleOpts) error {
 	fmt.Printf("==> Enabling module %s %s: %s\n", m.Name, m.Version, m.Description)
-	if m.MinMemoryMB > 0 && !force {
+	if m.MinMemoryMB > 0 && !opts.Force {
 		if mem := memTotalMB(); mem > 0 && mem < m.MinMemoryMB {
 			return fmt.Errorf("needs %d MB RAM, host has %d MB (--force to override)", m.MinMemoryMB, mem)
 		}
 	}
-	st := &ModuleState{Name: m.Name, Version: m.Version, Status: "installing", Auto: auto}
-	if prev, err := loadModuleState(m.Name); err == nil { // resume after a failed attempt
-		st.Files, st.Packages = prev.Files, prev.Packages
+	st := &ModuleState{Name: m.Name, Version: m.Version, Status: "installing", Auto: opts.Auto, Source: m.Source}
+	var prevSettings map[string]string
+	if prev, err := loadModuleState(m.Name); err == nil {
+		// Resume after a failed attempt, or upgrade: carry over only what this manifest still
+		// owns; upgradeModule removes the rest.
+		st.Files = map[string]string{}
+		for _, f := range m.Files {
+			if sum, ok := prev.Files[modPath(f.Path)]; ok {
+				st.Files[modPath(f.Path)] = sum
+			}
+		}
+		st.Packages = intersect(prev.Packages, m.Packages)
+		prevSettings = prev.Settings
 	}
+	settings, err := resolveSettings(m.Settings, prevSettings, opts.Set)
+	if err != nil {
+		return err
+	}
+	st.Settings = settings
 	if err := saveModuleState(st); err != nil {
 		return err
 	}
@@ -492,6 +779,24 @@ func installModule(m ModuleManifest, auto, force bool) error {
 			return fail(err)
 		}
 		st.Packages = uniq(append(st.Packages, missing...)) // only what this module added
+	}
+	secrets, err := loadOrCreateSecrets(moduleSecretsPath(m.Name), m.Secrets)
+	if err != nil {
+		return fail(err)
+	}
+	vars := map[string]string{}
+	for k, v := range settings {
+		vars["setting."+k] = v
+	}
+	for k, v := range secrets {
+		vars["secret."+k] = v
+	}
+	src := m
+	if m, err = m.render(vars); err != nil {
+		return fail(err)
+	}
+	if err := fetchArtifacts(m, st); err != nil {
+		return fail(err)
 	}
 	if err := ensureDirs(m); err != nil {
 		return fail(err)
@@ -531,12 +836,27 @@ func installModule(m ModuleManifest, auto, force bool) error {
 		}
 		fmt.Println("  health check passed")
 	}
+	// The snapshot keeps the unrendered manifest (no secrets); secrets stay in their 0600 file.
+	snap, _ := json.Marshal(src)
+	if err := writeFileAtomic(manifestSnapshotPath(m.Name), snap, 0644); err != nil {
+		return fail(err)
+	}
 	st.Status, st.Error = "enabled", ""
 	if err := saveModuleState(st); err != nil {
 		return err
 	}
 	fmt.Printf("✓ Module %s enabled\n", m.Name)
 	return nil
+}
+
+func intersect(a, b []string) []string {
+	var out []string
+	for _, x := range a {
+		if slices.Contains(b, x) {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 func uniq(in []string) []string {
@@ -558,10 +878,9 @@ func requiredBy(all map[string]ModuleManifest, enabled map[string]*ModuleState, 
 		if n == name {
 			continue
 		}
-		for _, r := range all[n].Requires {
-			if r == name {
-				out = append(out, n)
-			}
+		m, _ := installedManifest(all, n)
+		if slices.Contains(m.Requires, name) {
+			out = append(out, n)
 		}
 	}
 	sort.Strings(out)
@@ -581,7 +900,7 @@ func disableModule(name string) error {
 	if deps := requiredBy(all, enabled, name); len(deps) > 0 {
 		return fmt.Errorf("module %s is required by %s; disable those first", name, strings.Join(deps, ", "))
 	}
-	m := all[name]
+	m, _ := installedManifest(all, name)
 	undoModule(m, st)
 	delete(enabled, name)
 	// Dependencies that were only enabled for this module go too.
@@ -597,24 +916,40 @@ func disableModule(name string) error {
 
 // undoModule reverses exactly what installModule recorded in st.
 func undoModule(m ModuleManifest, st *ModuleState) {
-	name := m.Name
-	all, _ := loadManifests()
-	enabled := enabledModules()
-	fmt.Printf("==> Disabling module %s\n", name)
+	fmt.Printf("==> Disabling module %s\n", m.Name)
 	for _, c := range m.Stop {
 		if _, err := moduleExec(c); err != nil {
 			fmt.Printf("  ! %v\n", err)
 		}
 	}
+	removeFootprint(m.Name, st, ModuleManifest{Name: m.Name})
+	if len(m.Cron) > 0 {
+		_ = setCron(m.Name, nil)
+	}
+	for _, p := range []string{moduleStatePath(m.Name), manifestSnapshotPath(m.Name), moduleSecretsPath(m.Name)} {
+		_ = os.Remove(p)
+	}
+	fmt.Printf("✓ Module %s disabled\n", m.Name)
+}
+
+// removeFootprint removes what st recorded that keep (the manifest staying installed; empty on
+// disable) no longer has: services, files (unless edited by the admin), artifacts, and packages
+// no other enabled module lists. Shared by disable and upgrade.
+func removeFootprint(name string, st *ModuleState, keep ModuleManifest) {
+	all, _ := loadManifests()
+	enabled := enabledModules()
 	for _, s := range st.Services {
+		if slices.ContainsFunc(keep.Services, func(k ModuleService) bool { return k.Name == s }) {
+			continue
+		}
 		_ = stopModuleService(s)
 		_ = os.Remove(filepath.Join(servicesDir, s+".conf"))
 		_ = os.Remove(filepath.Join(stopMarkerDir, s))
 	}
-	if len(m.Cron) > 0 {
-		_ = setCron(name, nil)
-	}
 	for path, sum := range st.Files {
+		if slices.ContainsFunc(keep.Files, func(k ModuleFile) bool { return modPath(k.Path) == path }) {
+			continue
+		}
 		cur, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -630,15 +965,24 @@ func undoModule(m ModuleManifest, st *ModuleState) {
 			_ = os.Remove(path)
 		}
 	}
-	delete(enabled, name)
-	// Remove only packages this module added that no other enabled module still lists.
+	for _, p := range st.Artifacts {
+		if !slices.ContainsFunc(keep.Artifacts, func(k ModuleArtifact) bool { return modPath(k.Path) == p }) {
+			_ = os.Remove(p)
+		}
+	}
+	if len(keep.Artifacts) == 0 {
+		_ = os.Remove(modPath(filepath.Join(pluginRoot, name))) // only if empty
+	}
+	// Remove only packages this module added that nothing enabled (keep included) still lists.
 	var remove []string
 	for _, p := range st.Packages {
-		needed := false
+		needed := slices.Contains(keep.Packages, p)
 		for n := range enabled {
-			for _, q := range all[n].Packages {
-				needed = needed || q == p
+			if n == name {
+				continue
 			}
+			m, _ := installedManifest(all, n)
+			needed = needed || slices.Contains(m.Packages, p)
 		}
 		if !needed {
 			remove = append(remove, p)
@@ -649,8 +993,45 @@ func undoModule(m ModuleManifest, st *ModuleState) {
 			fmt.Printf("  ! %v\n", err)
 		}
 	}
-	_ = os.Remove(moduleStatePath(name))
-	fmt.Printf("✓ Module %s disabled\n", name)
+}
+
+// upgradeModule installs the available (newer) manifest over an enabled module, keeping its
+// settings and secrets, then removes what the old version had and the new one dropped.
+func upgradeModule(name string, force bool) error {
+	all, err := loadManifests()
+	if err != nil {
+		return err
+	}
+	st := enabledModules()[name]
+	if st == nil {
+		return fmt.Errorf("module %s is not enabled", name)
+	}
+	next, ok := all[name]
+	if !ok {
+		return fmt.Errorf("module %s is no longer in any catalog", name)
+	}
+	cur, _ := installedManifest(all, name)
+	if next.Version == cur.Version && st.Status == "enabled" && !force {
+		fmt.Printf("= module %s is up to date (%s)\n", name, cur.Version)
+		return nil
+	}
+	for _, r := range next.Requires {
+		if s := enabledModules()[r]; s == nil || s.Status != "enabled" {
+			if err := enableFrom(all, r, moduleOpts{Auto: true}); err != nil {
+				return err
+			}
+		}
+	}
+	old := *st
+	if err := installModule(next, moduleOpts{Auto: st.Auto, Force: force}); err != nil {
+		return err
+	}
+	if len(next.Cron) == 0 {
+		_ = setCron(name, nil)
+	}
+	removeFootprint(name, &old, next)
+	fmt.Printf("✓ Module %s upgraded %s -> %s\n", name, cur.Version, next.Version)
+	return nil
 }
 
 // reconcileModules re-applies enabled modules at boot: packages vanish after an OS upgrade and
@@ -661,8 +1042,12 @@ func reconcileModules() {
 		return
 	}
 	for name, st := range enabledModules() {
-		m, ok := all[name]
+		m, ok := installedManifest(all, name)
 		if !ok || st.Status != "enabled" {
+			continue
+		}
+		if m, err = renderInstalled(m, st); err != nil {
+			fmt.Printf("[modules] %s: %v\n", name, err)
 			continue
 		}
 		var missing []string
@@ -677,6 +1062,9 @@ func reconcileModules() {
 				fmt.Printf("[modules] %s: %v\n", name, err)
 				continue
 			}
+		}
+		if err := fetchArtifacts(m, st); err != nil {
+			fmt.Printf("[modules] %s: %v\n", name, err)
 		}
 		if err := ensureDirs(m); err != nil {
 			fmt.Printf("[modules] %s: %v\n", name, err)
@@ -697,6 +1085,28 @@ func reconcileModules() {
 	}
 }
 
+// renderInstalled expands an installed manifest with the settings and secrets it was enabled with.
+func renderInstalled(m ModuleManifest, st *ModuleState) (ModuleManifest, error) {
+	vars := map[string]string{}
+	settings, err := resolveSettings(m.Settings, st.Settings, nil)
+	if err != nil {
+		return m, err
+	}
+	for k, v := range settings {
+		vars["setting."+k] = v
+	}
+	if len(m.Secrets) > 0 {
+		secrets, err := loadOrCreateSecrets(moduleSecretsPath(m.Name), m.Secrets)
+		if err != nil {
+			return m, err
+		}
+		for k, v := range secrets {
+			vars["secret."+k] = v
+		}
+	}
+	return m.render(vars)
+}
+
 // moduleBootHooks re-runs post-start steps after boot (e.g. kernel audit rules are not persistent).
 func moduleBootHooks() {
 	all, err := loadManifests()
@@ -704,180 +1114,18 @@ func moduleBootHooks() {
 		return
 	}
 	for name, st := range enabledModules() {
-		if st.Status != "enabled" {
+		m, ok := installedManifest(all, name)
+		if !ok || st.Status != "enabled" {
 			continue
 		}
-		for _, c := range all[name].PostStart {
+		if m, err = renderInstalled(m, st); err != nil {
+			fmt.Printf("[modules] %s: %v\n", name, err)
+			continue
+		}
+		for _, c := range m.PostStart {
 			if _, err := moduleExec(c); err != nil {
 				fmt.Printf("[modules] %s: %v\n", name, err)
 			}
 		}
 	}
-}
-
-// ---- CLI ----
-
-var (
-	moduleForce bool
-	moduleAsync bool
-)
-
-var moduleCmd = &cobra.Command{
-	Use:   "module",
-	Short: "Opt-in feature modules (security packs, audit, ...): list, enable, disable",
-}
-
-type moduleInfo struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Description string   `json:"description"`
-	Requires    []string `json:"requires,omitempty"`
-	Status      string   `json:"status"`
-	Error       string   `json:"error,omitempty"`
-	Auto        bool     `json:"auto,omitempty"`
-}
-
-func listModules() ([]moduleInfo, error) {
-	all, err := loadManifests()
-	if err != nil {
-		return nil, err
-	}
-	enabled := enabledModules()
-	var out []moduleInfo
-	for _, m := range all {
-		mi := moduleInfo{Name: m.Name, Version: m.Version, Description: m.Description, Requires: m.Requires, Status: "available"}
-		if s := enabled[m.Name]; s != nil {
-			mi.Status, mi.Error, mi.Auto = s.Status, s.Error, s.Auto
-		}
-		out = append(out, mi)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
-}
-
-var moduleListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List available and enabled modules",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		mods, err := listModules()
-		if err != nil {
-			return err
-		}
-		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(mods)
-		}
-		fmt.Printf("%-12s %-8s %-12s %s\n", "MODULE", "VERSION", "STATUS", "DESCRIPTION")
-		for _, m := range mods {
-			st := m.Status
-			if m.Auto {
-				st += "*"
-			}
-			fmt.Printf("%-12s %-8s %-12s %s\n", m.Name, m.Version, st, m.Description)
-		}
-		fmt.Println("\n* enabled as a dependency. Enable one: ziroctl module enable <name>")
-		return nil
-	},
-}
-
-var moduleInfoCmd = &cobra.Command{
-	Use:   "info <name>",
-	Short: "Show what a module installs and configures",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		all, err := loadManifests()
-		if err != nil {
-			return err
-		}
-		m, ok := all[args[0]]
-		if !ok {
-			return fmt.Errorf("unknown module %q", args[0])
-		}
-		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(m)
-		}
-		fmt.Printf("%s %s: %s\n", m.Name, m.Version, m.Description)
-		if len(m.Requires) > 0 {
-			fmt.Printf("  requires: %s\n", strings.Join(m.Requires, ", "))
-		}
-		if len(m.Packages) > 0 {
-			fmt.Printf("  packages: %s\n", strings.Join(m.Packages, ", "))
-		}
-		for _, s := range m.Services {
-			fmt.Printf("  service:  %s (%s)\n", s.Name, s.Description)
-		}
-		for _, f := range m.Files {
-			fmt.Printf("  config:   %s\n", f.Path)
-		}
-		for _, c := range m.Cron {
-			fmt.Printf("  schedule: %s\n", c)
-		}
-		if m.MinMemoryMB > 0 {
-			fmt.Printf("  memory:   needs %d MB RAM\n", m.MinMemoryMB)
-		}
-		return nil
-	},
-}
-
-var moduleEnableCmd = &cobra.Command{
-	Use:   "enable <name>",
-	Short: "Install and configure a module (and its dependencies)",
-	Example: `  ziroctl module enable clamav     # antivirus: clamd + signature updates + daily scans
-  ziroctl module enable security   # the full security pack`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if moduleAsync {
-			return startModuleJob("enable", args[0])
-		}
-		return enableModule(args[0], false, moduleForce)
-	},
-}
-
-var moduleDisableCmd = &cobra.Command{
-	Use:   "disable <name>",
-	Short: "Stop a module and remove exactly what enabling it added",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if moduleAsync {
-			return startModuleJob("disable", args[0])
-		}
-		return disableModule(args[0])
-	},
-}
-
-var moduleReconcileCmd = &cobra.Command{
-	Use:    "reconcile",
-	Hidden: true,
-	Short:  "Re-apply enabled modules (run at boot)",
-	Run:    func(cmd *cobra.Command, args []string) { reconcileModules() },
-}
-
-// startModuleJob runs `ziroctl module <action> <name>` detached (enable can download hundreds of
-// MB); progress goes to /var/log/ziro-modules.log and the module status.
-func startModuleJob(action, name string) error {
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	log, err := os.OpenFile("/var/log/ziro-modules.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
-	if err != nil {
-		return err
-	}
-	defer log.Close()
-	c := exec.Command(self, "module", action, name)
-	c.Stdout, c.Stderr = log, log
-	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := c.Start(); err != nil {
-		return err
-	}
-	fmt.Printf("Started: module %s %s (PID %d); follow /var/log/ziro-modules.log or `ziroctl module list`\n", action, name, c.Process.Pid)
-	return c.Process.Release()
-}
-
-func init() {
-	moduleEnableCmd.Flags().BoolVar(&moduleForce, "force", false, "Enable even if the host has less memory than the module needs")
-	for _, c := range []*cobra.Command{moduleEnableCmd, moduleDisableCmd} {
-		c.Flags().BoolVar(&moduleAsync, "background", false, "Run in the background and return immediately")
-	}
-	moduleCmd.AddCommand(moduleListCmd, moduleInfoCmd, moduleEnableCmd, moduleDisableCmd, moduleReconcileCmd)
-	rootCmd.AddCommand(moduleCmd)
 }

@@ -56,6 +56,8 @@ func TestManifestValidationRejectsUnsafe(t *testing.T) {
 func stubModules(t *testing.T) (root string, installed map[string]bool, started *[]string) {
 	root = t.TempDir()
 	moduleStateDir = filepath.Join(root, "modules")
+	catalogDir = filepath.Join(root, "catalog")
+	reposPath = filepath.Join(root, "repos.json")
 	servicesDir = filepath.Join(root, "services")
 	cronPath = filepath.Join(root, "crontab")
 	alertConfigPath = filepath.Join(root, "alerting.json")
@@ -94,7 +96,7 @@ func TestModuleEnableDisableRoundTrip(t *testing.T) {
 		Files:    []ModuleFile{{Path: cfg, Mode: "0644", Content: "managed\n"}},
 		Cron:     []string{"30 3 * * * /usr/bin/ziroctl security scan --av --quiet"},
 		Services: []ModuleService{{Name: "demod", Exec: "/usr/sbin/demod", PIDFile: "/run/ziro-demod.pid", LogFile: "/var/log/demod.log"}}}
-	if err := installModule(m, false, false); err != nil {
+	if err := installModule(m, moduleOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := loadModuleState("demo")
@@ -116,7 +118,7 @@ func TestModuleEnableDisableRoundTrip(t *testing.T) {
 		t.Fatalf("cron %s", cron)
 	}
 	// Re-enabling is idempotent (no duplicate cron lines).
-	if err := installModule(m, false, false); err != nil {
+	if err := installModule(m, moduleOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if cron, _ := os.ReadFile(cronPath); strings.Count(string(cron), "security scan --av") != 1 {
@@ -144,12 +146,12 @@ func TestModuleKeepsAdminEdits(t *testing.T) {
 	root, _, _ := stubModules(t)
 	cfg := filepath.Join(root, "x.conf")
 	m := ModuleManifest{Name: "demo", Version: "1", Files: []ModuleFile{{Path: cfg, Mode: "0644", Content: "v1\n"}}}
-	if err := installModule(m, false, false); err != nil {
+	if err := installModule(m, moduleOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	os.WriteFile(cfg, []byte("admin tuned\n"), 0644)
 	m.Files[0].Content = "v2\n"
-	if err := installModule(m, false, false); err != nil { // e.g. reinstall after an upgrade
+	if err := installModule(m, moduleOpts{}); err != nil { // e.g. reinstall after an upgrade
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(cfg); string(b) != "admin tuned\n" {
@@ -166,10 +168,10 @@ func TestModuleMemoryGate(t *testing.T) {
 	stubModules(t)
 	memTotalMB = func() int { return 1024 }
 	m := ModuleManifest{Name: "big", Version: "1", MinMemoryMB: 1536}
-	if err := installModule(m, false, false); err == nil || !strings.Contains(err.Error(), "1536 MB") {
+	if err := installModule(m, moduleOpts{}); err == nil || !strings.Contains(err.Error(), "1536 MB") {
 		t.Fatalf("memory gate: %v", err)
 	}
-	if err := installModule(m, false, true); err != nil {
+	if err := installModule(m, moduleOpts{Force: true}); err != nil {
 		t.Fatalf("--force: %v", err)
 	}
 }
@@ -193,7 +195,7 @@ func TestSecurityPackAutoDependencies(t *testing.T) {
 	moduleDirRoot = t.TempDir()
 	defer func() { moduleDirRoot = "" }()
 
-	if err := enableModule("security", false, false); err != nil {
+	if err := enableModule("security", moduleOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	en := enabledModules()
@@ -204,7 +206,7 @@ func TestSecurityPackAutoDependencies(t *testing.T) {
 		t.Fatalf("disabling a dependency of an enabled pack must be refused: %v", err)
 	}
 	// The admin also enables auditd explicitly: it must survive disabling the pack.
-	if err := enableModule("auditd", false, false); err != nil {
+	if err := enableModule("auditd", moduleOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := disableModule("security"); err != nil {

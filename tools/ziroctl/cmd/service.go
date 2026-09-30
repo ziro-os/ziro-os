@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -24,7 +25,9 @@ type ServiceDef struct {
 	Args        string `json:"args"`
 	PIDFile     string `json:"pidfile"`
 	LogFile     string `json:"logfile"`
-	Check       string `json:"check,omitempty"` // args that make exec validate its config (sshd: -t)
+	Check       string `json:"check,omitempty"`    // args that make exec validate its config (sshd: -t)
+	User        string `json:"user,omitempty"`     // run as this user (and its primary group) instead of root
+	EnvFile     string `json:"env_file,omitempty"` // KEY=VALUE lines added to the environment (root-owned, not world-readable)
 	Autostart   bool   `json:"autostart"`
 }
 
@@ -453,6 +456,10 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 						def.LogFile = v
 					case "check":
 						def.Check = v
+					case "user":
+						def.User = v
+					case "env_file":
+						def.EnvFile = v
 					case "autostart":
 						def.Autostart = (v == "true" || v == "1" || v == "yes")
 					}
@@ -648,6 +655,12 @@ func startService(name string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
 	}
+	if err := applyServiceIdentity(cmd, def); err != nil {
+		if logF != nil {
+			logF.Close()
+		}
+		return err
+	}
 
 	if err := cmd.Start(); err != nil {
 		if logF != nil {
@@ -822,4 +835,68 @@ func init() {
 	serviceCmd.AddCommand(serviceBootCmd)
 	serviceCmd.AddCommand(serviceRotateLogsCmd)
 	rootCmd.AddCommand(serviceCmd)
+}
+
+// applyServiceIdentity drops the daemon to def.User and adds def.EnvFile to its environment.
+// Env files hold secrets (a plugin's generated tokens), so only a root-owned file that others
+// can't read or write is accepted.
+func applyServiceIdentity(cmd *exec.Cmd, def *ServiceDef) error {
+	if def.EnvFile != "" {
+		env, err := readEnvFile(def.EnvFile)
+		if err != nil {
+			return err
+		}
+		cmd.Env = append(os.Environ(), env...)
+	}
+	if def.User == "" || def.User == "root" {
+		return nil
+	}
+	u, err := user.Lookup(def.User)
+	if err != nil {
+		return fmt.Errorf("service %s: user %q: %w", def.Name, def.User, err)
+	}
+	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
+	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
+	cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}}
+	return nil
+}
+
+func readEnvFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !rootOwnedFile(fi) || fi.Mode().Perm()&0o004 != 0 {
+		return nil, fmt.Errorf("env file %s must be a root-owned regular file, not world-readable or group/world-writable", path)
+	}
+	var env []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		l := strings.TrimSpace(sc.Text())
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		if k, _, ok := strings.Cut(l, "="); !ok || k == "" {
+			return nil, fmt.Errorf("env file %s: bad line (want KEY=VALUE)", path)
+		}
+		env = append(env, l)
+	}
+	return env, sc.Err()
+}
+
+// supervisedConf renders a definition as /etc/ziro/services/<name>.conf, supervised by ziro-init
+// (restart=always).
+func supervisedConf(d ServiceDef) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "name=%s\ndescription=%s\nexec=%s\nargs=%s\npidfile=%s\nlogfile=%s\n", d.Name, d.Description, d.Exec, d.Args, d.PIDFile, d.LogFile)
+	if d.User != "" {
+		fmt.Fprintf(&b, "user=%s\n", d.User)
+	}
+	if d.EnvFile != "" {
+		fmt.Fprintf(&b, "env_file=%s\n", d.EnvFile)
+	}
+	b.WriteString("autostart=true\nrestart=always\n")
+	return b.String()
 }
