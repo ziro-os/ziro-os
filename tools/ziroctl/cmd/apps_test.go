@@ -96,7 +96,7 @@ func TestAppDeployLocal(t *testing.T) {
 	pw := secrets["POSTGRES_PASSWORD"]
 	joined := strings.Join(run, " ")
 	for _, want := range []string{"--name ziro-app-db", "--security-opt no-new-privileges", "--cap-drop NET_RAW", "-p 127.0.0.1:5432:5432",
-		"--label ziro.apps=db", "ZIRO_REPLICA=0", "--env-file", dataDir("db", 0, "/var/lib/postgresql/data") + ":/var/lib/postgresql/data",
+		"--label ziro.apps=db", "ZIRO_REPLICA=1", "--env-file", dataDir("db", 1, "/var/lib/postgresql/data") + ":/var/lib/postgresql/data",
 		"-- docker.io/library/postgres:18"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("run args lack %q: %s", want, joined)
@@ -130,11 +130,11 @@ func TestAppDeployLocal(t *testing.T) {
 	}
 
 	// rm keeps data and credentials; --purge deletes them.
-	os.MkdirAll(dataDir("db", 0, "/var/lib/postgresql/data"), 0700)
+	os.MkdirAll(dataDir("db", 1, "/var/lib/postgresql/data"), 0700)
 	if err := removeAppInstance("db", false); err != nil {
 		t.Fatal(err)
 	}
-	if !fileExists(appSecretsPath("db")) || !fileExists(dataDir("db", 0, "/var/lib/postgresql/data")) {
+	if !fileExists(appSecretsPath("db")) || !fileExists(dataDir("db", 1, "/var/lib/postgresql/data")) {
 		t.Fatal("rm without --purge lost data or credentials")
 	}
 	saveAppInstance(in)
@@ -186,7 +186,7 @@ func TestAppDeployCluster(t *testing.T) {
 	st, _ := readState()
 	a := st.app("mc")
 	if a == nil || a.Replicas != 3 || !slices.Equal(a.Data, []string{"/var/lib/mysql"}) || !slices.Equal(a.Secrets, []string{"app-mc"}) ||
-		a.Env["ZIRO_PEERS"] != "0.mc.cluster.ziro,1.mc.cluster.ziro,2.mc.cluster.ziro" || !slices.Contains(a.AllowFrom, "mc") || !slices.Contains(a.AllowFrom, "web") {
+		a.Env["ZIRO_PEERS"] != "1.mc.cluster.ziro,2.mc.cluster.ziro,3.mc.cluster.ziro" || !slices.Contains(a.AllowFrom, "mc") || !slices.Contains(a.AllowFrom, "web") {
 		t.Fatalf("app %+v", a)
 	}
 	pw := st.Secrets["app-mc"]["GR_PASSWORD"]

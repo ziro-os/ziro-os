@@ -31,7 +31,7 @@ ziroctl apps deploy mysql-cluster --replicas 5 --allow-from api
     no `NET_RAW`, and `restart always`.
   - The app's port is published on `127.0.0.1` by default. `--publish` picks the host port, and `--bind 0.0.0.0`
     exposes it.
-  - Data lives in `/var/lib/ziro/apps/<name>/0/`.
+  - Data lives in `/var/lib/ziro/apps/<name>/1/`.
   - Credentials are in `/etc/ziro/apps/<name>.secrets` (0600).
 - **On a cluster master:**
   - Each component becomes a cluster app. The image policy, scheduling, rolling updates and rollback all apply.
@@ -61,16 +61,16 @@ needs a dump and restore). To change major versions, deploy a new instance with 
 ### mysql-cluster
 
 The replicas find each other by stable DNS names, `<replica>.<name>.cluster.ziro` (for example
-`0.mysql-cluster.cluster.ziro`).
+`1.mysql-cluster.cluster.ziro`).
 
-- **First start:** replica 0 bootstraps the group once every peer answers and none of them is in a group yet. The
+- **First start:** replica 1 bootstraps the group once every peer answers and none of them is in a group yet. The
   other replicas join.
 - **Rejoining:** a restarted member rejoins by itself. A replica that starts empty receives the data from the
   group.
 - **Writes:** writes go to the primary, and any member tells you which one it is:
   `SELECT MEMBER_HOST FROM performance_schema.replication_group_members WHERE MEMBER_ROLE='PRIMARY'`.
 - **Failover:** when the primary fails, the others elect a new one within seconds. Use an odd number of replicas.
-- **After a full outage** where a member is gone for good, replica 0 won't bootstrap on its own. This is on
+- **After a full outage** where a member is gone for good, replica 1 won't bootstrap on its own. This is on
   purpose: under a network partition, it would otherwise start a second group. Bootstrap it by hand on the member
   with the most data:
 
@@ -125,7 +125,7 @@ Rules, enforced when a definition is loaded (catalog CI and every host):
 - **Placeholders:** `{{setting.x}}`, `{{app}}` (the component's name), `{{peers}}` (every replica's DNS name,
   comma-separated), `{{replicas}}`, and in outputs `{{host}}`, `{{port}}` and `{{secret.x}}`. They substitute values
   only.
-- **Containers:** each container gets `ZIRO_APP`, `ZIRO_REPLICA` (0, 1, ...) and, for `"cluster": true` apps,
+- **Containers:** each container gets `ZIRO_APP`, `ZIRO_REPLICA` (1, 2, ...) and, for `"cluster": true` apps,
   `ZIRO_PEERS`.
 - **Replicas:** several replicas need `"cluster": true`. `max_replicas` allows `--replicas`.
 - **Privileges:** run the process as the image's own user, not root. If the command is wrapped in a shell, drop

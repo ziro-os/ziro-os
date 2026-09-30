@@ -371,6 +371,9 @@ func deployAppRef(ref string, o appDeployOpts) error {
 		err = deployAppLocal(in, o)
 	}
 	if err != nil {
+		if len(in.Components) > 0 { // keep what was created, so `apps list` shows it and `apps rm` cleans it up
+			_ = saveAppInstance(in)
+		}
 		return err
 	}
 	if err := saveAppInstance(in); err != nil {
@@ -387,7 +390,7 @@ func deployAppRef(ref string, o appDeployOpts) error {
 func componentSpec(in *AppInstance, c AppComponent, replicas int) (env map[string]string, args, health []string, err error) {
 	app := componentApp(in.Name, in.Def, c)
 	var peers []string
-	for i := 0; i < replicas; i++ {
+	for i := 1; i <= replicas; i++ { // replica indexes start at 1, like the cluster scheduler's
 		peers = append(peers, strconv.Itoa(i)+"."+app+"."+meshDomain)
 	}
 	vars := map[string]string{"app": app, "peers": strings.Join(peers, ","), "replicas": strconv.Itoa(replicas), "host": app}
@@ -528,7 +531,8 @@ func deployAppLocal(in *AppInstance, o appDeployOpts) error {
 			return err
 		}
 		name := componentApp(in.Name, d, c)
-		a := Assignment{Name: "ziro-app-" + name, App: name, Image: d.Versions[in.Version].Images[c.Name], Args: args, Env: env, Data: c.Data}
+		a := Assignment{Name: "ziro-app-" + name, App: name, Image: d.Versions[in.Version].Images[c.Name], Args: args, Env: env,
+			Data: c.Data, Replica: 1}
 		for _, s := range c.Secrets {
 			if a.SecretEnv == nil {
 				a.SecretEnv = map[string]string{}
@@ -557,6 +561,7 @@ func deployAppLocal(in *AppInstance, o appDeployOpts) error {
 		err = appNerdctl(containerArgs(a, "ziro.apps="+in.Name)...)
 		_ = os.Remove(secretEnvFile(a.Name)) // nerdctl copied it into the container spec
 		if err != nil {
+			_ = appNerdctl("rm", "-f", a.Name)
 			return err
 		}
 		in.Components = append(in.Components, a.Name)

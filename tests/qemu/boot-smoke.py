@@ -234,12 +234,12 @@ def apps_checks(con, check):
                       "awk \"/^Uid/{print \\$2}\" $p/status; done'", timeout=600)
     check("apps deploy valkey: auth works, server not root", "OK" in out and out.split()[-1] != "0", out)
     rc, out = con.run("ziroctl apps rm valkey --purge | tail -1; ziroctl apps rm postgres --purge >/dev/null 2>&1; "
-                      "ziroctl cluster init --advertise 10.0.2.15 >/dev/null 2>&1; ziroctl apps deploy mysql-cluster 2>&1 | tail -1", timeout=300)
+                      "ziroctl cluster init --advertise 10.0.2.15 >/dev/null 2>&1; ziroctl apps deploy mysql-cluster 2>&1 | grep deployed", timeout=300)
     check("apps deploy mysql-cluster on a one-node cluster", "deployed" in out, out)
     q = ("R=$(ziroctl apps credentials mysql-cluster | awk '/^root_password:/{print $2}'); "
-         "C=$(nerdctl ps --format '{{.Names}}' | grep zc-mysql-cluster-0); "
+         "C=$(nerdctl ps --format '{{.Names}}' | grep zc-mysql-cluster-1); "
          "nerdctl exec $C mysql -uroot -p$R -N -e \"SELECT MEMBER_STATE FROM performance_schema.replication_group_members\" 2>/dev/null")
-    ok, out = retry(con, q, lambda rc, o: o.count("ONLINE") == 3, 900, every=15)
+    ok, out = retry(con, q, lambda rc, o: o.count("ONLINE") == 3, 2400, every=15)  # the first pull is ~850 MB
     check("mysql-cluster: 3 members ONLINE (group replication over pod DNS)", ok, out)
 
 
