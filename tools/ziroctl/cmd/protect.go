@@ -204,6 +204,11 @@ func applyGuard(cfg FirewallConfig) error {
 	return nftRun(script)
 }
 
+// guardActive reports whether the guard table is actually loaded (not just configured).
+func guardActive() bool {
+	return exec.Command("nft", "list", "table", "inet", "ziro_guard").Run() == nil
+}
+
 func removeGuard() error {
 	return nftRun("table " + guardTable + "\ndelete table " + guardTable + "\n")
 }
@@ -684,12 +689,12 @@ var protectStatusCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fw := loadFirewallConfig()
 		g := fw.Guard.withDefaults()
-		active := fw.Enabled && !fw.Guard.Disabled
+		active := fw.Enabled && !fw.Guard.Disabled && guardActive()
 		bans, _ := listBans()
 		if jsonOutput {
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{"active": active, "config": g, "bans": len(bans)})
 		}
-		fmt.Printf("Ziro Guard:   %s\n", map[bool]string{true: "active", false: "inactive (firewall disabled or guard disabled)"}[active])
+		fmt.Printf("Ziro Guard:   %s\n", map[bool]string{true: "active", false: "inactive (firewall or guard disabled, or the kernel lacks nftables limit/connlimit; see /var/log/firewall.log)"}[active])
 		fmt.Printf("SYN flood:    > %d new connections/s per source are dropped\n", g.SynRate)
 		fmt.Printf("Conn limit:   > %d concurrent connections per source are dropped\n", g.ConnLimit)
 		fmt.Printf("ICMP flood:   > %d packets/s per source are dropped\n", g.ICMPRate)

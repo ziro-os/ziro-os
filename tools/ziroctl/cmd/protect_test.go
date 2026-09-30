@@ -185,13 +185,15 @@ func TestHostAuditScore(t *testing.T) {
 	// One weak value: ptrace_scope 0 fails, and a stricter-than-minimum value (3) passes.
 	os.WriteFile(filepath.Join(root, "/proc/sys/kernel/yama/ptrace_scope"), []byte("0\n"), 0644)
 	os.WriteFile(filepath.Join(root, "/proc/sys/kernel/perf_event_paranoid"), []byte("3\n"), 0644)
+	// A feature compiled out of the kernel has no sysctl: that is the strictest state, not a failure.
+	os.Remove(filepath.Join(root, "/proc/sys/kernel/kexec_load_disabled"))
 	checks := hostAudit(root)
 	byID := map[string]AuditCheck{}
 	for _, c := range checks {
 		byID[c.ID] = c
 	}
 	if byID["sysctl:kernel.yama.ptrace_scope"].Pass || !byID["sysctl:kernel.perf_event_paranoid"].Pass ||
-		!byID["sysctl:kernel.kptr_restrict"].Pass {
+		!byID["sysctl:kernel.kptr_restrict"].Pass || !byID["sysctl:kernel.kexec_load_disabled"].Pass {
 		t.Fatalf("sysctl checks wrong: %+v", byID)
 	}
 	if s := auditScore(checks); s <= 0 || s >= 100 {

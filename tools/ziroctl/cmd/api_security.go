@@ -42,7 +42,7 @@ func registerSecurityRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc
 	mux.HandleFunc("/api/v1/security/protect", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		fw := loadFirewallConfig()
 		bans, _ := listBans()
-		_ = json.NewEncoder(w).Encode(map[string]any{"active": fw.Enabled && !fw.Guard.Disabled,
+		_ = json.NewEncoder(w).Encode(map[string]any{"active": fw.Enabled && !fw.Guard.Disabled && guardActive(),
 			"config": fw.Guard.withDefaults(), "bans": len(bans)})
 	}))
 	mux.HandleFunc("/api/v1/security/bans", wrap(false, func(w http.ResponseWriter, r *http.Request) {

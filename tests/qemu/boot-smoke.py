@@ -215,9 +215,10 @@ def main():
         rc, out = con.run("ziroctl service status crond")
         check("crond started at boot", "RUNNING" in out, out)
         # Ziro Guard: an "attacker" in its own network namespace (veth, so traffic isn't loopback).
-        rc, out = con.run("sysctl -n kernel.kexec_load_disabled kernel.perf_event_paranoid net.ipv4.conf.all.log_martians; "
+        # Sysctls present on every kernel (perf/kexec may be compiled out of the custom flavor).
+        rc, out = con.run("sysctl -n net.ipv4.conf.all.log_martians net.ipv4.tcp_rfc1337 dev.tty.ldisc_autoload; "
                           "ziroctl security audit --json | grep -o '\"score\":[0-9]*'")
-        check("hardening sysctls applied, audit score 100", out.split()[:3] == ["1", "3", "1"] and '"score":100' in out, out)
+        check("hardening sysctls applied, audit score 100", out.split()[:3] == ["1", "1", "0"] and '"score":100' in out, out)
         rc, out = con.run("unshare -n sleep 900 & echo $! > /tmp/atk.pid; sleep 1; A=$(cat /tmp/atk.pid); "
                           # iproute2 (/sbin/ip): busybox ip ignores "peer name".
                           "/sbin/ip link add atk0 type veth peer name atk1 && /sbin/ip link set atk1 netns $A && "

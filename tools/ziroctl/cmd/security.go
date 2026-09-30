@@ -79,31 +79,34 @@ type AuditCheck struct {
 }
 
 // auditSysctls: key -> minimum value (all of these are "higher is stricter" or exact booleans).
+// absentOK: the sysctl only exists when its feature is built in, so its absence is the strictest
+// possible state (e.g. no perf events or kexec at all on the custom kernel).
 var auditSysctls = []struct {
 	key, control string
 	min          int
 	exact        bool
+	absentOK     bool
 }{
-	{"kernel.randomize_va_space", "CIS 1.5.1", 2, true},
-	{"fs.suid_dumpable", "CIS 1.5.2", 0, true},
-	{"kernel.kptr_restrict", "CIS 1.5.3", 2, true},
-	{"kernel.dmesg_restrict", "CIS 1.5.3", 1, true},
-	{"kernel.yama.ptrace_scope", "CIS 1.5.4", 1, false},
-	{"kernel.unprivileged_bpf_disabled", "CIS 1.5.3", 1, false},
-	{"net.core.bpf_jit_harden", "CIS 1.5.3", 2, true},
-	{"kernel.kexec_load_disabled", "CIS 1.5.3", 1, true},
-	{"kernel.perf_event_paranoid", "CIS 1.5.3", 2, false},
-	{"fs.protected_hardlinks", "CIS 1.5.3", 1, true},
-	{"fs.protected_symlinks", "CIS 1.5.3", 1, true},
-	{"net.ipv4.tcp_syncookies", "CIS 3.3.8", 1, true},
-	{"net.ipv4.conf.all.accept_redirects", "CIS 3.3.2", 0, true},
-	{"net.ipv4.conf.all.secure_redirects", "CIS 3.3.3", 0, true},
-	{"net.ipv4.conf.all.send_redirects", "CIS 3.3.1", 0, true},
-	{"net.ipv4.conf.all.accept_source_route", "CIS 3.3.1", 0, true},
-	{"net.ipv4.conf.all.rp_filter", "CIS 3.3.7", 1, false},
-	{"net.ipv4.conf.all.log_martians", "CIS 3.3.4", 1, true},
-	{"net.ipv4.icmp_echo_ignore_broadcasts", "CIS 3.3.5", 1, true},
-	{"net.ipv6.conf.all.accept_redirects", "CIS 3.3.2", 0, true},
+	{"kernel.randomize_va_space", "CIS 1.5.1", 2, true, false},
+	{"fs.suid_dumpable", "CIS 1.5.2", 0, true, false},
+	{"kernel.kptr_restrict", "CIS 1.5.3", 2, true, false},
+	{"kernel.dmesg_restrict", "CIS 1.5.3", 1, true, false},
+	{"kernel.yama.ptrace_scope", "CIS 1.5.4", 1, false, false},
+	{"kernel.unprivileged_bpf_disabled", "CIS 1.5.3", 1, false, true},
+	{"net.core.bpf_jit_harden", "CIS 1.5.3", 2, true, true},
+	{"kernel.kexec_load_disabled", "CIS 1.5.3", 1, true, true},
+	{"kernel.perf_event_paranoid", "CIS 1.5.3", 2, false, true},
+	{"fs.protected_hardlinks", "CIS 1.5.3", 1, true, false},
+	{"fs.protected_symlinks", "CIS 1.5.3", 1, true, false},
+	{"net.ipv4.tcp_syncookies", "CIS 3.3.8", 1, true, false},
+	{"net.ipv4.conf.all.accept_redirects", "CIS 3.3.2", 0, true, false},
+	{"net.ipv4.conf.all.secure_redirects", "CIS 3.3.3", 0, true, false},
+	{"net.ipv4.conf.all.send_redirects", "CIS 3.3.1", 0, true, false},
+	{"net.ipv4.conf.all.accept_source_route", "CIS 3.3.1", 0, true, false},
+	{"net.ipv4.conf.all.rp_filter", "CIS 3.3.7", 1, false, false},
+	{"net.ipv4.conf.all.log_martians", "CIS 3.3.4", 1, true, false},
+	{"net.ipv4.icmp_echo_ignore_broadcasts", "CIS 3.3.5", 1, true, false},
+	{"net.ipv6.conf.all.accept_redirects", "CIS 3.3.2", 0, true, false},
 }
 
 // hostAudit runs every check; root prefixes all paths (tests use a fake tree).
@@ -114,6 +117,10 @@ func hostAudit(root string) []AuditCheck {
 	}
 	for _, s := range auditSysctls {
 		raw, err := os.ReadFile(filepath.Join(root, "/proc/sys", strings.ReplaceAll(s.key, ".", "/")))
+		if os.IsNotExist(err) && s.absentOK {
+			add("sysctl:"+s.key, s.control, s.key+" (feature not built into this kernel)", true, "")
+			continue
+		}
 		v, perr := strconv.Atoi(strings.TrimSpace(string(raw)))
 		pass := err == nil && perr == nil && (v == s.min || (!s.exact && v > s.min))
 		want := fmt.Sprintf("want %d", s.min)
@@ -133,7 +140,8 @@ func hostAudit(root string) []AuditCheck {
 
 	fw := loadFirewallConfig()
 	add("fw:enabled", "CIS 3.5.1", "Host firewall enabled with default-drop input", fw.Enabled && !strings.EqualFold(fw.DefaultInput, "ACCEPT"), "ziroctl firewall enable")
-	add("fw:guard", "CIS 3.5.1", "Ziro Guard flood/scan/brute-force protection active", fw.Enabled && !fw.Guard.Disabled, "ziroctl security protect enable")
+	add("fw:guard", "CIS 3.5.1", "Ziro Guard flood/scan/brute-force protection active",
+		fw.Enabled && !fw.Guard.Disabled && (root != "" || guardActive()), "ziroctl security protect status")
 
 	for _, f := range []struct {
 		path string

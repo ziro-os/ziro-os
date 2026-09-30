@@ -459,7 +459,12 @@ func applyNftables(cfg FirewallConfig) error {
 	if err := nftRun(script); err != nil {
 		return err
 	}
-	return applyGuard(cfg)
+	// The guard is extra protection: if the kernel lacks a feature it needs, the firewall itself
+	// must still be up. `security protect status` and `security audit` report it inactive.
+	if err := applyGuard(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "firewall: Ziro Guard not active: %v\n", err)
+	}
+	return nil
 }
 
 func applyIptables(cfg FirewallConfig) error {
