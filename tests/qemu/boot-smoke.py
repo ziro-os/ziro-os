@@ -224,7 +224,9 @@ def main():
                           "/sbin/ip link add atk0 type veth peer name atk1 && /sbin/ip link set atk1 netns $A && "
                           "/sbin/ip addr add 10.99.0.1/24 dev atk0 && /sbin/ip link set atk0 up && "
                           "nsenter -t $A -n sh -c '/sbin/ip addr add 10.99.0.2/24 dev atk1; /sbin/ip link set atk1 up; /sbin/ip link set lo up' && "
-                          "((printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n' ; sleep 300) | nc -l -p 9999 > /tmp/hook.txt &) && "
+                          # Capture-only receiver: busybox nc drops the request when it also sends a response,
+                          # so it answers nothing (ziroctl times out and keeps the alert queued for retry).
+                          "(sleep 120 | nc -l -p 9999 > /tmp/hook.txt &) && "
                           "ziroctl security alerting add local --url http://127.0.0.1:9999/hook --events ban >/dev/null && echo ATKOK")
         check("attacker namespace and local webhook receiver", "ATKOK" in out, out)
         con.run("A=$(cat /tmp/atk.pid); for i in 1 2 3 4 5 6; do nsenter -t $A -n ssh -o BatchMode=yes "
@@ -241,7 +243,8 @@ def main():
         check("ban blocks SSH, unban restores it", not out.lstrip().startswith("SSH-") and "Unbanned 10.99.0.2" in out and ok, out + out2)
         ok, out = retry(con, "grep -c 'X-Ziro-Signature: sha256=' /tmp/hook.txt && grep -o 'SSH brute force from 10.99.0.2 banned' /tmp/hook.txt",
                         lambda rc, o: rc == 0, 45)  # slow TCG runners
-        if not check("signed ban alert delivered to the webhook", ok, out):
+        check("signed ban alert delivered to the webhook", ok, out)
+        if not ok:
             _, diag = con.run("echo '--- hook.txt'; head -c 600 /tmp/hook.txt; echo; echo '--- spool'; ls -la /var/lib/ziro/alerts; "
                               "cat /var/lib/ziro/alerts/.recent; echo; cat /etc/ziro/alerting.json | grep -v secret; "
                               "echo '--- sentinel'; tail -15 /var/log/sentinel.log; ps | grep '[n]c -l'; netstat -tan | grep 9999")
