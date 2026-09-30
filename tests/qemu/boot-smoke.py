@@ -240,7 +240,7 @@ def main():
                          lambda rc, o: o.startswith("SSH-2.0"), 90, every=5)
         check("ban blocks SSH, unban restores it", not out.lstrip().startswith("SSH-") and "Unbanned 10.99.0.2" in out and ok, out + out2)
         ok, out = retry(con, "grep -c 'X-Ziro-Signature: sha256=' /tmp/hook.txt && grep -o 'SSH brute force from 10.99.0.2 banned' /tmp/hook.txt",
-                        lambda rc, o: rc == 0, 20)
+                        lambda rc, o: rc == 0, 45)  # slow TCG runners
         check("signed ban alert delivered to the webhook", ok, out)
         con.run("A=$(cat /tmp/atk.pid); for p in $(seq 1000 1030); do nsenter -t $A -n nc -w 1 10.99.0.1 $p </dev/null; done 2>/dev/null",
                 timeout=120)

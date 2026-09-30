@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -327,14 +328,30 @@ func trimSpool() {
 	}
 }
 
-var flushMu sync.Mutex
+var (
+	flushMu    sync.Mutex
+	flushAgain atomic.Bool
+)
 
-// flushAlerts delivers due spooled alerts, retrying failures with exponential backoff.
+// flushAlerts delivers due spooled alerts, retrying failures with exponential backoff. If a flush
+// is already running, it is asked to run once more instead: the running pass may have listed the
+// spool before this caller's alert was written, and that alert must not wait for the next tick.
 func flushAlerts() {
 	if !flushMu.TryLock() {
-		return // a flush is already running in this process
+		flushAgain.Store(true)
+		return
 	}
 	defer flushMu.Unlock()
+	for {
+		flushAgain.Store(false)
+		flushOnce()
+		if !flushAgain.Load() {
+			return
+		}
+	}
+}
+
+func flushOnce() {
 	cfg, err := loadAlertConfig()
 	if err != nil {
 		return

@@ -131,3 +131,29 @@ func TestAlertSlackFormat(t *testing.T) {
 		t.Fatalf("slack body %s", b)
 	}
 }
+
+// An alert raised while another flush is running is delivered by that flush, not left for the
+// next periodic tick.
+func TestAlertFlushRerunsForConcurrentAlert(t *testing.T) {
+	alertConfigPath = filepath.Join(t.TempDir(), "alerting.json")
+	alertSpoolDir = t.TempDir()
+	clusterDir = t.TempDir()
+	var got atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got.Add(1) }))
+	defer srv.Close()
+	if _, err := addAlertEndpoint("h", srv.URL, "info", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	flushMu.Lock() // a flush is "running"
+	now := time.Now()
+	spoolAlert(Alert{ID: "late", Time: now.UTC().Format(time.RFC3339), Severity: "high", Category: "ban", Title: "late"}, now)
+	flushAlerts() // must not be lost: it asks the running flush to go again
+	if !flushAgain.Load() {
+		t.Fatal("concurrent flush request dropped")
+	}
+	flushMu.Unlock()
+	flushAlerts()
+	if got.Load() != 1 || len(spoolFiles()) != 0 {
+		t.Fatalf("delivered %d, queued %d", got.Load(), len(spoolFiles()))
+	}
+}
