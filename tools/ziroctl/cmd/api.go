@@ -472,6 +472,7 @@ func startAPIServer() {
 		_ = json.NewEncoder(w).Encode(cachedSecurityScan())
 	}))
 	registerSecurityRoutes(mux, wrapHandler)
+	registerModuleRoutes(mux, wrapHandler)
 
 	addr := fmt.Sprintf("%s:%d", apiBindHost, apiPort)
 	fmt.Println("================================================================")

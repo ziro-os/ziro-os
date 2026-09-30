@@ -52,3 +52,39 @@ func TestSecurityRoutesRBAC(t *testing.T) {
 		t.Fatalf("admin remove endpoint: %d", code)
 	}
 }
+
+func TestModuleRoutesRBAC(t *testing.T) {
+	mux := http.NewServeMux()
+	var role string
+	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
+		}
+	}
+	registerModuleRoutes(mux, wrap)
+	do := func(method, path string) int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		return rec.Code
+	}
+	for _, r := range []string{"viewer", "operator"} {
+		role = r
+		if code := do("POST", "/api/v1/modules/clamav/enable"); code != http.StatusForbidden {
+			t.Errorf("%s enable: %d, want 403", r, code)
+		}
+	}
+	role = "viewer"
+	if code := do("GET", "/api/v1/modules"); code != http.StatusOK {
+		t.Errorf("viewer list: %d", code)
+	}
+	role = "admin"
+	for _, p := range []string{"/api/v1/modules/nope/enable", "/api/v1/modules/clamav/rm-rf"} {
+		if code := do("POST", p); code != http.StatusNotFound {
+			t.Errorf("%s: %d, want 404", p, code)
+		}
+	}
+	// ServeMux cleans ".." and redirects before any handler runs.
+	if code := do("POST", "/api/v1/modules/../../etc/enable"); code == http.StatusAccepted || code == http.StatusOK {
+		t.Error("traversal path accepted")
+	}
+}

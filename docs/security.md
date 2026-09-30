@@ -105,6 +105,9 @@ Output:
   - The API (`/api/v1/security/alerting`) is admin-only.
 - **Container defaults**: cluster containers run with `no-new-privileges` and without `NET_RAW` (no raw-socket
   spoofing). `cluster deploy --allow-privilege-escalation` opts an app out.
+- **Security modules** (opt-in, never preinstalled): `ziroctl module enable security` installs the `clamav`
+  antivirus (clamd on a local socket, signature updates, daily scans, `security scan --av`, `av` alerts) and
+  `auditd` (a CIS-aligned kernel audit trail). See [modules.md](modules.md).
 - **Hardening score**: `ziroctl security audit [--json]` scores the host against 30 CIS-mapped checks (kernel and
   network sysctls, SSH, firewall and guard, file permissions, audit chain). Fresh images score 100.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
