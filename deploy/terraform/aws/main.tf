@@ -49,6 +49,24 @@ variable "ssh_allowed_cidrs" {
   type        = list(string)
 }
 
+variable "nodeport_allowed_cidrs" {
+  description = "CIDRs allowed to reach NodePort services (30000-32767). Empty: VPC-internal only."
+  type        = list(string)
+  default     = []
+}
+
+variable "api_lb_internal" {
+  description = "Keep the Kubernetes API load balancer internal to the VPC (reach it through a VPN, WireGuard peer or bastion)"
+  type        = bool
+  default     = true
+}
+
+variable "public_node_ips" {
+  description = "Put nodes in public subnets with public IPs (instead of private subnets behind a NAT gateway)"
+  type        = bool
+  default     = false
+}
+
 variable "ziro_version" {
   description = "Ziro-OS release tag whose bootstrap scripts are fetched (pinned, never 'main')"
   type        = string
@@ -105,13 +123,32 @@ resource "aws_internet_gateway" "ziro_os" {
   }
 }
 
+locals {
+  az_count = min(length(data.aws_availability_zones.available.names), 3)
+}
+
+# Public subnets: the NAT gateway and, when api_lb_internal = false, the API load balancer.
+resource "aws_subnet" "public" {
+  count = local.az_count
+
+  vpc_id            = aws_vpc.ziro_os.id
+  cidr_block        = "10.0.${count.index + 101}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "${var.cluster_name}-public-${count.index + 1}"
+    Type = "ziro-os"
+  }
+}
+
+# Node subnets: private (egress through the NAT gateway) unless public_node_ips = true.
 resource "aws_subnet" "ziro_os" {
-  count = min(length(data.aws_availability_zones.available.names), 3)
+  count = local.az_count
 
   vpc_id                  = aws_vpc.ziro_os.id
   cidr_block              = "10.0.${count.index + 1}.0/24"
   availability_zone       = data.aws_availability_zones.available.names[count.index]
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = var.public_node_ips
 
   tags = {
     Name = "${var.cluster_name}-subnet-${count.index + 1}"
@@ -119,7 +156,7 @@ resource "aws_subnet" "ziro_os" {
   }
 }
 
-resource "aws_route_table" "ziro_os" {
+resource "aws_route_table" "public" {
   vpc_id = aws_vpc.ziro_os.id
 
   route {
@@ -128,12 +165,55 @@ resource "aws_route_table" "ziro_os" {
   }
 
   tags = {
-    Name = "${var.cluster_name}-rt"
+    Name = "${var.cluster_name}-public-rt"
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  count = local.az_count
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+# ponytail: one NAT gateway (cost); add one per AZ if an AZ outage must not cut node egress.
+resource "aws_eip" "nat" {
+  count  = var.public_node_ips ? 0 : 1
+  domain = "vpc"
+
+  tags = {
+    Name = "${var.cluster_name}-nat"
+  }
+}
+
+resource "aws_nat_gateway" "ziro_os" {
+  count         = var.public_node_ips ? 0 : 1
+  allocation_id = aws_eip.nat[0].id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = {
+    Name = "${var.cluster_name}-nat"
+  }
+
+  depends_on = [aws_internet_gateway.ziro_os]
+}
+
+resource "aws_route_table" "ziro_os" {
+  vpc_id = aws_vpc.ziro_os.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = var.public_node_ips ? null : aws_nat_gateway.ziro_os[0].id
+    gateway_id     = var.public_node_ips ? aws_internet_gateway.ziro_os.id : null
+  }
+
+  tags = {
+    Name = "${var.cluster_name}-nodes-rt"
   }
 }
 
 resource "aws_route_table_association" "ziro_os" {
-  count = length(aws_subnet.ziro_os)
+  count = local.az_count
 
   subnet_id      = aws_subnet.ziro_os[count.index].id
   route_table_id = aws_route_table.ziro_os.id
@@ -142,6 +222,7 @@ resource "aws_route_table_association" "ziro_os" {
 # Security groups
 resource "aws_security_group" "ziro_os_nodes" {
   name_prefix = "${var.cluster_name}-nodes"
+  description = "Ziro-OS cluster nodes: SSH from allowed CIDRs, cluster traffic inside the VPC, NodePorts from allowed CIDRs"
   vpc_id      = aws_vpc.ziro_os.id
 
   # SSH access (restricted)
@@ -168,12 +249,16 @@ resource "aws_security_group" "ziro_os_nodes" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
-  # NodePort services
-  ingress {
-    from_port   = 30000
-    to_port     = 32767
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  # NodePort services: only from the CIDRs you list (VPC-internal traffic is allowed below)
+  dynamic "ingress" {
+    for_each = length(var.nodeport_allowed_cidrs) > 0 ? [1] : []
+    content {
+      description = "NodePort services"
+      from_port   = 30000
+      to_port     = 32767
+      protocol    = "tcp"
+      cidr_blocks = var.nodeport_allowed_cidrs
+    }
   }
 
   # Container networking
@@ -192,11 +277,53 @@ resource "aws_security_group" "ziro_os_nodes" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
-  # All outbound traffic
+  # Outbound: anything inside the VPC; to the internet only what a container host needs
+  # (HTTPS/HTTP for images and packages, DNS, NTP, WireGuard for mesh peers outside the VPC).
   egress {
+    description = "Cluster traffic inside the VPC"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  egress {
+    description = "HTTPS (registries, packages, APIs)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "HTTP (package mirrors)"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "DNS"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "NTP"
+    from_port   = 123
+    to_port     = 123
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "WireGuard mesh and remote peers"
+    from_port   = 51821
+    to_port     = 51821
+    protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
@@ -244,10 +371,10 @@ resource "aws_launch_template" "ziro_os" {
 
 # Auto Scaling Group
 resource "aws_autoscaling_group" "ziro_os" {
-  name                = "${var.cluster_name}-asg"
-  vpc_zone_identifier = aws_subnet.ziro_os[*].id
-  target_group_arns   = []
-  health_check_type   = "EC2"
+  name                      = "${var.cluster_name}-asg"
+  vpc_zone_identifier       = aws_subnet.ziro_os[*].id
+  target_group_arns         = [aws_lb_target_group.ziro_os_api.arn] # nodes serve the API through the NLB
+  health_check_type         = "EC2"
   health_check_grace_period = 300
 
   min_size         = 1
@@ -275,9 +402,9 @@ resource "aws_autoscaling_group" "ziro_os" {
 # Load balancer for Kubernetes API
 resource "aws_lb" "ziro_os_api" {
   name               = "${var.cluster_name}-api-lb"
-  internal           = false
+  internal           = var.api_lb_internal
   load_balancer_type = "network"
-  subnets            = aws_subnet.ziro_os[*].id
+  subnets            = var.api_lb_internal ? aws_subnet.ziro_os[*].id : aws_subnet.public[*].id
 
   enable_deletion_protection = false
 

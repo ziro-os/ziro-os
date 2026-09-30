@@ -123,6 +123,12 @@ Output:
   repo variables are set. After that, delete the static key secrets.
 - **Terraform (AWS)**: IMDSv2 is required with hop limit 1. SSH is limited to `ssh_allowed_cidrs`, which is
   required. Bootstrap scripts come from the pinned `ziro_version` tag, with optional sha256 verification.
+  - Nodes sit in private subnets and reach the internet through a NAT gateway. `public_node_ips = true` restores
+    public IPs; otherwise reach nodes through a bastion, SSM or a WireGuard peer.
+  - The Kubernetes API load balancer is internal unless `api_lb_internal = false`.
+  - NodePorts are reachable only from inside the VPC unless you list `nodeport_allowed_cidrs`.
+  - Outbound traffic to the internet is limited to HTTPS/HTTP, DNS, NTP and WireGuard; everything else stays
+    inside the VPC.
 
 ## Security boundary checks
 

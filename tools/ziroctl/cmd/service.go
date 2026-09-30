@@ -301,6 +301,7 @@ var serviceBootCmd = &cobra.Command{
 			if !s.Enabled || initManaged[s.Name] || s.Status == "RUNNING" {
 				continue
 			}
+			// deepcode ignore CommandInjection: names come from root-owned definitions in /etc/ziro/services; startService re-validates the definition and its executable
 			if err := startService(s.Name); err != nil {
 				fmt.Printf("[boot] %s: %v\n", s.Name, err)
 				continue
@@ -363,6 +364,38 @@ func validName(name string) error {
 	return nil
 }
 
+// rootOwnedFile: a regular file owned by root and not writable by group or others.
+func rootOwnedFile(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && fi.Mode().IsRegular() && st.Uid == 0 && fi.Mode().Perm()&0o022 == 0
+}
+
+// checkServicePaths keeps a definition's pid and log files where ziroctl and ziro-init expect
+// them (both delete or truncate these paths as root).
+func checkServicePaths(def *ServiceDef) error {
+	for _, c := range []struct{ path, dir string }{{def.PIDFile, "/run/"}, {def.LogFile, "/var/log/"}} {
+		if c.path != "" && (!strings.HasPrefix(c.path, c.dir) || strings.Contains(c.path, "..")) {
+			return fmt.Errorf("%q must be under %s", c.path, c.dir)
+		}
+	}
+	return nil
+}
+
+// trustedExecutable: an absolute, clean path to a root-owned executable nobody else can write.
+func trustedExecutable(p string) error {
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p {
+		return fmt.Errorf("service exec %q must be an absolute path", p)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return err
+	}
+	if !rootOwnedFile(fi) || fi.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("service exec %s must be an executable owned by root, not group- or world-writable", p)
+	}
+	return nil
+}
+
 func loadServiceDef(name string) (*ServiceDef, error) {
 	if err := validName(name); err != nil {
 		return nil, err
@@ -374,6 +407,11 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 		f, err := os.Open(confPath)
 		if err == nil {
 			defer f.Close()
+			// A service definition decides what runs as root: trust only root-owned files that
+			// nobody else can write.
+			if fi, err := f.Stat(); err != nil || !rootOwnedFile(fi) {
+				return nil, fmt.Errorf("service definition %s must be a regular file owned by root, not group- or world-writable", confPath)
+			}
 			sc := bufio.NewScanner(f)
 			for sc.Scan() {
 				line := strings.TrimSpace(sc.Text())
@@ -399,6 +437,9 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 						def.Autostart = (v == "true" || v == "1" || v == "yes")
 					}
 				}
+			}
+			if err := checkServicePaths(def); err != nil {
+				return nil, fmt.Errorf("%s: %w", confPath, err)
 			}
 			return def, nil
 		}
@@ -550,10 +591,14 @@ func startService(name string) error {
 		return fmt.Errorf("service '%s' is already running (PID %d)", name, pid)
 	}
 
+	if err := trustedExecutable(def.Exec); err != nil {
+		return err
+	}
 	_ = os.MkdirAll(filepath.Dir(def.PIDFile), 0755)
 	_ = os.MkdirAll(filepath.Dir(def.LogFile), 0755)
 
 	args := strings.Fields(def.Args)
+	// deepcode ignore CommandInjection: def.Exec comes from a root-owned, non-group/world-writable definition and passed trustedExecutable (absolute, root-owned, not writable by others); args are argv, no shell
 	cmd := exec.Command(def.Exec, args...)
 
 	rotateLog(def.LogFile)

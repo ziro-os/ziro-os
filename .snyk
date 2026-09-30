@@ -1,0 +1,17 @@
+# Snyk (https://snyk.io) policy file.
+version: v1.25.0
+# Test code is excluded from scanning: its fake HTTP servers echo requests and its scripts open
+# paths from their own arguments by design; none of it ships. Production code is always scanned.
+exclude:
+  global:
+    - "**/*_test.go"
+    - tests/**
+ignore:
+  SNYK-CC-TF-73:
+    - 'deploy/terraform/aws/main.tf > *':
+        reason: >-
+          Node egress to 0.0.0.0/0 is limited to the ports a container host needs (443/80 for
+          registries and packages, 53 DNS, 123 NTP, 51821 WireGuard); all other egress is VPC-only.
+          Registries are chosen by users, so destination CIDRs cannot be enumerated.
+        expires: 2027-03-31T00:00:00.000Z
+        created: 2026-09-30T00:00:00.000Z
