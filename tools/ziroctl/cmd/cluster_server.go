@@ -109,6 +109,8 @@ type heartbeatResponse struct {
 	PodCIDR     string              `json:"pod_cidr,omitempty"`     // this node's /24 (pod networking on)
 	PodNet      string              `json:"pod_net,omitempty"`      // the cluster pod network
 	PodDNS      map[string][]string `json:"pod_dns,omitempty"`      // app -> running pod IPs (DNS answers)
+	DNSRecords  []DNSRecord         `json:"dns_records,omitempty"`  // cluster-wide records for the host resolver
+	Egress      map[string][]string `json:"egress,omitempty"`       // app -> allowed outside destinations
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -794,6 +796,15 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 			resp.Endpoints = resp.PodDNS // <app>.cluster.ziro means pod IPs everywhere on a pod network
 		}
 		resp.Policy = policyFor(st, n.ID)
+		resp.DNSRecords = st.DNSRecords
+		for _, a := range st.Apps {
+			if len(a.Egress) > 0 {
+				if resp.Egress == nil {
+					resp.Egress = map[string][]string{}
+				}
+				resp.Egress[a.Name] = a.Egress
+			}
+		}
 		resp.CA, resp.Masters = st.CACert, masterAddrs(st, cfg)
 		if n.Gateway {
 			resp.Gateway = gatewayConfigFor(st)

@@ -136,7 +136,8 @@ func (ag *agent) setupPods(resp heartbeatResponse) error {
 	if ag.dns == nil {
 		clients, _ := netip.ParsePrefix(resp.PodCIDR)
 		gw := podGateway(resp.PodCIDR)
-		ag.dns = &podDNS{clients: clients, upstreams: hostResolvers("/etc/resolv.conf", gw)}
+		ag.dns = &podDNS{clients: clients, upstreams: hostResolvers("/etc/resolv.conf", gw),
+			egress: &egressLearner{add: nftAddLearned}}
 		go func(d *podDNS) {
 			for { // the address can briefly be missing while the link is (re)created: retry
 				if err := d.serve(net.JoinHostPort(gw, "53")); err != nil {
@@ -386,6 +387,21 @@ var clusterAgentCmd = &cobra.Command{
 				if merr == nil && resp.PodCIDR != "" {
 					if perr := ag.setupPods(resp); perr != nil {
 						merr, podOK = fmt.Errorf("pod network: %w", perr), false
+					}
+				}
+				writeClusterDNS(resp)
+				if podOK && resp.PodCIDR != "" {
+					meshNet := ""
+					if ip, err := netip.ParseAddr(resp.MeshIP); err == nil && resp.MeshPrefix > 0 {
+						if p, err := ip.Prefix(resp.MeshPrefix); err == nil {
+							meshNet = p.String()
+						}
+					}
+					if eerr := applyEgress(resp.Egress, resp.Assignments, resp.PodNet, meshNet); eerr != nil && merr == nil {
+						merr = eerr
+					}
+					if ag.dns != nil {
+						ag.dns.egress.set(resp.Egress, resp.Assignments)
 					}
 				}
 				if podOK {

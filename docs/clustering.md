@@ -251,3 +251,10 @@ ziroctl cluster network enable          # migrate an existing cluster (apps roll
 - Placement counts replicas, not CPU or memory.
 - Without the pod network, discovery uses hosts entries: a container sees new endpoints only when it is recreated.
 - IPv4 only; one pod /24 per node (253 replicas).
+
+## Cluster DNS records and egress control
+
+- `ziroctl cluster dns add <name> <type> <value>` publishes a record that every node's smart DNS resolves.
+- `ziroctl cluster deploy --egress <domains,CIDRs>` limits where an app's pods may connect outside the cluster.
+
+See [dns.md](dns.md).

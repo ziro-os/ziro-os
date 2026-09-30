@@ -92,9 +92,12 @@ type ClusteredApp struct {
 	AllowFrom []string          `json:"allow_from,omitempty"` // apps (or "*") allowed to reach Port over the mesh
 	Network   string            `json:"network,omitempty"`    // "pod" (routed container IP) or "" (host ports only; pre-pod clusters)
 	// Containers run with no-new-privileges and without NET_RAW unless this is set.
-	AllowPrivilegeEscalation bool   `json:"allow_privilege_escalation,omitempty"`
-	Revision                 int    `json:"revision,omitempty"`
-	CreatedAt                string `json:"created_at,omitempty"`
+	AllowPrivilegeEscalation bool `json:"allow_privilege_escalation,omitempty"`
+	// Egress, when set, is the only outside world the app's pods may reach: IPv4 CIDRs and domain
+	// names (subdomains included). Enforced per node; needs the pod network.
+	Egress    []string `json:"egress,omitempty"`
+	Revision  int      `json:"revision,omitempty"`
+	CreatedAt string   `json:"created_at,omitempty"`
 }
 
 // Replica is one placed (or pending, Node == "") instance of an app.
@@ -120,6 +123,7 @@ type ClusterState struct {
 	// "allow"/"" (clusters created before policies existed keep working unchanged).
 	PolicyDefault string         `json:"policy_default,omitempty"`
 	Routes        []GatewayRoute `json:"routes,omitempty"`
+	DNSRecords    []DNSRecord    `json:"dns_records,omitempty"` // cluster-wide records served by every node's smart DNS
 	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
 	Peers         []RemotePeer   `json:"peers,omitempty"`    // WireGuard remote-access clients
 	PodCIDR       string         `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
@@ -432,6 +436,14 @@ func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 	}
 	if a.MeshOnly && a.Port == "" {
 		return fmt.Errorf("--mesh-only needs --port")
+	}
+	if len(a.Egress) > 0 {
+		if a.Network != "pod" {
+			return fmt.Errorf("--egress needs the app on the pod network")
+		}
+		if err := validateEgress(a.Egress); err != nil {
+			return err
+		}
 	}
 	for k, v := range a.Env {
 		if !envKeyRe.MatchString(k) || strings.ContainsAny(v, "\x00\r\n") {
@@ -962,6 +974,7 @@ var (
 	appMeshOnly bool
 	appPrivEsc  bool
 	appAllow    []string
+	appEgress   []string
 	applyFile   string
 )
 
@@ -1033,6 +1046,14 @@ var clusterDeployCmd = &cobra.Command{
 			}
 			if f.Changed("arg") {
 				app.Args = appArgs
+			}
+			if f.Changed("egress") {
+				app.Egress = nil
+				for _, e := range appEgress {
+					if e = strings.TrimSpace(e); e != "" {
+						app.Egress = append(app.Egress, strings.TrimSuffix(strings.ToLower(e), "."))
+					}
+				}
 			}
 			if f.Changed("allow-from") {
 				app.AllowFrom = nil
@@ -1557,6 +1578,7 @@ func init() {
 	clusterDeployCmd.Flags().StringArrayVar(&appArgs, "arg", nil, "Command/argument passed after the image (repeatable, in order)")
 	clusterDeployCmd.Flags().BoolVar(&appMeshOnly, "mesh-only", false, "Publish --port only on the node's mesh IP (not the public interface)")
 	clusterDeployCmd.Flags().BoolVar(&appPrivEsc, "allow-privilege-escalation", false, "Run without no-new-privileges and keep NET_RAW (setuid binaries, ping); off by default")
+	clusterDeployCmd.Flags().StringSliceVar(&appEgress, "egress", nil, "Only outside destinations the app may reach: IPv4 CIDRs and domains, comma-separated ('' = unrestricted); pod network only")
 	clusterDeployCmd.Flags().StringSliceVar(&appAllow, "allow-from", nil, "Apps allowed to reach --port over the mesh (comma-separated; '*' = any cluster app, 'peer:<name>' or 'peers' = WireGuard remote peers, '' = none)")
 	clusterApplyCmd.Flags().StringVarP(&applyFile, "file", "f", "", "JSON manifest")
 	_ = clusterApplyCmd.MarkFlagRequired("file")

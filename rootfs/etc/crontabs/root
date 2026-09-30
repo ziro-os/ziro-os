@@ -2,3 +2,5 @@
 0 * * * * /usr/bin/ziroctl service rotate-logs
 # Grow root and data filesystems when the cloud/VM disk is resized (no-op otherwise)
 * * * * * /usr/bin/ziroctl disk expand --auto --quiet
+# Refresh subscribed DNS blocklists (no-op without any)
+17 4 * * * /usr/bin/ziroctl dns blocklist update >/dev/null 2>&1

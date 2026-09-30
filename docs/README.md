@@ -10,3 +10,4 @@ Technical documentation and architecture specifications for Ziro-OS.
 - `security.md` - Security model and hardening
 - `networking.md` - Hostname, DNS resolvers, declarative interfaces/VLANs/bonds/routes with rollback
 - `storage.md` - Automatic disk growth and data disks
+- `dns.md` - Smart DNS resolver, split DNS, records, blocklists, DoT, cluster DNS, container egress control

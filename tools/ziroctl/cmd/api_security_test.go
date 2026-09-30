@@ -97,3 +97,47 @@ func TestHostRoutesRBAC(t *testing.T) {
 		t.Errorf("PUT without confirm_timeout: %d", c)
 	}
 }
+
+func TestDNSRoutesRBAC(t *testing.T) {
+	dir := t.TempDir()
+	dnsConfigPath, dnsStatsPath = filepath.Join(dir, "dns.json"), filepath.Join(dir, "stats.json")
+	resolvPinned = filepath.Join(dir, "udhcpc.conf")
+	mux := http.NewServeMux()
+	var role string
+	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
+		}
+	}
+	registerDNSRoutes(mux, wrap)
+	do := func(method, path, body string) int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return rec.Code
+	}
+	role = "viewer"
+	if c := do("GET", "/api/v1/dns", ""); c != http.StatusOK {
+		t.Errorf("viewer read: %d", c)
+	}
+	if c := do("POST", "/api/v1/dns/records", `{"name":"a.internal","type":"A","value":"10.0.0.1"}`); c != http.StatusForbidden {
+		t.Errorf("viewer write: %d", c)
+	}
+	role = "operator"
+	if c := do("POST", "/api/v1/dns/records", `{"name":"a.internal","type":"A","value":"10.0.0.1"}`); c != http.StatusOK {
+		t.Errorf("operator record: %d", c)
+	}
+	if c := do("POST", "/api/v1/dns/records", `{"name":"a.internal","type":"A","value":"not-an-ip"}`); c != http.StatusBadRequest {
+		t.Errorf("invalid record accepted: %d", c)
+	}
+	if c := do("PUT", "/api/v1/dns/upstreams", `{"upstreams":[{"addr":"198.51.100.53"}]}`); c != http.StatusForbidden {
+		t.Errorf("operator redirected all DNS: %d", c)
+	}
+	role = "admin"
+	if c := do("PUT", "/api/v1/dns/upstreams", `{"upstreams":[{"addr":"1.1.1.1","tls_name":"cloudflare-dns.com"}]}`); c != http.StatusOK {
+		t.Errorf("admin upstreams: %d", c)
+	}
+	cfg, _ := loadDNSConfig()
+	if len(cfg.Records) != 1 || len(cfg.Upstreams) != 1 {
+		t.Fatalf("config %+v", cfg)
+	}
+}

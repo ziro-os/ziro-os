@@ -171,6 +171,29 @@ def main():
         rc, out = w.run(f"nerdctl exec {wc} nslookup docker.io", timeout=30)
         check("pod DNS forwards external names", rc == 0 and "Address" in out.split("docker.io", 1)[-1], out)
 
+        # Smart DNS on a node: cluster-wide records, and <app>.cluster.ziro via the node's pod DNS.
+        rc, out = w.run("ziroctl dns enable 2>&1 | tail -1", timeout=60)
+        check("node2: smart DNS enabled", "Smart DNS enabled" in out, out)
+        rc, out = m.run("ziroctl cluster dns add registry.internal A 10.0.0.40")
+        ok, out = bs.retry(w, "nslookup registry.internal 127.0.0.53 2>&1 | grep -c 10.0.0.40", lambda rc, o: o.strip().endswith("1"), 90, every=5)
+        check("cluster DNS record resolves on node2 (heartbeat -> host resolver)", ok, out)
+        ok, out = bs.retry(w, "nslookup web.cluster.ziro 127.0.0.53 2>&1 | grep -c 'Address.*10.201.'", lambda rc, o: o.strip()[-1:] not in ("", "0"), 60, every=5)
+        check("host resolver answers <app>.cluster.ziro through the pod DNS", ok, out)
+
+        # Egress control: the app may reach only its allowed domain (learned from its DNS answers).
+        rc, out = m.run("ziroctl cluster deploy --name egr --image docker.io/library/nginx:alpine --replicas 2 "
+                        "--egress dl-cdn.alpinelinux.org")
+        check("deploy with --egress", rc == 0, out)
+        ec = pod_of(w, "egr")
+        ok, out = bs.retry(w, f"nerdctl exec {ec} wget -q -O /dev/null -T 8 http://dl-cdn.alpinelinux.org/alpine/ && echo ALLOWED",
+                           lambda rc, o: "ALLOWED" in o, 120, every=10)
+        check("egress: allowed domain reachable from the app's pod", ok, out)
+        rc, out = w.run(f"nerdctl exec {ec} wget -q -O /dev/null -T 5 http://example.com/ 2>&1 || echo BLOCKED_NAME; "
+                        f"nerdctl exec {ec} wget -q -O /dev/null -T 5 http://1.1.1.1/ 2>&1 || echo BLOCKED_IP; "
+                        "nft list chain inet ziro_egress forward | grep -o 'packets [1-9][0-9]* bytes [0-9]* drop'", timeout=60)
+        check("egress: other domains and raw IPs are dropped (counted)", "BLOCKED_NAME" in out and "BLOCKED_IP" in out and "drop" in out, out)
+        m.run("ziroctl cluster remove egr")
+
         rc, out = m.run("ziroctl cluster deploy --name other --image docker.io/library/nginx:alpine --replicas 2")
         oc = pod_of(w, "other")
         rc, out = w.run(f"nerdctl exec {oc} wget -qO- -T5 http://{web_master}/ >/dev/null && echo REACHED || echo BLOCKED", timeout=30)
