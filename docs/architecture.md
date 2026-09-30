@@ -1,6 +1,8 @@
 # Ziro-OS System Architecture
 
-Ziro-OS is a cloud-native, ultra-lightweight operating system engineered from first principles specifically to host container workloads. It dispenses with the bloat of general-purpose distributions while preserving full compatibility with Open Container Initiative (OCI) runtimes, `containerd`, and Docker-compatible workflows.
+Ziro-OS is a lightweight Linux host built for OCI container workloads. It uses `containerd` and `runc` at the core;
+Docker and Podman command compatibility is provided through `nerdctl` aliases on the full host. The project is
+under active development and is not ready for production use.
 
 ---
 
@@ -25,10 +27,25 @@ Ziro-OS is a cloud-native, ultra-lightweight operating system engineered from fi
 ```
 
 1. **Minimal Base**: ≈16 MB minimal container rootfs; full host image (ISO / initramfs, `alpine` or `custom` kernel) < 300 MB.
-2. **Stateless & Immutable**: Immutable root filesystem with minimal writeable paths (`/run`, `/tmp`, `/var/lib/containerd`).
+2. **Limited mutable state**: An immutable installed root is a design goal. The current installer mounts ext4
+   read/write, and live boot uses writable tmpfs. See the [security guide](security.md#2-immutable-root-filesystem).
 3. **Container-Native**: Built-in `containerd`, `runc`, and CNI networking.
 4. **Multi-Architecture**: First-class support for `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).
-5. **Instant Boot**: Optimized for sub-second microVM boot times in modern hypervisors (QEMU, AWS Firecracker, Cloud-Hypervisor).
+5. **Direct-kernel boot**: QEMU uses a kernel and initramfs directly; boot time depends on host and configuration.
+
+### Technical choices and extension points
+
+- **Kernel and userland:** Linux provides namespaces, cgroups, seccomp, capabilities, and the drivers required for
+  container hosts. BusyBox and musl keep the base small; Go CLIs are built without CGO where possible. The two
+  kernel flavors and supported build architectures are documented in the [build guide](building.md).
+- **Runtime and networking:** `containerd` manages images and tasks, `runc` executes OCI containers, and CNI
+  plugins provide container networking. `ziroctl` exposes system and container operations; `nerdctl` provides
+  Docker-style commands on the full host. This does not imply complete Docker Engine or Podman compatibility.
+- **Storage and extensions:** The host uses Linux filesystems and containerd snapshotters. Networking, storage,
+  logging, and security integrations should remain separately packaged where practical. A general module manifest
+  and plug-in interface are future work rather than a stable API.
+- **Updates and security:** Current update and rollback behavior is described in the [upgrade guide](upgrade.md).
+  Runtime controls and the limits of the writable root are described in the [security guide](security.md).
 
 ---
 
