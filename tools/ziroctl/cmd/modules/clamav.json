@@ -1,0 +1,81 @@
+{
+  "name": "clamav",
+  "version": "1.0",
+  "description": "ClamAV antivirus: clamd (local socket), signature updates, daily scans",
+  "packages": [
+    "clamav-daemon",
+    "clamav-clamdscan",
+    "freshclam"
+  ],
+  "min_memory_mb": 1536,
+  "dirs": [
+    {
+      "path": "/run/clamav",
+      "mode": "0750",
+      "owner": "clamav:clamav"
+    },
+    {
+      "path": "/var/log/clamav",
+      "mode": "0750",
+      "owner": "clamav:clamav"
+    },
+    {
+      "path": "/var/lib/clamav",
+      "mode": "0755",
+      "owner": "clamav:clamav"
+    }
+  ],
+  "files": [
+    {
+      "path": "/etc/clamav/clamd.conf",
+      "mode": "0644",
+      "content": "# Managed by `ziroctl module enable clamav` (local socket only: no network listener).\nLogFile /var/log/clamav/clamd.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/clamd.pid\nLocalSocket /run/clamav/clamd.sock\nLocalSocketGroup clamav\nLocalSocketMode 660\nFixStaleSocket yes\nUser clamav\nForeground yes\nDatabaseDirectory /var/lib/clamav\nMaxThreads 4\nMaxScanSize 400M\nMaxFileSize 100M\nMaxRecursion 16\nMaxFiles 10000\nExcludePath ^/proc/\nExcludePath ^/sys/\nExcludePath ^/dev/\nExcludePath ^/run/\nExtendedDetectionInfo yes\n"
+    },
+    {
+      "path": "/etc/clamav/freshclam.conf",
+      "mode": "0644",
+      "content": "# Managed by `ziroctl module enable clamav`.\nDatabaseDirectory /var/lib/clamav\nUpdateLogFile /var/log/clamav/freshclam.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/freshclam.pid\nDatabaseOwner clamav\nDatabaseMirror database.clamav.net\nScriptedUpdates yes\nNotifyClamd /etc/clamav/clamd.conf\nChecks 12\nForeground yes\nConnectTimeout 30\nReceiveTimeout 600\n"
+    }
+  ],
+  "cron": [
+    "30 3 * * * /usr/bin/ziroctl security scan --av --quiet"
+  ],
+  "prepare": [
+    {
+      "exec": "/usr/bin/freshclam",
+      "args": [
+        "--config-file=/etc/clamav/freshclam.conf",
+        "--stdout"
+      ],
+      "creates": "/var/lib/clamav/main.c[lv]d",
+      "timeout": "30m"
+    }
+  ],
+  "services": [
+    {
+      "name": "clamd",
+      "description": "ClamAV scanning daemon (local socket)",
+      "exec": "/usr/sbin/clamd",
+      "args": "--config-file=/etc/clamav/clamd.conf",
+      "pidfile": "/run/ziro-clamd.pid",
+      "logfile": "/var/log/clamd.log"
+    },
+    {
+      "name": "freshclam",
+      "description": "ClamAV signature updates (every 2h)",
+      "exec": "/usr/bin/freshclam",
+      "args": "-d --config-file=/etc/clamav/freshclam.conf",
+      "pidfile": "/run/ziro-freshclam.pid",
+      "logfile": "/var/log/freshclam.log"
+    }
+  ],
+  "health": {
+    "exec": "/usr/bin/clamdscan",
+    "args": [
+      "--config-file=/etc/clamav/clamd.conf",
+      "--ping=120:1"
+    ],
+    "timeout": "3m",
+    "expect": "PONG"
+  }
+}

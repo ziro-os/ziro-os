@@ -224,6 +224,7 @@ def main():
     ap.add_argument("--boot-timeout", type=int, default=600)
     ap.add_argument("--no-pull", action="store_true", help="skip the container run check (no internet)")
     ap.add_argument("--installed", action="store_true", help="also install to a disk and boot it (tiny initramfs)")
+    ap.add_argument("--modules", action="store_true", help="also test the clamav module (downloads ~250 MB of signatures)")
     args = ap.parse_args()
 
     disk = None
@@ -405,6 +406,28 @@ def main():
                           "[ \"$(cat /run/containerd/containerd.pid)\" != \"$P\" ] && sleep 2 && "
                           "nerdctl info >/dev/null && echo CRESTART")
         check("service restart containerd (no race with init)", "CRESTART" in out, out)
+        # Opt-in modules (need the Alpine repositories, like the container pull above).
+        if not args.no_pull:
+            rc, out = con.run("ziroctl module enable auditd 2>&1 | tail -3; auditctl -s | head -1; "
+                              "touch /etc/ziro/.smoke; sleep 1; ausearch -k ziro-config 2>/dev/null | grep -c '.smoke'", timeout=300)
+            check("module enable auditd: installed, rules loaded, changes audited",
+                  "Module auditd enabled" in out and "enabled 1" in out and out.split()[-1] != "0", out)
+            rc, out = con.run("auditctl -D >/dev/null; ziroctl service boot >/dev/null 2>&1; auditctl -l | grep -c ziro-config")
+            check("module rules restored at boot (service boot hooks)", out.split()[-1:] != ["0"] and rc == 0, out)
+            rc, out = con.run("ziroctl module disable auditd 2>&1 | tail -1; apk info -e audit; "
+                              "ls /etc/ziro/services/auditd.conf /etc/ziro/modules/auditd.json 2>&1 | grep -c 'No such'", timeout=120)
+            check("module disable auditd removes packages, service and state",
+                  "Module auditd disabled" in out and out.split()[-1] == "2", out)
+        if args.modules:
+            rc, out = con.run("(sleep 300 | nc -l -p 9998 > /tmp/av.txt &); "
+                              "ziroctl security alerting add av --url http://127.0.0.1:9998/h --events av >/dev/null; "
+                              "ziroctl module enable clamav 2>&1 | tail -3", timeout=1800)
+            check("module enable clamav (signatures, clamd, freshclam)", "Module clamav enabled" in out, out)
+            rc, out = con.run("printf 'X5O!P%%@AP[4\\\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > /root/eicar.com; "
+                              "ziroctl security scan --av /root 2>&1 | grep -v alerts; sleep 3; grep -c X-Ziro-Signature /tmp/av.txt", timeout=300)
+            check("clamav detects EICAR in a root-only path and alerts", "Eicar" in out and out.split()[-1] == "1", out)
+            rc, out = con.run("ziroctl module disable clamav 2>&1 | tail -1; netstat -tln | grep -c 3310", timeout=300)
+            check("module disable clamav", "Module clamav disabled" in out, out)
         if args.installed:
             rc, out = con.run("ziro-install --disk /dev/vda --yes --hostname ziro-itest --password Ziro-Test-9 "
                               "</dev/null >/tmp/install.log 2>&1; echo INSTALL_RC=$?; tail -15 /tmp/install.log", timeout=600)

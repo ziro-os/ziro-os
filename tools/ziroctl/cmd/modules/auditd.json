@@ -1,0 +1,67 @@
+{
+  "name": "auditd",
+  "version": "1.0",
+  "description": "Linux audit: kernel audit trail with CIS rules (identity, SSH, modules, time)",
+  "packages": [
+    "audit"
+  ],
+  "dirs": [
+    {
+      "path": "/var/log/audit",
+      "mode": "0700"
+    },
+    {
+      "path": "/etc/audit/rules.d",
+      "mode": "0750"
+    }
+  ],
+  "files": [
+    {
+      "path": "/etc/audit/rules.d/ziro.rules",
+      "mode": "0640",
+      "content": "## Managed by `ziroctl module enable auditd` (CIS-aligned).\n-D\n-b 8192\n-f 1\n--backlog_wait_time 60000\n-w /etc/passwd -p wa -k identity\n-w /etc/group -p wa -k identity\n-w /etc/shadow -p wa -k identity\n-w /etc/sudoers -p wa -k scope\n-w /root/.ssh -p wa -k ssh-keys\n-w /etc/ssh/sshd_config -p wa -k sshd\n-w /etc/ziro -p wa -k ziro-config\n-w /usr/bin/ziroctl -p x -k ziroctl\n-w /sbin/insmod -p x -k modules\n-w /sbin/modprobe -p x -k modules\n-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k modules\n-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change\n-a always,exit -F arch=b64 -S sethostname,setdomainname -k system-locale\n-a always,exit -F arch=b64 -S mount,umount2 -F auid>=1000 -F auid!=unset -k mounts\n"
+    }
+  ],
+  "services": [
+    {
+      "name": "auditd",
+      "description": "Linux audit daemon",
+      "exec": "/usr/sbin/auditd",
+      "args": "-n",
+      "pidfile": "/run/ziro-auditd.pid",
+      "logfile": "/var/log/auditd-daemon.log"
+    }
+  ],
+  "post_start": [
+    {
+      "exec": "/usr/sbin/auditctl",
+      "args": [
+        "-R",
+        "/etc/audit/rules.d/ziro.rules"
+      ]
+    },
+    {
+      "exec": "/usr/sbin/auditctl",
+      "args": [
+        "-e",
+        "1"
+      ]
+    }
+  ],
+  "stop": [
+    {
+      "exec": "/usr/sbin/auditctl",
+      "args": [
+        "-D"
+      ]
+    }
+  ],
+  "health": {
+    "exec": "/usr/sbin/auditctl",
+    "args": [
+      "-s"
+    ],
+    "expect": "enabled 1",
+    "timeout": "30s"
+  }
+}
