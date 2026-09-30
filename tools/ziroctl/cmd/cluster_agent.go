@@ -93,6 +93,9 @@ func runArgs(a Assignment) []string {
 	if a.IP != "" {
 		args = append(args, "--network", podNetName, "--ip", a.IP, "--dns", a.DNS, "--dns-search", meshDomain)
 	}
+	for _, v := range a.Volumes {
+		args = append(args, "-v", v)
+	}
 	return append(append(args, "--", a.Image), a.Args...)
 }
 
@@ -390,6 +393,14 @@ var clusterAgentCmd = &cobra.Command{
 					}
 				}
 				writeClusterDNS(resp)
+				// Shares first: a replica whose share can't be mounted here is held back, never
+				// started on the empty local mount point.
+				if unavailable, serr := applyStorage(resp.NFSExports, resp.NFSMounts); serr != nil || len(unavailable) > 0 {
+					resp.Assignments = holdBack(resp.Assignments, unavailable)
+					if serr != nil && merr == nil {
+						merr = fmt.Errorf("storage: %w", serr)
+					}
+				}
 				if podOK && resp.PodCIDR != "" {
 					meshNet := ""
 					if ip, err := netip.ParseAddr(resp.MeshIP); err == nil && resp.MeshPrefix > 0 {

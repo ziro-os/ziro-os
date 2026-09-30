@@ -681,6 +681,13 @@ func reconcileModules() {
 		if err := ensureDirs(m); err != nil {
 			fmt.Printf("[modules] %s: %v\n", name, err)
 		}
+		// Prepare steps set up what services need before they start (kernel modules, special
+		// mounts); they are guarded with "creates" or harmless to repeat.
+		for _, c := range m.Prepare {
+			if _, err := moduleExec(c); err != nil {
+				fmt.Printf("[modules] %s: %v\n", name, err)
+			}
+		}
 		for _, s := range m.Services {
 			p := filepath.Join(servicesDir, s.Name+".conf")
 			if !fileExists(p) {

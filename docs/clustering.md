@@ -258,3 +258,8 @@ ziroctl cluster network enable          # migrate an existing cluster (apps roll
 - `ziroctl cluster deploy --egress <domains,CIDRs>` limits where an app's pods may connect outside the cluster.
 
 See [dns.md](dns.md).
+
+## Shared volumes
+
+`ziroctl cluster storage add <share> --node <n>` and `cluster deploy --volume <share>:/path[:ro]` give apps NFSv4.2
+shares over the mesh. See [storage.md](storage.md).

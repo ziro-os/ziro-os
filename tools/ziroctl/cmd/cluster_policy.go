@@ -152,6 +152,9 @@ func policyFor(st *ClusterState, nodeID string) *MeshPolicy {
 		n, _ := strconv.Atoi(port)
 		p.Rules = append(p.Rules, MeshRule{App: r.App, Port: n, Proto: proto, Sources: src})
 	}
+	if r := storagePolicyRule(st, nodeID); r != nil {
+		p.Rules = append(p.Rules, *r)
+	}
 	sort.Slice(p.Rules, func(i, j int) bool {
 		if p.Rules[i].Port != p.Rules[j].Port {
 			return p.Rules[i].Port < p.Rules[j].Port

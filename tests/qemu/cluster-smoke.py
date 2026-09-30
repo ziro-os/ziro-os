@@ -194,6 +194,24 @@ def main():
         check("egress: other domains and raw IPs are dropped (counted)", "BLOCKED_NAME" in out and "BLOCKED_IP" in out and "drop" in out, out)
         m.run("ziroctl cluster remove egr")
 
+        # Cluster NFS: a share on the master, used by an app with a replica on each node.
+        rc, out = m.run("ziroctl cluster storage add media --node master-1 && "
+                        "ziroctl cluster deploy --name vol --image docker.io/library/nginx:alpine --replicas 2 "
+                        "--volume media:/usr/share/nginx/html", timeout=60)
+        check("cluster storage add + deploy with --volume", rc == 0, out)
+        vw = pod_of(w, "vol")
+        ok, out = bs.retry(w, f"nerdctl exec {vw} sh -c 'echo cluster-nfs > /usr/share/nginx/html/index.html' && echo WROTE",
+                           lambda rc, o: "WROTE" in o, 600, every=15)  # the first export installs the NFS server
+        check("node2's pod writes to the share (NFSv4.2 over the mesh)", ok, out)
+        rc, out = m.run("cat /var/lib/ziro/storage/media/index.html; grep -c 10.200.0 /etc/exports.d/ziro-cluster.exports; "
+                        "awk '$2==\"/var/lib/ziro/volumes/media\"{print $3}' /proc/mounts", timeout=30)
+        check("the write is on the master's storage; exported to mesh IPs only", "cluster-nfs" in out and "nfs4" in out, out)
+        rc, out = w.run("awk '$2==\"/var/lib/ziro/volumes/media\"{print $1, $3}' /proc/mounts", timeout=30)
+        check("node2 mounts the share from the master's mesh IP", "10.200.0.1:/var/lib/ziro/storage/media nfs4" in out, out)
+        rc, out = m.run("nft list table inet ziro_cluster | grep -c 'proto-dst 2049'", timeout=30)
+        check("deny-mode mesh policy opens 2049 only for the share's consumers", out.strip().split()[-1:] != ["0"], out)
+        m.run("ziroctl cluster remove vol; ziroctl cluster storage rm media", timeout=60)
+
         rc, out = m.run("ziroctl cluster deploy --name other --image docker.io/library/nginx:alpine --replicas 2")
         oc = pod_of(w, "other")
         rc, out = w.run(f"nerdctl exec {oc} wget -qO- -T5 http://{web_master}/ >/dev/null && echo REACHED || echo BLOCKED", timeout=30)
