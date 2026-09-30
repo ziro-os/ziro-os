@@ -1,13 +1,25 @@
-# Documentation
+# Ziro-OS documentation
 
-Technical documentation and architecture specifications for Ziro-OS.
+Ziro-OS is under active development and is not ready for production use. Start with the
+[project README](../README.md) for an overview and a local container quick start.
 
-## Files
-- `architecture.md` - System architecture overview
-- `build.md` - Build instructions and requirements
-- `modules.md` - Opt-in modules (clamav, auditd, security pack) and how to add one
-- `api.md` - API documentation
-- `security.md` - Security model and hardening
-- `networking.md` - Hostname, DNS resolvers, declarative interfaces/VLANs/bonds/routes with rollback
-- `storage.md` - Automatic disk growth, data disks, NFS exports and mounts, cluster storage
-- `dns.md` - Smart DNS resolver, split DNS, records, blocklists, DoT, cluster DNS, container egress control
+## Start here
+
+- [Getting started](getting-started.md): container image, QEMU, and ISO basics.
+- [Building](building.md): architectures, kernel flavors, build commands, and verification.
+- [Installation](installation-guide.md): installing from bootable media.
+- [Project goals](project-goals.md): intended use cases and future directions.
+- [Contributing](../community/CONTRIBUTING.md): development workflow and pull requests.
+
+## System and operations
+
+- [Architecture](architecture.md): host components and cluster design.
+- [Security](security.md): current controls and limitations.
+- [Virtualization](virtualization.md) and [multi-architecture builds](multi-architecture-guide.md).
+- [Clustering](clustering.md) and [gateway](gateway.md).
+- [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes with rollback.
+- [Storage](storage.md): automatic disk growth and data disks.
+- [Smart DNS](dns.md): caching resolver, split DNS, cluster records, container egress control.
+- [Upgrades](upgrade.md) and [compliance mapping](compliance.md).
+- [Advanced deployment](advanced-deployment-guide.md) and
+  [first application tutorial](tutorials/01-first-application.md).

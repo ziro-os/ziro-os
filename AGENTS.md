@@ -95,7 +95,7 @@
 - Include any new module’s manifest/recipe with metadata (name, version, dependencies).
 - Ensure configuration / defaults don’t introduce breakage.
 - Follow versioning schema for modules / packages.
-- Document new features or changes in docs/ or in `tech.md`.
+- Document new features or changes in `docs/`, especially `docs/architecture.md` for technical decisions.
 
 ---
 
@@ -121,7 +121,7 @@
 ## Agent‑Specific Notes
 
 - If the agent is asked to generate files, scaffold under the defined structure: `kernel/`, `rootfs/`, `packages/`, `images/`, `tools/`, `docs/`.
-- Agent should reference tech decisions in `tech.md` when generating code or architecture.
+- Agent should reference technical decisions in `docs/architecture.md` when generating code or architecture.
 - When in doubt, aim for minimalism and clarity.
 
 ---
