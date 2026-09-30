@@ -392,8 +392,12 @@ def main():
         rc, out = con.run("ziroctl service status sshd")
         check("service status finds sshd (retitled process)", "RUNNING" in out, out)
         con.run("cp /etc/ssh/sshd_config /tmp/sshd_config.bak && printf 'Port 22\\nPort 2222\\n' >> /etc/ssh/sshd_config")
-        rc, out = con.run("ziroctl service restart sshd && netstat -ltn | grep -c ':2222 ' && ps -o args | grep -c '[l]istener'")
-        check("service restart sshd applies new config (one listener)", rc == 0 and out.split()[-2:] == ["2", "1"], out)
+        rc, out = con.run("ziroctl service restart sshd")
+        # restart returns once init has respawned sshd; binding the new port can take a moment
+        # on slow (emulated) runners, so wait for it. ';' so a 0 count can't skip the next one.
+        ok, out2 = retry(con, "netstat -ltn | grep -c ':2222 '; ps -o args | grep -c '[l]istener'",
+                         lambda rc_, o: o.split()[-2:] == ["2", "1"], 15, every=1)
+        check("service restart sshd applies new config (one listener)", rc == 0 and ok, out + out2)
         con.run("echo 'NoSuchOption yes' >> /etc/ssh/sshd_config")
         rc, out = con.run("P=$(cat /run/sshd.pid); ziroctl service restart sshd; [ \"$(cat /run/sshd.pid)\" = \"$P\" ] && echo KEPT")
         check("broken sshd_config: restart refused, sshd kept", "config check failed" in out and "KEPT" in out, out)
