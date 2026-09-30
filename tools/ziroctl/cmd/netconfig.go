@@ -577,6 +577,9 @@ const resolvPinMarker = "# Managed by `ziroctl network dns`: resolvers are pinne
 
 // setResolvers pins the resolvers (DHCP stops rewriting resolv.conf), or with nil returns to DHCP.
 func setResolvers(servers, search []string) error {
+	if dnsEnabled() { // smart DNS owns resolv.conf: these become its upstreams
+		return setDNSUpstreamsFromResolvers(servers, search)
+	}
 	if servers == nil {
 		b, err := os.ReadFile(resolvPinned)
 		if err != nil {

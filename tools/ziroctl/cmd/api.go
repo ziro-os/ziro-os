@@ -473,6 +473,7 @@ func startAPIServer() {
 	}))
 	registerSecurityRoutes(mux, wrapHandler)
 	registerHostRoutes(mux, wrapHandler)
+	registerDNSRoutes(mux, wrapHandler)
 
 	addr := fmt.Sprintf("%s:%d", apiBindHost, apiPort)
 	fmt.Println("================================================================")

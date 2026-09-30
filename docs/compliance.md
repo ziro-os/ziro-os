@@ -51,6 +51,8 @@ Trust Services Criteria (2017, revised points of focus).
 | 8.2/8.5/8.9 Audit log management | Tamper-evident, hash-chained audit log on every host; forward it to a central collector (8.9) |
 | 12.2/13.4 Network segmentation and traffic filtering | App policy on the mesh; gateway CIDR allowlists and per-client rate limits |
 | 13.1/8.11 Monitoring and alerting | Prometheus metrics (node readiness, replica health, control-plane membership, security-control state); signed webhook alerts for threats, integrity changes and bans |
+| 4.4/13.4 Egress filtering | Per-app egress allowlists (`--egress`), enforced in nftables with DNS-learned addresses |
+| 9.2 DNS filtering | Smart DNS blocklists and blocked domains (`ziroctl dns block`, `dns blocklist`) |
 | 13.3/13.8 Network intrusion prevention | Ziro Guard: per-source SYN/connection/ICMP limits, kernel port-scan bans, SSH brute-force bans with escalation |
 | 16.1/16.4 Secure software supply chain | Signed-image policy; pinned dependencies; `govulncheck` and SAST/dependency scanning in CI |
 

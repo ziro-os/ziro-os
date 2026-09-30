@@ -362,6 +362,7 @@ type podDNS struct {
 	eps       map[string][]string // app -> pod IPs
 	clients   netip.Prefix
 	upstreams []string
+	egress    *egressLearner // fills egress-controlled apps' allow sets from their DNS answers
 }
 
 func (d *podDNS) setEndpoints(eps map[string][]string) {
@@ -430,6 +431,16 @@ func (d *podDNS) answer(q []byte) []byte {
 	}
 	binary.BigEndian.PutUint16(resp[6:], uint16(n))
 	return resp
+}
+
+func addrIP(addr net.Addr) string {
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		return a.IP.String()
+	case *net.TCPAddr:
+		return a.IP.String()
+	}
+	return ""
 }
 
 func (d *podDNS) allowed(addr net.Addr) bool {
@@ -520,7 +531,9 @@ func (d *podDNS) serve(addr string) error {
 				}
 				resp := d.answer(q)
 				if resp == nil {
-					resp = d.forward(q, true)
+					if resp = d.forward(q, true); resp != nil {
+						d.egress.learn(addrIP(c.RemoteAddr()), resp) // before the pod gets the answer
+					}
 				}
 				if resp != nil {
 					_, _ = c.Write(append([]byte{byte(len(resp) >> 8), byte(len(resp))}, resp...))
@@ -547,6 +560,7 @@ func (d *podDNS) serve(addr string) error {
 			go func() {
 				defer func() { <-sem }()
 				if resp := d.forward(q, false); resp != nil {
+					d.egress.learn(addrIP(from), resp) // before the pod gets the answer (and connects)
 					_, _ = pc.WriteTo(resp, from)
 				}
 			}()

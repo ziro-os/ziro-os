@@ -111,6 +111,9 @@ Output:
   Keys are deduplicated by fingerprint and tagged `ziro-import:<src>:<user>`. `--sync` also removes keys the user
   deleted upstream, but never syncs to an empty list, so you can't be locked out. `ssh key remove --source
   gh:<user>` removes every key from that source. `/api/v1/ssh/keys` is admin-only.
+- **DNS and egress**: the optional smart DNS (`ziroctl dns enable`) only answers loopback and allowed networks. It
+  rate-limits clients, verifies DNS-over-TLS certificates and can block domains. Apps deployed with `--egress`
+  reach only their allowed domains and CIDRs; see [dns.md](dns.md).
 - **Hardening score**: `ziroctl security audit [--json]` scores the host against 30 CIS-mapped checks (kernel and
   network sysctls, SSH, firewall and guard, file permissions, audit chain). Fresh images score 100.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects

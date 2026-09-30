@@ -318,3 +318,95 @@ func registerHostRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) ht
 		}
 	}))
 }
+
+// registerDNSRoutes: reading is for any token. Records and blocks: operator. Upstreams and
+// forwards decide where every lookup goes (a hijack vector): admin.
+func registerDNSRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+	mux.HandleFunc("/api/v1/dns", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		cfg, _ := loadDNSConfig()
+		var st dnsStatsFile
+		if b, err := os.ReadFile(dnsStatsPath); err == nil {
+			_ = json.Unmarshal(b, &st)
+		}
+		apiReply(w, nil, map[string]any{"enabled": dnsEnabled(), "config": cfg, "stats": st, "cluster_records": loadClusterRecords()})
+	}))
+	mux.HandleFunc("/api/v1/dns/", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		what := strings.TrimPrefix(r.URL.Path, "/api/v1/dns/")
+		need := "operator"
+		if what == "upstreams" || what == "forwards" {
+			need = "admin"
+		}
+		if !requireRole(w, r, need) {
+			return
+		}
+		var err error
+		switch {
+		case what == "records" && r.Method == http.MethodPost:
+			var rec DNSRecord
+			if !decodeBody(w, r, &rec) {
+				return
+			}
+			err = mutateDNS(func(c *DNSConfig) error {
+				if _, _, err := parseRecord(rec); err != nil {
+					return err
+				}
+				c.Records = append(c.Records, rec)
+				return nil
+			})
+		case what == "records" && r.Method == http.MethodDelete:
+			name, typ := r.URL.Query().Get("name"), r.URL.Query().Get("type")
+			err = mutateDNS(func(c *DNSConfig) error {
+				kept := c.Records[:0]
+				for _, x := range c.Records {
+					if fqdn(x.Name) == fqdn(name) && (typ == "" || strings.EqualFold(x.Type, typ)) {
+						continue
+					}
+					kept = append(kept, x)
+				}
+				c.Records = kept
+				return nil
+			})
+		case what == "block" && r.Method == http.MethodPut:
+			var req struct {
+				Domains []string `json:"domains"`
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			err = mutateDNS(func(c *DNSConfig) error { c.Block = req.Domains; return nil })
+		case what == "upstreams" && r.Method == http.MethodPut:
+			var req struct {
+				Upstreams []DNSUpstream `json:"upstreams"` // empty: from DHCP
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			err = mutateDNS(func(c *DNSConfig) error { c.Upstreams = req.Upstreams; return nil })
+		case what == "forwards" && r.Method == http.MethodPut:
+			var req struct {
+				Forwards []DNSForward `json:"forwards"`
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			err = mutateDNS(func(c *DNSConfig) error { c.Forwards = req.Forwards; return nil })
+		default:
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+		apiAudit(r, "dns "+what+" "+strings.ToLower(r.Method), "", err)
+		apiReply(w, err, APIMessage{Status: "ok", Message: "dns " + what + " updated (the resolver reloads within 2s)"})
+	}))
+}
+
+// mutateDNS edits and validates the config; nothing is written when validation fails.
+func mutateDNS(edit func(*DNSConfig) error) error {
+	cfg, err := loadDNSConfig()
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := edit(cfg); err != nil {
+		return err
+	}
+	return saveDNSConfig(cfg)
+}
