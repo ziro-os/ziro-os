@@ -787,26 +787,34 @@ static void start_containerd(void) {
     }
 }
 
+/* A directory sshd requires to be owned by its own (init's) user and closed to others. Through an
+ * O_NOFOLLOW descriptor, so a symlink planted at the path can't redirect the chown/chmod. */
+static void ensure_private_dir(const char *path, mode_t mode) {
+    safe_mkdir(path, mode);
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "[init] %s is not a plain directory: %s\n", path, strerror(errno));
+        return;
+    }
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (st.st_uid != geteuid() || st.st_gid != getegid()) &&
+        fchown(fd, geteuid(), getegid()) != 0) {
+        fprintf(stderr, "[init] %s: fchown: %s\n", path, strerror(errno));
+    }
+    if (fchmod(fd, mode) != 0) fprintf(stderr, "[init] %s: fchmod: %s\n", path, strerror(errno));
+    close(fd);
+}
+
 static void start_sshd(void) {
     if (access("/usr/sbin/sshd", X_OK) != 0 && access("/sbin/sshd", X_OK) != 0) {
         printf("[init] sshd not found; skipping remote SSH daemon startup\n");
         return;
     }
 
-    safe_mkdir("/var/empty", 0700);
-    chmod("/var/empty", 0700);
-    // deepcode ignore MissingAuthorization: PID 1 must make sshd privilege-separation dir root-owned (sshd refuses otherwise)
-    if (chown("/var/empty", 0, 0) != 0) {
-        // ignore if not running as root
-    }
+    ensure_private_dir("/var/empty", 0700);  /* privilege separation: sshd refuses it otherwise */
     safe_mkdir("/run/sshd", 0755);
     safe_mkdir("/etc/ssh", 0755);
-    safe_mkdir("/root/.ssh", 0700);
-    chmod("/root/.ssh", 0700);
-    // deepcode ignore MissingAuthorization: PID 1 must keep root's .ssh root-owned (sshd StrictModes)
-    if (chown("/root/.ssh", 0, 0) != 0) {
-        // ignore if not running as root
-    }
+    ensure_private_dir("/root/.ssh", 0700);  /* StrictModes: sshd ignores keys otherwise */
 
     // Auto-generate host keys if not present
     if (access("/etc/ssh/ssh_host_ed25519_key", F_OK) != 0) {
@@ -882,10 +890,14 @@ static void get_active_console(char *dev_path, size_t max_len) {
                 last_word = token;
                 token = strtok(NULL, " \t\r\n");
             }
-            /* A plain device name from the kernel (e.g. ttyS0): never a path. */
-            if (last_word && strlen(last_word) > 0 && strlen(last_word) < 32 &&
-                strspn(last_word, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == strlen(last_word)) {
-                snprintf(dev_path, max_len, "/dev/%s", last_word);
+            /* Only a console this system knows: the path is one of these constants, never text from sysfs. */
+            static const char *const consoles[] = {"/dev/tty0", "/dev/tty1", "/dev/ttyS0", "/dev/ttyS1",
+                                                   "/dev/ttyAMA0", "/dev/hvc0", "/dev/xvc0"};
+            for (size_t i = 0; last_word && i < sizeof(consoles) / sizeof(consoles[0]); i++) {
+                if (strcmp(last_word, consoles[i] + 5) == 0) {
+                    snprintf(dev_path, max_len, "%s", consoles[i]);
+                    break;
+                }
             }
         }
         fclose(f);
@@ -964,7 +976,6 @@ static void setup_controlling_tty(void) {
     char dev_path[64];
     get_active_console(dev_path, sizeof(dev_path));
 
-    // deepcode ignore PT: dev_path is /dev/<name>, name restricted to [A-Za-z0-9] in get_active_console
     int fd = open(dev_path, O_RDWR);
     if (fd < 0) {
         fd = open("/dev/tty1", O_RDWR);
@@ -1139,9 +1150,11 @@ static int conf_trusted(FILE *f) {
     return fstat(fileno(f), &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0 && (st.st_mode & 022) == 0;
 }
 
-/* Pidfiles live under /run: never follow a definition elsewhere (PID 1 unlinks them). */
-static int pidfile_ok(const char *p) {
-    return strncmp(p, "/run/", 5) == 0 && strstr(p, "..") == NULL && strlen(p) < 128;
+/* Pidfiles live under /run, and PID 1 reads and unlinks them: canonicalize (resolving "..",
+ * symlinks) and require the real path to stay under /run/, so a definition or a planted symlink
+ * can't point PID 1 at any other file. real must hold PATH_MAX bytes. */
+static int pidfile_resolve(const char *p, char *real) {
+    return strlen(p) < 128 && realpath(p, real) != NULL && strncmp(real, "/run/", 5) == 0;
 }
 
 static int conf_get(const char *path, const char *key, char *out, size_t max) {
@@ -1174,14 +1187,13 @@ static void supervise_service_exit(pid_t pid, int status) {
     while ((e = readdir(d)) != NULL) {
         size_t n = strlen(e->d_name);
         if (n < 6 || n > 60 || strcmp(e->d_name + n - 5, ".conf") != 0) continue;
-        char conf[320], restart[32] = "", pidfile[200] = "", pidbuf[32] = "", state[16] = "";
+        char conf[320], restart[32] = "", pidfile[200] = "", pidbuf[32] = "", state[16] = "", real[PATH_MAX];
         snprintf(conf, sizeof(conf), "/etc/ziro/services/%s", e->d_name);
         if (!conf_get(conf, "restart", restart, sizeof(restart))) continue;
         int always = strcmp(restart, "always") == 0;
         if (!always && !(strcmp(restart, "on-failure") == 0 && !(WIFEXITED(status) && WEXITSTATUS(status) == 0))) continue;
-        if (!conf_get(conf, "pidfile", pidfile, sizeof(pidfile)) || !pidfile_ok(pidfile)) continue;
-        // deepcode ignore PT: pidfile comes from a root-owned, non-group/world-writable definition (conf_trusted) and pidfile_ok limits it to /run/ without ..
-        FILE *pf = fopen(pidfile, "r");
+        if (!conf_get(conf, "pidfile", pidfile, sizeof(pidfile)) || !pidfile_resolve(pidfile, real)) continue;
+        FILE *pf = fopen(real, "r");
         if (!pf) continue;
         if (!fgets(pidbuf, sizeof(pidbuf), pf)) pidbuf[0] = '\0';
         fclose(pf);
@@ -1196,8 +1208,7 @@ static void supervise_service_exit(pid_t pid, int status) {
             if (!fgets(state, sizeof(state), ef)) state[0] = '\0';
             fclose(ef);
         }
-        // deepcode ignore PT: same pidfile as above: trusted definition, confined to /run/ by pidfile_ok
-        unlink(pidfile);
+        unlink(real);
         if (strncmp(state, "disabled", 8) == 0) break;
 
         time_t now = time(NULL);

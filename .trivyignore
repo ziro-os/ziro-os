@@ -1,0 +1,8 @@
+# Trivy exceptions. Each entry says why it does not apply and expires, so it gets re-checked.
+
+# golang.org/x/crypto/openpgp is unmaintained (GO-2026-5932, no fixed version). Trivy flags the
+# whole x/crypto module, but no Ziro-OS binary imports openpgp: ziroctl uses x/crypto for
+# acme/autocert and friends, and cni-dhcp only pulls it in indirectly. Verify with:
+#   go list -deps ./... | grep x/crypto/openpgp   (in tools/ziroctl and packages/cni-dhcp: no output)
+# Image signatures are verified with cosign's sigstore format, never OpenPGP.
+GO-2026-5932 exp:2027-03-31

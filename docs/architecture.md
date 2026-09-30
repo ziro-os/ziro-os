@@ -136,7 +136,7 @@ flowchart LR
 
 | Boundary | Control |
 |---|---|
-| Worker → master | TLS pinned to the master certificate hash; bearer node token checked in constant time; per-IP rate limit; 1 MiB body limit; audit record for rejected credentials (at most one per IP per 10 min) |
+| Worker → master | TLS with standard chain and hostname verification, never skipped. A node that holds the cluster CA verifies against it. A first join (or a pre-CA agent) takes the certificate whose hash is the pin from the chain the master presents, and uses it as the only root. Bearer node token checked in constant time; per-IP rate limit; 1 MiB body limit; audit record for rejected credentials (at most one per IP per 10 min) |
 | Master → worker data | Delivered only in heartbeat replies over that channel; the agent re-validates everything it passes to nft or nerdctl (IPs, ports, image after `--`) |
 | Node ↔ node | WireGuard (Curve25519 keys per node, distributed by the master); app policy on `ziro0` |
 | Secrets | `0600` on the master; sent only to nodes running the app; written to tmpfs env files, never argv; excluded from backups unless `--include-secrets`; never in audit records |
