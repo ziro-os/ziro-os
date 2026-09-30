@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -278,40 +279,71 @@ func caVerifiedTLS(pin string) *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: clusterSNI}
 }
 
-// pinnedTLS trusts a master by pin. The pin is either the cluster CA hash (the leaf must chain to
-// that CA) or, for agents from before the cluster CA, the first master's own certificate hash.
-func pinnedTLS(pin string, sni bool) *tls.Config {
-	c := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		// Chain/hostname verification is replaced by the pin checks below.
-		// deepcode ignore TooPermissiveTrustManager: certificate pinning (kubeadm-style) replaces chain verification: VerifyConnection requires the pinned leaf, or a pinned CA that the leaf must chain to; nodes that hold the CA use caVerifiedTLS (standard verification)
-		InsecureSkipVerify: true, //nolint:gosec
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 {
-				return errors.New("master presented no certificate")
-			}
-			leaf := cs.PeerCertificates[0]
-			if subtle.ConstantTimeCompare([]byte(certDERHash(leaf.Raw)), []byte(pin)) == 1 {
-				return nil // pre-CA agent pinned to this exact certificate
-			}
-			for _, c := range cs.PeerCertificates[1:] {
-				if subtle.ConstantTimeCompare([]byte(certDERHash(c.Raw)), []byte(pin)) != 1 || !c.IsCA {
-					continue
-				}
-				pool := x509.NewCertPool()
-				pool.AddCert(c)
-				if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: clusterSNI}); err != nil {
-					return pinError("master certificate does not chain to the pinned CA: " + err.Error())
-				}
-				return nil
-			}
-			return pinError("master certificate does not match the pinned " + pin)
-		},
+// legacySNI is a name on pre-CA master certificates (ensureTLSCertificates); CA-aware masters
+// serve that certificate to clients that do not ask for clusterSNI.
+const legacySNI = "ziro-host"
+
+var pinnedConfigs sync.Map // addr|pin -> *tls.Config
+
+// pinnedTLS turns a pin into a standard verifying config; no verification is ever skipped. The
+// chain a master presents is read from a probe handshake that fails verification (Go reports it
+// in CertificateVerificationError), and the certificate whose hash is the pin becomes the only
+// root: the cluster CA, which the leaf must chain to under clusterSNI, or, for agents from before
+// the cluster CA, the master's own self-signed certificate under legacySNI.
+func pinnedTLS(addr, pin string) (*tls.Config, error) {
+	if c, ok := pinnedConfigs.Load(addr + "|" + pin); ok {
+		return c.(*tls.Config), nil
 	}
-	if sni {
-		c.ServerName = clusterSNI
+	for _, sni := range []string{clusterSNI, legacySNI} {
+		probe := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: sni, RootCAs: x509.NewCertPool()}
+		conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, probe)
+		if err == nil {
+			conn.Close() // cannot verify against an empty pool; never trust it
+			continue
+		}
+		var ve *tls.CertificateVerificationError
+		if !errors.As(err, &ve) {
+			return nil, err // network or handshake failure, not a certificate question
+		}
+		for i, c := range ve.UnverifiedCertificates {
+			if subtle.ConstantTimeCompare([]byte(certDERHash(c.Raw)), []byte(pin)) != 1 {
+				continue
+			}
+			// A pinned CA must be a CA; a pinned leaf is only a pre-CA master (legacySNI).
+			if (i > 0 && !c.IsCA) || (i == 0 && sni != legacySNI) {
+				continue
+			}
+			name := sni
+			if i == 0 {
+				name = leafName(c) // the pin names this exact certificate: verify it under its own name
+			}
+			pool := x509.NewCertPool()
+			pool.AddCert(c)
+			tc := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: name}
+			pinnedConfigs.Store(addr+"|"+pin, tc)
+			return tc, nil
+		}
 	}
-	return c
+	return nil, pinError("master certificate does not match the pinned " + pin)
+}
+
+// leafName picks a name a pinned pre-CA certificate carries (legacySNI on real ones), never
+// clusterSNI, which would make a CA-aware master present its CA-signed certificate instead.
+func leafName(c *x509.Certificate) string {
+	for _, n := range c.DNSNames {
+		if n == legacySNI {
+			return n
+		}
+	}
+	for _, n := range c.DNSNames {
+		if n != clusterSNI {
+			return n
+		}
+	}
+	if len(c.IPAddresses) > 0 {
+		return c.IPAddresses[0].String()
+	}
+	return legacySNI
 }
 
 // masterClientTLS is used between masters: present our cert, require a master cert back.

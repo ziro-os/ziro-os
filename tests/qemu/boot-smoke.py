@@ -229,6 +229,11 @@ def main():
 
         # Service lifecycle for init-supervised daemons. sshd rewrites its process title and
         # ziro-init respawns both, so status/stop/restart must go through init, not around it.
+        rc, out = con.run("stat -c '%U %a' /root/.ssh /var/empty")
+        check("sshd private dirs root-owned 0700", out.split() == ["root", "700", "root", "700"], out)
+        ok, out = retry(con, "P=$(cat /run/crond.pid) && kill $P && sleep 4 && N=$(cat /run/crond.pid) && "
+                        "[ \"$N\" != \"$P\" ] && kill -0 $N && echo RESPAWNED", lambda rc, o: "RESPAWNED" in o, 30)
+        check("init respawns a killed restart=always service (crond)", ok, out)
         rc, out = con.run("ziroctl service status sshd")
         check("service status finds sshd (retitled process)", "RUNNING" in out, out)
         con.run("cp /etc/ssh/sshd_config /tmp/sshd_config.bak && printf 'Port 22\\nPort 2222\\n' >> /etc/ssh/sshd_config")
