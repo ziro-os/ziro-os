@@ -357,6 +357,23 @@ def main():
         else:
             print(f"  [SKIP] ssh key import from GitHub (unreachable or no published keys): {out.strip()[:120]}")
 
+        # Smart DNS (127.0.0.53): local records, blocking, upstream resolution, DHCP interplay.
+        rc, out = con.run("ziroctl dns enable 2>&1 | tail -1; head -3 /etc/resolv.conf", timeout=60)
+        check("dns enable: resolver up, resolv.conf -> 127.0.0.53", "Smart DNS enabled" in out and "nameserver 127.0.0.53" in out, out)
+        rc, out = con.run("ziroctl dns record add db.internal A 10.0.0.20 >/dev/null && ziroctl dns block add blocked.example >/dev/null && "
+                          "sleep 3; echo LOCAL=$(nslookup db.internal 2>&1 | grep -c 10.0.0.20); "
+                          "echo BLOCKED=$(nslookup ads.blocked.example 2>&1 | grep -c NXDOMAIN); "
+                          "echo UPSTREAM=$(nslookup dl-cdn.alpinelinux.org 2>&1 | grep -c '^Address')", timeout=60)
+        check("dns: local record, blocked subdomain (NXDOMAIN), upstream names resolve",
+              "LOCAL=1" in out and "BLOCKED=0" not in out and "UPSTREAM=0" not in out, out)  # A + AAAA lookups
+        rc, out = con.run("kill -USR1 $(cat /run/udhcpc.eth0.pid); sleep 4; "
+                          "echo RESOLV=$(grep -c '^nameserver 127.0.0.53' /etc/resolv.conf) DHCPNS=$(grep -c ^nameserver /run/ziro/dhcp-resolv.conf); "
+                          "sleep 11; ziroctl dns status --json | grep -o '\"queries\":[0-9]*'", timeout=60)
+        check("DHCP renewal feeds the resolver's upstreams (resolv.conf stays on 127.0.0.53); stats",
+              "RESOLV=1" in out and "DHCPNS=0" not in out and re.search(r'"queries":[1-9]', out) is not None, out)
+        rc, out = con.run("ziroctl dns disable 2>&1 | tail -1; grep -c 127.0.0.53 /etc/resolv.conf; nslookup dl-cdn.alpinelinux.org >/dev/null 2>&1 && echo RESOLVES", timeout=60)
+        check("dns disable restores working resolvers", "disabled" in out and "RESOLVES" in out and "\n0\n" in out, out)
+
         if args.no_pull:
             print("  [SKIP] container run (--no-pull)")
         else:
