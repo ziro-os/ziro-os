@@ -10,9 +10,11 @@ This guide outlines our development workflow, coding standards, and how to get y
 
 Every contribution to Ziro-OS should respect our core design tenets:
 
-1. **Minimal by Design**: We only ship what is strictly necessary to run container workloads. No bloated daemons, no unnecessary background services. Target base footprint is < 15MB.
+1. **Minimal by Design**: Ship only what is needed for container workloads. The minimal container rootfs is about
+   16 MB; CI keeps bootable host images under 300 MB.
 2. **Container-Native First**: The host OS exists to host and schedule OCI containers via `containerd` and `runc`. Containers are first-class citizens.
-3. **Stateless & Immutable**: Root filesystems are read-only. Mutable state is confined to designated tmpfs or mounted persistent volumes.
+3. **Controlled mutable state**: An immutable installed root is a goal. Today the installer mounts ext4 read/write,
+   while live boot uses writable tmpfs. Document and minimize writable paths.
 4. **True Multi-Architecture**: Full support for both `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM64 cloud instances).
 5. **Static Linking & Zero Bloat**: Prefer statically compiled Go and C99 binaries with musl libc to avoid runtime dynamic library dependency issues.
 
@@ -24,7 +26,7 @@ Every contribution to Ziro-OS should respect our core design tenets:
 
 To build and test Ziro-OS locally, ensure you have the following installed:
 
-- **Go 1.21+**: For compiling `ziroctl` and `ziropkg`.
+- **Go 1.27.1+**: Required by the `ziroctl` and `ziropkg` modules.
 - **Docker 24.0+** (with Buildx support): For rootfs extraction and container base building.
 - **GCC / Clang** (or `musl-gcc`): For compiling `ziro-init` PID 1 supervisor.
 - **QEMU** (`qemu-system-x86_64` and/or `qemu-system-aarch64`): For running microVM tests.
@@ -61,6 +63,9 @@ ziro-os/
 ├── Makefile                       # Top-level build orchestrator
 ├── AGENTS.md                      # AI agent and development guidelines
 ├── README.md                      # Main project documentation
+├── LICENSE                        # MIT license
+├── containerd/, docker/, podman/  # Runtime integration and compatibility notes
+├── docs/                          # Public architecture, build, and operations guides
 ├── init/                          # C99 static PID 1 supervisor (ziro-init)
 │   ├── ziro-init.c
 │   └── Makefile
@@ -82,11 +87,16 @@ ziro-os/
 ├── tests/                         # Test suites
 │   ├── smoke/                     # Container & rootfs smoke tests
 │   └── security/                  # CIS & security audit tests
-└── community/                     # Documentation and community guides
+└── community/                     # Contribution and community guides
     ├── CONTRIBUTING.md
     └── docs/
         └── getting-started.md
 ```
+
+Keep each directory focused on one responsibility. Put base configuration in `rootfs/etc/`, package recipes in
+`packages/`, image assembly in `images/`, and user-facing technical documentation in `docs/`. Include version and
+dependency metadata with new package or module recipes. Keep optional components independently buildable where
+practical, and document how configuration overrides are applied before relying on them.
 
 ---
 
