@@ -214,6 +214,46 @@ def main():
         check("Sentinel started at boot (service boot)", ok, out)
         rc, out = con.run("ziroctl service status crond")
         check("crond started at boot", "RUNNING" in out, out)
+        # Ziro Guard: an "attacker" in its own network namespace (veth, so traffic isn't loopback).
+        # Sysctls present on every kernel (perf/kexec may be compiled out of the custom flavor).
+        rc, out = con.run("sysctl -n net.ipv4.conf.all.log_martians net.ipv4.tcp_rfc1337 dev.tty.ldisc_autoload; "
+                          "ziroctl security audit --json | grep -o '\"score\":[0-9]*'; ziroctl security audit | grep -A1 WARN")
+        check("hardening sysctls applied, audit score 100", out.split()[:3] == ["1", "1", "0"] and '"score":100' in out, out)
+        rc, out = con.run("unshare -n sleep 900 & echo $! > /tmp/atk.pid; sleep 1; A=$(cat /tmp/atk.pid); "
+                          # iproute2 (/sbin/ip): busybox ip ignores "peer name".
+                          "/sbin/ip link add atk0 type veth peer name atk1 && /sbin/ip link set atk1 netns $A && "
+                          "/sbin/ip addr add 10.99.0.1/24 dev atk0 && /sbin/ip link set atk0 up && "
+                          "nsenter -t $A -n sh -c '/sbin/ip addr add 10.99.0.2/24 dev atk1; /sbin/ip link set atk1 up; /sbin/ip link set lo up' && "
+                          # Capture-only receiver: busybox nc drops the request when it also sends a response,
+                          # so it answers nothing (ziroctl times out and keeps the alert queued for retry).
+                          "(sleep 120 | nc -l -p 9999 > /tmp/hook.txt &) && "
+                          "ziroctl security alerting add local --url http://127.0.0.1:9999/hook --events ban >/dev/null && echo ATKOK")
+        check("attacker namespace and local webhook receiver", "ATKOK" in out, out)
+        con.run("A=$(cat /tmp/atk.pid); for i in 1 2 3 4 5 6; do nsenter -t $A -n ssh -o BatchMode=yes "
+                "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 attacker@10.99.0.1 true; done 2>/dev/null",
+                timeout=90)
+        ok, out = retry(con, "nft list set inet ziro_guard ban4", lambda rc, o: "10.99.0.2" in o, 20)
+        check("SSH brute force banned in the kernel (6 failed logins)", ok, out)
+        rc, out = con.run("A=$(cat /tmp/atk.pid); nsenter -t $A -n nc -w 3 10.99.0.1 22 </dev/null | head -c 7; echo; "
+                          "ziroctl security bans unban 10.99.0.2", timeout=30)
+        # While banned nc gets no banner (dropped). After the unban the banner comes back once
+        # sshd's own PerSourcePenalties (a few seconds per failure) have expired too.
+        ok, out2 = retry(con, "nsenter -t $(cat /tmp/atk.pid) -n nc -w 3 10.99.0.1 22 </dev/null | head -c 7",
+                         lambda rc, o: o.startswith("SSH-2.0"), 90, every=5)
+        check("ban blocks SSH, unban restores it", not out.lstrip().startswith("SSH-") and "Unbanned 10.99.0.2" in out and ok, out + out2)
+        ok, out = retry(con, "grep -c 'X-Ziro-Signature: sha256=' /tmp/hook.txt && grep -o 'SSH brute force from 10.99.0.2 banned' /tmp/hook.txt",
+                        lambda rc, o: rc == 0, 45)  # slow TCG runners
+        check("signed ban alert delivered to the webhook", ok, out)
+        if not ok:
+            _, diag = con.run("echo '--- hook.txt'; head -c 600 /tmp/hook.txt; echo; echo '--- spool'; ls -la /var/lib/ziro/alerts; "
+                              "cat /var/lib/ziro/alerts/.recent; echo; cat /etc/ziro/alerting.json | grep -v secret; "
+                              "echo '--- sentinel'; tail -15 /var/log/sentinel.log; ps | grep '[n]c -l'; netstat -tan | grep 9999")
+            print("    diagnostics:\n" + "\n".join("      " + l for l in diag.splitlines()), flush=True)
+        con.run("A=$(cat /tmp/atk.pid); for p in $(seq 1000 1030); do nsenter -t $A -n nc -w 1 10.99.0.1 $p </dev/null; done 2>/dev/null",
+                timeout=120)
+        rc, out = con.run("ziroctl security bans list")
+        check("port scan banned by the kernel (no userspace)", "10.99.0.2" in out, out)
+        con.run("ziroctl security bans unban 10.99.0.2; kill $(cat /tmp/atk.pid); /sbin/ip link del atk0; ziroctl security alerting remove local")
         ok, out = retry(con, "nft list table inet ziro", lambda rc, o: rc == 0 and "policy drop" in o, 60)
         check("firewall table 'inet ziro' applied at boot", ok, out)
 

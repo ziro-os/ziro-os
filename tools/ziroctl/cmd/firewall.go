@@ -36,6 +36,8 @@ type FirewallConfig struct {
 	BlockedIPs   []BlockedIP    `json:"blocked_ips"`
 	// Interfaces whose traffic is authenticated elsewhere (the WireGuard cluster mesh).
 	TrustedInterfaces []string `json:"trusted_interfaces,omitempty"`
+	// Flood/scan limits and bans (Ziro Guard, protect.go); on by default with the firewall.
+	Guard GuardConfig `json:"guard,omitempty"`
 }
 
 var (
@@ -454,10 +456,13 @@ func applyNftables(cfg FirewallConfig) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(script)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
+	if err := nftRun(script); err != nil {
+		return err
+	}
+	// The guard is extra protection: if the kernel lacks a feature it needs, the firewall itself
+	// must still be up. `security protect status` and `security audit` report it inactive.
+	if err := applyGuard(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "firewall: Ziro Guard not active: %v\n", err)
 	}
 	return nil
 }
@@ -515,6 +520,7 @@ func applyIptables(cfg FirewallConfig) error {
 func flushFirewallRules() {
 	if _, err := exec.LookPath("nft"); err == nil {
 		_ = exec.Command("nft", "delete", "table", "inet", "ziro").Run()
+		_ = removeGuard()
 		return
 	}
 	for _, bin := range []string{"iptables", "ip6tables"} {

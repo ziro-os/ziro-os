@@ -69,6 +69,10 @@ func secretEnvFile(name string) string { return filepath.Join(secretEnvDir, name
 func runArgs(a Assignment) []string {
 	args := []string{"run", "-d", "--name", a.Name, "--restart", "always",
 		"--label", "ziro.cluster=true", "--label", "ziro.app=" + a.App}
+	if !a.PrivEsc {
+		// Secure by default: setuid binaries can't gain privileges, and no raw sockets (spoofing).
+		args = append(args, "--security-opt", "no-new-privileges", "--cap-drop", "NET_RAW")
+	}
 	if a.Port != "" {
 		args = append(args, "-p", a.Port)
 	}

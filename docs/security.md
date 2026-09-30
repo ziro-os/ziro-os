@@ -78,6 +78,35 @@ Output:
 - **Sentinel**: alert-only by default. Use `ziroctl security monitor --enforce` to SIGKILL CRITICAL detections.
   File integrity is checked against a baseline in `/etc/ziro/fim.db`. Refresh it after upgrades with
   `ziroctl security harden`.
+- **Ziro Guard (flood, scan and brute-force protection)**: on whenever the firewall is on
+  (`ziroctl security protect status|set|allow|disallow|enable|disable`).
+  - It lives in its own `inet ziro_guard` nftables table that firewall changes never delete, so bans keep their
+    remaining time and expire in the kernel.
+  - Per source address: new TCP connections over 100/s, more than 256 concurrent connections, or ICMP over 20/s
+    are dropped.
+  - Port scans (SYNs to closed ports over 20/min, with a default-drop firewall) are banned for 10 minutes by the
+    kernel itself.
+  - Sentinel bans SSH sources after 5 failures in 10 minutes: 1 hour first, doubling for repeat offenders up to 24
+    hours. It counts OpenSSH's own PerSourcePenalties lines too, but never penalties for connections that don't
+    try to log in (load balancer health checks).
+  - The source address is taken from where sshd writes it, so a crafted username cannot frame another address.
+  - Banned addresses cannot reach published container ports either.
+  - Never limited: loopback, link-local, the cluster mesh (`ziro0`), container bridges and `protect allow` CIDRs.
+  - Manage bans with `ziroctl security bans list|ban|unban`, or `GET/POST /api/v1/security/bans` (changes need an
+    admin token).
+- **Security alerting**: `ziroctl security alerting add <name> --url https://... [--min-severity high]
+  [--events ban,threat,fim,canary] [--format json|slack]` pushes Sentinel threats, file-integrity and canary
+  changes, and bans to webhooks.
+  - Each request is signed: `X-Ziro-Signature: sha256=HMAC-SHA256(secret, X-Ziro-Timestamp + "." + body)`. The
+    secret is shown once at creation. Reject stale timestamps to stop replays.
+  - Alerts are queued in `/var/lib/ziro/alerts` and retried with backoff for 24 hours. The same alert is sent at
+    most once per 10 minutes.
+  - Webhooks must be HTTPS (plain HTTP only to loopback), and redirects are not followed.
+  - The API (`/api/v1/security/alerting`) is admin-only.
+- **Container defaults**: cluster containers run with `no-new-privileges` and without `NET_RAW` (no raw-socket
+  spoofing). `cluster deploy --allow-privilege-escalation` opts an app out.
+- **Hardening score**: `ziroctl security audit [--json]` scores the host against 30 CIS-mapped checks (kernel and
+  network sysctls, SSH, firewall and guard, file permissions, audit chain). Fresh images score 100.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
   paths outside the backup allowlist, traversal, hardlinks, and writes through symlinks.
   Creation stages bytes in a private file, publishes the finished archive atomically, and refuses existing
