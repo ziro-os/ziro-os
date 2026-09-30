@@ -86,7 +86,7 @@ jobs:
             build/kernel-custom-${{ matrix.arch }}/kernel.release
             build/kernel-custom-${{ matrix.arch }}/stamp
             build/kernel-custom-${{ matrix.arch }}/modroot
-          key: kernel-out-${{ matrix.arch }}-${{ hashFiles('kernel/configs/**', 'kernel/build-kernel.sh') }}
+          key: kernel-out-${{ matrix.arch }}-${{ hashFiles('kernel/**') }}
 
       # On a miss, ccache + the cached kernel.org tarball keep a config change to minutes.
       - name: Restore ccache and kernel tarball

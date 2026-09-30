@@ -38,9 +38,8 @@ type ServiceStatusInfo struct {
 	LogFile     string `json:"logfile"`
 }
 
-var servicesDir = "/etc/ziro/services"
-
 const (
+	servicesDir = "/etc/ziro/services"
 	enabledDir  = "/etc/ziro/services/enabled"
 	logsDir     = "/var/log"
 	runDir      = "/run"
@@ -302,7 +301,6 @@ var serviceBootCmd = &cobra.Command{
 	Short:  "Start all enabled services (invoked by ziro-init at boot)",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		reconcileModules() // packages vanish after an OS upgrade; /run is empty every boot
 		// In parallel: init waits for this, and each start watches its daemon for up to 1s.
 		var wg sync.WaitGroup
 		for _, s := range listAllServices() {
@@ -321,7 +319,6 @@ var serviceBootCmd = &cobra.Command{
 			}(s.Name)
 		}
 		wg.Wait()
-		moduleBootHooks()
 		return nil
 	},
 }

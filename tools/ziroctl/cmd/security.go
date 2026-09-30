@@ -183,32 +183,10 @@ func auditScore(checks []AuditCheck) int {
 	return countPass(checks) * 100 / len(checks)
 }
 
-var (
-	scanAV    bool
-	scanQuiet bool
-)
-
 var securityScanCmd = &cobra.Command{
-	Use:   "scan [paths...]",
-	Short: "Perform AI heuristic malware, ransomware, and reverse shell detection (--av: antivirus scan)",
-	Example: `  ziroctl security scan                 # Sentinel heuristics (processes, canary, file integrity)
-  ziroctl security scan --av            # ClamAV scan of /root /home /tmp /var/tmp and volumes
-  ziroctl security scan --av /srv/data  # ClamAV scan of specific paths`,
+	Use:   "scan",
+	Short: "Perform AI heuristic malware, ransomware, and reverse shell detection",
 	Run: func(cmd *cobra.Command, args []string) {
-		if scanAV {
-			found, err := runAVScan(args, scanQuiet)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "Error:", err)
-				os.Exit(2)
-			}
-			if jsonOutput {
-				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"detections": found})
-			}
-			if len(found) > 0 {
-				os.Exit(1)
-			}
-			return
-		}
 		if !jsonOutput {
 			fmt.Println("🛡️  Starting Ziro-OS Sentinel Security & Threat Scan...")
 		}
@@ -597,8 +575,6 @@ func printCheck(out io.Writer, name string, passed bool) {
 
 func init() {
 	securityCmd.AddCommand(securityAuditCmd)
-	securityScanCmd.Flags().BoolVar(&scanAV, "av", false, "Antivirus scan with ClamAV (module clamav)")
-	securityScanCmd.Flags().BoolVar(&scanQuiet, "quiet", false, "Only alert; no output (cron)")
 	securityCmd.AddCommand(securityScanCmd)
 	securityMonitorCmd.Flags().BoolVar(&sentinelEnforce, "enforce", false, "SIGKILL processes flagged CRITICAL (default: alert only)")
 	securityCmd.AddCommand(securityMonitorCmd)

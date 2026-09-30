@@ -1,9 +1,0 @@
-{
-  "name": "security",
-  "version": "1.0",
-  "description": "Security pack: ClamAV antivirus + Linux audit",
-  "requires": [
-    "clamav",
-    "auditd"
-  ]
-}
