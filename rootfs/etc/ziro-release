@@ -3,5 +3,5 @@ VERSION="1.0.15"
 ID=ziro-os
 PRETTY_NAME="Ziro-OS 1.0.15"
 HOME_URL="https://github.com/ziro-os/ziro-os"
-BUILD_DATE="2026-09-30T16:33:12Z"
+BUILD_DATE="2026-09-30T16:38:33Z"
 ARCH="arm64"
