@@ -1,2 +1,4 @@
 # Rotate service logs larger than 10MB
 0 * * * * /usr/bin/ziroctl service rotate-logs
+# Grow root and data filesystems when the cloud/VM disk is resized (no-op otherwise)
+* * * * * /usr/bin/ziroctl disk expand --auto --quiet

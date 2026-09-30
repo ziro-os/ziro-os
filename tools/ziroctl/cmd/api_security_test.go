@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,5 +51,49 @@ func TestSecurityRoutesRBAC(t *testing.T) {
 	}
 	if code := do("DELETE", "/api/v1/security/alerting/soc", ""); code != http.StatusOK {
 		t.Fatalf("admin remove endpoint: %d", code)
+	}
+}
+
+func TestHostRoutesRBAC(t *testing.T) {
+	dir := t.TempDir()
+	hostnamePath, hostsPath, kernelHostnamePath = filepath.Join(dir, "hostname"), filepath.Join(dir, "hosts"), filepath.Join(dir, "khost")
+	netConfigPath, netAppliedPath, netRollbackPath = filepath.Join(dir, "n.json"), filepath.Join(dir, "a.json"), filepath.Join(dir, "r.json")
+	mux := http.NewServeMux()
+	var role string
+	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
+		}
+	}
+	registerHostRoutes(mux, wrap)
+	do := func(method, path, body string) int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return rec.Code
+	}
+	role = "viewer"
+	if c := do("GET", "/api/v1/network", ""); c != http.StatusOK {
+		t.Errorf("viewer GET network: %d", c)
+	}
+	role = "operator"
+	for _, c := range []struct{ m, p, b string }{
+		{"PUT", "/api/v1/network", `{}`}, {"POST", "/api/v1/network/confirm", ""}, {"GET", "/api/v1/ssh/keys", ""},
+		{"POST", "/api/v1/ssh/keys", `{"source":"gh:x"}`}, {"POST", "/api/v1/disks", `{"device":"/dev/vdb","mount":"/data"}`},
+		{"POST", "/api/v1/disks/expand", ""},
+	} {
+		if code := do(c.m, c.p, c.b); code != http.StatusForbidden {
+			t.Errorf("operator %s %s: %d, want 403", c.m, c.p, code)
+		}
+	}
+	if c := do("POST", "/api/v1/network/hostname", `{"hostname":"api-node"}`); c != http.StatusOK {
+		t.Errorf("operator hostname: %d", c)
+	}
+	if b, _ := os.ReadFile(hostnamePath); string(b) != "api-node\n" {
+		t.Errorf("hostname file %q", b)
+	}
+	role = "admin"
+	// Applying a network config over the API without a rollback timer is refused.
+	if c := do("PUT", "/api/v1/network", `{"config":{"interfaces":[{"name":"eth0","mode":"dhcp"}]}}`); c != http.StatusBadRequest {
+		t.Errorf("PUT without confirm_timeout: %d", c)
 	}
 }

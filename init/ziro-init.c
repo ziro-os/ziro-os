@@ -656,8 +656,24 @@ static void init_network(void) {
         waitpid(pid, &status, 0);
     }
 
-    // 2. Discover physical / virtual network interfaces in /sys/class/net
-    DIR *d = opendir("/sys/class/net");
+    // 2. Declarative networking: with /etc/ziro/network.json, ziroctl applies it (static addresses,
+    //    VLANs, bonds, routes). Without it: DHCP on every Ethernet interface, below.
+    int declarative = access("/etc/ziro/network.json", R_OK) == 0 && access("/usr/bin/ziroctl", X_OK) == 0;
+    if (declarative) {
+        printf("[init] applying /etc/ziro/network.json\n");
+        pid_t np = fork();
+        if (np == 0) {
+            char *argv[] = {"ziroctl", "network", "apply", "--boot", NULL};
+            execv("/usr/bin/ziroctl", argv);
+            _exit(1);
+        } else if (np > 0) {
+            int st;
+            waitpid(np, &st, 0);
+        }
+    }
+
+    // Discover physical / virtual network interfaces in /sys/class/net
+    DIR *d = declarative ? NULL : opendir("/sys/class/net");
     if (d) {
         struct dirent *dir;
         while ((dir = readdir(d)) != NULL) {
@@ -744,6 +760,21 @@ static int daemon_held(const char *name) {
     char p[64];
     snprintf(p, sizeof(p), "/run/ziro/stopped/%s", name);
     return access(p, F_OK) == 0;
+}
+
+/* Data disks added with `ziroctl disk add` are mounted (and grown to fill resized volumes)
+ * before containerd starts: /var/lib/containerd may live on one. */
+static void mount_data_disks(void) {
+    if (access("/etc/ziro/disks.json", R_OK) != 0 || access("/usr/bin/ziroctl", X_OK) != 0) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"ziroctl", "disk", "boot", NULL};
+        execv("/usr/bin/ziroctl", argv);
+        _exit(1);
+    } else if (pid > 0) {
+        int st;
+        waitpid(pid, &st, 0);
+    }
 }
 
 static void start_containerd(void) {
@@ -1465,6 +1496,7 @@ int main(int argc, char *argv[]) {
     init_cgroups();
     init_hostname();
     init_network();
+    mount_data_disks();
     apply_firewall_early();
     start_containerd();
     start_sshd();

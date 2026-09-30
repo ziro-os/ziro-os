@@ -24,7 +24,7 @@ BOOT_MARKER = "Live initialization complete"
 INSTALLED_MARKER = "Enterprise Container Host Status"
 
 
-def qemu_command(arch, build_dir, flavor, initrd=None, append="rdinit=/init", disk=None):
+def qemu_command(arch, build_dir, flavor, initrd=None, append="rdinit=/init", disk=None, data_disk=None, qmp=None):
     sfx = "" if flavor == "alpine" else f"-{flavor}"
     kernel = os.path.join(build_dir, f"vmlinuz-{arch}{sfx}")
     initrd = initrd or os.path.join(build_dir, f"ziro-initramfs-{arch}{sfx}.cpio.gz")
@@ -45,6 +45,10 @@ def qemu_command(arch, build_dir, flavor, initrd=None, append="rdinit=/init", di
               "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"]
     if disk:
         common += ["-drive", f"file={disk},if=none,id=d0,format=raw", "-device", "virtio-blk-pci,drive=d0"]
+    if data_disk:
+        common += ["-drive", f"file={data_disk},if=none,id=d1,format=raw", "-device", "virtio-blk-pci,drive=d1"]
+    if qmp:
+        common += ["-qmp", f"unix:{qmp},server=on,wait=off"]
     cpu = "host" if accel in ("kvm", "hvf") else "max"
     if arch == "x86_64":
         return ["qemu-system-x86_64", "-cpu", cpu, *common,
@@ -117,12 +121,56 @@ def retry(console, cmd, ok, timeout, every=3):
     return False, out
 
 
+def qmp_resize(sock_path, device, size):
+    """Grow a virtual disk while the guest runs (like resizing a cloud volume)."""
+    import json, socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    f = s.makefile("rw")
+    f.readline()  # greeting
+    for cmd in ({"execute": "qmp_capabilities"},
+                {"execute": "block_resize", "arguments": {"device": device, "size": size}}):
+        f.write(json.dumps(cmd) + "\n")
+        f.flush()
+        while True:  # skip async events until the command's reply
+            reply = json.loads(f.readline())
+            if "return" in reply or "error" in reply:
+                break
+        if "error" in reply:
+            raise RuntimeError(reply["error"])
+    s.close()
+
+
+def console_login(con, password="Ziro-Test-9"):
+    with con.lock:
+        start = len(con.buf)
+    con.proc.stdin.write(b"root\n")
+    con.proc.stdin.flush()
+    if not con.wait_for(r"[Pp]assword:", 30, start):
+        return False
+    con.proc.stdin.write(password.encode() + b"\n")
+    con.proc.stdin.flush()
+    time.sleep(3)
+    rc, out = con.run("stty -echo 2>/dev/null; echo LOGGED_IN", timeout=30)
+    return "LOGGED_IN" in out
+
+
 def installed_checks(args, disk, check):
     """Boot the installed disk through the tiny initramfs, then prove a missing disk fails closed."""
     sfx = "" if args.flavor == "alpine" else f"-{args.flavor}"
     tiny = os.path.join(args.build_dir, f"rootfs-full-{args.arch}{sfx}", "boot", "initramfs-boot.cpio.gz")
     root = "root=LABEL=ZIRO_ROOT rootwait=30"
-    cmd, _ = qemu_command(args.arch, args.build_dir, args.flavor, initrd=tiny, append=root, disk=disk)
+    # The cloud volume was resized while the host was off: the root must fill it at boot.
+    with open(disk, "r+b") as f:
+        f.truncate(6 << 30)
+    data = os.path.join(args.build_dir, f"data-test-{args.arch}-{args.flavor}.img")
+    with open(data, "wb") as f:
+        f.truncate(1 << 30)
+    qmp = os.path.join(args.build_dir, f"qmp-{args.arch}.sock")
+    if os.path.exists(qmp):
+        os.remove(qmp)
+    cmd, _ = qemu_command(args.arch, args.build_dir, args.flavor, initrd=tiny, append=root, disk=disk,
+                          data_disk=data, qmp=qmp)
     con = Console(cmd, os.path.join(args.build_dir, f"qemu-installed-{args.arch}-{args.flavor}.log"))
     try:
         t0 = time.time()
@@ -133,6 +181,10 @@ def installed_checks(args, disk, check):
             con.proc.stdin.write(b"\n")
             con.proc.stdin.flush()
             check("installed console requires login", bool(con.wait_for(r"login:", 60)), "no login prompt")
+            if console_login(con):
+                disk_checks(con, check, qmp)
+            else:
+                check("console login (installer password)", False, "login failed")
     finally:
         con.close()
 
@@ -146,6 +198,21 @@ def installed_checks(args, disk, check):
               con.buf[-400:] if not m else "")
     finally:
         con.close()
+
+
+def disk_checks(con, check, qmp):
+    gib = lambda out: int(out.split()[-1]) / (1 << 20) if out.split() and out.split()[-1].isdigit() else 0
+    ok, out = retry(con, "df -k / | awk 'NR==2{print $2}'", lambda rc, o: gib(o) > 5.3, 90, every=10)
+    check("root filesystem grown at boot to fill the resized disk (6 GiB)", ok, out)
+    qmp_resize(qmp, "d0", 8 << 30)
+    rc, out = con.run("sleep 2; ziroctl disk expand; df -k / | awk 'NR==2{print $2}'", timeout=180)
+    check("disk grown live (QMP block_resize) -> disk expand grows the mounted root", gib(out) > 7.3, out)
+    rc, out = con.run("ziroctl disk add /dev/vda --mount /x 2>&1; ziroctl disk add /dev/vdb --mount /etc 2>&1", timeout=60)
+    check("disk add refuses the boot disk and system mount points", "root filesystem" in out and "system path" in out, out)
+    rc, out = con.run("ziroctl disk add /dev/vdb --mount /data && echo hello > /data/t && umount /data && "
+                      "ziroctl disk boot && cat /data/t && awk '$2==\"/data\"{print $4}' /proc/mounts", timeout=180)
+    check("disk add formats and mounts a data disk; disk boot re-mounts it (nodev,nosuid)",
+          "hello" in out and "nosuid" in out and "nodev" in out, out)
 
 
 def main():
@@ -259,6 +326,36 @@ def main():
 
         ok, out = retry(con, "ip -4 addr show | grep 'inet 10.0.2.'", lambda rc, o: rc == 0, 90)
         check("DHCP network configured", ok, out)
+
+        # Networking day-2: hostname, pinned resolvers, declarative config with automatic rollback.
+        rc, out = con.run("ziroctl network hostname smoke-node >/dev/null && hostname && grep -c '^127.0.1.1.*smoke-node' /etc/hosts")
+        check("network hostname: set live and persisted", out.split()[:2] == ["smoke-node", "1"], out)
+        rc, out = con.run("ziroctl network dns 9.9.9.9 --search smoke.example >/dev/null && kill -USR1 $(cat /run/udhcpc.eth0.pid) && "
+                          "sleep 4 && cat /etc/resolv.conf")
+        check("pinned resolvers survive a DHCP renewal", "nameserver 9.9.9.9" in out and "udhcpc" not in out, out)
+        con.run("ziroctl network dns auto >/dev/null; kill -USR1 $(cat /run/udhcpc.eth0.pid); sleep 3")
+        rc, out = con.run("ziroctl network set eth0 --mode static --address 10.0.2.15/24 --gateway 10.0.2.2 >/dev/null && "
+                          "ziroctl network vlan add eth0 100 >/dev/null && "
+                          "ziroctl network set eth0.100 --mode static --address 172.16.100.5/24 >/dev/null && "
+                          "ziroctl network apply --confirm-timeout 15s >/dev/null && "
+                          "ip -4 addr show eth0.100 | grep -c 172.16.100.5; ip route | grep -c 'default via 10.0.2.2'", timeout=60)
+        check("network apply: static address, VLAN and gateway applied", out.split()[-2:] == ["1", "1"], out)
+        ok, out = retry(con, "ip link show eth0.100 >/dev/null 2>&1 && echo VLAN_UP || echo VLAN_GONE; "
+                        "test -e /etc/ziro/network.json && echo CFG || echo NOCFG; pgrep -f 'udhcpc.*eth0' >/dev/null && echo DHCP",
+                        lambda rc, o: "VLAN_GONE" in o and "NOCFG" in o and "DHCP" in o, 60, every=5)
+        check("unconfirmed network change rolled back by itself (VLAN removed, DHCP restored)", ok, out)
+        rc, out = con.run("printf '{\"interfaces\":[{\"name\":\"eth0\",\"mode\":\"dhcp\"},"
+                          "{\"name\":\"eth0.200\",\"mode\":\"static\",\"parent\":\"eth0\",\"vlan_id\":200,"
+                          "\"addresses\":[\"172.16.200.5/24\"]}]}' > /etc/ziro/network.json && "
+                          "ziroctl network apply --boot >/dev/null && echo VLAN200=$(ip -4 addr show eth0.200 | grep -c 172.16.200.5); "
+                          "rm -f /etc/ziro/network.json /etc/ziro/network.applied.json; ip link del eth0.200", timeout=60)
+        check("boot-time apply of /etc/ziro/network.json (what ziro-init runs)", "VLAN200=1" in out, out)
+        rc, out = con.run("ziroctl ssh key import gh:torvalds 2>&1; grep -c 'ziro-import:gh:torvalds' /root/.ssh/authorized_keys", timeout=60)
+        if "key(s) added" in out:
+            check("ssh key import gh:<user> (tagged, deduplicated)", out.split()[-1] != "0", out)
+            con.run("ziroctl ssh key remove --source gh:torvalds")
+        else:
+            print(f"  [SKIP] ssh key import from GitHub (unreachable or no published keys): {out.strip()[:120]}")
 
         if args.no_pull:
             print("  [SKIP] container run (--no-pull)")

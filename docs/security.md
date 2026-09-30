@@ -105,6 +105,12 @@ Output:
   - The API (`/api/v1/security/alerting`) is admin-only.
 - **Container defaults**: cluster containers run with `no-new-privileges` and without `NET_RAW` (no raw-socket
   spoofing). `cluster deploy --allow-privilege-escalation` opts an app out.
+- **SSH key import**: `ziroctl ssh key import gh:<user> [gl:<user>] [lp:<user>]` fetches published keys over HTTPS
+  from fixed provider URLs. The username is validated, the response is capped at 64 KB, and redirects are only
+  followed on the same host. DSA keys and RSA keys under 2048 bits are rejected, and so are keys with options.
+  Keys are deduplicated by fingerprint and tagged `ziro-import:<src>:<user>`. `--sync` also removes keys the user
+  deleted upstream, but never syncs to an empty list, so you can't be locked out. `ssh key remove --source
+  gh:<user>` removes every key from that source. `/api/v1/ssh/keys` is admin-only.
 - **Hardening score**: `ziroctl security audit [--json]` scores the host against 30 CIS-mapped checks (kernel and
   network sysctls, SSH, firewall and guard, file permissions, audit chain). Fresh images score 100.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects

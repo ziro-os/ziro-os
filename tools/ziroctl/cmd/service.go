@@ -301,6 +301,7 @@ var serviceBootCmd = &cobra.Command{
 	Short:  "Start all enabled services (invoked by ziro-init at boot)",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		_ = expandAll(false, true) // a disk resized while the host was off
 		// In parallel: init waits for this, and each start watches its daemon for up to 1s.
 		var wg sync.WaitGroup
 		for _, s := range listAllServices() {
