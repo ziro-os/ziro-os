@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -138,6 +139,11 @@ func podEndpoints(st *ClusterState) map[string][]string {
 	for _, r := range st.Replicas {
 		if r.IP != "" && st.replicaRunning(r) {
 			out[r.App] = append(out[r.App], r.IP)
+		}
+		// <index>.<app>: one replica, by its stable index (peers of a replicated database find
+		// each other before they run). App names can't contain dots, so this never collides.
+		if r.IP != "" {
+			out[strconv.Itoa(r.Index)+"."+r.App] = []string{r.IP}
 		}
 	}
 	for _, ips := range out {
@@ -411,7 +417,7 @@ func (d *podDNS) answer(q []byte) []byte {
 	binary.BigEndian.PutUint16(resp[6:], 0)  // ANCOUNT
 	binary.BigEndian.PutUint16(resp[8:], 0)  // NSCOUNT
 	binary.BigEndian.PutUint16(resp[10:], 0) // ARCOUNT
-	if !known || strings.Contains(app, ".") {
+	if !known {
 		resp[3] |= 3 // NXDOMAIN
 		return resp
 	}

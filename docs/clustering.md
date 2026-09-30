@@ -236,7 +236,9 @@ ziroctl cluster network enable          # migrate an existing cluster (apps roll
   containers, even on the same node, is routed through the host and policed by nftables.
 - Nodes route each other's /24 over WireGuard. Only traffic leaving the cluster is masqueraded, so a
   destination sees the real pod IP.
-- **DNS:** each node answers `<app>.cluster.ziro` on its `.1` address with the IPs of running replicas (TTL 5s).
+- **DNS:** each node answers `<app>.cluster.ziro` on its `.1` address with the IPs of running replicas (TTL 5s),
+  and `<index>.<app>.cluster.ziro` with one replica's IP as soon as it is placed (stable peer names for
+  replicated databases; see [apps.md](apps.md)).
   Containers get it through `--dns`/`--dns-search cluster.ziro`, so plain `http://web` works too. Other names
   are relayed to the node's own resolvers. It only answers the node's own containers. Endpoint changes are
   live; containers are no longer restarted to see them.
@@ -251,6 +253,8 @@ ziroctl cluster network enable          # migrate an existing cluster (apps roll
 - Placement counts replicas, not CPU or memory.
 - Without the pod network, discovery uses hosts entries: a container sees new endpoints only when it is recreated.
 - IPv4 only; one pod /24 per node (253 replicas).
+- An app's `data` paths (`/var/lib/ziro/apps/<app>/<index>/` on the replica's node, `ZIRO_REPLICA` in the
+  container) are node-local: a replica that moves starts empty. Use them for apps that replicate themselves.
 
 ## Cluster DNS records and egress control
 

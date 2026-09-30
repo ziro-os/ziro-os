@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,8 +69,16 @@ func planReconcile(desired []Assignment, actual map[string]bool) (start []Assign
 func secretEnvFile(name string) string { return filepath.Join(secretEnvDir, name+".env") }
 
 func runArgs(a Assignment) []string {
-	args := []string{"run", "-d", "--name", a.Name, "--restart", "always",
-		"--label", "ziro.cluster=true", "--label", "ziro.app=" + a.App}
+	return containerArgs(a, "ziro.cluster=true", "ziro.app="+a.App)
+}
+
+// containerArgs is the hardened `nerdctl run` for a cluster replica or a standalone app.
+func containerArgs(a Assignment, labels ...string) []string {
+	args := []string{"run", "-d", "--name", a.Name, "--restart", "always"}
+	for _, l := range labels {
+		args = append(args, "--label", l)
+	}
+	args = append(args, "-e", "ZIRO_REPLICA="+strconv.Itoa(a.Replica))
 	if !a.PrivEsc {
 		// Secure by default: setuid binaries can't gain privileges, and no raw sockets (spoofing).
 		args = append(args, "--security-opt", "no-new-privileges", "--cap-drop", "NET_RAW")
@@ -96,7 +106,47 @@ func runArgs(a Assignment) []string {
 	for _, v := range a.Volumes {
 		args = append(args, "-v", v)
 	}
+	for _, d := range a.Data {
+		args = append(args, "-v", dataDir(a.App, a.Replica, d)+":"+d)
+	}
 	return append(append(args, "--", a.Image), a.Args...)
+}
+
+// appDataRoot holds node-local app data: <app>/<replica>/<container path, "/" -> "_">.
+var appDataRoot = "/var/lib/ziro/apps"
+
+func dataDir(app string, replica int, path string) string {
+	return filepath.Join(appDataRoot, app, strconv.Itoa(replica), strings.ReplaceAll(strings.Trim(path, "/"), "/", "_"))
+}
+
+// validateDataPaths: absolute, clean, not "/", and nothing nerdctl -v would misparse.
+func validateDataPaths(paths []string) error {
+	if len(paths) > 8 {
+		return errors.New("too many data paths (max 8)")
+	}
+	for _, p := range paths {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" || strings.ContainsAny(p, ":,\x00\n") || len(p) > 256 {
+			return fmt.Errorf("invalid data path %q", p)
+		}
+	}
+	return nil
+}
+
+// ensureDataDirs creates a replica's data dirs (root-only; the image's entrypoint chowns its
+// own). The agent re-validates the paths: they come from the master.
+func ensureDataDirs(a Assignment) error {
+	if err := validName(a.App); err != nil {
+		return err
+	}
+	if err := validateDataPaths(a.Data); err != nil {
+		return err
+	}
+	for _, d := range a.Data {
+		if err := os.MkdirAll(dataDir(a.App, a.Replica, d), 0700); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeSecretEnv(a Assignment) error {
@@ -272,6 +322,9 @@ func (ag *agent) reconcile(desired []Assignment) error {
 		cancel()
 		if err == nil {
 			err = writeSecretEnv(a)
+		}
+		if err == nil {
+			err = ensureDataDirs(a)
 		}
 		if err == nil {
 			err = nerdctl(context.Background(), runArgs(a)...)

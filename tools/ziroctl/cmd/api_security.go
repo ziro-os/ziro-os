@@ -2,9 +2,15 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -448,5 +454,95 @@ func registerModuleRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) 
 		}
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(APIMessage{Status: "accepted", Message: "module " + act + " " + m.Name + " started; poll GET /api/v1/modules"})
+	}))
+}
+
+// AppDeployRequest is the body of POST /api/v1/apps/deploy.
+type AppDeployRequest struct {
+	App       string            `json:"app"` // name[:version]
+	Name      string            `json:"name,omitempty"`
+	Set       map[string]string `json:"set,omitempty"`
+	Replicas  int               `json:"replicas,omitempty"`
+	Publish   int               `json:"publish,omitempty"`
+	AllowFrom []string          `json:"allow_from,omitempty"`
+}
+
+var appRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}(:[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$`)
+
+// deployJobArgs turns a request into `ziroctl apps deploy` argv. Every value goes in a
+// --flag=value form after validation, and the app ref after "--", so nothing can become a flag.
+func (req AppDeployRequest) deployJobArgs() ([]string, error) {
+	if !appRefRe.MatchString(req.App) {
+		return nil, fmt.Errorf("invalid app %q (want name[:version])", req.App)
+	}
+	args := []string{"apps", "deploy"}
+	if req.Name != "" {
+		if err := validName(req.Name); err != nil {
+			return nil, err
+		}
+		args = append(args, "--name="+req.Name)
+	}
+	keys := make([]string, 0, len(req.Set))
+	for k := range req.Set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !settingNameRe.MatchString(k) || strings.ContainsAny(req.Set[k], "\x00\r\n") {
+			return nil, fmt.Errorf("invalid setting %q", k)
+		}
+		args = append(args, "--set="+k+"="+req.Set[k])
+	}
+	if req.Replicas < 0 || req.Replicas > 64 || req.Publish < 0 || req.Publish > 65535 {
+		return nil, errors.New("invalid replicas or publish port")
+	}
+	if req.Replicas > 0 {
+		args = append(args, "--replicas="+strconv.Itoa(req.Replicas))
+	}
+	if req.Publish > 0 {
+		args = append(args, "--publish="+strconv.Itoa(req.Publish))
+	}
+	for _, a := range req.AllowFrom {
+		if a != "*" {
+			if err := validName(a); err != nil {
+				return nil, err
+			}
+		}
+		args = append(args, "--allow-from="+a)
+	}
+	return append(args, "--", req.App), nil
+}
+
+// registerAppRoutes: listing deployed apps is for any token; deploying and removing run
+// containers, so they need admin. Deploys run detached (image pulls outlast HTTP timeouts); poll
+// GET /api/v1/apps. Credentials are never served over the API: use the CLI on the host.
+func registerAppRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+	mux.HandleFunc("/api/v1/apps", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, appsStatus())
+	}))
+	mux.HandleFunc("/api/v1/apps/deploy", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requireRole(w, r, "admin") {
+			return
+		}
+		var req AppDeployRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+			apiReply(w, fmt.Errorf("bad request: %w", err), nil)
+			return
+		}
+		args, err := req.deployJobArgs()
+		if err == nil {
+			err = startJob(args, "/var/log/ziro-apps.log")
+		}
+		apiAudit(r, "apps deploy", req.App, err)
+		if err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(APIMessage{Status: "accepted", Message: "deploying " + req.App + "; poll GET /api/v1/apps"})
 	}))
 }
