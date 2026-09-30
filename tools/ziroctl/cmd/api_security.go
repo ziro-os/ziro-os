@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -149,3 +150,171 @@ func registerSecurityRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(v); err != nil {
+		apiReply(w, err, nil)
+		return false
+	}
+	return true
+}
+
+// registerHostRoutes: networking, disks and SSH keys.
+func registerHostRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+	mux.HandleFunc("/api/v1/network", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			pending, _ := loadNetConfig(netConfigPath)
+			applied, _ := loadNetConfig(netAppliedPath)
+			host, _ := os.Hostname()
+			resolv, _ := os.ReadFile(resolvPath)
+			apiReply(w, nil, map[string]any{"hostname": host, "pending": pending, "applied": applied,
+				"resolv_conf": string(resolv), "resolvers_pinned": fileExists(resolvPinned), "awaiting_confirm": fileExists(netRollbackPath)})
+		case http.MethodPut: // replace the pending config and apply it; always with a rollback timer
+			if !requireRole(w, r, "admin") {
+				return
+			}
+			var req struct {
+				Config         NetConfig `json:"config"`
+				ConfirmTimeout string    `json:"confirm_timeout"`
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			d, err := time.ParseDuration(req.ConfirmTimeout)
+			if err != nil || d < 30*time.Second || d > 30*time.Minute {
+				apiReply(w, errString("confirm_timeout is required over the API (30s-30m): a bad config must not strand the host"), nil)
+				return
+			}
+			if err = saveNetConfig(netConfigPath, &req.Config); err == nil {
+				err = startNetApply(d)
+			}
+			apiAudit(r, "network apply", "confirm within "+d.String(), err)
+			apiReply(w, err, APIMessage{Status: "ok", Message: "applied; POST /api/v1/network/confirm within " + d.String()})
+		default:
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	mux.HandleFunc("/api/v1/network/", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var err error
+		action := strings.TrimPrefix(r.URL.Path, "/api/v1/network/")
+		switch action {
+		case "confirm":
+			if !requireRole(w, r, "admin") {
+				return
+			}
+			if err = os.Remove(netRollbackPath); err != nil {
+				err = errString("nothing to confirm")
+			}
+		case "hostname":
+			var req struct {
+				Hostname string `json:"hostname"`
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			err = setHostname(req.Hostname)
+		case "dns":
+			var req struct {
+				Servers []string `json:"servers"` // empty: follow DHCP
+				Search  []string `json:"search"`
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			if len(req.Servers) == 0 {
+				if err = setResolvers(nil, nil); os.IsNotExist(err) {
+					err = nil
+				}
+			} else {
+				err = setResolvers(req.Servers, req.Search)
+			}
+		default:
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+		apiAudit(r, "network "+action, "", err)
+		apiReply(w, err, APIMessage{Status: "ok", Message: "network " + action + " done"})
+	}))
+
+	mux.HandleFunc("/api/v1/disks", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			root, fs := mountSource("/")
+			apiReply(w, nil, map[string]any{"root": root, "root_fs": fs, "data_disks": loadDataDisks()})
+		case http.MethodPost: // {"device": "/dev/vdb", "mount": "/data"}
+			if !requireRole(w, r, "admin") {
+				return
+			}
+			var req struct {
+				Device string `json:"device"`
+				Mount  string `json:"mount"`
+				Label  string `json:"label"`
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			d, err := addDataDisk(req.Device, req.Mount, req.Label, false) // never --force over the API
+			apiAudit(r, "disk add", req.Device+" -> "+req.Mount, err)
+			apiReply(w, err, d)
+		default:
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	mux.HandleFunc("/api/v1/disks/expand", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requireRole(w, r, "admin") {
+			return
+		}
+		err := expandAll(false, true)
+		apiAudit(r, "disk expand", "", err)
+		apiReply(w, err, APIMessage{Status: "ok", Message: "filesystems grown where the disk had room"})
+	}))
+
+	// Authorized keys grant root: admin only, also for reading (who can log in is sensitive).
+	mux.HandleFunc("/api/v1/ssh/keys", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		if !requireRole(w, r, "admin") {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			b, _ := os.ReadFile(sshAuthorizedKeysPath)
+			var keys []map[string]string
+			for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				if f := strings.Fields(l); len(f) >= 2 {
+					c := ""
+					if len(f) > 2 {
+						c = strings.Join(f[2:], " ")
+					}
+					keys = append(keys, map[string]string{"type": f[0], "comment": c})
+				}
+			}
+			apiReply(w, nil, keys)
+		case http.MethodPost: // {"source": "gh:alice", "sync": false}
+			var req struct {
+				Source string `json:"source"`
+				Sync   bool   `json:"sync"`
+			}
+			if !decodeBody(w, r, &req) {
+				return
+			}
+			added, removed, rejected, err := importKeys(req.Source, req.Sync)
+			apiAudit(r, "ssh key import", req.Source, err)
+			apiReply(w, err, map[string]any{"added": added, "removed": removed, "rejected": rejected})
+		case http.MethodDelete: // ?source=gh:alice
+			src := r.URL.Query().Get("source")
+			n, err := removeImportedKeys(src)
+			apiAudit(r, "ssh key remove", src, err)
+			apiReply(w, err, map[string]any{"removed": n})
+		default:
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+}

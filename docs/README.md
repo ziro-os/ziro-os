@@ -8,3 +8,5 @@ Technical documentation and architecture specifications for Ziro-OS.
 - `modules.md` - Module development guide
 - `api.md` - API documentation
 - `security.md` - Security model and hardening
+- `networking.md` - Hostname, DNS resolvers, declarative interfaces/VLANs/bonds/routes with rollback
+- `storage.md` - Automatic disk growth and data disks

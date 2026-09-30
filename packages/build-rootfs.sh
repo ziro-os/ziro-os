@@ -90,11 +90,11 @@ setup_layout() {
     chmod 0700 "$target/etc/crontabs" 2>/dev/null || true
     chmod 0600 "$target/etc/crontabs/root" 2>/dev/null || true
     
-    # Copy tracked usr skeleton (e.g. udhcpc default script)
+    # Copy tracked usr skeleton (DHCP uses busybox's udhcpc script from Alpine, configured
+    # through /etc/udhcpc/udhcpc.conf: `ziroctl network dns` pins resolvers there).
     if [ -d "$REPO_ROOT/rootfs/usr" ]; then
         mkdir -p "$target/usr"
         cp -r "$REPO_ROOT/rootfs/usr/"* "$target/usr/"
-        chmod +x "$target/usr/share/udhcpc/default.script" 2>/dev/null || true
     fi
     mkdir -p "$target/lib/apk/db" "$target/etc/apk/keys"
     touch "$target/lib/apk/db/installed"
@@ -376,7 +376,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
             add --cache-dir "/out/apk-cache/$TARGET_ARCH" \
             ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
             iptables openssh-server openssh-client linux-pam \
-            e2fsprogs dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS; then
+            e2fsprogs e2fsprogs-extra dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS; then
             ok=1
             break
         fi
@@ -387,7 +387,8 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         echo "FATAL: host packages failed to install" >&2
         exit 1
     fi
-    for bin in usr/bin/containerd usr/bin/nerdctl usr/bin/runc usr/sbin/nft usr/sbin/sshd usr/bin/wg usr/sbin/iptables; do
+    for bin in usr/bin/containerd usr/bin/nerdctl usr/bin/runc usr/sbin/nft usr/sbin/sshd usr/bin/wg usr/sbin/iptables \
+        usr/sbin/resize2fs; do
         if [ ! -x "/rootfs/$bin" ]; then
             echo "FATAL: /$bin missing from host rootfs" >&2
             exit 1
