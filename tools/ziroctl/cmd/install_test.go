@@ -26,4 +26,19 @@ func TestInstallHelpCommand(t *testing.T) {
 	if !bytes.Contains([]byte(out), []byte("--ssh-key")) {
 		t.Errorf("Expected '--ssh-key' flag in help output, got: %s", out)
 	}
+	if !bytes.Contains([]byte(out), []byte("--upgrade")) {
+		t.Errorf("Expected '--upgrade' flag in help output, got: %s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("--erase")) {
+		t.Errorf("Expected '--erase' flag in help output, got: %s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("--force")) {
+		t.Errorf("Expected '--force' flag in help output, got: %s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("--no-reboot")) {
+		t.Errorf("Expected '--no-reboot' flag in help output, got: %s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("--reboot-timeout")) {
+		t.Errorf("Expected '--reboot-timeout' flag in help output, got: %s", out)
+	}
 }

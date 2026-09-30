@@ -63,6 +63,8 @@ Options:
       --upgrade              Upgrade an existing Ziro-OS install in place (keeps all data)
       --erase                Allow wiping a disk that already holds Ziro-OS (unattended mode)
       --force                Upgrade even if the pre-upgrade config snapshot fails
+      --no-reboot            Do not automatically reboot after installation or upgrade
+      --reboot-timeout <sec> Seconds to count down before rebooting (default: 10)
   -h, --help                 Show this help message
 
 Examples:
@@ -98,6 +100,8 @@ INSTALL_MODE=""   # "", upgrade, erase
 FORCE=0
 UPGRADE_PART=""
 EXISTING_VERSION=""
+NO_REBOOT=0
+REBOOT_TIMEOUT=10
 
 # Parse kernel command line for automated cloud provisioning
 parse_cmdline() {
@@ -125,6 +129,12 @@ parse_cmdline() {
                     ;;
                 ziro.erase)
                     INSTALL_MODE="erase"
+                    ;;
+                ziro.no_reboot|ziro.noreboot)
+                    NO_REBOOT=1
+                    ;;
+                ziro.reboot_timeout=*)
+                    REBOOT_TIMEOUT="${arg#ziro.reboot_timeout=}"
                     ;;
                 ziro.net=*)
                     NET_MODE="${arg#ziro.net=}"
@@ -208,6 +218,14 @@ parse_args() {
                 FORCE=1
                 shift
                 ;;
+            --no-reboot)
+                NO_REBOOT=1
+                shift
+                ;;
+            --reboot-timeout)
+                REBOOT_TIMEOUT="$2"
+                shift 2
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -221,15 +239,68 @@ parse_args() {
     done
 }
 
-detect_disks() {
-    # 1. Proactively probe virtualization, SCSI, SATA, and NVMe kernel drivers
-    for mod in virtio_pci virtio_blk virtio_scsi scsi_mod sd_mod sr_mod ahci ata_piix ata_generic nvme nvme_core; do
+probe_storage_drivers() {
+    # Proactively probe virtualization, SCSI, SATA, and NVMe kernel drivers and filesystems
+    for mod in virtio_pci virtio_blk virtio_scsi scsi_mod sd_mod sr_mod ahci ata_piix ata_generic nvme nvme_core isofs ext4 vfat; do
         modprobe -q "$mod" 2>/dev/null || true
     done
     mdev -s 2>/dev/null || true
+}
+
+populate_dev_nodes() {
+    probe_storage_drivers
+
+    # Dynamically populate disk and partition block devices from /sys/block
+    for bdir in /sys/block/*; do
+        [ -d "$bdir" ] || continue
+        bname="$(basename "$bdir")"
+        case "$bname" in
+            loop*|ram*|sr*|fd*|dm-*|zram*)
+                continue
+                ;;
+        esac
+
+        if [ ! -b "/dev/$bname" ] && [ -f "$bdir/dev" ]; then
+            majmin=$(cat "$bdir/dev" 2>/dev/null || true)
+            if [ -n "$majmin" ]; then
+                mknod -m 660 "/dev/$bname" b "${majmin%:*}" "${majmin#*:}" 2>/dev/null || true
+            fi
+        fi
+
+        for pdir in "$bdir"/"$bname"*; do
+            [ -d "$pdir" ] || continue
+            pname="$(basename "$pdir")"
+            if [ ! -b "/dev/$pname" ] && [ -f "$pdir/dev" ]; then
+                majmin=$(cat "$pdir/dev" 2>/dev/null || true)
+                if [ -n "$majmin" ]; then
+                    mknod -m 660 "/dev/$pname" b "${majmin%:*}" "${majmin#*:}" 2>/dev/null || true
+                fi
+            fi
+        done
+    done
+
+    # Dynamically populate partition nodes from /proc/partitions
+    if [ -r /proc/partitions ]; then
+        while read -r maj min blocks name; do
+            case "$maj" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            [ -n "$name" ] || continue
+            case "$name" in
+                loop*|ram*|sr*|fd*|dm-*|zram*) continue ;;
+            esac
+            if [ ! -b "/dev/$name" ]; then
+                mknod -m 660 "/dev/$name" b "$maj" "$min" 2>/dev/null || true
+            fi
+        done < /proc/partitions
+    fi
+}
+
+detect_disks() {
+    populate_dev_nodes
 
     DISKS=""
-    # 2. Scan /sys/block for candidate drives
+    # Scan /sys/block for candidate whole drives
     for devpath in /sys/block/*; do
         devname=$(basename "$devpath")
         case "$devname" in
@@ -238,40 +309,98 @@ detect_disks() {
                 ;;
         esac
 
-        # Dynamically create device node in /dev if missing
-        if [ ! -b "/dev/$devname" ] && [ -f "$devpath/dev" ]; then
-            majmin=$(cat "$devpath/dev" 2>/dev/null || echo "")
-            if [ -n "$majmin" ]; then
-                maj="${majmin%:*}"
-                min="${majmin#*:}"
-                mknod -m 660 "/dev/$devname" b "$maj" "$min" 2>/dev/null || true
-            fi
-        fi
-
         # Verify device node exists in /dev
         if [ -b "/dev/$devname" ]; then
             # Check if read-only
             if [ -f "$devpath/ro" ] && [ "$(cat "$devpath/ro" 2>/dev/null || echo 0)" = "1" ]; then
                 continue
             fi
-            
+
             # Fetch human-readable size
             size_bytes=$(cat "$devpath/size" 2>/dev/null || echo 0)
             size_mb=$((size_bytes * 512 / 1024 / 1024))
             if [ "$size_mb" -lt 100 ]; then
                 continue # Skip devices smaller than 100MB
             fi
-            
+
             DISKS="$DISKS /dev/$devname"
         fi
     done
     echo "$DISKS"
 }
 
-# Parent disk of a partition device, e.g. /dev/nvme0n1p3 -> /dev/nvme0n1.
+# Parent disk of a partition device, e.g. /dev/nvme0n1p3 -> /dev/nvme0n1, /dev/sda2 -> /dev/sda.
 part_disk() {
-    _p=$(readlink -f "/sys/class/block/$(basename "$1")/.." 2>/dev/null) || return 0
-    echo "/dev/$(basename "$_p")"
+    _part="$1"
+    _devname="$(basename "$_part")"
+    if [ -d "/sys/class/block/$_devname" ]; then
+        _parent="$(readlink -f "/sys/class/block/$_devname/.." 2>/dev/null || true)"
+        if [ -n "$_parent" ] && [ -d "$_parent" ]; then
+            _pname="$(basename "$_parent")"
+            if [ -n "$_pname" ] && [ "$_pname" != "block" ] && [ "$_pname" != "." ]; then
+                echo "/dev/$_pname"
+                return 0
+            fi
+        fi
+    fi
+    case "$_part" in
+        *[0-9]n[0-9]*p[0-9]*|*mmcblk[0-9]*p[0-9]*|*loop[0-9]*p[0-9]*)
+            echo "${_part%p*}"
+            return 0
+            ;;
+        *[0-9]*)
+            echo "$_part" | sed -E 's/[0-9]+$//'
+            return 0
+            ;;
+    esac
+    echo "$_part"
+}
+
+# Resolves block devices with the given filesystem label.
+# Works seamlessly across BusyBox blkid, util-linux blkid, and findfs.
+find_partitions_by_label() {
+    _target_label="$1"
+    _found=""
+
+    # Strategy 1: check /dev/disk/by-label/
+    if [ -e "/dev/disk/by-label/$_target_label" ]; then
+        _real="$(readlink -f "/dev/disk/by-label/$_target_label" 2>/dev/null || echo "/dev/disk/by-label/$_target_label")"
+        if [ -b "$_real" ]; then
+            _found="$_real"
+        fi
+    fi
+
+    # Strategy 2: findfs
+    if [ -z "$_found" ] && command -v findfs >/dev/null 2>&1; then
+        _res="$(findfs "LABEL=$_target_label" 2>/dev/null || true)"
+        if [ -n "$_res" ] && [ -b "$_res" ]; then
+            _found="$_res"
+        fi
+    fi
+
+    # Strategy 3: blkid output parsing (compatible with BusyBox and util-linux blkid)
+    if command -v blkid >/dev/null 2>&1; then
+        for _line in $(blkid 2>/dev/null | grep "LABEL=\"$_target_label\"" | cut -d: -f1); do
+            [ -b "$_line" ] || continue
+            case " $_found " in
+                *" $_line "*) ;;
+                *) _found="${_found:+$_found }$_line" ;;
+            esac
+        done
+
+        # Also explicitly scan candidate partitions in /dev if blkid without args missed any
+        for _dev in /dev/sd* /dev/vd* /dev/nvme* /dev/xvd* /dev/hd*; do
+            [ -b "$_dev" ] || continue
+            if blkid "$_dev" 2>/dev/null | grep -q "LABEL=\"$_target_label\""; then
+                case " $_found " in
+                    *" $_dev "*) ;;
+                    *) _found="${_found:+$_found }$_dev" ;;
+                esac
+            fi
+        done
+    fi
+
+    echo "$_found"
 }
 
 # Finds an existing installation (ZIRO_ROOT with /etc/ziro-installed), limited to
@@ -279,24 +408,70 @@ part_disk() {
 find_existing_install() {
     UPGRADE_PART=""
     EXISTING_VERSION=""
-    mdev -s 2>/dev/null || true
-    for part in $(blkid -o device -t LABEL=ZIRO_ROOT 2>/dev/null); do
+    populate_dev_nodes
+
+    candidate_parts=""
+    # 1. Search by filesystem label ZIRO_ROOT
+    for part in $(find_partitions_by_label "ZIRO_ROOT"); do
+        case " $candidate_parts " in
+            *" $part "*) ;;
+            *) candidate_parts="${candidate_parts:+$candidate_parts }$part" ;;
+        esac
+    done
+
+    # 2. Resilient fallback: scan all candidate partitions in /proc/partitions
+    if [ -z "$candidate_parts" ] || [ -n "$TARGET_DISK" ]; then
+        if [ -r /proc/partitions ]; then
+            while read -r maj min blocks name; do
+                case "$maj" in
+                    ''|*[!0-9]*) continue ;;
+                esac
+                [ -n "$name" ] || continue
+                case "$name" in
+                    loop*|ram*|sr*|fd*|dm-*|zram*) continue ;;
+                esac
+                dev="/dev/$name"
+                [ -b "$dev" ] || continue
+                pdisk="$(part_disk "$dev")"
+                if [ "$pdisk" != "$dev" ]; then
+                    if [ -n "$TARGET_DISK" ] && [ "$pdisk" != "$TARGET_DISK" ]; then
+                        continue
+                    fi
+                    case " $candidate_parts " in
+                        *" $dev "*) ;;
+                        *) candidate_parts="${candidate_parts:+$candidate_parts }$dev" ;;
+                    esac
+                fi
+            done < /proc/partitions
+        fi
+    fi
+
+    # 3. Mount and probe each candidate partition for Ziro-OS rootfs markers
+    mkdir -p /mnt/ziro-probe
+    for part in $candidate_parts; do
         if [ -n "$TARGET_DISK" ] && [ "$(part_disk "$part")" != "$TARGET_DISK" ]; then
             continue
         fi
-        mkdir -p /mnt/ziro-probe
-        mount -r "$part" /mnt/ziro-probe 2>/dev/null || continue
-        if [ -f /mnt/ziro-probe/etc/ziro-installed ]; then
-            if [ -n "$UPGRADE_PART" ]; then
-                umount /mnt/ziro-probe
-                printf "${RED}❌ Several disks hold Ziro-OS; choose one with --disk.${RESET}\n"
-                exit 1
+        if mount -t ext4 -r "$part" /mnt/ziro-probe 2>/dev/null || mount -r "$part" /mnt/ziro-probe 2>/dev/null; then
+            if [ -f /mnt/ziro-probe/etc/ziro-installed ] || [ -f /mnt/ziro-probe/etc/ziro-release ] || grep -q 'ID="*ziro-os"*' /mnt/ziro-probe/etc/os-release 2>/dev/null; then
+                if [ -n "$UPGRADE_PART" ] && [ "$UPGRADE_PART" != "$part" ]; then
+                    umount /mnt/ziro-probe 2>/dev/null || true
+                    printf "${RED}❌ Multiple disks hold Ziro-OS installations; specify the target disk with --disk <device>.${RESET}\n"
+                    exit 1
+                fi
+                UPGRADE_PART="$part"
+                if [ -f /mnt/ziro-probe/etc/ziro-release ]; then
+                    EXISTING_VERSION=$(sed -n 's/^VERSION="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /mnt/ziro-probe/etc/ziro-release 2>/dev/null)
+                elif [ -f /mnt/ziro-probe/etc/os-release ]; then
+                    EXISTING_VERSION=$(sed -n 's/^VERSION_ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /mnt/ziro-probe/etc/os-release 2>/dev/null)
+                fi
+                EXISTING_VERSION="${EXISTING_VERSION:-installed}"
             fi
-            UPGRADE_PART="$part"
-            EXISTING_VERSION=$(sed -n 's/^VERSION="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /mnt/ziro-probe/etc/ziro-release 2>/dev/null)
+            umount /mnt/ziro-probe 2>/dev/null || true
         fi
-        umount /mnt/ziro-probe 2>/dev/null || true
     done
+    rmdir /mnt/ziro-probe 2>/dev/null || true
+
     [ -n "$UPGRADE_PART" ]
 }
 
@@ -493,6 +668,81 @@ find_boot_image() {
     done
 }
 
+# Dynamic interactive countdown timer for clean system restart
+reboot_countdown() {
+    if [ "${NO_REBOOT:-0}" -eq 1 ]; then
+        printf "\n${CYAN}ℹ️  Automatic reboot skipped (--no-reboot).${RESET}\n"
+        printf "Type '${CYAN}reboot${RESET}' to restart the host into Ziro-OS.\n\n"
+        return 0
+    fi
+
+    secs="${REBOOT_TIMEOUT:-10}"
+    case "$secs" in
+        ''|*[!0-9]*) secs=10 ;;
+    esac
+
+    printf "\n${BOLD}${CYAN}System ready to reboot.${RESET}\n"
+    printf "${YELLOW}Note:${RESET} Disconnect or unmount the installer ISO media before rebooting.\n\n"
+
+    # Identify openable interactive TTY source
+    tty_source=""
+    if (exec 3< /dev/tty) 2>/dev/null; then
+        exec 3<&-
+        tty_source="/dev/tty"
+    elif [ -t 0 ] || [ -p /dev/stdin ] || [ -f /dev/stdin ]; then
+        tty_source="/dev/stdin"
+    fi
+
+    cancelled=0
+    while [ "$secs" -gt 0 ]; do
+        printf "\r${BOLD}Auto-rebooting in ${YELLOW}%2d${RESET}${BOLD}s... (Press ${GREEN}[Enter]${RESET}${BOLD} to reboot now, ${YELLOW}[c]${RESET}${BOLD} to cancel): ${RESET}" "$secs"
+        user_key=""
+        t_start=$(date +%s)
+
+        if [ -n "$tty_source" ]; then
+            if read -t 1 user_key < "$tty_source" 2>/dev/null; then
+                case "$user_key" in
+                    c|C)
+                        cancelled=1
+                        break
+                        ;;
+                    *)
+                        printf "\n${GREEN}Rebooting immediately...${RESET}\n"
+                        secs=0
+                        break
+                        ;;
+                esac
+            fi
+        fi
+
+        t_end=$(date +%s)
+        elapsed=$((t_end - t_start))
+        if [ "$elapsed" -lt 1 ]; then
+            sleep 1
+        fi
+        secs=$((secs - 1))
+    done
+
+    if [ "$cancelled" -eq 1 ]; then
+        printf "\n\n${YELLOW}⚠️  Auto-reboot cancelled by user.${RESET}\n"
+        printf "You are now in the live environment. Run '${CYAN}reboot${RESET}' when ready.\n\n"
+        return 0
+    fi
+
+    printf "\n${GREEN}🚀 Rebooting system now...${RESET}\n"
+    sync
+    sleep 1
+
+    # Execute system reboot cleanly
+    if [ -x /sbin/reboot ]; then
+        exec /sbin/reboot
+    elif command -v reboot >/dev/null 2>&1; then
+        exec reboot -f
+    else
+        kill -TERM 1 2>/dev/null || busybox reboot -f
+    fi
+}
+
 # In-place upgrade of an existing installation: nothing is partitioned or
 # formatted; ziroctl swaps the OS files and keeps config, containers and data.
 perform_upgrade() {
@@ -517,30 +767,60 @@ perform_upgrade() {
 
     TARGET_MNT="/mnt/ziro-target"
     mkdir -p "$TARGET_MNT"
-    umount -R "$TARGET_MNT" 2>/dev/null || true
+    umount -l "$TARGET_MNT" 2>/dev/null || true
     mount "$UPGRADE_PART" "$TARGET_MNT"
+
+    # Locate and mount ESP partition on the same disk
     ESP=""
-    for d in $(blkid -o device -t LABEL=ZIRO_ESP 2>/dev/null); do
+    for d in $(find_partitions_by_label "ZIRO_ESP"); do
         [ "$(part_disk "$d")" = "$(part_disk "$UPGRADE_PART")" ] && ESP="$d"
     done
+    if [ -z "$ESP" ]; then
+        up_disk="$(part_disk "$UPGRADE_PART")"
+        for cand in "${up_disk}2" "${up_disk}p2" "${up_disk}1" "${up_disk}p1"; do
+            if [ -b "$cand" ] && blkid "$cand" 2>/dev/null | grep -qi "vfat"; then
+                ESP="$cand"
+                break
+            fi
+        done
+    fi
     if [ -n "$ESP" ]; then
         mkdir -p "$TARGET_MNT/boot/efi"
         mount "$ESP" "$TARGET_MNT/boot/efi"
     fi
+
     for fs in dev proc sys; do
         mount --bind "/$fs" "$TARGET_MNT/$fs"
     done
     cleanup_upgrade() {
         for fs in dev proc sys boot/efi; do
-            umount "$TARGET_MNT/$fs" 2>/dev/null || true
+            umount -l "$TARGET_MNT/$fs" 2>/dev/null || true
         done
         sync
-        umount "$TARGET_MNT" 2>/dev/null || true
+        umount -l "$TARGET_MNT" 2>/dev/null || true
     }
     trap cleanup_upgrade EXIT
 
-    printf "${BOLD}[2/4] Snapshotting configuration with the installed ziroctl...${RESET}\n"
-    if ! chroot "$TARGET_MNT" /usr/bin/ziroctl backup create; then
+    printf "${BOLD}[2/4] Snapshotting configuration and state before upgrade...${RESET}\n"
+    snapshot_ok=0
+    if [ -x "$TARGET_MNT/usr/bin/ziroctl" ] && chroot "$TARGET_MNT" /usr/bin/ziroctl backup create 2>/dev/null; then
+        snapshot_ok=1
+        echo "✓ Configuration snapshot created via ziroctl backup"
+    fi
+
+    if [ "$snapshot_ok" -eq 0 ]; then
+        # Resilient fallback snapshot: create a tar.gz archive of /etc and metadata
+        BACKUP_DIR="$TARGET_MNT/var/backups/ziro"
+        mkdir -p "$BACKUP_DIR"
+        BACKUP_FILE="$BACKUP_DIR/preupgrade-backup-$(date +%Y%m%d%H%M%S).tar.gz"
+        if tar -czf "$BACKUP_FILE" -C "$TARGET_MNT" etc 2>/dev/null; then
+            (cd "$BACKUP_DIR" && sha256sum "$(basename "$BACKUP_FILE")" > "$(basename "$BACKUP_FILE").sha256") 2>/dev/null || true
+            echo "✓ Configuration snapshot safely archived to $BACKUP_FILE"
+            snapshot_ok=1
+        fi
+    fi
+
+    if [ "$snapshot_ok" -eq 0 ]; then
         if [ "$FORCE" -ne 1 ]; then
             printf "${RED}❌ Pre-upgrade snapshot failed; nothing was changed. Use --force to skip it.${RESET}\n"
             exit 1
@@ -548,14 +828,34 @@ perform_upgrade() {
         printf "${YELLOW}⚠️  --force: continuing without a snapshot.${RESET}\n"
     fi
 
+    # Locate ziroctl binary to apply upgrade
+    ZIROCTL_BIN=""
+    for zb in /usr/bin/ziroctl /bin/ziroctl /usr/local/bin/ziroctl; do
+        if [ -x "$zb" ]; then
+            ZIROCTL_BIN="$zb"
+            break
+        fi
+    done
+    if [ -z "$ZIROCTL_BIN" ]; then
+        ZIROCTL_BIN="$(command -v ziroctl 2>/dev/null || echo "ziroctl")"
+    fi
+
     printf "${BOLD}[3/4] Swapping OS files and kernel...${RESET}\n"
-    ziroctl upgrade apply --root "$TARGET_MNT" --initramfs "$INITR_SRC"
+    "$ZIROCTL_BIN" upgrade apply --root "$TARGET_MNT" --initramfs "$INITR_SRC"
 
     printf "${BOLD}[4/4] Finalizing...${RESET}\n"
     cleanup_upgrade
     trap - EXIT
-    printf "\n${GREEN}🎉 Ziro-OS upgraded. Remove the install media and reboot.${RESET}\n"
-    printf "   Roll back with 'ziroctl upgrade rollback' or the \"Ziro-OS (previous version)\" boot entry.\n\n"
+
+    printf "\n${GREEN}============================================================${RESET}\n"
+    printf "${GREEN}🎉 Ziro-OS Upgraded Successfully!${RESET}\n"
+    printf "${GREEN}============================================================${RESET}\n"
+    echo " Target Partition: $UPGRADE_PART"
+    echo " Previous Version: ${EXISTING_VERSION:-unknown}"
+    echo " Data Status:      Preserved (containers, configs, user data kept)"
+    echo " Rollback:         Available via 'ziroctl upgrade rollback' or GRUB boot menu"
+    echo ""
+    reboot_countdown
 }
 
 perform_install() {
@@ -996,8 +1296,7 @@ EOF
     echo " Hostname:       $TARGET_HOSTNAME"
     echo " Security:       $([ -n "$SSH_KEY" ] && echo "SSH Public Key Auth (Password Disabled)" || echo "Configured")"
     echo ""
-    echo "To reboot into your newly installed Ziro-OS:"
-    printf "  ${CYAN}reboot${RESET}  (Remember to disconnect the ISO/install media in Proxmox)\n\n"
+    reboot_countdown
 }
 
 main() {
