@@ -241,7 +241,11 @@ def main():
         check("ban blocks SSH, unban restores it", not out.lstrip().startswith("SSH-") and "Unbanned 10.99.0.2" in out and ok, out + out2)
         ok, out = retry(con, "grep -c 'X-Ziro-Signature: sha256=' /tmp/hook.txt && grep -o 'SSH brute force from 10.99.0.2 banned' /tmp/hook.txt",
                         lambda rc, o: rc == 0, 45)  # slow TCG runners
-        check("signed ban alert delivered to the webhook", ok, out)
+        if not check("signed ban alert delivered to the webhook", ok, out):
+            _, diag = con.run("echo '--- hook.txt'; head -c 600 /tmp/hook.txt; echo; echo '--- spool'; ls -la /var/lib/ziro/alerts; "
+                              "cat /var/lib/ziro/alerts/.recent; echo; cat /etc/ziro/alerting.json | grep -v secret; "
+                              "echo '--- sentinel'; tail -15 /var/log/sentinel.log; ps | grep '[n]c -l'")
+            print("    diagnostics:\n" + "\n".join("      " + l for l in diag.splitlines()), flush=True)
         con.run("A=$(cat /tmp/atk.pid); for p in $(seq 1000 1030); do nsenter -t $A -n nc -w 1 10.99.0.1 $p </dev/null; done 2>/dev/null",
                 timeout=120)
         rc, out = con.run("ziroctl security bans list")
