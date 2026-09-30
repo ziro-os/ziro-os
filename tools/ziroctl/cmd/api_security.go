@@ -411,7 +411,7 @@ func mutateDNS(edit func(*DNSConfig) error) error {
 	return saveDNSConfig(cfg)
 }
 
-// registerModuleRoutes: listing modules is for any token; enabling or disabling installs software
+// registerModuleRoutes: listing modules is for any token; enabling, upgrading or disabling installs software
 // as root, so it needs admin. The work runs detached through the ziroctl CLI (a ClamAV signature
 // download outlasts any HTTP timeout); poll GET /api/v1/modules for its status.
 func registerModuleRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
@@ -434,13 +434,13 @@ func registerModuleRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) 
 			return
 		}
 		m, ok := all[name]
-		act := map[string]string{"enable": "enable", "disable": "disable"}[action]
+		act := map[string]string{"enable": "enable", "disable": "disable", "upgrade": "upgrade"}[action]
 		if !ok || act == "" {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "unknown module or action"})
 			return
 		}
-		err = startModuleJob(act, m.Name) // the name comes from the embedded manifest
+		err = startModuleJob(act, m.Name) // the name comes from a verified manifest, not the URL
 		apiAudit(r, "module "+act, m.Name, err)
 		if err != nil {
 			apiReply(w, err, nil)

@@ -42,8 +42,10 @@ under active development and is not ready for production use.
   plugins provide container networking. `ziroctl` exposes system and container operations; `nerdctl` provides
   Docker-style commands on the full host. This does not imply complete Docker Engine or Podman compatibility.
 - **Storage and extensions:** The host uses Linux filesystems and containerd snapshotters. Networking, storage,
-  logging, and security integrations should remain separately packaged where practical. A general module manifest
-  and plug-in interface are future work rather than a stable API.
+  logging, and security integrations are packaged as opt-in plugins (see below).
+- **Plugins:** a plugin is a declarative JSON manifest (packages, sha256-pinned artifacts, config files, generated
+  secrets, validated settings, unprivileged supervised services, health check), applied and exactly reversed by
+  `ziroctl plugin`. Manifests are built into `ziroctl` or come from signed catalogs ([modules guide](modules.md)).
 - **Updates and security:** Current update and rollback behavior is described in the [upgrade guide](upgrade.md).
   Runtime controls and the limits of the writable root are described in the [security guide](security.md).
 
@@ -159,6 +161,7 @@ flowchart LR
 | Secrets | `0600` on the master; sent only to nodes running the app; written to tmpfs env files, never argv; excluded from backups unless `--include-secrets`; never in audit records |
 | Operator actions | Every mutating `ziroctl` command, ziro-api service action and cluster join/leave is written to the audit chain, with `KEY=VALUE` values and credential flags redacted |
 | Admin API | Loopback only; bearer token; rate limited |
+| Plugin and app catalogs | ed25519-signed index (keys compiled into `ziroctl`, or added by an admin per third-party repo); every manifest and artifact pinned by sha256; index expiry (freeze) and serial (rollback) checks; cache re-verified on every read; no shadowing of built-in or official names; placeholders substitute values only, settings match anchored patterns, secrets never reach argv or backups |
 
 Known limits, each addressed by a later phase:
 

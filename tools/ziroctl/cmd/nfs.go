@@ -139,7 +139,7 @@ var nfsServerReady = func() error {
 		return nil
 	}
 	fmt.Println("Enabling the nfs module (NFS server) ...")
-	return enableModule("nfs", true, false)
+	return enableModule("nfs", moduleOpts{Auto: true})
 }
 
 var nfsExec = func(name string, args ...string) error {

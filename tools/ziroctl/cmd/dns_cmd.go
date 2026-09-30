@@ -459,11 +459,7 @@ func dnsEnabled() bool {
 var dnsService = ServiceDef{Name: "dns", Description: "Ziro smart DNS resolver (127.0.0.53)", Exec: "/usr/bin/ziroctl",
 	Args: "dns serve", PIDFile: "/run/ziro-dns.pid", LogFile: "/var/log/dns.log", Autostart: true}
 
-func dnsServiceConf() string {
-	d := dnsService
-	return fmt.Sprintf("name=%s\ndescription=%s\nexec=%s\nargs=%s\npidfile=%s\nlogfile=%s\nautostart=true\nrestart=always\n",
-		d.Name, d.Description, d.Exec, d.Args, d.PIDFile, d.LogFile)
-}
+func dnsServiceConf() string { return supervisedConf(dnsService) }
 
 // waitDNS waits until 127.0.0.53 answers a query.
 func waitDNS(timeout time.Duration) error {
