@@ -20,6 +20,7 @@ Ziro-OS is under active development and is not ready for production use. Start w
 - [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes with rollback.
 - [Storage](storage.md): automatic disk growth and data disks.
 - [Smart DNS](dns.md): caching resolver, split DNS, cluster records, container egress control.
+- [Apps](apps.md): one-command deployments (postgres, mysql, mysql-cluster, valkey) from signed catalogs.
 - [Modules and plugins](modules.md): opt-in plugins (ClamAV, auditd, S3 storage, rclone), signed catalogs, and how to write and publish a plugin.
 - [Upgrades](upgrade.md) and [compliance mapping](compliance.md).
 - [Advanced deployment](advanced-deployment-guide.md) and

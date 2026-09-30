@@ -46,6 +46,9 @@ under active development and is not ready for production use.
 - **Plugins:** a plugin is a declarative JSON manifest (packages, sha256-pinned artifacts, config files, generated
   secrets, validated settings, unprivileged supervised services, health check), applied and exactly reversed by
   `ziroctl plugin`. Manifests are built into `ziroctl` or come from signed catalogs ([modules guide](modules.md)).
+- **Apps:** a digest-pinned app definition (components, settings, generated secrets, data paths) that
+  `ziroctl apps deploy` runs as hardened containers on a host, or as cluster apps through the same scheduler
+  and policy as any other ([apps guide](apps.md)).
 - **Updates and security:** Current update and rollback behavior is described in the [upgrade guide](upgrade.md).
   Runtime controls and the limits of the writable root are described in the [security guide](security.md).
 

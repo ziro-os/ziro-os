@@ -72,6 +72,7 @@ type CatalogItem struct {
 // secrets of each repo).
 var officialRepos = []CatalogRepo{
 	{Name: "ziro", URL: "https://ziro-os.github.io/pkgs", Kind: "module", Official: true, Key: pkgsCatalogKey},
+	{Name: "ziro-apps", URL: "https://ziro-os.github.io/apps", Kind: "app", Official: true, Key: appsCatalogKey},
 }
 
 var (

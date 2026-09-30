@@ -84,6 +84,8 @@ type Assignment struct {
 	DNS       string            `json:"dns,omitempty"`        // the node's pod DNS responder
 	PrivEsc   bool              `json:"priv_esc,omitempty"`   // opt out of no-new-privileges / NET_RAW drop
 	Volumes   []string          `json:"volumes,omitempty"`    // host:container[:ro] bind mounts of NFS shares
+	Replica   int               `json:"replica"`              // replica index (ZIRO_REPLICA in the container)
+	Data      []string          `json:"data,omitempty"`       // container paths backed by node-local dirs
 }
 
 // MeshPeer is another node on the WireGuard mesh.
@@ -139,6 +141,9 @@ func specHash(a ClusteredApp) string {
 	}
 	if len(a.Volumes) > 0 || a.VolumeEpoch > 0 {
 		fmt.Fprintf(h, "\x00volumes=%q\x00epoch=%d", a.Volumes, a.VolumeEpoch)
+	}
+	if len(a.Data) > 0 {
+		fmt.Fprintf(h, "\x00data=%q", a.Data)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }
@@ -414,7 +419,7 @@ func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[stri
 		}
 		as := Assignment{Name: replicaName(r.App, r.Index, r.Hash), App: r.App, Image: spec.Image, Args: spec.Args,
 			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts, PrivEsc: spec.AllowPrivilegeEscalation,
-			Volumes: volumeArgs(spec.Volumes)}
+			Volumes: volumeArgs(spec.Volumes), Replica: r.Index, Data: spec.Data}
 		if spec.Network == "pod" && r.IP != "" && n != nil && n.PodCIDR != "" {
 			as.IP, as.DNS, as.Hosts = r.IP, podGateway(n.PodCIDR), nil // discovery via DNS instead
 		}

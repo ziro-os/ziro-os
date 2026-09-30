@@ -99,8 +99,12 @@ type ClusteredApp struct {
 	// Volumes are cluster shares bind-mounted into the containers: "share:/path[:ro]".
 	Volumes     []string `json:"volumes,omitempty"`
 	VolumeEpoch int      `json:"volume_epoch,omitempty"` // bumped by storage failover: consumers restart
-	Revision    int      `json:"revision,omitempty"`
-	CreatedAt   string   `json:"created_at,omitempty"`
+	// Data are container paths kept on the replica's node (/var/lib/ziro/apps/<app>/<index>/...).
+	// They follow the replica index, not the node: a replica that moves starts empty and must
+	// recover through the app's own replication or a backup.
+	Data      []string `json:"data,omitempty"`
+	Revision  int      `json:"revision,omitempty"`
+	CreatedAt string   `json:"created_at,omitempty"`
 }
 
 // Replica is one placed (or pending, Node == "") instance of an app.
@@ -442,6 +446,9 @@ func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 		return fmt.Errorf("--mesh-only needs --port")
 	}
 	if err := validateVolumes(a); err != nil {
+		return err
+	}
+	if err := validateDataPaths(a.Data); err != nil {
 		return err
 	}
 	if len(a.Egress) > 0 {

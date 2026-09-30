@@ -599,22 +599,28 @@ var catalogVerifyCmd = &cobra.Command{
 // startModuleJob runs `ziroctl module <args>` detached (enable can download hundreds of MB);
 // progress goes to /var/log/ziro-modules.log and the module status.
 func startModuleJob(args ...string) error {
+	return startJob(append([]string{"module"}, args...), "/var/log/ziro-modules.log")
+}
+
+// startJob runs `ziroctl <args>` in its own session (it outlives an API request or a closed
+// terminal), appending its output to logPath. args are argv, never a shell string.
+func startJob(args []string, logPath string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	log, err := os.OpenFile("/var/log/ziro-modules.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	c := exec.Command(self, append([]string{"module"}, args...)...)
+	c := exec.Command(self, args...)
 	c.Stdout, c.Stderr = log, log
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {
 		return err
 	}
-	fmt.Printf("Started: module %s (PID %d); follow /var/log/ziro-modules.log or `ziroctl plugin list`\n", strings.Join(args, " "), c.Process.Pid)
+	fmt.Printf("Started: %s (PID %d); follow %s\n", strings.Join(args, " "), c.Process.Pid, logPath)
 	return c.Process.Release()
 }
 

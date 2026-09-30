@@ -40,7 +40,7 @@ def qemu_command(arch, build_dir, flavor, initrd=None, append="rdinit=/init", di
     elif native and sys.platform == "darwin":
         accel = "hvf"
 
-    common = ["-m", "2048", "-smp", "2", "-nographic", "-no-reboot", "-accel", accel,
+    common = ["-m", os.environ.get("ZIRO_SMOKE_MEM", "2048"), "-smp", "2", "-nographic", "-no-reboot", "-accel", accel,
               "-kernel", kernel, "-initrd", initrd,
               "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"]
     if disk:
@@ -215,6 +215,34 @@ def disk_checks(con, check, qmp):
           "hello" in out and "nosuid" in out and "nodev" in out, out)
 
 
+def apps_checks(con, check):
+    """Official signed catalogs end to end: plugins (s3-ziro + rclone backups) and apps."""
+    rc, out = con.run("ziroctl plugin update", timeout=120)
+    check("plugin update: both official catalogs verify", rc == 0 and out.count("✓") == 2, out)
+    rc, out = con.run("ziroctl plugin enable s3-ziro --set capacity=1G 2>&1 | tail -1; ziroctl plugin enable rclone-ziro 2>&1 | tail -1; "
+                      "ziroctl backup create --remote ziro_s3:ziro-backups 2>&1 | tail -1", timeout=600)
+    check("s3-ziro + rclone-ziro: backup uploaded to local S3", "Uploaded to ziro_s3:ziro-backups" in out, out)
+    rc, out = con.run("ziroctl apps deploy postgres 2>&1 | tail -2; U=$(ziroctl apps credentials postgres | awk '/^url:/{print $2}'); "
+                      "nerdctl exec ziro-app-postgres psql \"$U\" -tAc 'select 40+2'", timeout=900)
+    check("apps deploy postgres: ready, credentials work", out.strip().endswith("42"), out)
+    rc, out = con.run("ps -o args | grep -c '[p]assword'; ziroctl apps rm postgres | tail -1; ls /etc/ziro/apps/postgres.secrets "
+                      "/var/lib/ziro/apps/postgres/0 >/dev/null && echo KEPT", timeout=120)
+    check("apps rm keeps data and credentials; no password in argv", out.split()[0] == "0" and "KEPT" in out, out)
+    rc, out = con.run("ziroctl apps deploy valkey 2>&1 | tail -1; P=$(ziroctl apps credentials valkey | awk '/^password:/{print $2}'); "
+                      "nerdctl exec -e VALKEYCLI_AUTH=$P ziro-app-valkey valkey-cli set k v; "
+                      "nerdctl exec ziro-app-valkey sh -c 'for p in /proc/[0-9]*; do grep -q valkey-server $p/cmdline 2>/dev/null && "
+                      "awk \"/^Uid/{print \\$2}\" $p/status; done'", timeout=600)
+    check("apps deploy valkey: auth works, server not root", "OK" in out and out.split()[-1] != "0", out)
+    rc, out = con.run("ziroctl apps rm valkey --purge | tail -1; ziroctl apps rm postgres --purge >/dev/null 2>&1; "
+                      "ziroctl cluster init --advertise 10.0.2.15 >/dev/null 2>&1; ziroctl apps deploy mysql-cluster 2>&1 | tail -1", timeout=300)
+    check("apps deploy mysql-cluster on a one-node cluster", "deployed" in out, out)
+    q = ("R=$(ziroctl apps credentials mysql-cluster | awk '/^root_password:/{print $2}'); "
+         "C=$(nerdctl ps --format '{{.Names}}' | grep zc-mysql-cluster-0); "
+         "nerdctl exec $C mysql -uroot -p$R -N -e \"SELECT MEMBER_STATE FROM performance_schema.replication_group_members\" 2>/dev/null")
+    ok, out = retry(con, q, lambda rc, o: o.count("ONLINE") == 3, 900, every=15)
+    check("mysql-cluster: 3 members ONLINE (group replication over pod DNS)", ok, out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     default_arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
@@ -225,7 +253,11 @@ def main():
     ap.add_argument("--no-pull", action="store_true", help="skip the container run check (no internet)")
     ap.add_argument("--installed", action="store_true", help="also install to a disk and boot it (tiny initramfs)")
     ap.add_argument("--modules", action="store_true", help="also test the clamav module (downloads ~250 MB of signatures)")
+    ap.add_argument("--apps", action="store_true",
+                    help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
     args = ap.parse_args()
+    if args.apps:
+        os.environ.setdefault("ZIRO_SMOKE_MEM", "4096")
 
     disk = None
     if args.installed:
@@ -443,6 +475,8 @@ def main():
             check("clamav detects EICAR in a root-only path and alerts", "Eicar" in out and out.split()[-1] == "1", out)
             rc, out = con.run("ziroctl module disable clamav 2>&1 | tail -1; netstat -tln | grep -c 3310", timeout=300)
             check("module disable clamav", "Module clamav disabled" in out, out)
+        if args.apps:
+            apps_checks(con, check)
         if args.installed:
             rc, out = con.run("ziro-install --disk /dev/vda --yes --hostname ziro-itest --password Ziro-Test-9 "
                               "</dev/null >/tmp/install.log 2>&1; echo INSTALL_RC=$?; tail -15 /tmp/install.log", timeout=600)
