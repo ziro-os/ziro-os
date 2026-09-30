@@ -19,7 +19,9 @@ Trust Services Criteria (2017, revised points of focus).
 | API access inventory | `ziroctl api token ls --json` |
 | Credential age (rotation) | `ziroctl cluster nodes --json` (`token_issued`), metric `ziro_cluster_node_token_age_seconds` |
 | Continuous monitoring | `GET /api/v1/metrics` (Prometheus; a `viewer` token is enough) |
-| Host hardening | `ziroctl security audit` (every host) |
+| Host hardening | `ziroctl security audit --json` (every host; CIS Linux Benchmark sections per check) |
+| Intrusion prevention state | `ziroctl security protect status --json`, `ziroctl security bans list --json` |
+| Alert routing | `ziroctl security alerting list --json` |
 
 ## NIST SP 800-190
 
@@ -32,7 +34,7 @@ Trust Services Criteria (2017, revised points of focus).
 | Unauthorized access (4.3.2) | Joins pin the cluster CA plus an expiring join token; per-node tokens (hashed, rotated); masters authenticate with mutual TLS |
 | Poorly separated inter-container traffic (4.3.3) | Default-deny app network policy (`allow_from`), enforced per container IP on the pod network, including same-node traffic |
 | Orchestrator node trust (4.3.5) | Only CA-signed master certificates can join Raft; workers can never obtain one; audited data-key fetches |
-| Runtime and app vulnerabilities (4.4) | containerd/runc defaults; host firewall default-deny; secrets never in argv or env listings of other apps (0600 env files on tmpfs) |
+| Runtime and app vulnerabilities (4.4) | Containers run with no-new-privileges and without NET_RAW by default; containerd/runc seccomp defaults; host firewall default-deny; secrets never in argv or env listings of other apps (0600 env files on tmpfs) |
 | Large host attack surface (4.5.1) | Minimal OS; `custom` kernel with module signing, lockdown and KASLR; hardened sysctls; login required on consoles |
 | Improper user access rights (4.5.4) | SSH hardening (`security harden`); console root shell only via the explicit recovery entry |
 | Host file system tampering (4.5.5) | File integrity baseline (Sentinel); immutable root filesystem is on the roadmap (not yet enforced) |
@@ -48,7 +50,8 @@ Trust Services Criteria (2017, revised points of focus).
 | 5.2/6.x Access control and credential management | Unique scoped tokens; expiry; revocation; automatic rotation of node tokens (30 days) and master certificates |
 | 8.2/8.5/8.9 Audit log management | Tamper-evident, hash-chained audit log on every host; forward it to a central collector (8.9) |
 | 12.2/13.4 Network segmentation and traffic filtering | App policy on the mesh; gateway CIDR allowlists and per-client rate limits |
-| 13.1/8.11 Monitoring and alerting | Prometheus metrics (node readiness, replica health, control-plane membership, security-control state) |
+| 13.1/8.11 Monitoring and alerting | Prometheus metrics (node readiness, replica health, control-plane membership, security-control state); signed webhook alerts for threats, integrity changes and bans |
+| 13.3/13.8 Network intrusion prevention | Ziro Guard: per-source SYN/connection/ICMP limits, kernel port-scan bans, SSH brute-force bans with escalation |
 | 16.1/16.4 Secure software supply chain | Signed-image policy; pinned dependencies; `govulncheck` and SAST/dependency scanning in CI |
 
 ## SOC 2 (Trust Services Criteria)
@@ -61,7 +64,8 @@ Trust Services Criteria (2017, revised points of focus).
 | CC6.7 Transmission of data | TLS, WireGuard, mutual TLS |
 | CC6.8 Prevent unauthorized or malicious software | Registry allowlist and signature verification with digest pinning |
 | CC7.1 Configuration management | Declarative `cluster apply`; every spec change is a new revision |
-| CC7.2 Monitoring for anomalies | Metrics endpoint; audit log; Sentinel alerts |
+| CC7.2 Monitoring for anomalies | Metrics endpoint; audit log; Sentinel detections pushed as signed webhook alerts |
+| CC7.3/CC7.4 Incident response | Automatic bans of brute-force and scanning sources; alerts with host, node and cluster context |
 | CC8.1 Change management | Every administrative change is audited (who, what, result) and can be rolled back (`cluster rollback`) |
 | A1.2 Availability / recovery | 3- or 5-master Raft control plane with automatic failover; workloads keep running if the control plane is down; backups |
 

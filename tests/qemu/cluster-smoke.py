@@ -101,6 +101,12 @@ def main():
         except ValueError:
             spread = False
         check("one replica per node (port anti-affinity)", spread, out)
+        rc, out = m.run("C=$(nerdctl ps --filter label=ziro.app=web --format '{{.Names}}' | head -1); "
+                        "nerdctl exec $C grep -E 'NoNewPrivs|CapBnd' /proc/1/status")
+        # NET_RAW is capability 13: bit 0x2000 must be clear in the bounding set.
+        capbnd = re.search(r"CapBnd:\s*([0-9a-f]+)", out)
+        check("cluster containers: no-new-privileges and no NET_RAW by default",
+              re.search(r"NoNewPrivs:\s*1", out) is not None and capbnd is not None and int(capbnd.group(1), 16) & 0x2000 == 0, out)
 
         # New clusters default to deny: node2 must not reach the master's replica over the mesh
         # until web allows itself (both nodes run web).

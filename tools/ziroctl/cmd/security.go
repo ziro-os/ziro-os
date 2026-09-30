@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -49,58 +48,131 @@ var securityCmd = &cobra.Command{
 
 var securityAuditCmd = &cobra.Command{
 	Use:   "audit",
-	Short: "Run security and hardening checks on the host OS",
-	Run: func(cmd *cobra.Command, args []string) {
+	Short: "Score the host against CIS-mapped hardening checks",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		checks := hostAudit("")
+		score := auditScore(checks)
+		if jsonOutput {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"score": score, "checks": checks})
+		}
 		out := cmd.OutOrStdout()
 		fmt.Fprintln(out, "=== Ziro-OS Security & Hardening Audit ===")
-
-		// Check 1: Seccomp support
-		seccompFound := false
-		if f, err := os.Open("/proc/self/status"); err == nil {
-			scanner := bufio.NewScanner(f)
-			for scanner.Scan() {
-				if strings.HasPrefix(scanner.Text(), "Seccomp:") {
-					seccompFound = true
-					break
-				}
-			}
-			f.Close()
-		}
-		printCheck(out, "Kernel Seccomp Support", seccompFound)
-
-		// Check 2: Linux Namespaces
-		nsDir, err := os.ReadDir("/proc/self/ns")
-		nsCount := len(nsDir)
-		printCheck(out, "Namespaces Enabled (pid, net, ipc, uts, user, mnt)", err == nil && nsCount >= 5)
-
-		// Check 3: cgroups v2
-		_, cgroupErr := os.Stat("/sys/fs/cgroup/cgroup.controllers")
-		printCheck(out, "Unified cgroups v2 Hierarchy", cgroupErr == nil)
-
-		// Check 4: IP Forwarding
-		ipForward := false
-		if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
-			if strings.TrimSpace(string(data)) == "1" {
-				ipForward = true
+		for _, c := range checks {
+			printCheck(out, fmt.Sprintf("%-10s %s", c.Control, c.Title), c.Pass)
+			if !c.Pass && c.Detail != "" {
+				fmt.Fprintf(out, "            -> %s\n", c.Detail)
 			}
 		}
-		printCheck(out, "Container IPv4 Forwarding Enabled", ipForward)
-
-		// Check 5: /tmp sticky bit
-		tmpStat, tmpErr := os.Stat("/tmp")
-		if tmpErr == nil && (tmpStat.Mode()&os.ModeSticky != 0) {
-			printCheck(out, "/tmp sticky bit configured correctly", true)
-		} else {
-			printCheck(out, "/tmp sticky bit configured correctly", false)
-		}
-
-		// Check 6: SSH Password Auth disabled
-		sshKeyOnly := false
-		if data, err := os.ReadFile("/etc/ssh/sshd_config"); err == nil {
-			sshKeyOnly = sshKeyOnlyConfig(data)
-		}
-		printCheck(out, "SSH Enforces Key-Only Authentication (Passwords Disabled)", sshKeyOnly)
+		fmt.Fprintf(out, "\nScore: %d/100 (%d of %d checks pass)\n", score, countPass(checks), len(checks))
+		return nil
 	},
+}
+
+// AuditCheck is one hardening control. Control names the CIS Benchmark section it maps to
+// (docs/compliance.md has the table).
+type AuditCheck struct {
+	ID      string `json:"id"`
+	Control string `json:"control"`
+	Title   string `json:"title"`
+	Pass    bool   `json:"pass"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// auditSysctls: key -> minimum value (all of these are "higher is stricter" or exact booleans).
+var auditSysctls = []struct {
+	key, control string
+	min          int
+	exact        bool
+}{
+	{"kernel.randomize_va_space", "CIS 1.5.1", 2, true},
+	{"fs.suid_dumpable", "CIS 1.5.2", 0, true},
+	{"kernel.kptr_restrict", "CIS 1.5.3", 2, true},
+	{"kernel.dmesg_restrict", "CIS 1.5.3", 1, true},
+	{"kernel.yama.ptrace_scope", "CIS 1.5.4", 1, false},
+	{"kernel.unprivileged_bpf_disabled", "CIS 1.5.3", 1, false},
+	{"net.core.bpf_jit_harden", "CIS 1.5.3", 2, true},
+	{"kernel.kexec_load_disabled", "CIS 1.5.3", 1, true},
+	{"kernel.perf_event_paranoid", "CIS 1.5.3", 2, false},
+	{"fs.protected_hardlinks", "CIS 1.5.3", 1, true},
+	{"fs.protected_symlinks", "CIS 1.5.3", 1, true},
+	{"net.ipv4.tcp_syncookies", "CIS 3.3.8", 1, true},
+	{"net.ipv4.conf.all.accept_redirects", "CIS 3.3.2", 0, true},
+	{"net.ipv4.conf.all.secure_redirects", "CIS 3.3.3", 0, true},
+	{"net.ipv4.conf.all.send_redirects", "CIS 3.3.1", 0, true},
+	{"net.ipv4.conf.all.accept_source_route", "CIS 3.3.1", 0, true},
+	{"net.ipv4.conf.all.rp_filter", "CIS 3.3.7", 1, false},
+	{"net.ipv4.conf.all.log_martians", "CIS 3.3.4", 1, true},
+	{"net.ipv4.icmp_echo_ignore_broadcasts", "CIS 3.3.5", 1, true},
+	{"net.ipv6.conf.all.accept_redirects", "CIS 3.3.2", 0, true},
+}
+
+// hostAudit runs every check; root prefixes all paths (tests use a fake tree).
+func hostAudit(root string) []AuditCheck {
+	var checks []AuditCheck
+	add := func(id, control, title string, pass bool, detail string) {
+		checks = append(checks, AuditCheck{ID: id, Control: control, Title: title, Pass: pass, Detail: detail})
+	}
+	for _, s := range auditSysctls {
+		raw, err := os.ReadFile(filepath.Join(root, "/proc/sys", strings.ReplaceAll(s.key, ".", "/")))
+		v, perr := strconv.Atoi(strings.TrimSpace(string(raw)))
+		pass := err == nil && perr == nil && (v == s.min || (!s.exact && v > s.min))
+		want := fmt.Sprintf("want %d", s.min)
+		if !s.exact {
+			want = fmt.Sprintf("want >= %d", s.min)
+		}
+		add("sysctl:"+s.key, s.control, s.key, pass, fmt.Sprintf("is %s, %s", strings.TrimSpace(string(raw)), want))
+	}
+
+	status, _ := os.ReadFile(filepath.Join(root, "/proc/self/status"))
+	add("seccomp", "CIS 1.6", "Kernel seccomp support", strings.Contains(string(status), "Seccomp:"), "")
+	_, err := os.Stat(filepath.Join(root, "/sys/fs/cgroup/cgroup.controllers"))
+	add("cgroupv2", "CIS 1.6", "Unified cgroups v2 hierarchy", err == nil, "")
+
+	sshd, _ := os.ReadFile(filepath.Join(root, "/etc/ssh/sshd_config"))
+	add("ssh:keyonly", "CIS 5.2.8", "SSH key-only authentication (passwords disabled)", sshKeyOnlyConfig(sshd), "set PasswordAuthentication no")
+
+	fw := loadFirewallConfig()
+	add("fw:enabled", "CIS 3.5.1", "Host firewall enabled with default-drop input", fw.Enabled && !strings.EqualFold(fw.DefaultInput, "ACCEPT"), "ziroctl firewall enable")
+	add("fw:guard", "CIS 3.5.1", "Ziro Guard flood/scan/brute-force protection active", fw.Enabled && !fw.Guard.Disabled, "ziroctl security protect enable")
+
+	for _, f := range []struct {
+		path string
+		max  os.FileMode
+		ctl  string
+	}{{"/etc/shadow", 0640, "CIS 6.1.5"}, {"/etc/passwd", 0644, "CIS 6.1.2"}, {"/root/.ssh", 0700, "CIS 5.2.x"}} {
+		fi, err := os.Stat(filepath.Join(root, f.path))
+		pass := err == nil && fi.Mode().Perm()&^f.max == 0
+		detail := "missing"
+		if err == nil {
+			detail = fmt.Sprintf("mode %o, want %o or stricter", fi.Mode().Perm(), f.max)
+		}
+		add("perm:"+f.path, f.ctl, f.path+" permissions", pass, detail)
+	}
+	fi, err := os.Stat(filepath.Join(root, "/tmp"))
+	add("tmp:sticky", "CIS 1.1.x", "/tmp sticky bit", err == nil && fi.Mode()&os.ModeSticky != 0, "")
+
+	if root == "" {
+		_, _, verr := verifyAudit(auditFiles())
+		add("audit:chain", "CIS 4.1.x", "Tamper-evident audit log chain intact", verr == nil || len(auditFiles()) == 0, fmt.Sprint(verr))
+	}
+	return checks
+}
+
+func countPass(checks []AuditCheck) int {
+	n := 0
+	for _, c := range checks {
+		if c.Pass {
+			n++
+		}
+	}
+	return n
+}
+
+func auditScore(checks []AuditCheck) int {
+	if len(checks) == 0 {
+		return 0
+	}
+	return countPass(checks) * 100 / len(checks)
 }
 
 var securityScanCmd = &cobra.Command{
@@ -158,6 +230,7 @@ var securityMonitorCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("🛡️  Ziro Sentinel Continuous Protection Monitor started.")
 		ensureCanary()
+		go runGuardWatcher()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
@@ -171,6 +244,10 @@ var securityMonitorCmd = &cobra.Command{
 			}
 			changed := sig != lastAlert
 			lastAlert = sig
+			if changed {
+				raiseScanAlerts(rep)
+			}
+			flushAlerts() // retry anything still queued
 			if changed && (rep.ThreatsCount > 0 || !rep.CanaryOK || !rep.IntegrityOK) {
 				fmt.Printf("[%s] 🚨 ALERT: %d threats detected! Canary: %v, FIM: %v\n",
 					time.Now().Format("15:04:05"), rep.ThreatsCount, rep.CanaryOK, rep.IntegrityOK)
@@ -315,6 +392,25 @@ func runSecurityScan() SecurityScanReport {
 	}
 
 	return rep
+}
+
+// raiseScanAlerts turns a Sentinel scan into alerts (deduplicated by alertf per title).
+func raiseScanAlerts(rep SecurityScanReport) {
+	for _, t := range rep.Threats {
+		sev := strings.ToLower(t.Severity)
+		if _, ok := alertSeverities[sev]; !ok {
+			sev = "high"
+		}
+		alertf(sev, "threat", fmt.Sprintf("%s: %s (PID %d)", t.Type, t.ProcessName, t.PID),
+			map[string]any{"pid": t.PID, "process": t.ProcessName, "type": t.Type, "details": t.Details})
+	}
+	if !rep.CanaryOK {
+		alertf("critical", "canary", "Ransomware canary file was modified or removed",
+			map[string]any{"path": "/var/canary/sentinel.token"})
+	}
+	if !rep.IntegrityOK {
+		alertf("high", "fim", "Critical system files changed", map[string]any{"files": rep.FIMIssues})
+	}
 }
 
 func computeSHA256Hash(path string) (string, error) {

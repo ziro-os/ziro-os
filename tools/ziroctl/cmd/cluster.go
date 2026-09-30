@@ -91,8 +91,10 @@ type ClusteredApp struct {
 	MeshOnly  bool              `json:"mesh_only,omitempty"`  // publish Port on the mesh IP only
 	AllowFrom []string          `json:"allow_from,omitempty"` // apps (or "*") allowed to reach Port over the mesh
 	Network   string            `json:"network,omitempty"`    // "pod" (routed container IP) or "" (host ports only; pre-pod clusters)
-	Revision  int               `json:"revision,omitempty"`
-	CreatedAt string            `json:"created_at,omitempty"`
+	// Containers run with no-new-privileges and without NET_RAW unless this is set.
+	AllowPrivilegeEscalation bool   `json:"allow_privilege_escalation,omitempty"`
+	Revision                 int    `json:"revision,omitempty"`
+	CreatedAt                string `json:"created_at,omitempty"`
 }
 
 // Replica is one placed (or pending, Node == "") instance of an app.
@@ -958,6 +960,7 @@ var (
 	appSecrets  []string
 	appArgs     []string
 	appMeshOnly bool
+	appPrivEsc  bool
 	appAllow    []string
 	applyFile   string
 )
@@ -1024,6 +1027,9 @@ var clusterDeployCmd = &cobra.Command{
 			}
 			if f.Changed("mesh-only") {
 				app.MeshOnly = appMeshOnly
+			}
+			if f.Changed("allow-privilege-escalation") {
+				app.AllowPrivilegeEscalation = appPrivEsc
 			}
 			if f.Changed("arg") {
 				app.Args = appArgs
@@ -1550,6 +1556,7 @@ func init() {
 	clusterDeployCmd.Flags().StringArrayVar(&appSecrets, "secret", nil, "Cluster secret to inject as env (repeatable)")
 	clusterDeployCmd.Flags().StringArrayVar(&appArgs, "arg", nil, "Command/argument passed after the image (repeatable, in order)")
 	clusterDeployCmd.Flags().BoolVar(&appMeshOnly, "mesh-only", false, "Publish --port only on the node's mesh IP (not the public interface)")
+	clusterDeployCmd.Flags().BoolVar(&appPrivEsc, "allow-privilege-escalation", false, "Run without no-new-privileges and keep NET_RAW (setuid binaries, ping); off by default")
 	clusterDeployCmd.Flags().StringSliceVar(&appAllow, "allow-from", nil, "Apps allowed to reach --port over the mesh (comma-separated; '*' = any cluster app, 'peer:<name>' or 'peers' = WireGuard remote peers, '' = none)")
 	clusterApplyCmd.Flags().StringVarP(&applyFile, "file", "f", "", "JSON manifest")
 	_ = clusterApplyCmd.MarkFlagRequired("file")

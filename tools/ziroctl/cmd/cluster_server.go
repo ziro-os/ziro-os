@@ -82,6 +82,7 @@ type Assignment struct {
 	Hosts     []string          `json:"hosts,omitempty"`      // --add-host entries (host-port networking only)
 	IP        string            `json:"ip,omitempty"`         // pod IP on the ziro-cluster network (pod networking)
 	DNS       string            `json:"dns,omitempty"`        // the node's pod DNS responder
+	PrivEsc   bool              `json:"priv_esc,omitempty"`   // opt out of no-new-privileges / NET_RAW drop
 }
 
 // MeshPeer is another node on the WireGuard mesh.
@@ -127,6 +128,9 @@ func specHash(a ClusteredApp) string {
 	}
 	if a.Network != "" { // moving an app onto the pod network recreates its containers (rolling)
 		fmt.Fprintf(h, "\x00net=%s", a.Network)
+	}
+	if a.AllowPrivilegeEscalation { // only when set, so existing apps keep their hash
+		h.Write([]byte("\x00privesc"))
 	}
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }
@@ -401,7 +405,7 @@ func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[stri
 			}
 		}
 		as := Assignment{Name: replicaName(r.App, r.Index, r.Hash), App: r.App, Image: spec.Image, Args: spec.Args,
-			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts}
+			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts, PrivEsc: spec.AllowPrivilegeEscalation}
 		if spec.Network == "pod" && r.IP != "" && n != nil && n.PodCIDR != "" {
 			as.IP, as.DNS, as.Hosts = r.IP, podGateway(n.PodCIDR), nil // discovery via DNS instead
 		}

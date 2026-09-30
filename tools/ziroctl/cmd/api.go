@@ -325,7 +325,8 @@ func startAPIServer() {
 					_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "Forbidden: the " + role + " role cannot " + r.Method})
 					return
 				}
-				r = r.WithContext(context.WithValue(r.Context(), apiCallerKey{}, "api-token:"+name+"("+role+")"))
+				ctx := context.WithValue(r.Context(), apiCallerKey{}, "api-token:"+name+"("+role+")")
+				r = r.WithContext(context.WithValue(ctx, apiRoleKey{}, role))
 			}
 
 			h(w, r)
@@ -470,6 +471,7 @@ func startAPIServer() {
 	mux.HandleFunc("/api/v1/security", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(cachedSecurityScan())
 	}))
+	registerSecurityRoutes(mux, wrapHandler)
 
 	addr := fmt.Sprintf("%s:%d", apiBindHost, apiPort)
 	fmt.Println("================================================================")
