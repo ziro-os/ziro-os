@@ -1,0 +1,94 @@
+{
+  "name": "nfs",
+  "version": "1.0",
+  "description": "NFSv4.2 server (exports with root_squash; used by `ziroctl nfs` and cluster storage)",
+  "packages": [
+    "nfs-utils"
+  ],
+  "dirs": [
+    {
+      "path": "/etc/exports.d",
+      "mode": "0755"
+    },
+    {
+      "path": "/var/lib/nfs",
+      "mode": "0755"
+    }
+  ],
+  "files": [
+    {
+      "path": "/etc/nfs.conf",
+      "mode": "0644",
+      "content": "# Managed by `ziroctl module enable nfs`: NFSv4 only, TCP only\n[nfsd]\nudp=n\ntcp=y\nvers3=n\nvers4=y\nvers4.1=y\nvers4.2=y\n# After a server restart clients reclaim state for 30s (default 90s); dead clients expire after 30s\ngrace-time=30\nlease-time=30\n[mountd]\nmanage-gids=y\n"
+    }
+  ],
+  "services": [
+    {
+      "name": "nfs-mountd",
+      "description": "NFS mount/export daemon (v4 only)",
+      "exec": "/usr/sbin/rpc.mountd",
+      "args": "-F -N 3 -u",
+      "pidfile": "/run/ziro-nfs-mountd.pid",
+      "logfile": "/var/log/nfs-mountd.log"
+    }
+  ],
+  "post_start": [
+    {
+      "exec": "/usr/sbin/exportfs",
+      "args": [
+        "-ra"
+      ]
+    },
+    {
+      "exec": "/usr/sbin/rpc.nfsd",
+      "args": [
+        "-p",
+        "2049",
+        "-N",
+        "3",
+        "-U",
+        "16"
+      ]
+    }
+  ],
+  "stop": [
+    {
+      "exec": "/usr/sbin/rpc.nfsd",
+      "args": [
+        "0"
+      ]
+    },
+    {
+      "exec": "/usr/sbin/exportfs",
+      "args": [
+        "-ua"
+      ]
+    }
+  ],
+  "health": {
+    "exec": "/bin/cat",
+    "args": [
+      "/proc/fs/nfsd/versions"
+    ],
+    "expect": "+4.2",
+    "timeout": "10s"
+  },
+  "prepare": [
+    {
+      "exec": "/sbin/modprobe",
+      "args": [
+        "nfsd"
+      ]
+    },
+    {
+      "exec": "/bin/mount",
+      "args": [
+        "-t",
+        "nfsd",
+        "nfsd",
+        "/proc/fs/nfsd"
+      ],
+      "creates": "/proc/fs/nfsd/threads"
+    }
+  ]
+}
