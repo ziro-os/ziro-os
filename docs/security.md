@@ -114,6 +114,9 @@ Output:
 - **DNS and egress**: the optional smart DNS (`ziroctl dns enable`) only answers loopback and allowed networks. It
   rate-limits clients, verifies DNS-over-TLS certificates and can block domains. Apps deployed with `--egress`
   reach only their allowed domains and CIDRs; see [dns.md](dns.md).
+- **Security modules** (opt-in, never preinstalled): `ziroctl module enable security` installs the `clamav`
+  antivirus (clamd on a local socket, signature updates, daily scans, `security scan --av`, `av` alerts) and
+  `auditd` (a CIS-aligned kernel audit trail). See [modules.md](modules.md).
 - **Hardening score**: `ziroctl security audit [--json]` scores the host against 30 CIS-mapped checks (kernel and
   network sysctls, SSH, firewall and guard, file permissions, audit chain). Fresh images score 100.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
