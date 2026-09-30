@@ -383,7 +383,12 @@ func flushOnce() {
 			if err := deliverAlert(e, s.Alert); err != nil {
 				still = append(still, name)
 				fmt.Fprintf(os.Stderr, "[alerts] %s: %v\n", name, err)
+				continue
 			}
+			fmt.Printf("[alerts] delivered %s (%s) to %s\n", s.Alert.ID, s.Alert.Category, name)
+		}
+		if len(s.Pending) > 0 && len(still) == 0 && len(s.Pending) != countKnown(s.Pending, byName) {
+			fmt.Fprintf(os.Stderr, "[alerts] dropped %s: endpoint removed\n", s.Alert.ID)
 		}
 		created, _ := time.Parse(time.RFC3339, s.Alert.Time)
 		if len(still) == 0 || now.Sub(created) > alertGiveUp {
@@ -397,6 +402,16 @@ func flushOnce() {
 			_ = writeFileAtomic(path, b, 0600)
 		}
 	}
+}
+
+func countKnown(names []string, byName map[string]AlertEndpoint) int {
+	n := 0
+	for _, name := range names {
+		if _, ok := byName[name]; ok {
+			n++
+		}
+	}
+	return n
 }
 
 // ---- CLI ----
