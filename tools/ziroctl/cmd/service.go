@@ -760,17 +760,28 @@ func enableService(name string) error {
 	if _, err := loadServiceDef(name); err != nil {
 		return err
 	}
-	_ = os.MkdirAll(enabledDir, 0755)
-	target := filepath.Join(enabledDir, name)
-	return os.WriteFile(target, []byte("enabled\n"), 0644)
+	return writeServiceState(name, "enabled\n")
 }
 
 func disableService(name string) error {
 	if err := validName(name); err != nil {
 		return err
 	}
-	_ = os.MkdirAll(enabledDir, 0755)
-	return os.WriteFile(filepath.Join(enabledDir, name), []byte("disabled\n"), 0644)
+	return writeServiceState(name, "disabled\n")
+}
+
+// writeServiceState records a service's enabled state through os.Root: the name (validated by the
+// callers) can only ever select a file inside enabledDir, never follow ".." or a symlink out of it.
+func writeServiceState(name, state string) error {
+	if err := os.MkdirAll(enabledDir, 0755); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(enabledDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.WriteFile(name, []byte(state), 0644)
 }
 
 func printRecentLogs(path string, maxLines int) {

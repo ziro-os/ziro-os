@@ -236,7 +236,7 @@ func TestDataPathsAreValidatedOnTheAgent(t *testing.T) {
 }
 
 func TestAppDeployRequestArgs(t *testing.T) {
-	args, err := AppDeployRequest{App: "postgres:18", Name: "db", Set: map[string]string{"user": "x"}, Publish: 5433}.deployJobArgs()
+	args, err := deployJobArgs(AppDeployRequest{App: "postgres:18", Name: "db", Set: map[string]string{"user": "x"}, Publish: 5433})
 	if err != nil || strings.Join(args, " ") != "apps deploy --name=db --set=user=x --publish=5433 -- postgres:18" {
 		t.Fatalf("%v %v", args, err)
 	}
@@ -245,7 +245,7 @@ func TestAppDeployRequestArgs(t *testing.T) {
 		{App: "pg", Set: map[string]string{"a\nb": "1"}}, {App: "pg", Set: map[string]string{"a": "1\n2"}},
 		{App: "pg", Publish: 70000}, {App: "pg", AllowFrom: []string{"-x"}},
 	} {
-		if _, err := bad.deployJobArgs(); err == nil {
+		if _, err := deployJobArgs(bad); err == nil {
 			t.Errorf("accepted %+v", bad)
 		}
 	}

@@ -1138,7 +1138,7 @@ func init() {
 // registerGatewayRoutes: the gateway's management API (like Caddy's admin API, behind the API
 // server's tokens). Reading needs any token; changing routes or certificates needs admin.
 // Changes are live within a second; nothing is restarted.
-func registerGatewayRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+func registerGatewayRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
 	store := func(w http.ResponseWriter) routeStore {
 		s, err := gatewayStore()
 		if err != nil {

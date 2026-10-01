@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"crypto/ed25519"
+	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
 
 	"github.com/ziro-os/ziro-os/sdk/catalog"
 	"github.com/ziro-os/ziro-os/sdk/schema"
@@ -35,6 +36,19 @@ type (
 	GatewayConfig     = schema.GatewayConfig
 	GatewayRouteState = schema.GatewayRouteState
 	GatewayTarget     = schema.GatewayTarget
+
+	APIMessage         = sdkapi.Message
+	AppDeployRequest   = sdkapi.AppDeployRequest
+	appCatalogInfo     = sdkapi.AppCatalogEntry
+	appStatus          = sdkapi.AppStatus
+	moduleInfo         = sdkapi.ModuleInfo
+	NFSExport          = sdkapi.NFSExport
+	NFSMount           = sdkapi.NFSMount
+	NFSConfig          = sdkapi.NFSConfig
+	NFSClient          = sdkapi.NFSClient
+	GatewayStatus      = sdkapi.GatewayStatus
+	GatewayRouteStatus = sdkapi.GatewayRouteStatus
+	UpstreamHealth     = sdkapi.UpstreamHealth
 
 	CatalogRepo  = catalog.Repo
 	CatalogEntry = catalog.Entry

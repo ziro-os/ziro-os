@@ -34,18 +34,6 @@ var moduleCmd = &cobra.Command{
 	Short:   "Plugins and modules (built in, or from signed catalogs): search, enable, upgrade, disable",
 }
 
-type moduleInfo struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Available   string   `json:"available,omitempty"` // a newer version in a catalog (upgrade)
-	Description string   `json:"description"`
-	Source      string   `json:"source,omitempty"`
-	Requires    []string `json:"requires,omitempty"`
-	Status      string   `json:"status"`
-	Error       string   `json:"error,omitempty"`
-	Auto        bool     `json:"auto,omitempty"`
-}
-
 func listModules() ([]moduleInfo, error) {
 	all, err := loadManifests()
 	if err != nil {

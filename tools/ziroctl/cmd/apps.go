@@ -653,14 +653,6 @@ var appsCmd = &cobra.Command{
 	Short:   "One-command app deployments from signed catalogs (postgres, mysql, mysql-cluster, ...)",
 }
 
-type appCatalogInfo struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Default     string   `json:"default"`
-	Versions    []string `json:"versions"`
-	Cluster     bool     `json:"cluster,omitempty"`
-}
-
 func appCatalogList(q string) []appCatalogInfo {
 	var out []appCatalogInfo
 	for _, d := range loadAppDefs() {
@@ -773,16 +765,6 @@ var appsDeployCmd = &cobra.Command{
 }
 
 var ipv4Re = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}$`)
-
-type appStatus struct {
-	Name       string   `json:"name"`
-	App        string   `json:"app"`
-	Version    string   `json:"version"`
-	Mode       string   `json:"mode"`
-	Publish    string   `json:"publish,omitempty"`
-	Components []string `json:"components"`
-	Running    string   `json:"running"`
-}
 
 func appsStatus() []appStatus {
 	var out []appStatus
