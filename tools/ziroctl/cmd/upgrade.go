@@ -958,6 +958,7 @@ var (
 	upgradeYes       bool
 	upgradeReboot    bool
 	upgradeForce     bool
+	upgradeFlavor    string
 	upgradeRoot      string
 	upgradeImage     string
 )
@@ -1070,16 +1071,27 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
-	if cmpv == 0 {
+	hostRel := readRelease("/etc/ziro-release")
+	flavor := hostRel["KERNEL_FLAVOR"]
+	switching := false
+	if upgradeFlavor != "" {
+		if upgradeFlavor != "custom" && upgradeFlavor != "alpine" {
+			return fmt.Errorf("--flavor must be custom or alpine")
+		}
+		switching = upgradeFlavor != flavor && !(upgradeFlavor == "alpine" && flavor == "")
+		flavor = upgradeFlavor
+	}
+	if cmpv == 0 && !switching {
 		fmt.Printf("✅ Ziro-OS %s is already installed.\n", current)
 		return nil
 	}
 	if cmpv < 0 {
 		return fmt.Errorf("refusing to downgrade %s → %s", current, latest)
 	}
-
-	hostRel := readRelease("/etc/ziro-release")
-	assetName := imageAssetName(hostArch(), hostRel["KERNEL_FLAVOR"])
+	if switching {
+		fmt.Printf("🔁 Switching the kernel flavor to %s (rollback restores the current one)\n", flavor)
+	}
+	assetName := imageAssetName(hostArch(), flavor)
 	asset, sums := rel.asset(assetName), rel.asset("SHA256SUMS")
 	if asset == nil || sums == nil {
 		return fmt.Errorf("release %s has no %s or SHA256SUMS", rel.TagName, assetName)
@@ -1178,6 +1190,7 @@ func init() {
 	upgradeCmd.Flags().StringVar(&upgradeVersion, "version", "", "Upgrade to a specific release (e.g. v1.1.0) instead of the latest")
 	upgradeCmd.Flags().BoolVarP(&upgradeYes, "yes", "y", false, "Do not prompt for confirmation")
 	upgradeCmd.Flags().BoolVar(&upgradeReboot, "reboot", false, "Reboot automatically after a successful upgrade")
+	upgradeCmd.Flags().StringVar(&upgradeFlavor, "flavor", "", "Kernel flavor to install: custom (hardened Ziro kernel, the default for new installs) or alpine; also switches at the same version")
 	upgradeCmd.Flags().BoolVar(&upgradeForce, "force", false, "Continue despite doctor/config preflight failures (never skips checksum verification)")
 
 	upgradeRollbackCmd.Flags().StringVar(&upgradeRoot, "root", "/", "Root filesystem to roll back")

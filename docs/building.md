@@ -91,25 +91,30 @@ Pass `--no-pull` to the script if the machine has no internet access. The serial
 
 ## 🐧 Kernel Flavors
 
-Ziro-OS ships two kernel flavors. Each one produces its own, separately named artifacts:
+Ziro-OS ships two kernel flavors. Each one produces its own, separately named artifacts. **`custom`, the hardened
+Ziro kernel, is the default** for builds and new installs. `alpine` is the fallback.
 
-| | `alpine` (default) | `custom` |
+| | `alpine` | `custom` (default) |
 |---|---|---|
 | Kernel | Alpine `linux-virt` LTS package | Ziro kernel built from kernel.org LTS sources (`KERNEL_VERSION`, default 6.18.54) |
 | Config | Alpine's (tuned for VMs) | upstream arch `defconfig` (broad hardware) + `kernel/configs/ziro-common.config` + `ziro-<arch>.config` |
 | Targets | KVM/QEMU, Proxmox, most cloud VMs | bare metal plus KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro (ENA/NVMe), GCP (gVNIC); boot-critical drivers built in |
-| Hardening | Alpine defaults | KASLR, strict RWX, stack protector, FORTIFY, Yama + lockdown LSMs, unprivileged BPF off, **enforced module signing** (ephemeral per-build key) |
+| Hardening | Alpine defaults | See [kernel/README.md](../kernel/README.md#security-defaults): lockdown, Yama + Landlock + IMA + BPF LSMs, init-on-alloc/free, page-table checks, KFENCE, no kexec/hibernation/SysRq, **enforced module signing** (persistent Ziro key in releases) |
+| Performance | Alpine defaults | BBR + fq by default, MPTCP, kTLS, nftables flowtables, THP on madvise, zswap |
 | Artifacts | `vmlinuz-<arch>`, `ziro-initramfs-<arch>.cpio.gz`, `ziro-os-<arch>.iso` | same names with a `-custom` suffix, plus `kernel-config-<arch>-custom` |
 
 ```bash
-make rootfs image-iso TARGET_ARCH=x86_64                       # alpine flavor
-make kernel rootfs image-iso TARGET_ARCH=x86_64 KERNEL_FLAVOR=custom
-make test-boot TARGET_ARCH=x86_64 KERNEL_FLAVOR=custom         # boot-test that flavor
+make rootfs image-iso TARGET_ARCH=x86_64                       # custom flavor (builds the kernel when kernel/ changed)
+make rootfs image-iso TARGET_ARCH=x86_64 KERNEL_FLAVOR=alpine  # alpine flavor
+make test-boot TARGET_ARCH=x86_64                              # boot-test (KERNEL_FLAVOR picks the flavor)
+CONFIG_ONLY=1 ./kernel/build-kernel.sh arm64                   # check config fragments in a minute, no compile
 ```
 
 The custom build fails if `olddefconfig` drops or changes any option from the Ziro fragments, so a renamed or
 unsatisfiable symbol can never ship silently. CI (`.github/workflows/kernel-custom.yml`) builds and boot-tests
-the custom flavor natively on x86_64 and arm64. Releases publish both flavors.
+the custom flavor natively on x86_64 and arm64, and `ci.yml` builds and boot-tests the alpine flavor. Releases
+publish both flavors. Hosts keep upgrading within their flavor; `ziroctl upgrade --flavor custom` moves an
+alpine host to the hardened kernel (rollback restores the previous one).
 
 The kernel and its modules always come from **one** source. `build/kernel-release-<arch>[-custom]` records the
 version, and `images/iso/build-iso.sh` refuses to build an ISO whose kernel has no matching `lib/modules/<version>`

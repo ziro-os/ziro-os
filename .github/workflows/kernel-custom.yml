@@ -85,8 +85,9 @@ jobs:
             build/kernel-custom-${{ matrix.arch }}/config
             build/kernel-custom-${{ matrix.arch }}/kernel.release
             build/kernel-custom-${{ matrix.arch }}/stamp
+            build/kernel-custom-${{ matrix.arch }}/module-signing.crt
             build/kernel-custom-${{ matrix.arch }}/modroot
-          key: kernel-out-${{ matrix.arch }}-${{ hashFiles('kernel/configs/**', 'kernel/build-kernel.sh') }}
+          key: kernel-out-${{ matrix.arch }}-${{ hashFiles('kernel/configs/**', 'kernel/build-kernel.sh', 'kernel/certs/**') }}
 
       # On a miss, ccache + the cached kernel.org tarball keep a config change to minutes.
       - name: Restore ccache and kernel tarball
@@ -100,6 +101,10 @@ jobs:
           restore-keys: kernel-ccache-${{ matrix.arch }}-
 
       - name: Build custom kernel (fails if any Ziro config option is dropped)
+        env:
+          # Persistent module key (public half: kernel/certs/ziro-modules.crt). Absent on fork
+          # PRs: those builds sign with an ephemeral key.
+          ZIRO_MODULE_SIGNING_KEY: ${{ secrets.ZIRO_MODULE_SIGNING_KEY }}
         run: make kernel
 
       - name: Save built kernel
@@ -111,6 +116,7 @@ jobs:
             build/kernel-custom-${{ matrix.arch }}/config
             build/kernel-custom-${{ matrix.arch }}/kernel.release
             build/kernel-custom-${{ matrix.arch }}/stamp
+            build/kernel-custom-${{ matrix.arch }}/module-signing.crt
             build/kernel-custom-${{ matrix.arch }}/modroot
           key: ${{ steps.kernel-out.outputs.cache-primary-key }}
 

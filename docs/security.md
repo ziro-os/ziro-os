@@ -116,7 +116,9 @@ Output:
   reach only their allowed domains and CIDRs; see [dns.md](dns.md).
 - **Security modules** (opt-in, never preinstalled): `ziroctl module enable security` installs the `clamav`
   antivirus (clamd on a local socket, signature updates, daily scans, `security scan --av`, `av` alerts) and
-  `auditd` (a CIS-aligned kernel audit trail). See [modules.md](modules.md).
+  `auditd` (a CIS-aligned kernel audit trail), `integrity` (IMA: what the host runs is checked daily against the OS
+  image and signed packages; `ziroctl security integrity`), and `clamav-onaccess` (blocks opening infected
+  files). See [modules.md](modules.md).
 - **Hardening score**: `ziroctl security audit [--json]` scores the host against 30 CIS-mapped checks (kernel and
   network sysctls, SSH, firewall and guard, file permissions, audit chain). Fresh images score 100.
 - **Backups**: archives are root-only (0600) and unencrypted, and they contain private keys. Restore rejects
@@ -159,7 +161,7 @@ Output:
   `ziroctl audit log --since 24h --json` exports records. `KEY=VALUE` values and credential flags are redacted.
   The log rotates by rename at 10 MB and keeps 10 generations. Because root can rewrite the whole chain, forward
   the log off-host or store the head hash printed by `verify` when you need non-repudiation.
-- **Kernel & sysctl**: the `custom` kernel flavor enforces module signing (ephemeral per-build key; unsigned modules are rejected). Its config fragments add KASLR, strict RWX, a strong stack protector, hardened
+- **Kernel & sysctl**: the `custom` kernel flavor (the default) enforces module signing (the persistent Ziro key in releases; unsigned modules are rejected), loads IMA, and zeroes memory on free; see [kernel/README.md](../kernel/README.md#security-defaults). Its config fragments add KASLR, strict RWX, a strong stack protector, hardened
   usercopy, FORTIFY, the Yama and lockdown LSMs, unprivileged BPF off, and nftables/WireGuard built in. Shipped
   sysctls set `kptr_restrict=2`, `dmesg_restrict=1`, `unprivileged_bpf_disabled=1`, `ptrace_scope=1`, protected
   links/fifos/regular files, and loose `rp_filter=2` (strict mode breaks WireGuard and multi-homed routing).

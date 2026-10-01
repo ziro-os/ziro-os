@@ -39,9 +39,10 @@ BUILD_DIR="$REPO_ROOT/build"
 ALPINE_IMAGE="${ALPINE_IMAGE:-alpine:3.24}"
 DOWNLOAD_DIR="$BUILD_DIR/downloads"
 ROOTFS_MINIMAL="$BUILD_DIR/rootfs-minimal-$TARGET_ARCH"
-# Kernel flavor: alpine (linux-virt, default) or custom (kernel/build-kernel.sh). The minimal
-# docker rootfs is flavor-independent; host artifacts of the custom flavor carry a "-custom" suffix.
-KERNEL_FLAVOR="${KERNEL_FLAVOR:-alpine}"
+# Kernel flavor: custom (kernel/build-kernel.sh, the hardened default) or alpine (linux-virt,
+# fallback). The minimal docker rootfs is flavor-independent. Host artifacts of the custom flavor
+# keep their "-custom" suffix so hosts keep upgrading within their flavor.
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-custom}"
 [ "${BUILD_FROM_SOURCE:-0}" = "1" ] && KERNEL_FLAVOR="custom"
 case "$KERNEL_FLAVOR" in
     alpine) SUFFIX="" ;;
@@ -600,6 +601,15 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         mknod -m 666 /rootfs/dev/tty1 c 4 1 2>/dev/null || true
         mknod -m 660 /rootfs/dev/ttyS0 c 4 64 2>/dev/null || true
         mknod -m 666 /rootfs/dev/urandom c 1 9 2>/dev/null || true
+
+        # Integrity baseline: SHA-256 of every executable, shared library and kernel module the
+        # image ships. `ziroctl security integrity` compares IMA measurements against it.
+        mkdir -p /rootfs/etc/ziro
+        (cd /rootfs && find bin sbin usr/bin usr/sbin usr/libexec lib usr/lib opt/cni/bin -xdev -type f \
+            \( -perm -u+x -o -name "*.so*" -o -name "*.ko*" \) -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum \
+            | sed "s#  #  /#") > /rootfs/etc/ziro/integrity.sha256
+        chmod 0644 /rootfs/etc/ziro/integrity.sha256
+        echo "✓ integrity baseline: $(wc -l < /rootfs/etc/ziro/integrity.sha256) files"
 
         mkdir -p "/out/apk-cache/$TARGET_ARCH"
         apk add --cache-dir "/out/apk-cache/$TARGET_ARCH" pigz >/dev/null 2>&1 || true   # multi-threaded gzip; falls back below

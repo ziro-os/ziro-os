@@ -28,8 +28,9 @@ endif
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo "1.0.9")
 IMAGE_TAG ?= ziro-os:latest
 export ALPINE_IMAGE ?= alpine:3.24
-# Kernel flavor: alpine (Alpine linux-virt, default) or custom (Ziro kernel from kernel.org sources)
-export KERNEL_FLAVOR ?= alpine
+# Kernel flavor: custom (hardened Ziro kernel from kernel.org sources, default) or alpine
+# (Alpine linux-virt, the fallback). The custom kernel is rebuilt only when kernel/ changes.
+export KERNEL_FLAVOR ?= custom
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%d" 2>/dev/null || echo "unknown")
 LDFLAGS_ZIRO := -s -w -X github.com/ziro-os/ziroctl/cmd.Version=$(VERSION) -X github.com/ziro-os/ziroctl/cmd.GitCommit=$(GIT_COMMIT) -X github.com/ziro-os/ziroctl/cmd.BuildDate=$(BUILD_DATE)
@@ -61,14 +62,16 @@ tools-all:
 	@echo "✅ Built bin/ziroctl and bin/ziropkg for x86_64 and arm64"
 
 # --- Rootfs & Userland ---
-rootfs: tools
+rootfs: tools kernel
 	@echo "Building rootfs for $(ARCH_NORMALIZED)..."
 	@./packages/build-rootfs.sh $(ARCH_NORMALIZED)
 
 rootfs-x86_64:
+	@./kernel/build-kernel.sh x86_64
 	@./packages/build-rootfs.sh x86_64
 
 rootfs-arm64:
+	@./kernel/build-kernel.sh arm64
 	@./packages/build-rootfs.sh arm64
 
 rootfs-all: rootfs-x86_64 rootfs-arm64

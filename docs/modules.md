@@ -65,7 +65,9 @@ ziroctl plugin repo rm acme
 | `clamav` | ClamAV antivirus. `clamd` listens on a local socket only (`/run/clamav/clamd.sock`, `clamav:clamav 0660`), never on TCP. `freshclam` updates signatures every 2 hours. A daily scan runs at 03:30. Needs 1.5 GB RAM (`--force` to override). |
 | `auditd` | Linux audit with CIS-aligned rules: identity files, sudoers, root's SSH keys, `sshd_config`, `/etc/ziro`, `ziroctl` runs, kernel module loads, time and hostname changes, mounts. Rules are reloaded at every boot. |
 | `nfs` | NFSv4.2 server: v2/v3 and UDP off, 30s grace, `rpc.mountd` supervised. Enabled automatically by the first `ziroctl nfs export` or cluster share. See [storage.md](storage.md). |
-| `security` | The security pack: `clamav` + `auditd`. |
+| `clamav-onaccess` | Blocks opening infected files: `clamonacc` (fanotify permission events) asks `clamd` about every open under the paths in `/etc/clamav/onaccess-paths` (your edits are kept). Needs `clamav`. |
+| `integrity` | Host integrity. IMA (the default kernel) measures every executable, library and module the host runs (container overlays excluded). `ziroctl security integrity` (daily, and on demand) checks each one against the OS image's baseline (`/etc/ziro/integrity.sha256`) or the signed apk database; anything else raises a critical `integrity` alert. |
+| `security` | The security pack: `clamav` + `auditd` + `integrity`. |
 | `s3-ziro` (pkgs) | S3-compatible object storage ([Garage](https://garagehq.deuxfleurs.fr)) for backups, snapshots and apps. Runs as `garage`, S3 API on `127.0.0.1:3900` (`--set bind=0.0.0.0` to expose it; the firewall still applies), RPC and admin API on loopback. Creates the bucket `ziro-backups` and the rclone remote `ziro_s3`. Settings: `capacity` (10G), `bind`, `port`. |
 | `rclone-ziro` (pkgs) | rclone for S3, GCS, Azure Blob, B2, SFTP and more. Enables `ziroctl backup create --remote` and `backup restore remote:path`. Your remotes go in `/etc/ziro/rclone.conf` (`rclone --config /etc/ziro/rclone.conf config`). |
 
