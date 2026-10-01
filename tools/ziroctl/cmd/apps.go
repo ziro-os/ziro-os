@@ -653,6 +653,7 @@ func removeAppInstance(name string, purge bool) error {
 			}
 			if purge {
 				delete(st.Secrets, appClusterSecret(name))
+				markPurge(st, in.Components...)
 			}
 			scheduleReplicas(st, time.Now())
 			return nil
@@ -660,7 +661,7 @@ func removeAppInstance(name string, purge bool) error {
 			return err
 		}
 		if purge {
-			fmt.Printf("  note: data on each node stays in %s/<component>/ until you delete it there\n", appDataRoot)
+			fmt.Printf("  every node deletes its %s/<component>/ data within a heartbeat\n", appDataRoot)
 		}
 	} else {
 		for _, c := range in.Components {
@@ -683,6 +684,50 @@ func removeAppInstance(name string, purge bool) error {
 	} else {
 		fmt.Printf("✓ %s removed; data and credentials kept (redeploy with --name %s to reuse them, or rm --purge)\n", name, name)
 	}
+	return nil
+}
+
+// markPurge asks every node to delete the named cluster apps' local data, and drops expired
+// requests.
+func markPurge(st *ClusterState, apps ...string) {
+	if st.PurgeData == nil {
+		st.PurgeData = map[string]string{}
+	}
+	now := time.Now().UTC()
+	for app, at := range st.PurgeData {
+		if t, err := time.Parse(time.RFC3339, at); err != nil || now.Sub(t) >= purgeDataTTL {
+			delete(st.PurgeData, app)
+		}
+	}
+	for _, a := range apps {
+		st.PurgeData[a] = now.Format(time.RFC3339)
+	}
+}
+
+// purgeLeftovers deletes data and credentials left by an app removed without --purge (the
+// instance record is gone, so name is the instance or cluster app name).
+func purgeLeftovers(name string) error {
+	if err := validName(name); err != nil {
+		return err
+	}
+	if _, err := loadAppInstance(name); err == nil {
+		return removeAppInstance(name, true)
+	}
+	if cfg, err := loadClusterConfig(); err == nil && cfg.Role == "master" {
+		if err := withState(func(st *ClusterState) error {
+			if st.app(name) != nil {
+				return fmt.Errorf("%s is a running cluster app; remove it first", name)
+			}
+			delete(st.Secrets, appClusterSecret(name))
+			markPurge(st, name)
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	_ = os.RemoveAll(filepath.Join(appDataRoot, name))
+	_ = os.Remove(appSecretsPath(name))
+	fmt.Printf("✓ purged leftovers of %s\n", name)
 	return nil
 }
 
@@ -920,6 +965,15 @@ var appsCredentialsCmd = &cobra.Command{
 	},
 }
 
+var appsPurgeCmd = &cobra.Command{
+	Use:   "purge <name>",
+	Short: "Remove an app with its data and credentials, or delete what a removed app left behind",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return purgeLeftovers(args[0])
+	},
+}
+
 var appsRmCmd = &cobra.Command{
 	Use:   "rm <name>",
 	Short: "Remove a deployed app (data and credentials are kept unless --purge)",
@@ -940,6 +994,6 @@ func init() {
 	f.BoolVar(&appsLocal, "local", false, "Deploy on this host even if it is a cluster master")
 	f.BoolVar(&appsNewVersion, "new-version", false, "Allow moving an existing instance to another version")
 	appsRmCmd.Flags().BoolVar(&appsPurge, "purge", false, "Also delete the app's data and credentials")
-	appsCmd.AddCommand(appsSearchCmd, appsInfoCmd, appsDeployCmd, appsListCmd, appsCredentialsCmd, appsRmCmd)
+	appsCmd.AddCommand(appsSearchCmd, appsInfoCmd, appsDeployCmd, appsListCmd, appsCredentialsCmd, appsRmCmd, appsPurgeCmd)
 	rootCmd.AddCommand(appsCmd)
 }

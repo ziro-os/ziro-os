@@ -116,6 +116,7 @@ type heartbeatResponse struct {
 	Egress      map[string][]string `json:"egress,omitempty"`       // app -> allowed outside destinations
 	NFSExports  []clusterExport     `json:"nfs_exports,omitempty"`  // shares this node serves
 	NFSMounts   []clusterMount      `json:"nfs_mounts,omitempty"`   // shares its replicas use
+	PurgeData   []string            `json:"purge_data,omitempty"`   // apps whose local data to delete
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -810,6 +811,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		resp.Policy = policyFor(st, n.ID)
 		resp.DNSRecords = st.DNSRecords
 		resp.NFSExports, resp.NFSMounts = storageFor(st, n.ID)
+		resp.PurgeData = purgeList(st, time.Now())
 		for _, a := range st.Apps {
 			if len(a.Egress) > 0 {
 				if resp.Egress == nil {

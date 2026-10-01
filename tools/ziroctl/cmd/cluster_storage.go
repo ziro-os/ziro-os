@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type ClusterShare struct {
 	Name    string `json:"name"`
 	Node    string `json:"node"`
 	Standby string `json:"standby,omitempty"`
+	Owner   string `json:"owner,omitempty"` // "uid:gid": every client write lands as this owner (all_squash)
 	Created string `json:"created"`
 }
 
@@ -42,6 +44,7 @@ type clusterExport struct {
 	Share   string   `json:"share"`
 	Path    string   `json:"path"`
 	Clients []string `json:"clients"`
+	Owner   string   `json:"owner,omitempty"`
 }
 
 type clusterMount struct {
@@ -124,7 +127,7 @@ func storageFor(st *ClusterState, nodeID string) (exports []clusterExport, mount
 	for _, s := range st.Shares {
 		if s.Node == nodeID {
 			if c := shareClients(st, s.Name); len(c) > 0 {
-				exports = append(exports, clusterExport{Share: s.Name, Path: filepath.Join(storageRoot, s.Name), Clients: c})
+				exports = append(exports, clusterExport{Share: s.Name, Path: filepath.Join(storageRoot, s.Name), Clients: c, Owner: s.Owner})
 			}
 		}
 	}
@@ -203,12 +206,29 @@ func applyStorage(exports []clusterExport, mounts []clusterMount) (unavailable m
 			errs = append(errs, "invalid export "+e.Share)
 			continue
 		}
-		if err := os.MkdirAll(e.Path, 0755); err == nil {
-			// root_squash: container root writes as nobody. No sticky bit: with
-			// fs.protected_regular=2 it would refuse root opening its own (nobody-owned) files.
-			_ = os.Chmod(e.Path, 0777)
+		x := NFSExport{Path: e.Path, Clients: e.Clients}
+		if e.Owner != "" {
+			x.Squash, x.Owner = "all", e.Owner
+			if _, err := exportIdentity(x); err != nil { // the owner comes from the master: re-validate
+				errs = append(errs, "export "+e.Share+": "+err.Error())
+				continue
+			}
 		}
-		nfsExports = append(nfsExports, NFSExport{Path: e.Path, Clients: e.Clients})
+		if err := os.MkdirAll(e.Path, 0755); err == nil {
+			if e.Owner != "" {
+				// all_squash: every client writes as the owner, so the share needs no world write.
+				uid, gid, _ := strings.Cut(e.Owner, ":")
+				u, _ := strconv.Atoi(uid)
+				g, _ := strconv.Atoi(gid)
+				_ = os.Lchown(e.Path, u, g)
+				_ = os.Chmod(e.Path, 0770)
+			} else {
+				// root_squash: container root writes as nobody. No sticky bit: with
+				// fs.protected_regular=2 it would refuse root opening its own (nobody-owned) files.
+				_ = os.Chmod(e.Path, 0777)
+			}
+		}
+		nfsExports = append(nfsExports, x)
 	}
 	if len(nfsExports) > 0 || fileExists(nfsClusterFile) {
 		if perr := publishExports(nfsClusterFile, nfsExports); perr != nil {
@@ -266,7 +286,7 @@ func holdBack(as []Assignment, unavailable map[string]bool) []Assignment {
 // ---- CLI (master) ----
 
 var (
-	storageNode, storageStandby, storageTo string
+	storageNode, storageStandby, storageTo, storageOwner string
 )
 
 var clusterStorageCmd = &cobra.Command{Use: "storage", Short: "Cluster NFS shares (served over the WireGuard mesh)"}
@@ -295,8 +315,11 @@ var clusterStorageAddCmd = &cobra.Command{
 			if storageNode == "" {
 				return errors.New("--node is required")
 			}
+			if storageOwner != "" && !ownerRe.MatchString(storageOwner) {
+				return errors.New("--owner must be numeric uid:gid (user names differ between nodes and containers)")
+			}
 			st.Shares = append(st.Shares, ClusterShare{Name: args[0], Node: storageNode, Standby: storageStandby,
-				Created: time.Now().UTC().Format(time.RFC3339)})
+				Owner: storageOwner, Created: time.Now().UTC().Format(time.RFC3339)})
 			fmt.Printf("✓ share %s on %s (%s/%s); use it: ziroctl cluster deploy ... --volume %s:/data\n",
 				args[0], storageNode, storageRoot, args[0], args[0])
 			return nil
@@ -406,6 +429,7 @@ var clusterStorageFailoverCmd = &cobra.Command{
 func init() {
 	clusterStorageAddCmd.Flags().StringVar(&storageNode, "node", "", "Node that serves the share")
 	clusterStorageAddCmd.Flags().StringVar(&storageStandby, "standby", "", "Node to fail over to")
+	clusterStorageAddCmd.Flags().StringVar(&storageOwner, "owner", "", "uid:gid every client writes as (e.g. the app's user, 999:999); default: root squashed to nobody")
 	clusterStorageFailoverCmd.Flags().StringVar(&storageTo, "to", "", "Node to serve from (default: the standby)")
 	clusterStorageCmd.AddCommand(clusterStorageAddCmd, clusterStorageRmCmd, clusterStorageLsCmd, clusterStorageFailoverCmd)
 	clusterCmd.AddCommand(clusterStorageCmd)

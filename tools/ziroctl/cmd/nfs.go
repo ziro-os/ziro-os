@@ -13,6 +13,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"os/user"
+	"regexp"
+	"strconv"
 )
 
 // NFS: NFSv4.2-only file sharing. The server side is the `nfs` module (nfs-utils is installed on
@@ -30,6 +33,61 @@ type NFSExport struct {
 	Path     string   `json:"path"`
 	Clients  []string `json:"clients"` // IPv4 addresses or CIDRs
 	ReadOnly bool     `json:"read_only,omitempty"`
+	// Squash maps client identities: "root" (default: root becomes the anonymous user), "all"
+	// (every client user becomes the owner below) or "none" (client root is root here).
+	Squash string `json:"squash,omitempty"`
+	// Owner ("uid:gid") is the anonymous identity squashed users write as; with Squash "all" every
+	// client write lands as this owner, so files stay usable on the server.
+	Owner string `json:"owner,omitempty"`
+}
+
+var ownerRe = regexp.MustCompile(`^([0-9]{1,10}):([0-9]{1,10})$`)
+
+// exportIdentity returns the exports(5) identity options for e.
+func exportIdentity(e NFSExport) (string, error) {
+	opts := ""
+	switch e.Squash {
+	case "", "root":
+		opts = "root_squash"
+	case "all":
+		opts = "all_squash"
+	case "none":
+		opts = "no_root_squash"
+	default:
+		return "", fmt.Errorf("squash must be root, all or none")
+	}
+	if e.Owner != "" {
+		m := ownerRe.FindStringSubmatch(e.Owner)
+		if m == nil {
+			return "", fmt.Errorf("owner %q must be uid:gid", e.Owner)
+		}
+		if m[1] == "0" || m[2] == "0" {
+			return "", errors.New("owner can't be root (use --squash none --allow-root)")
+		}
+		opts += ",anonuid=" + m[1] + ",anongid=" + m[2]
+	}
+	return opts, nil
+}
+
+// resolveOwner turns "user:group", "uid:gid" or "user" into numeric "uid:gid".
+func resolveOwner(s string) (string, error) {
+	if ownerRe.MatchString(s) {
+		return s, nil
+	}
+	name, group, _ := strings.Cut(s, ":")
+	u, err := user.Lookup(name)
+	if err != nil {
+		return "", fmt.Errorf("owner %q: %w", s, err)
+	}
+	gid := u.Gid
+	if group != "" {
+		g, err := user.LookupGroup(group)
+		if err != nil {
+			return "", fmt.Errorf("owner %q: %w", s, err)
+		}
+		gid = g.Gid
+	}
+	return u.Uid + ":" + gid, nil
 }
 
 type NFSMount struct {
@@ -106,7 +164,11 @@ func renderExports(exports []NFSExport) (string, error) {
 		if e.ReadOnly {
 			mode = "ro"
 		}
-		opts := fmt.Sprintf("%s,sync,no_subtree_check,root_squash,sec=sys,fsid=%d", mode, crc32.ChecksumIEEE([]byte(e.Path))&0x7fffffff)
+		ident, err := exportIdentity(e)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", e.Path, err)
+		}
+		opts := fmt.Sprintf("%s,sync,no_subtree_check,%s,sec=sys,fsid=%d", mode, ident, crc32.ChecksumIEEE([]byte(e.Path))&0x7fffffff)
 		b.WriteString(e.Path)
 		for _, c := range clients {
 			b.WriteString(" " + c + "(" + opts + ")")
@@ -284,8 +346,11 @@ func nfsBoot() {
 // ---- CLI ----
 
 var (
-	nfsClients []string
-	nfsRO      bool
+	nfsClients   []string
+	nfsRO        bool
+	nfsSquash    string
+	nfsOwner     string
+	nfsAllowRoot bool
 )
 
 var nfsCmd = &cobra.Command{
@@ -305,7 +370,18 @@ var nfsExportAddCmd = &cobra.Command{
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		e := NFSExport{Path: args[0], Clients: nfsClients, ReadOnly: nfsRO}
+		e := NFSExport{Path: args[0], Clients: nfsClients, ReadOnly: nfsRO, Squash: nfsSquash}
+		if e.Squash == "none" && !nfsAllowRoot {
+			return errors.New("--squash none lets client root act as root on this host; add --allow-root if you mean it")
+		}
+		if nfsOwner != "" {
+			if e.Owner, err = resolveOwner(nfsOwner); err != nil {
+				return err
+			}
+			if e.Squash == "" {
+				e.Squash = "all" // --owner means "writes land as this owner"
+			}
+		}
 		kept := c.Exports[:0]
 		for _, x := range c.Exports {
 			if x.Path != e.Path {
@@ -321,6 +397,17 @@ var nfsExportAddCmd = &cobra.Command{
 		}
 		if err := syncNFSFirewall(c.Exports); err != nil {
 			return err
+		}
+		if e.Owner != "" { // the owner must be able to write the export's top directory
+			uid, gid, _ := strings.Cut(e.Owner, ":")
+			u, _ := strconv.Atoi(uid)
+			g, _ := strconv.Atoi(gid)
+			if err := os.Lchown(e.Path, u, g); err != nil {
+				return err
+			}
+		}
+		if e.Squash == "none" {
+			fmt.Fprintln(os.Stderr, "WARNING: client root has root access to "+e.Path)
 		}
 		if err := saveNFSConfig(c); err != nil {
 			return err
@@ -370,7 +457,8 @@ var nfsListCmd = &cobra.Command{
 		}
 		fmt.Println("EXPORTS")
 		for _, e := range c.Exports {
-			fmt.Printf("  %-30s %-4s %s\n", e.Path, map[bool]string{true: "ro", false: "rw"}[e.ReadOnly], strings.Join(e.Clients, ","))
+			ident, _ := exportIdentity(e)
+			fmt.Printf("  %-30s %-4s %-40s %s\n", e.Path, map[bool]string{true: "ro", false: "rw"}[e.ReadOnly], ident, strings.Join(e.Clients, ","))
 		}
 		fmt.Println("MOUNTS")
 		for _, m := range c.Mounts {
@@ -382,6 +470,109 @@ var nfsListCmd = &cobra.Command{
 			fmt.Printf("  %-30s %s:%s (%s)\n", m.Target, m.Server, m.Path, state)
 		}
 		return nil
+	},
+}
+
+// NFSClient is a connected NFSv4 client, from /proc/fs/nfsd/clients.
+type NFSClient struct {
+	Address      string   `json:"address"`
+	Name         string   `json:"name"`
+	MinorVersion string   `json:"minor_version"`
+	Status       string   `json:"status"`
+	OpenFiles    int      `json:"open_files"`
+	Exports      []string `json:"exports"` // exports whose client list admits this address
+}
+
+var nfsdClientsDir = "/proc/fs/nfsd/clients"
+
+// parseNFSDInfo reads the "key: value" lines of a clients/<id>/info file.
+func parseNFSDInfo(b []byte) map[string]string {
+	out := map[string]string{}
+	for _, l := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(l, ":"); ok {
+			out[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"`)
+		}
+	}
+	return out
+}
+
+// listNFSClients reports the clients the NFS server knows, with the exports they may use.
+func listNFSClients(exports []NFSExport) ([]NFSClient, error) {
+	ents, err := os.ReadDir(nfsdClientsDir)
+	if os.IsNotExist(err) {
+		return nil, errors.New("the NFS server is not running (ziroctl nfs export add ...)")
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []NFSClient
+	for _, e := range ents {
+		b, err := os.ReadFile(filepath.Join(nfsdClientsDir, e.Name(), "info"))
+		if err != nil {
+			continue
+		}
+		info := parseNFSDInfo(b)
+		c := NFSClient{Address: info["address"], Name: info["name"], MinorVersion: info["minor version"], Status: info["status"]}
+		if st, err := os.ReadFile(filepath.Join(nfsdClientsDir, e.Name(), "states")); err == nil {
+			c.OpenFiles = strings.Count(string(st), "type: open")
+		}
+		if ap, err := netip.ParseAddrPort(c.Address); err == nil {
+			for _, x := range exports {
+				clients, _ := normalizeClients(x.Clients) // stored as typed: "10.0.0.5" or a CIDR
+				for _, cl := range clients {
+					if p, err := netip.ParsePrefix(cl); err == nil && p.Contains(ap.Addr().Unmap()) {
+						c.Exports = append(c.Exports, x.Path)
+						break
+					}
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Address < out[j].Address })
+	return out, nil
+}
+
+// nfsAllExports is what this host serves: standalone exports plus cluster shares.
+func nfsAllExports() []NFSExport {
+	c, _ := loadNFSConfig()
+	all := append([]NFSExport{}, c.Exports...)
+	if b, err := os.ReadFile(nfsClusterFile); err == nil {
+		for _, l := range strings.Split(string(b), "\n") {
+			f := strings.Fields(l)
+			if len(f) < 2 || strings.HasPrefix(l, "#") {
+				continue
+			}
+			x := NFSExport{Path: f[0]}
+			for _, c := range f[1:] {
+				if host, _, ok := strings.Cut(c, "("); ok {
+					x.Clients = append(x.Clients, host)
+				}
+			}
+			all = append(all, x)
+		}
+	}
+	return all
+}
+
+var nfsClientsCmd = &cobra.Command{
+	Use:   "clients",
+	Short: "Show NFS clients connected to this server, and the exports they may use",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		clients, err := listNFSClients(nfsAllExports())
+		if err != nil {
+			return err
+		}
+		return printResult(clients, func() {
+			if len(clients) == 0 {
+				fmt.Println("No NFS clients connected.")
+				return
+			}
+			fmt.Printf("%-22s %-6s %-11s %-6s %-28s %s\n", "CLIENT", "NFS", "STATUS", "OPEN", "NAME", "EXPORTS")
+			for _, c := range clients {
+				fmt.Printf("%-22s %-6s %-11s %-6d %-28s %s\n", c.Address, "4."+c.MinorVersion, c.Status, c.OpenFiles, c.Name, strings.Join(c.Exports, ","))
+			}
+		})
 	},
 }
 
@@ -447,8 +638,11 @@ var nfsUmountCmd = &cobra.Command{
 func init() {
 	nfsExportAddCmd.Flags().StringSliceVar(&nfsClients, "clients", nil, "Client IPv4 addresses or CIDRs (required)")
 	nfsExportAddCmd.Flags().BoolVar(&nfsRO, "ro", false, "Read-only export")
+	nfsExportAddCmd.Flags().StringVar(&nfsSquash, "squash", "", "Client identity mapping: root (default), all, none")
+	nfsExportAddCmd.Flags().StringVar(&nfsOwner, "owner", "", "Squashed clients write as this user[:group] (implies --squash all; the export dir is chowned to it)")
+	nfsExportAddCmd.Flags().BoolVar(&nfsAllowRoot, "allow-root", false, "Confirm --squash none (client root acts as root here)")
 	nfsMountCmd.Flags().BoolVar(&nfsRO, "ro", false, "Mount read-only")
 	nfsExportCmd.AddCommand(nfsExportAddCmd, nfsExportRmCmd)
-	nfsCmd.AddCommand(nfsExportCmd, nfsListCmd, nfsMountCmd, nfsUmountCmd)
+	nfsCmd.AddCommand(nfsExportCmd, nfsListCmd, nfsClientsCmd, nfsMountCmd, nfsUmountCmd)
 	rootCmd.AddCommand(nfsCmd)
 }

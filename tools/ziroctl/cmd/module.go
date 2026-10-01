@@ -109,9 +109,11 @@ type ModuleState struct {
 	Files     map[string]string `json:"files,omitempty"` // path -> sha256 we wrote
 	Services  []string          `json:"services,omitempty"`
 	Artifacts []string          `json:"artifacts,omitempty"` // paths we downloaded
-	Settings  map[string]string `json:"settings,omitempty"`  // resolved --set values, reused by upgrade and re-enable
-	Source    string            `json:"source,omitempty"`
-	UpdatedAt string            `json:"updated_at"`
+	// CreatedDirs are directories that didn't exist before this module: the only ones purge removes.
+	CreatedDirs []string          `json:"created_dirs,omitempty"`
+	Settings    map[string]string `json:"settings,omitempty"` // resolved --set values, reused by upgrade and re-enable
+	Source      string            `json:"source,omitempty"`
+	UpdatedAt   string            `json:"updated_at"`
 }
 
 // moduleOpts are the operator's choices for an enable.
@@ -573,9 +575,13 @@ func chownSpec(path, owner string) error {
 	return os.Lchown(path, uid, gid)
 }
 
-func ensureDirs(m ModuleManifest) error {
+// ensureDirs creates the module's directories; st (nil at boot) records the ones it created.
+func ensureDirs(m ModuleManifest, st *ModuleState) error {
 	for _, d := range m.Dirs {
 		d.Path = modPath(d.Path)
+		if _, err := os.Lstat(d.Path); os.IsNotExist(err) && st != nil {
+			st.CreatedDirs = uniq(append(st.CreatedDirs, d.Path))
+		}
 		mode, _ := strconv.ParseUint(d.Mode, 8, 32)
 		if mode == 0 {
 			mode = 0755
@@ -750,6 +756,7 @@ func installModule(m ModuleManifest, opts moduleOpts) error {
 			}
 		}
 		st.Packages = intersect(prev.Packages, m.Packages)
+		st.CreatedDirs = prev.CreatedDirs
 		prevSettings = prev.Settings
 	}
 	settings, err := resolveSettings(m.Settings, prevSettings, opts.Set)
@@ -798,7 +805,7 @@ func installModule(m ModuleManifest, opts moduleOpts) error {
 	if err := fetchArtifacts(m, st); err != nil {
 		return fail(err)
 	}
-	if err := ensureDirs(m); err != nil {
+	if err := ensureDirs(m, st); err != nil {
 		return fail(err)
 	}
 	if err := writeModuleFiles(m, st); err != nil {
@@ -887,7 +894,9 @@ func requiredBy(all map[string]ModuleManifest, enabled map[string]*ModuleState, 
 	return out
 }
 
-func disableModule(name string) error {
+// disableModule stops and removes a module; purge also deletes its data (the directories it
+// created, its service logs).
+func disableModule(name string, purge bool) error {
 	all, err := loadManifests()
 	if err != nil {
 		return err
@@ -902,16 +911,39 @@ func disableModule(name string) error {
 	}
 	m, _ := installedManifest(all, name)
 	undoModule(m, st)
+	if purge {
+		purgeModuleData(m, st)
+	}
 	delete(enabled, name)
 	// Dependencies that were only enabled for this module go too.
 	for _, r := range m.Requires {
 		if s := enabled[r]; s != nil && s.Auto && len(requiredBy(all, enabled, r)) == 0 {
-			if err := disableModule(r); err != nil {
+			if err := disableModule(r, purge); err != nil {
 				fmt.Printf("  ! %v\n", err)
 			}
 		}
 	}
 	return nil
+}
+
+// purgeModuleData deletes the module's data: directories it created (deepest first, never a
+// system directory) and its services' log files.
+func purgeModuleData(m ModuleManifest, st *ModuleState) {
+	dirs := append([]string(nil), st.CreatedDirs...)
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, d := range dirs {
+		if slices.Contains(nfsForbidden, d) || strings.Count(d, "/") < 2 {
+			continue
+		}
+		if err := os.RemoveAll(d); err != nil {
+			fmt.Printf("  ! %v\n", err)
+			continue
+		}
+		fmt.Printf("  purged %s\n", d)
+	}
+	for _, s := range m.Services {
+		_ = os.Remove(s.LogFile)
+	}
 }
 
 // undoModule reverses exactly what installModule recorded in st.
@@ -1066,7 +1098,7 @@ func reconcileModules() {
 		if err := fetchArtifacts(m, st); err != nil {
 			fmt.Printf("[modules] %s: %v\n", name, err)
 		}
-		if err := ensureDirs(m); err != nil {
+		if err := ensureDirs(m, nil); err != nil {
 			fmt.Printf("[modules] %s: %v\n", name, err)
 		}
 		// Prepare steps set up what services need before they start (kernel modules, special

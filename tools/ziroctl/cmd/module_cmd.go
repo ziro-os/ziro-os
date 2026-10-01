@@ -20,6 +20,7 @@ import (
 var (
 	moduleForce bool
 	moduleAsync bool
+	modulePurge bool
 	moduleSets  []string
 	moduleFile  string
 	repoKeyFile string
@@ -335,14 +336,31 @@ var moduleUpgradeCmd = &cobra.Command{
 
 var moduleDisableCmd = &cobra.Command{
 	Use:   "disable <name>",
-	Short: "Stop a module and remove exactly what enabling it added (data directories are kept)",
+	Short: "Stop a module and remove exactly what enabling it added (data directories are kept unless --purge)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if moduleAsync {
-			return startModuleJob("disable", args[0])
-		}
-		return disableModule(args[0])
+		return runDisable(args[0], modulePurge)
 	},
+}
+
+var modulePurgeCmd = &cobra.Command{
+	Use:   "purge <name>",
+	Short: "Disable a module and delete its data (directories it created, its logs, its secrets)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runDisable(args[0], true)
+	},
+}
+
+func runDisable(name string, purge bool) error {
+	if moduleAsync {
+		args := []string{"disable", name}
+		if purge {
+			args = append(args, "--purge")
+		}
+		return startModuleJob(args...)
+	}
+	return disableModule(name, purge)
 }
 
 var moduleValidateCmd = &cobra.Command{
@@ -631,7 +649,8 @@ func init() {
 	for _, c := range []*cobra.Command{moduleEnableCmd, moduleInstallCmd} {
 		c.Flags().StringArrayVar(&moduleSets, "set", nil, "Set a module setting (name=value; see `plugin info`)")
 	}
-	for _, c := range []*cobra.Command{moduleEnableCmd, moduleDisableCmd, moduleUpgradeCmd} {
+	moduleDisableCmd.Flags().BoolVar(&modulePurge, "purge", false, "Also delete the module's data (directories it created, logs, secrets)")
+	for _, c := range []*cobra.Command{moduleEnableCmd, moduleDisableCmd, modulePurgeCmd, moduleUpgradeCmd} {
 		c.Flags().BoolVar(&moduleAsync, "background", false, "Run in the background and return immediately")
 	}
 	moduleInstallCmd.Flags().StringVarP(&moduleFile, "file", "f", "", "Manifest file")
@@ -641,7 +660,7 @@ func init() {
 	_ = moduleRepoAddCmd.MarkFlagRequired("key")
 	moduleRepoCmd.AddCommand(moduleRepoListCmd, moduleRepoAddCmd, moduleRepoRmCmd)
 	moduleCmd.AddCommand(moduleListCmd, moduleSearchCmd, moduleUpdateCmd, moduleInfoCmd, moduleEnableCmd, moduleInstallCmd,
-		moduleUpgradeCmd, moduleDisableCmd, moduleValidateCmd, moduleNewCmd, moduleRepoCmd, moduleReconcileCmd)
+		moduleUpgradeCmd, moduleDisableCmd, modulePurgeCmd, moduleValidateCmd, moduleNewCmd, moduleRepoCmd, moduleReconcileCmd)
 	rootCmd.AddCommand(moduleCmd)
 
 	for _, c := range []*cobra.Command{catalogBuildCmd, catalogVerifyCmd} {

@@ -202,14 +202,14 @@ func TestSecurityPackAutoDependencies(t *testing.T) {
 	if en["security"] == nil || en["security"].Auto || !en["clamav"].Auto || !en["auditd"].Auto || !installed["audit"] {
 		t.Fatalf("after enable: %+v", en)
 	}
-	if err := disableModule("clamav"); err == nil || !strings.Contains(err.Error(), "required by security") {
+	if err := disableModule("clamav", false); err == nil || !strings.Contains(err.Error(), "required by security") {
 		t.Fatalf("disabling a dependency of an enabled pack must be refused: %v", err)
 	}
 	// The admin also enables auditd explicitly: it must survive disabling the pack.
 	if err := enableModule("auditd", moduleOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := disableModule("security"); err != nil {
+	if err := disableModule("security", false); err != nil {
 		t.Fatal(err)
 	}
 	en = enabledModules()

@@ -1094,6 +1094,14 @@ static void spawn_terminal(struct terminal_session *s) {
         dup2(fd, STDERR_FILENO);
         if (fd > 2) close(fd);
 
+        /* A respawn means someone logged out: clear the screen and scrollback so the next
+         * person at this console can't read the previous session. The first session keeps
+         * the boot messages and banner. */
+        if (s->last_spawn != 0) {
+            static const char clear[] = "\033[H\033[2J\033[3J";
+            if (write(STDOUT_FILENO, clear, sizeof(clear) - 1) < 0) {}
+        }
+
         exec_console_session();
     } else if (pid > 0) {
         s->pid = pid;
