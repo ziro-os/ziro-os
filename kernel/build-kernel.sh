@@ -12,6 +12,12 @@
 # ZIRO_MODULE_SIGNING_KEY (PEM: private key + certificate, from the CI secret) signs modules with
 # the persistent Ziro key; it must match kernel/certs/ziro-modules.crt. Without it, the kernel
 # build generates an ephemeral key, as before.
+# ZIRO_EXTRA_TRUSTED_CERT (path to a PEM certificate) builds a kernel that also trusts modules
+# signed by that key (third-party kernel modules; see docs/sdk.md). Official builds never set it.
+#
+# Besides the kernel, the build packs the kernel kit, $OUT/kernel-devel.tar.gz: the headers, scripts
+# and Module.symvers for out-of-tree modules (kdev/), vmlinux.h for CO-RE eBPF, the module signing
+# certificate, and the builder image the kit's host tools were built in (`ziroctl dev kmod|bpf build`).
 
 set -euo pipefail
 
@@ -73,8 +79,14 @@ if [ -n "${ZIRO_MODULE_SIGNING_KEY:-}" ]; then
     fi
     KEY_MODE=persistent
 fi
+EXTRA_CERT_SUM=none
+if [ -n "${ZIRO_EXTRA_TRUSTED_CERT:-}" ]; then
+    openssl x509 -in "$ZIRO_EXTRA_TRUSTED_CERT" -noout >/dev/null || { echo "❌ ZIRO_EXTRA_TRUSTED_CERT is not a PEM certificate" >&2; exit 1; }
+    openssl x509 -in "$ZIRO_EXTRA_TRUSTED_CERT" > "$KEYS_DIR/extra-trusted.pem"
+    EXTRA_CERT_SUM=$(sha256sum < "$KEYS_DIR/extra-trusted.pem" | cut -d' ' -f1)
+fi
 
-STAMP=$(cat "$REPO_ROOT"/kernel/configs/*.config "$SCRIPT_DIR/build-kernel.sh" "$REPO_ROOT/kernel/certs/ziro-modules.crt" | { cat; echo "$KERNEL_VER $ALPINE_IMAGE $TARGET_ARCH"; } | sha256sum | cut -d' ' -f1)
+STAMP=$(cat "$REPO_ROOT"/kernel/configs/*.config "$SCRIPT_DIR/build-kernel.sh" "$REPO_ROOT/kernel/certs/ziro-modules.crt" | { cat; echo "$KERNEL_VER $ALPINE_IMAGE $TARGET_ARCH $EXTRA_CERT_SUM"; } | sha256sum | cut -d' ' -f1)
 # A build signed with the persistent key is reused even without the secret (later build steps
 # don't carry it); an ephemeral-key build is replaced as soon as the persistent key is available.
 BUILT_MODE=$(cat "$OUT/key-mode" 2>/dev/null || echo ephemeral)
@@ -86,7 +98,7 @@ certMatches() {
 KEY_OK=1
 [ "$BUILT_MODE" = persistent ] && ! certMatches && KEY_OK=0
 [ "$KEY_MODE" = persistent ] && [ "$BUILT_MODE" != persistent ] && KEY_OK=0
-if [ "${CONFIG_ONLY:-0}" != "1" ] && [ "${FORCE_KERNEL_BUILD:-0}" != "1" ] && [ -f "$OUT/vmlinuz" ] && [ -d "$OUT/modroot" ] && \
+if [ "${CONFIG_ONLY:-0}" != "1" ] && [ "${FORCE_KERNEL_BUILD:-0}" != "1" ] && [ -f "$OUT/vmlinuz" ] && [ -d "$OUT/modroot" ] && [ -f "$OUT/kernel-devel.tar.gz" ] && \
    [ "$KEY_OK" = 1 ] && [ "$(cat "$OUT/stamp" 2>/dev/null)" = "$STAMP" ]; then
     echo "✓ Custom kernel $(cat "$OUT/kernel.release") for $TARGET_ARCH is up to date (stamp ${STAMP:0:12}, $BUILT_MODE module key); skipping build."
     echo "  Set FORCE_KERNEL_BUILD=1 to rebuild."
@@ -108,12 +120,12 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e CONFIG_ONLY="${CONFIG_ONLY:-0}" \
     -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=2G -e CCACHE_COMPILERCHECK=content \
     -e KBUILD_BUILD_TIMESTAMP="2026-01-01 00:00:00 UTC" -e KBUILD_BUILD_USER=ziro -e KBUILD_BUILD_HOST=ziro-build \
-    -e KV="$KERNEL_VER" -e KARCH="$KERNEL_ARCH" -e TARCH="$TARGET_ARCH" \
+    -e BUILDER="$ALPINE_IMAGE" -e KV="$KERNEL_VER" -e KARCH="$KERNEL_ARCH" -e TARCH="$TARGET_ARCH" \
     -e KTARGET="$KERNEL_TARGET" -e KOUT="$KERNEL_OUT_SRC" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     "$ALPINE_IMAGE" sh -euc '
         apk add --no-cache build-base linux-headers bc bison flex openssl-dev elfutils-dev \
-            perl python3 xz bash curl diffutils findutils kmod gzip openssl gawk ccache pahole zstd gnupg coreutils >/dev/null
+            perl python3 xz bash curl diffutils findutils kmod gzip openssl gawk ccache pahole zstd gnupg coreutils bpftool >/dev/null
         # Reproducible builds: the kernel parses KBUILD_BUILD_TIMESTAMP with `date -d`, which needs
         # GNU date (BusyBox date rejects it and the timestamp would silently not apply).
         date -d "$KBUILD_BUILD_TIMESTAMP" +%s >/dev/null || { echo "❌ KBUILD_BUILD_TIMESTAMP is not parseable" >&2; exit 1; }
@@ -195,6 +207,11 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
             make -s ARCH=$KARCH CC="ccache gcc" olddefconfig
             grep -q "^CONFIG_MODULE_SIG_KEY=\"/keys/signing_key.pem\"" .config || { echo "❌ MODULE_SIG_KEY not applied" >&2; exit 1; }
         fi
+        if [ -s /keys/extra-trusted.pem ]; then
+            ./scripts/config --set-str SYSTEM_TRUSTED_KEYS /keys/extra-trusted.pem
+            make -s ARCH=$KARCH CC="ccache gcc" olddefconfig
+            grep -q "^CONFIG_SYSTEM_TRUSTED_KEYS=\"/keys/extra-trusted.pem\"" .config || { echo "❌ SYSTEM_TRUSTED_KEYS not applied" >&2; exit 1; }
+        fi
 
         echo "Compiling kernel + modules with $(nproc) jobs..."
         ccache -z >/dev/null
@@ -212,7 +229,18 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         # Public half of whatever key signed the modules (kernel kit: verify out-of-tree builds).
         openssl x509 -inform DER -in certs/signing_key.x509 -out /build/module-signing.crt
         echo "$KREL" > /build/kernel.release
-        chown -R "$HOST_UID:$HOST_GID" /build/vmlinuz /build/config /build/kernel.release /build/module-signing.crt /build/modroot /ccache /dl
+
+        # Kernel kit. Called directly (not via make run-command, which would re-sync the config for
+        # the different CC); CC = HOSTCC keeps the host tools (modpost, sign-file) as built.
+        rm -rf /tmp/kit && mkdir -p /tmp/kit
+        srctree=. SRCARCH=$KARCH CC=gcc HOSTCC=gcc sh scripts/package/install-extmod-build /tmp/kit/kdev
+        cp .config /tmp/kit/kdev/.config
+        bpftool btf dump file vmlinux format c > /tmp/kit/vmlinux.h
+        cp /build/module-signing.crt /build/config /build/kernel.release /tmp/kit/
+        echo "$BUILDER" > /tmp/kit/builder
+        tar -C /tmp/kit --numeric-owner -czf /build/kernel-devel.tar.gz .
+        echo "✓ Kernel kit: $(du -h /build/kernel-devel.tar.gz | cut -f1)"
+        chown -R "$HOST_UID:$HOST_GID" /build/vmlinuz /build/config /build/kernel.release /build/module-signing.crt /build/kernel-devel.tar.gz /build/modroot /ccache /dl
     '
 if [ "${CONFIG_ONLY:-0}" = "1" ]; then
     echo "✅ Config verified: $OUT/config"
@@ -227,6 +255,6 @@ echo "$KEY_MODE" > "$OUT/key-mode"
 
 echo "=================================================="
 echo "✅ Custom kernel $(cat "$OUT/kernel.release") ready: $OUT/vmlinuz ($(du -h "$OUT/vmlinuz" | cut -f1))"
-echo "   modules: $(du -sh "$OUT/modroot" | cut -f1)   config: $OUT/config"
+echo "   modules: $(du -sh "$OUT/modroot" | cut -f1)   config: $OUT/config   kit: $OUT/kernel-devel.tar.gz"
 echo "   Next: KERNEL_FLAVOR=custom ./packages/build-rootfs.sh $TARGET_ARCH"
 echo "=================================================="

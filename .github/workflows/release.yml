@@ -154,7 +154,7 @@ jobs:
         run: |
           mkdir -p build
           cd build
-          sha256sum ziro-os-*.iso ziro-rootfs-*.tar.gz ziro-initramfs-*.cpio.gz vmlinuz-x86_64* vmlinuz-arm64* kernel-config-* > SHA256SUMS
+          sha256sum ziro-os-*.iso ziro-rootfs-*.tar.gz ziro-initramfs-*.cpio.gz vmlinuz-x86_64* vmlinuz-arm64* kernel-config-* kernel-devel-*.tar.gz > SHA256SUMS
           cd ../bin
           sha256sum ziroctl-* ziropkg-* >> ../build/SHA256SUMS
           echo "Generated SHA256SUMS:"
@@ -177,6 +177,7 @@ jobs:
             build/vmlinuz-x86_64*
             build/vmlinuz-arm64*
             build/kernel-config-*
+            build/kernel-devel-*.tar.gz
             build/SHA256SUMS
             bin/ziroctl-*
             bin/ziropkg-*

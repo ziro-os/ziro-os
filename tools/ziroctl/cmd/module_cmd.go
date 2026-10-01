@@ -352,25 +352,12 @@ func runDisable(name string, purge bool) error {
 	return disableModule(name, purge)
 }
 
+// moduleValidateCmd is `dev validate` (schema + lints) under its older name.
 var moduleValidateCmd = &cobra.Command{
 	Use:   "validate <manifest.json...>",
-	Short: "Check plugin manifests against the schema and security rules",
+	Short: "Check plugin manifests against the schema and security rules (same as `dev validate`)",
 	Args:  cobra.MinimumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		var errs []error
-		for _, f := range args {
-			b, err := os.ReadFile(f)
-			if err == nil {
-				_, err = parseManifest(b)
-			}
-			if err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", f, err))
-				continue
-			}
-			fmt.Printf("✓ %s\n", f)
-		}
-		return errors.Join(errs...)
-	},
+	RunE:  func(cmd *cobra.Command, args []string) error { return devValidateCmd.RunE(cmd, args) },
 }
 
 var moduleNewCmd = &cobra.Command{
@@ -382,17 +369,7 @@ var moduleNewCmd = &cobra.Command{
 		if err := validName(name); err != nil {
 			return err
 		}
-		m := ModuleManifest{
-			Name: name, Version: "0.1.0", Description: "What " + name + " does, in one line",
-			Packages: []string{"busybox-extras"},
-			Settings: []Setting{{Name: "port", Description: "listen port", Default: "8080", Pattern: `^[0-9]{2,5}$`}},
-			Dirs:     []ModuleDir{{Path: "/var/lib/" + name, Mode: "0750", Owner: "nobody:nobody"}},
-			Files:    []ModuleFile{{Path: "/var/lib/" + name + "/index.html", Mode: "0644", Content: "hello from " + name + "\n"}},
-			Services: []ModuleService{{Name: name, Description: name + " daemon", Exec: "/usr/sbin/httpd",
-				Args: "-f -p 127.0.0.1:{{setting.port}} -h /var/lib/" + name, User: "nobody",
-				PIDFile: "/run/ziro-" + name + ".pid", LogFile: "/var/log/" + name + ".log"}},
-			Health: &ModuleCmd{Exec: "/usr/bin/wget", Args: []string{"-qO-", "http://127.0.0.1:{{setting.port}}/"}, Expect: "hello", Timeout: "30s"},
-		}
+		m := scaffoldPlugin(name)
 		if err := m.Validate(); err != nil {
 			return err
 		}
@@ -537,7 +514,7 @@ var catalogCheckers = map[string]func([]byte) (CatalogEntry, error){
 	},
 }
 
-var catalogCmd = &cobra.Command{Use: "catalog", Hidden: true, Short: "Build, sign and verify catalogs (for catalog repositories' CI)"}
+var catalogCmd = &cobra.Command{Use: "catalog", Short: "Build, sign and verify catalogs (for catalog repositories' CI)"}
 
 var catalogBuildCmd = &cobra.Command{
 	Use:   "build <src-dir>",
@@ -663,4 +640,19 @@ func init() {
 	_ = catalogVerifyCmd.MarkFlagRequired("key")
 	catalogCmd.AddCommand(catalogBuildCmd, catalogSignCmd, catalogVerifyCmd)
 	rootCmd.AddCommand(catalogCmd)
+}
+
+// scaffoldPlugin is a small, valid plugin to start from: a static web server as an unprivileged user.
+func scaffoldPlugin(name string) ModuleManifest {
+	return ModuleManifest{
+		Name: name, Version: "0.1.0", Description: "What " + name + " does, in one line",
+		Packages: []string{"busybox-extras"},
+		Settings: []Setting{{Name: "port", Description: "listen port", Default: "8080", Pattern: `^[0-9]{2,5}$`}},
+		Dirs:     []ModuleDir{{Path: "/var/lib/" + name, Mode: "0750", Owner: "nobody:nobody"}},
+		Files:    []ModuleFile{{Path: "/var/lib/" + name + "/index.html", Mode: "0644", Content: "hello from " + name + "\n"}},
+		Services: []ModuleService{{Name: name, Description: name + " daemon", Exec: "/usr/sbin/httpd",
+			Args: "-f -p 127.0.0.1:{{setting.port}} -h /var/lib/" + name, User: "nobody",
+			PIDFile: "/run/ziro-" + name + ".pid", LogFile: "/var/log/" + name + ".log"}},
+		Health: &ModuleCmd{Exec: "/usr/bin/wget", Args: []string{"-qO-", "http://127.0.0.1:{{setting.port}}/"}, Expect: "hello", Timeout: "30s"},
+	}
 }
