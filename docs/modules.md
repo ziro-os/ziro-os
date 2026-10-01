@@ -18,6 +18,7 @@ ziroctl plugin enable security            # the security pack (clamav + auditd)
 ziroctl plugin list                       # status; VERSION shows 1.0→1.1 when an upgrade is available
 ziroctl plugin upgrade                    # upgrade every enabled plugin (or name them)
 ziroctl plugin disable s3-ziro            # data directories are kept
+ziroctl plugin purge s3-ziro              # also deletes its data: dirs it created, logs, secrets
 ziroctl plugin update                     # refresh the catalogs now
 ziroctl plugin enable clamav --background # return at once; progress in /var/log/ziro-modules.log
 ```
@@ -29,6 +30,7 @@ GET  /api/v1/modules                      # status of every module, with source 
 POST /api/v1/modules/{name}/enable        # 202 Accepted: runs in the background, poll GET for status
 POST /api/v1/modules/{name}/upgrade
 POST /api/v1/modules/{name}/disable
+POST /api/v1/modules/{name}/purge         # disable and delete the module's data
 ```
 
 ## Catalogs and trust
@@ -184,7 +186,7 @@ Rules, enforced when a manifest is loaded (`plugin validate`, catalog CI, `go te
   - it restores or removes files, but keeps any file you edited
   - it removes the packages this module added, unless another enabled module needs them
   - it disables auto dependencies nothing else needs
-  - it keeps data directories
+  - it keeps data directories; `purge` also deletes the ones the module created (never one that existed before), its logs and its secrets
 - **After a reboot or `ziroctl upgrade`:** `ziroctl service boot` reinstalls missing packages and artifacts,
   recreates `/run` directories and re-runs post-start steps (for example loading audit rules). It works from the
   installed copies and never needs the network for a module whose packages are still in place.

@@ -450,10 +450,10 @@ def main():
                   "Module auditd enabled" in out and "enabled 1" in out and out.split()[-1] != "0", out)
             rc, out = con.run("auditctl -D >/dev/null; ziroctl service boot >/dev/null 2>&1; auditctl -l | grep -c ziro-config")
             check("module rules restored at boot (service boot hooks)", out.split()[-1:] != ["0"] and rc == 0, out)
-            rc, out = con.run("ziroctl module disable auditd 2>&1 | tail -1; apk info -e audit; "
-                              "ls /etc/ziro/services/auditd.conf /etc/ziro/modules/auditd.json 2>&1 | grep -c 'No such'", timeout=120)
-            check("module disable auditd removes packages, service and state",
-                  "Module auditd disabled" in out and out.split()[-1] == "2", out)
+            rc, out = con.run("ziroctl plugin purge auditd 2>&1 | tail -1; apk info -e audit; "
+                              "ls /etc/ziro/services/auditd.conf /etc/ziro/modules/auditd.json /var/log/auditd-daemon.log 2>&1 | grep -c 'No such'", timeout=120)
+            check("plugin purge auditd removes packages, service, state and logs",
+                  "Module auditd disabled" in out and out.split()[-1] == "3", out)
             # NFS: the first export installs the server (nfs module); the kernel mounts NFSv4 directly.
             rc, out = con.run("mkdir -p /srv/share && chmod 0777 /srv/share && ziroctl nfs export add /srv/share --clients 127.0.0.1 2>&1 | tail -1; "
                               "cat /proc/fs/nfsd/versions", timeout=600)
@@ -464,7 +464,15 @@ def main():
                               "cat /srv/share/t.txt; stat -c %U /srv/share/t.txt; awk '$2==\"/mnt/nfs\"{print $3, $4}' /proc/mounts", timeout=180)
             check("nfs mount (kernel client, v4.2): write lands on the export; root is squashed",
                   "hi" in out and "nobody" in out and "nfs4" in out and "vers=4.2" in out, out)
-            con.run("ziroctl nfs umount /mnt/nfs; ziroctl nfs export remove /srv/share", timeout=60)
+            rc, out = con.run("ziroctl nfs clients", timeout=30)
+            check("nfs clients lists the connected client and its export", "127.0.0.1" in out and "/srv/share" in out, out)
+            # --owner: every client write lands as that owner instead of nobody.
+            rc, out = con.run("ziroctl nfs umount /mnt/nfs; mkdir -p /srv/owned && "
+                              "ziroctl nfs export add /srv/owned --clients 127.0.0.1 --owner 1000:1000 2>&1 | tail -1; "
+                              "ziroctl nfs mount 127.0.0.1:/srv/owned /mnt/owned >/dev/null 2>&1; echo hi > /mnt/owned/o.txt; "
+                              "stat -c '%u:%g' /srv/owned/o.txt /srv/owned", timeout=120)
+            check("nfs export --owner: client writes land as the owner", out.split()[-2:] == ["1000:1000", "1000:1000"], out)
+            con.run("ziroctl nfs umount /mnt/owned; ziroctl nfs export remove /srv/owned; ziroctl nfs export remove /srv/share", timeout=60)
         if args.modules:
             rc, out = con.run("(sleep 300 | nc -l -p 9998 > /tmp/av.txt &); "
                               "ziroctl security alerting add av --url http://127.0.0.1:9998/h --events av >/dev/null; "
@@ -477,6 +485,17 @@ def main():
             check("module disable clamav", "Module clamav disabled" in out, out)
         if args.apps:
             apps_checks(con, check)
+        # Logging out of a console clears it (screen + scrollback) before the next login prompt.
+        with con.lock:
+            mark = len(con.buf)
+        con.proc.stdin.write(b"exit\n")
+        con.proc.stdin.flush()
+        cleared = con.wait_for(re.escape("\x1b[H\x1b[2J\x1b[3J"), 30, mark)
+        check("console cleared on logout", cleared is not None)
+        time.sleep(2)
+        con.proc.stdin.write(b"\n")
+        con.proc.stdin.flush()
+        con.run("stty -echo 2>/dev/null; true", timeout=30)
         if args.installed:
             rc, out = con.run("ziro-install --disk /dev/vda --yes --hostname ziro-itest --password Ziro-Test-9 "
                               "</dev/null >/tmp/install.log 2>&1; echo INSTALL_RC=$?; tail -15 /tmp/install.log", timeout=600)

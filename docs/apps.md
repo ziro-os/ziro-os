@@ -11,7 +11,8 @@ ziroctl apps deploy postgres                # default version, on 127.0.0.1:5432
 ziroctl apps credentials postgres           # URL, user, password
 ziroctl apps list                           # what runs, where, and how many replicas are up
 ziroctl apps rm postgres                    # keeps data and credentials
-ziroctl apps rm postgres --purge            # deletes them too
+ziroctl apps rm postgres --purge            # deletes them too (on a cluster: on every node)
+ziroctl apps purge postgres                 # same, or clean up what an earlier `rm` left behind
 ```
 
 More examples:
@@ -84,7 +85,8 @@ The replicas find each other by stable DNS names, `<replica>.<name>.cluster.ziro
 ## API
 
 ```
-GET  /api/v1/apps            # deployed apps and running replicas (any token)
+GET    /api/v1/apps                      # deployed apps and running replicas (any token)
+DELETE /api/v1/apps/{name}[?purge=true]  # admin; remove (and purge) in the background
 POST /api/v1/apps/deploy     # admin; 202 Accepted, runs in the background (log: /var/log/ziro-apps.log)
      {"app": "postgres:18", "name": "db", "set": {"database": "shop"}, "publish": 5433, "allow_from": ["api"]}
 ```

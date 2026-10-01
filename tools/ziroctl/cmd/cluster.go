@@ -132,10 +132,13 @@ type ClusterState struct {
 	Routes        []GatewayRoute `json:"routes,omitempty"`
 	DNSRecords    []DNSRecord    `json:"dns_records,omitempty"` // cluster-wide records served by every node's smart DNS
 	Shares        []ClusterShare `json:"shares,omitempty"`      // NFS shares served over the mesh
-	GatewayACME   GatewayACME    `json:"gateway_acme,omitempty"`
-	Peers         []RemotePeer   `json:"peers,omitempty"`    // WireGuard remote-access clients
-	PodCIDR       string         `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
-	DEKID         string         `json:"dek_id,omitempty"`   // data key sealing Secrets and CAKey ("" = not sealed yet)
+	// PurgeData: apps whose node-local data every node deletes (app -> when requested). Entries
+	// expire after purgeDataTTL; deploying an app of that name again cancels its entry.
+	PurgeData   map[string]string `json:"purge_data,omitempty"`
+	GatewayACME GatewayACME       `json:"gateway_acme,omitempty"`
+	Peers       []RemotePeer      `json:"peers,omitempty"`    // WireGuard remote-access clients
+	PodCIDR     string            `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
+	DEKID       string            `json:"dek_id,omitempty"`   // data key sealing Secrets and CAKey ("" = not sealed yet)
 	// Rotation: previous node tokens stay valid briefly; nodes/masters re-issue what predates these.
 	PrevNodeTokens     map[string]prevNodeToken `json:"prev_node_tokens,omitempty"`
 	RotateTokensBefore time.Time                `json:"rotate_tokens_before,omitempty"`
@@ -1002,6 +1005,7 @@ func deployApp(mutate func(st *ClusterState) (*ClusteredApp, error)) error {
 			return err
 		}
 		*app = withPodNetwork(st, *app) // deploy, apply, scale and rollback all land on the pod network
+		delete(st.PurgeData, app.Name)  // a new app of a purged name keeps its new data
 		// A new image passes the image policy here (verified and pinned by digest when signatures are
 		// required); an unchanged one was checked when it was set.
 		if cur := st.app(app.Name); cur == nil || cur.Image != app.Image {

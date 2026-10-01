@@ -49,15 +49,24 @@ server). Clients need nothing extra: the kernel mounts NFSv4 directly.
 
 ```sh
 ziroctl nfs export add /srv/media --clients 10.0.0.0/24 [--ro]   # opens 2049/tcp to those clients only
+ziroctl nfs export add /srv/app --clients 10.0.0.0/24 --owner app # every client write lands as user "app"
 ziroctl nfs mount 10.0.0.5:/srv/media /mnt/media [--ro]           # persistent across reboots
-ziroctl nfs list
+ziroctl nfs list                                                  # exports (with their options) and mounts
+ziroctl nfs clients                                               # who is connected, open files, which export
 ziroctl nfs umount /mnt/media
 ziroctl nfs export remove /srv/media
 ```
 
-- **Export options:** always `root_squash,sync,no_subtree_check,sec=sys` with a stable `fsid`. Exporting system
-  paths, or to `0.0.0.0/0`, is refused. Client root becomes `nobody`, so make the directory writable for your
-  apps (`chmod 0777`, or `chown` it to their uid).
+- **Export options:**
+  - Always `sync,no_subtree_check,sec=sys`, with a stable `fsid`.
+  - Exporting system paths, or to `0.0.0.0/0`, is refused.
+- **Who writes:** `--squash` picks how client users map to users on the server.
+  - **`root`** (the default): client root becomes `nobody`, and other users keep their uid.
+  - **`all`**, or **`--owner user[:group]`**, which implies `all`: every client write lands as that owner. The
+    export directory is `chown`ed to the owner, so writes work with no `chmod 0777`. Use this for apps.
+  - **`none`**: client root is root on the server. It needs `--allow-root`.
+- **Clients:** `nfs clients` (and `GET /api/v1/nfs/clients`) list connected clients with their address, NFS minor
+  version, open files, and the exports their address may use.
 - **Mount options:** `vers=4.2,proto=tcp,hard,nconnect=4,rsize=wsize=1M,noatime,nodev,nosuid`.
 - **Unmounted shares:** the empty mount point is made immutable, so nothing can be written to the local disk
   while the share is down.
@@ -75,6 +84,9 @@ ziroctl cluster storage failover media --to storage-2
 ziroctl cluster storage rm media      # refused while an app uses it; the data stays on the node
 ```
 
+- **Ownership:** `cluster storage add media --node storage-1 --owner 999:999` makes every write land as uid:gid
+  999:999 (`all_squash`). The share is then mode 0770 instead of 0777. The value is numeric because user names
+  differ between nodes and images.
 - **Serving:** the storage node installs the NFS server on demand and exports `/var/lib/ziro/storage/<share>` only
   to the mesh IPs of nodes that run an app using the share. In deny mode, the mesh policy opens 2049/tcp to
   exactly those nodes.

@@ -440,13 +440,17 @@ func registerModuleRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) 
 			return
 		}
 		m, ok := all[name]
-		act := map[string]string{"enable": "enable", "disable": "disable", "upgrade": "upgrade"}[action]
+		act := map[string]string{"enable": "enable", "disable": "disable", "upgrade": "upgrade", "purge": "purge"}[action]
 		if !ok || act == "" {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "unknown module or action"})
 			return
 		}
-		err = startModuleJob(act, m.Name) // the name comes from a verified manifest, not the URL
+		job := []string{act, m.Name} // the name comes from a verified manifest, not the URL
+		if act == "purge" {
+			job = []string{"disable", m.Name, "--purge"}
+		}
+		err = startModuleJob(job...)
 		apiAudit(r, "module "+act, m.Name, err)
 		if err != nil {
 			apiReply(w, err, nil)
@@ -520,6 +524,33 @@ func registerAppRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) htt
 	mux.HandleFunc("/api/v1/apps", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		apiReply(w, nil, appsStatus())
 	}))
+	// DELETE /api/v1/apps/{name}[?purge=true]: remove an app (admin), with its data when purging.
+	mux.HandleFunc("/api/v1/apps/", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/api/v1/apps/")
+		if r.Method != http.MethodDelete || name == "deploy" {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requireRole(w, r, "admin") {
+			return
+		}
+		if err := validName(name); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		args := []string{"apps", "rm", name}
+		if r.URL.Query().Get("purge") == "true" {
+			args = []string{"apps", "purge", name}
+		}
+		err := startJob(args, "/var/log/ziro-apps.log")
+		apiAudit(r, strings.Join(args[:2], " "), name, err)
+		if err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(APIMessage{Status: "accepted", Message: "removing " + name + "; poll GET /api/v1/apps"})
+	}))
 	mux.HandleFunc("/api/v1/apps/deploy", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -544,5 +575,21 @@ func registerAppRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) htt
 		}
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(APIMessage{Status: "accepted", Message: "deploying " + req.App + "; poll GET /api/v1/apps"})
+	}))
+}
+
+// registerNFSRoutes: read-only views of NFS (any token). Exports change through the CLI, which
+// also opens the firewall to the clients.
+func registerNFSRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+	mux.HandleFunc("/api/v1/nfs", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		c, err := loadNFSConfig()
+		if os.IsNotExist(err) {
+			err = nil
+		}
+		apiReply(w, err, c)
+	}))
+	mux.HandleFunc("/api/v1/nfs/clients", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		clients, err := listNFSClients(nfsAllExports())
+		apiReply(w, err, clients)
 	}))
 }

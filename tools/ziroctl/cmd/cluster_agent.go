@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,6 +111,39 @@ func containerArgs(a Assignment, labels ...string) []string {
 		args = append(args, "-v", dataDir(a.App, a.Replica, d)+":"+d)
 	}
 	return append(append(args, "--", a.Image), a.Args...)
+}
+
+const purgeDataTTL = 7 * 24 * time.Hour
+
+// purgeList is the apps whose data nodes should delete (unexpired entries).
+func purgeList(st *ClusterState, now time.Time) []string {
+	var out []string
+	for app, at := range st.PurgeData {
+		if t, err := time.Parse(time.RFC3339, at); err == nil && now.Sub(t) < purgeDataTTL {
+			out = append(out, app)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// purgeAppData deletes the node-local data of purged apps that have no replica here. The names
+// come from the master: they are re-validated, and only appDataRoot/<app> is ever removed.
+func purgeAppData(apps []string, desired []Assignment) {
+	for _, app := range apps {
+		if validName(app) != nil || slices.ContainsFunc(desired, func(a Assignment) bool { return a.App == app }) {
+			continue
+		}
+		dir := filepath.Join(appDataRoot, app)
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Printf("[agent] purge %s: %v\n", app, err)
+			continue
+		}
+		fmt.Printf("[agent] purged data of %s\n", app)
+	}
 }
 
 // appDataRoot holds node-local app data: <app>/<replica>/<container path, "/" -> "_">.
@@ -472,6 +506,7 @@ var clusterAgentCmd = &cobra.Command{
 					ag.mu.Lock()
 					ag.desired, ag.synced = resp.Assignments, true
 					ag.mu.Unlock()
+					purgeAppData(resp.PurgeData, resp.Assignments)
 				}
 				if merr == nil {
 					merr = writeHostsBlock(hostsFile, resp.Endpoints)
