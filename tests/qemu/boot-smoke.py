@@ -256,8 +256,9 @@ def main():
     ap.add_argument("--apps", action="store_true",
                     help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
     args = ap.parse_args()
-    if args.apps:
-        os.environ.setdefault("ZIRO_SMOKE_MEM", "4096")
+    if args.apps or args.modules:
+        # Live hosts keep the root filesystem (and ClamAV signatures) in RAM; clamd needs ~1.5 GB.
+        os.environ.setdefault("ZIRO_SMOKE_MEM", "6144")
 
     disk = None
     if args.installed:
@@ -500,10 +501,10 @@ def main():
             check("clamav detects EICAR in a root-only path and alerts", "Eicar" in out and out.split()[-1] == "1", out)
             if args.flavor == "custom":
                 # On-access: opening an infected file under a watched path is denied (fanotify).
-                rc, out = con.run("ziroctl plugin enable clamav-onaccess 2>&1 | tail -1; sleep 5; "
+                rc, out = con.run("ziroctl plugin enable clamav-onaccess 2>&1 | tail -1; sleep 20; "
                                   "cp /root/eicar.com /tmp/eicar.txt 2>/dev/null; cat /tmp/eicar.txt >/dev/null 2>&1; echo CAT_RC=$?; "
                                   "ziroctl plugin disable clamav-onaccess 2>&1 | tail -1; rm -f /tmp/eicar.txt", timeout=300)
-                check("clamav-onaccess blocks opening EICAR", "Module clamav-onaccess enabled" in out and "CAT_RC=0" not in out, out)
+                check("clamav-onaccess blocks opening EICAR", "Module clamav-onaccess enabled" in out and "CAT_RC=1" in out, out)
             rc, out = con.run("ziroctl module disable clamav 2>&1 | tail -1; netstat -tln | grep -c 3310", timeout=300)
             check("module disable clamav", "Module clamav disabled" in out, out)
         if args.apps:

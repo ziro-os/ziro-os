@@ -1,6 +1,6 @@
 {
   "name": "clamav",
-  "version": "1.0",
+  "version": "1.1",
   "description": "ClamAV antivirus: clamd (local socket), signature updates, daily scans",
   "packages": [
     "clamav-daemon",
@@ -23,13 +23,18 @@
       "path": "/var/lib/clamav",
       "mode": "0755",
       "owner": "clamav:clamav"
+    },
+    {
+      "path": "/var/lib/clamav/tmp",
+      "mode": "0750",
+      "owner": "clamav:clamav"
     }
   ],
   "files": [
     {
       "path": "/etc/clamav/clamd.conf",
       "mode": "0644",
-      "content": "# Managed by `ziroctl module enable clamav` (local socket only: no network listener).\nLogFile /var/log/clamav/clamd.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/clamd.pid\nLocalSocket /run/clamav/clamd.sock\nLocalSocketGroup clamav\nLocalSocketMode 660\nFixStaleSocket yes\nUser clamav\nForeground yes\nDatabaseDirectory /var/lib/clamav\nMaxThreads 4\nMaxScanSize 400M\nMaxFileSize 100M\nMaxRecursion 16\nMaxFiles 10000\nExcludePath ^/proc/\nExcludePath ^/sys/\nExcludePath ^/dev/\nExcludePath ^/run/\nExtendedDetectionInfo yes\n"
+      "content": "# Managed by `ziroctl module enable clamav` (local socket only: no network listener).\nLogFile /var/log/clamav/clamd.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/clamd.pid\nLocalSocket /run/clamav/clamd.sock\nLocalSocketGroup clamav\nLocalSocketMode 660\nFixStaleSocket yes\nUser clamav\nForeground yes\nDatabaseDirectory /var/lib/clamav\n# Temp files outside /tmp, so clamav-onaccess can watch /tmp\nTemporaryDirectory /var/lib/clamav/tmp\nMaxThreads 4\nMaxScanSize 400M\nMaxFileSize 100M\nMaxRecursion 16\nMaxFiles 10000\nExcludePath ^/proc/\nExcludePath ^/sys/\nExcludePath ^/dev/\nExcludePath ^/run/\nExtendedDetectionInfo yes\n"
     },
     {
       "path": "/etc/clamav/freshclam.conf",
