@@ -21,6 +21,7 @@ More examples:
 ziroctl apps deploy postgres:16 --name billing --publish 5433 --set database=billing
 ziroctl apps deploy mysql:8.4 --bind 0.0.0.0          # reachable from the network (the firewall still applies)
 ziroctl apps deploy valkey
+ziroctl apps deploy grafana --expose grafana.example.com   # also publish it through the gateway (HTTPS)
 ziroctl apps deploy mysql-cluster                      # on a cluster master
 ziroctl apps deploy mysql-cluster --replicas 5 --allow-from api
 ```

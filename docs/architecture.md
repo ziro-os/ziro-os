@@ -46,6 +46,9 @@ under active development and is not ready for production use.
 - **Plugins:** a plugin is a declarative JSON manifest (packages, sha256-pinned artifacts, config files, generated
   secrets, validated settings, unprivileged supervised services, health check), applied and exactly reversed by
   `ziroctl plugin`. Manifests are built into `ziroctl` or come from signed catalogs ([modules guide](modules.md)).
+- **Gateway:** zirogate is one L4/L7 data plane (HTTP/1.1, HTTP/2, HTTP/3, TCP, TLS passthrough) fed by a
+  route store: cluster state, resolved by the master to running replicas, or a local file on standalone hosts.
+  The CLI and the API server edit routes; the gateway re-validates and hot-swaps them ([gateway guide](gateway.md)).
 - **Apps:** a digest-pinned app definition (components, settings, generated secrets, data paths) that
   `ziroctl apps deploy` runs as hardened containers on a host, or as cluster apps through the same scheduler
   and policy as any other ([apps guide](apps.md)).

@@ -451,6 +451,22 @@ def main():
                           "[ \"$(cat /run/containerd/containerd.pid)\" != \"$P\" ] && sleep 2 && "
                           "nerdctl info >/dev/null && echo CRESTART")
         check("service restart containerd (no race with init)", "CRESTART" in out, out)
+        # Standalone gateway: one-command expose with the internal CA, HTTP->HTTPS, HTTP/3, a TCP route.
+        rc, out = con.run("mkdir -p /tmp/www && echo gw-ok > /tmp/www/index.html && (busybox httpd -f -p 127.0.0.1:8081 -h /tmp/www &); "
+                          "ziroctl gateway expose 127.0.0.1:8081 --host smoke.internal --tls internal --name smoke 2>&1 | tail -1; sleep 4; "
+                          "ziroctl gateway ca > /tmp/gwca.pem; "
+                          "curl -s --cacert /tmp/gwca.pem --resolve smoke.internal:443:127.0.0.1 https://smoke.internal/; "
+                          "curl -sI --cacert /tmp/gwca.pem --resolve smoke.internal:443:127.0.0.1 https://smoke.internal/ | grep -ci '^alt-svc: h3'; "
+                          "curl -s -o /dev/null -w 'HTTP=%{http_code}\\n' --resolve smoke.internal:80:127.0.0.1 http://smoke.internal/; "
+                          "netstat -uln | grep -c ':443 '", timeout=120)
+        check("gateway expose: HTTPS with the internal CA, HTTP->HTTPS, HTTP/3 advertised and listening",
+              "is live at https://smoke.internal" in out and "gw-ok" in out and "HTTP=308" in out and out.split()[-1] != "0", out)
+        rc, out = con.run("ziroctl gateway route add echo --tcp --listen 9099 --to 127.0.0.1:8081 >/dev/null; sleep 3; "
+                          "curl -s http://127.0.0.1:9099/; ziroctl gateway status | grep -c healthy", timeout=60)
+        check("gateway tcp route proxies; status reports upstream health", "gw-ok" in out and out.split()[-1] != "0", out)
+        rc, out = con.run("ziroctl gateway route rm echo >/dev/null; ziroctl gateway route rm smoke >/dev/null; sleep 2; "
+                          "ziroctl service status gateway | grep -c RUNNING; pkill -f 'httpd -f -p 127.0.0.1:8081'", timeout=60)
+        check("gateway stops with its last route", out.split()[0] == "0", out)
         # Opt-in modules (need the Alpine repositories, like the container pull above).
         if not args.no_pull:
             rc, out = con.run("ziroctl module enable auditd 2>&1 | tail -3; auditctl -s | head -1; "
