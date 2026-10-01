@@ -518,7 +518,8 @@ func listNFSClients(exports []NFSExport) ([]NFSClient, error) {
 		}
 		if ap, err := netip.ParseAddrPort(c.Address); err == nil {
 			for _, x := range exports {
-				for _, cl := range x.Clients {
+				clients, _ := normalizeClients(x.Clients) // stored as typed: "10.0.0.5" or a CIDR
+				for _, cl := range clients {
 					if p, err := netip.ParsePrefix(cl); err == nil && p.Contains(ap.Addr().Unmap()) {
 						c.Exports = append(c.Exports, x.Path)
 						break

@@ -47,12 +47,13 @@ func TestNFSClients(t *testing.T) {
 	os.MkdirAll(d, 0755)
 	os.WriteFile(filepath.Join(d, "info"), []byte("clientid: 0xdeadbeef\naddress: \"10.0.0.5:879\"\nstatus: confirmed\nname: \"Linux NFSv4.2 web-1\"\nminor version: 2\n"), 0644)
 	os.WriteFile(filepath.Join(d, "states"), []byte("- 0x1: { type: open, access: rw }\n- 0x2: { type: open, access: r- }\n- 0x3: { type: deleg }\n"), 0644)
-	cs, err := listNFSClients([]NFSExport{{Path: "/srv/a", Clients: []string{"10.0.0.0/24"}}, {Path: "/srv/b", Clients: []string{"192.168.1.0/24"}}})
+	cs, err := listNFSClients([]NFSExport{{Path: "/srv/a", Clients: []string{"10.0.0.0/24"}}, {Path: "/srv/b", Clients: []string{"192.168.1.0/24"}},
+		{Path: "/srv/c", Clients: []string{"10.0.0.5"}}}) // a bare address, as `export add --clients` stores it
 	if err != nil || len(cs) != 1 {
 		t.Fatal(cs, err)
 	}
 	c := cs[0]
-	if c.Address != "10.0.0.5:879" || c.Name != "Linux NFSv4.2 web-1" || c.MinorVersion != "2" || c.OpenFiles != 2 || !slices.Equal(c.Exports, []string{"/srv/a"}) {
+	if c.Address != "10.0.0.5:879" || c.Name != "Linux NFSv4.2 web-1" || c.MinorVersion != "2" || c.OpenFiles != 2 || !slices.Equal(c.Exports, []string{"/srv/a", "/srv/c"}) {
 		t.Fatalf("%+v", c)
 	}
 }
