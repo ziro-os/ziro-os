@@ -47,7 +47,7 @@ def main():
     ap = argparse.ArgumentParser()
     default_arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
     ap.add_argument("--arch", default=default_arch, choices=["x86_64", "arm64"])
-    ap.add_argument("--flavor", default=os.environ.get("KERNEL_FLAVOR", "alpine"), choices=["alpine", "custom"])
+    ap.add_argument("--flavor", default=os.environ.get("KERNEL_FLAVOR", "custom"), choices=["alpine", "custom"])
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--boot-timeout", type=int, default=600)
     args = ap.parse_args()

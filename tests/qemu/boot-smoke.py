@@ -247,7 +247,7 @@ def main():
     ap = argparse.ArgumentParser()
     default_arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
     ap.add_argument("--arch", default=default_arch, choices=["x86_64", "arm64"])
-    ap.add_argument("--flavor", default=os.environ.get("KERNEL_FLAVOR", "alpine"), choices=["alpine", "custom"])
+    ap.add_argument("--flavor", default=os.environ.get("KERNEL_FLAVOR", "custom"), choices=["alpine", "custom"])
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--boot-timeout", type=int, default=600)
     ap.add_argument("--no-pull", action="store_true", help="skip the container run check (no internet)")
@@ -256,8 +256,9 @@ def main():
     ap.add_argument("--apps", action="store_true",
                     help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
     args = ap.parse_args()
-    if args.apps:
-        os.environ.setdefault("ZIRO_SMOKE_MEM", "4096")
+    if args.apps or args.modules:
+        # Live hosts keep the root filesystem (and ClamAV signatures) in RAM; clamd needs ~1.5 GB.
+        os.environ.setdefault("ZIRO_SMOKE_MEM", "6144")
 
     disk = None
     if args.installed:
@@ -292,6 +293,14 @@ def main():
         check("kernel matches shipped modules", "KMATCH" in out, out)
         rc, out = con.run("modprobe nf_tables && modprobe wireguard && modprobe overlay && echo MODOK")
         check("modprobe nf_tables/wireguard/overlay", "MODOK" in out, out)
+        if args.flavor == "custom":
+            # Hardened Ziro kernel: LSM stack, network defaults, module signing, attack surface.
+            rc, out = con.run("cat /sys/kernel/security/lsm; echo; sysctl -n net.ipv4.tcp_congestion_control net.core.default_qdisc; "
+                              "zcat /proc/config.gz | grep -cE '^CONFIG_(INIT_ON_FREE_DEFAULT_ON|FANOTIFY_ACCESS_PERMISSIONS|IMA|MODULE_SIG_FORCE)=y'; "
+                              "zcat /proc/config.gz | grep -c '^CONFIG_KEXEC=y'")
+            lines = out.split()
+            check("custom kernel: ima+landlock+bpf LSMs, bbr/fq, hardening options built in",
+                  "ima" in out and "landlock" in out and "bbr" in lines and "fq" in lines and lines[-2:] == ["4", "0"], out)
         rc, out = con.run("test -e /dev/fd/0 && test -e /dev/stdin && bash -c 'cat <(echo PSUB)'")
         check("/dev/fd + bash process substitution", "PSUB" in out, out)
         rc, out = con.run("ziroctl wg init >/dev/null && ziroctl wg up && ziroctl wg up && "
@@ -450,6 +459,15 @@ def main():
                   "Module auditd enabled" in out and "enabled 1" in out and out.split()[-1] != "0", out)
             rc, out = con.run("auditctl -D >/dev/null; ziroctl service boot >/dev/null 2>&1; auditctl -l | grep -c ziro-config")
             check("module rules restored at boot (service boot hooks)", out.split()[-1:] != ["0"] and rc == 0, out)
+            if args.flavor == "custom":
+                rc, out = con.run("ziroctl plugin enable integrity 2>&1 | tail -1; ziroctl security integrity", timeout=180)
+                check("integrity module: IMA policy loaded, every measured system file matches the image",
+                      "Module integrity enabled" in out and "every measured system file is intact" in out, out)
+                rc, out = con.run("printf '#!/bin/sh\\necho hi\\n' > /usr/bin/zz-smoke && chmod +x /usr/bin/zz-smoke && /usr/bin/zz-smoke >/dev/null; "
+                                  "ziroctl security integrity; echo RC=$?; rm -f /usr/bin/zz-smoke", timeout=60)
+                check("integrity: a binary outside the image and packages is reported (exit 1)",
+                      "/usr/bin/zz-smoke" in out and "RC=1" in out, out)
+                con.run("ziroctl plugin disable integrity >/dev/null 2>&1", timeout=60)
             rc, out = con.run("ziroctl plugin purge auditd 2>&1 | tail -1; apk info -e audit; "
                               "ls /etc/ziro/services/auditd.conf /etc/ziro/modules/auditd.json /var/log/auditd-daemon.log 2>&1 | grep -c 'No such'", timeout=120)
             check("plugin purge auditd removes packages, service, state and logs",
@@ -481,6 +499,12 @@ def main():
             rc, out = con.run("printf 'X5O!P%%@AP[4\\\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > /root/eicar.com; "
                               "ziroctl security scan --av /root 2>&1 | grep -v alerts; sleep 3; grep -c X-Ziro-Signature /tmp/av.txt", timeout=300)
             check("clamav detects EICAR in a root-only path and alerts", "Eicar" in out and out.split()[-1] == "1", out)
+            if args.flavor == "custom":
+                # On-access: opening an infected file under a watched path is denied (fanotify).
+                rc, out = con.run("ziroctl plugin enable clamav-onaccess 2>&1 | tail -1; sleep 20; "
+                                  "cp /root/eicar.com /tmp/eicar.txt 2>/dev/null; cat /tmp/eicar.txt >/dev/null 2>&1; echo CAT_RC=$?; "
+                                  "ziroctl plugin disable clamav-onaccess 2>&1 | tail -1; rm -f /tmp/eicar.txt", timeout=300)
+                check("clamav-onaccess blocks opening EICAR", "Module clamav-onaccess enabled" in out and "CAT_RC=1" in out, out)
             rc, out = con.run("ziroctl module disable clamav 2>&1 | tail -1; netstat -tln | grep -c 3310", timeout=300)
             check("module disable clamav", "Module clamav disabled" in out, out)
         if args.apps:

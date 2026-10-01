@@ -12,7 +12,7 @@ func TestEmbeddedManifestsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"clamav", "auditd", "security"} {
+	for _, n := range []string{"clamav", "auditd", "integrity", "clamav-onaccess", "security"} {
 		if _, ok := all[n]; !ok {
 			t.Fatalf("module %s missing", n)
 		}
@@ -23,7 +23,7 @@ func TestEmbeddedManifestsValid(t *testing.T) {
 		}
 	}
 	order, _ := enableOrder(all, "security")
-	if strings.Join(order, ",") != "clamav,auditd,security" {
+	if strings.Join(order, ",") != "clamav,auditd,integrity,security" {
 		t.Fatalf("security enable order %v", order)
 	}
 	// clamd must never listen on the network.

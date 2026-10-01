@@ -32,7 +32,7 @@ echo " Architecture: $TARGET_ARCH"
 echo "=================================================="
 
 BUILD_DIR="$REPO_ROOT/build"
-KERNEL_FLAVOR="${KERNEL_FLAVOR:-alpine}"
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-custom}"
 [ "${BUILD_FROM_SOURCE:-0}" = "1" ] && KERNEL_FLAVOR="custom"
 SUFFIX=""
 [ "$KERNEL_FLAVOR" = "custom" ] && SUFFIX="-custom"

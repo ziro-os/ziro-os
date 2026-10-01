@@ -89,6 +89,8 @@ Thumbs.db
 *.pem
 *.key
 *.crt
+# Public certificate of the kernel module signing key (the private key is a CI secret)
+!kernel/certs/ziro-modules.crt
 *.p12
 *.pfx
 

@@ -8,6 +8,10 @@
 #                                   security, every major cloud/hypervisor). Output: build/kernel-custom-<arch>/
 #
 # BUILD_FROM_SOURCE=1 is accepted as an alias for KERNEL_FLAVOR=custom.
+# CONFIG_ONLY=1 stops after configuring and verifying the fragments (a minute, no compile).
+# ZIRO_MODULE_SIGNING_KEY (PEM: private key + certificate, from the CI secret) signs modules with
+# the persistent Ziro key; it must match kernel/certs/ziro-modules.crt. Without it, the kernel
+# build generates an ephemeral key, as before.
 
 set -euo pipefail
 
@@ -30,7 +34,7 @@ case "$RAW_ARCH" in
         ;;
 esac
 
-KERNEL_FLAVOR="${KERNEL_FLAVOR:-alpine}"
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-custom}"
 [ "${BUILD_FROM_SOURCE:-0}" = "1" ] && KERNEL_FLAVOR="custom"
 
 if [ "$KERNEL_FLAVOR" = "alpine" ]; then
@@ -52,25 +56,56 @@ mkdir -p "$OUT" "$CCACHE_DIR_HOST" "$DL_DIR"
 
 # Skip the build when nothing that shapes the kernel changed (config fragments, this script,
 # kernel version, toolchain image). Saves the full compile on every rootfs/ISO/CI rebuild.
-STAMP=$(cat "$REPO_ROOT"/kernel/configs/*.config "$SCRIPT_DIR/build-kernel.sh" | { cat; echo "$KERNEL_VER $ALPINE_IMAGE $TARGET_ARCH"; } | sha256sum | cut -d' ' -f1)
-if [ "${FORCE_KERNEL_BUILD:-0}" != "1" ] && [ -f "$OUT/vmlinuz" ] && [ -d "$OUT/modroot" ] && \
-   [ "$(cat "$OUT/stamp" 2>/dev/null)" = "$STAMP" ]; then
-    echo "✓ Custom kernel $(cat "$OUT/kernel.release") for $TARGET_ARCH is up to date (stamp ${STAMP:0:12}); skipping build."
+# The persistent module key: written to a private temp file (never argv or env of the
+# container) and checked against the committed certificate, so a wrong secret fails loudly.
+KEYS_DIR=$(mktemp -d)
+trap 'rm -rf "$KEYS_DIR"' EXIT
+chmod 700 "$KEYS_DIR"
+KEY_MODE=ephemeral
+if [ -n "${ZIRO_MODULE_SIGNING_KEY:-}" ]; then
+    ( umask 077; printf '%s\n' "$ZIRO_MODULE_SIGNING_KEY" > "$KEYS_DIR/signing_key.pem" )
+    want=$(openssl x509 -in "$REPO_ROOT/kernel/certs/ziro-modules.crt" -noout -pubkey | sha256sum)
+    got=$( (openssl x509 -in "$KEYS_DIR/signing_key.pem" -noout -pubkey 2>/dev/null || true) | sha256sum)
+    keypub=$( (openssl pkey -in "$KEYS_DIR/signing_key.pem" -pubout 2>/dev/null || true) | sha256sum)
+    if [ "$want" != "$got" ] || [ "$want" != "$keypub" ]; then
+        echo "❌ ZIRO_MODULE_SIGNING_KEY doesn't match kernel/certs/ziro-modules.crt" >&2
+        exit 1
+    fi
+    KEY_MODE=persistent
+fi
+
+STAMP=$(cat "$REPO_ROOT"/kernel/configs/*.config "$SCRIPT_DIR/build-kernel.sh" "$REPO_ROOT/kernel/certs/ziro-modules.crt" | { cat; echo "$KERNEL_VER $ALPINE_IMAGE $TARGET_ARCH"; } | sha256sum | cut -d' ' -f1)
+# A build signed with the persistent key is reused even without the secret (later build steps
+# don't carry it); an ephemeral-key build is replaced as soon as the persistent key is available.
+BUILT_MODE=$(cat "$OUT/key-mode" 2>/dev/null || echo ephemeral)
+# certMatches: the kernel in $OUT trusts (and signed its modules with) the committed Ziro key.
+certMatches() {
+    [ -f "$OUT/module-signing.crt" ] && [ "$(openssl x509 -in "$OUT/module-signing.crt" -noout -pubkey 2>/dev/null)" = \
+        "$(openssl x509 -in "$REPO_ROOT/kernel/certs/ziro-modules.crt" -noout -pubkey)" ]
+}
+KEY_OK=1
+[ "$BUILT_MODE" = persistent ] && ! certMatches && KEY_OK=0
+[ "$KEY_MODE" = persistent ] && [ "$BUILT_MODE" != persistent ] && KEY_OK=0
+if [ "${CONFIG_ONLY:-0}" != "1" ] && [ "${FORCE_KERNEL_BUILD:-0}" != "1" ] && [ -f "$OUT/vmlinuz" ] && [ -d "$OUT/modroot" ] && \
+   [ "$KEY_OK" = 1 ] && [ "$(cat "$OUT/stamp" 2>/dev/null)" = "$STAMP" ]; then
+    echo "✓ Custom kernel $(cat "$OUT/kernel.release") for $TARGET_ARCH is up to date (stamp ${STAMP:0:12}, $BUILT_MODE module key); skipping build."
     echo "  Set FORCE_KERNEL_BUILD=1 to rebuild."
     exit 0
 fi
-rm -f "$OUT/stamp"
+rm -f "$OUT/stamp" "$OUT/key-mode"
 
 echo "=================================================="
 echo " Ziro custom kernel $KERNEL_VER for $TARGET_ARCH"
 echo " Config:   ${KERNEL_ARCH} defconfig + ziro-common + ziro-$TARGET_ARCH"
+echo " Signing:  $KEY_MODE module key"
 echo " Output:   $OUT"
 echo "=================================================="
 
 docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$OUT:/build" \
     -v "$REPO_ROOT/kernel/configs:/configs:ro" \
-    -v "$CCACHE_DIR_HOST:/ccache" -v "$DL_DIR:/dl" \
+    -v "$CCACHE_DIR_HOST:/ccache" -v "$DL_DIR:/dl" -v "$KEYS_DIR:/keys:ro" \
+    -e CONFIG_ONLY="${CONFIG_ONLY:-0}" \
     -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=2G -e CCACHE_COMPILERCHECK=content \
     -e KBUILD_BUILD_TIMESTAMP="2026-01-01 00:00:00 UTC" -e KBUILD_BUILD_USER=ziro -e KBUILD_BUILD_HOST=ziro-build \
     -e KV="$KERNEL_VER" -e KARCH="$KERNEL_ARCH" -e TARCH="$TARGET_ARCH" \
@@ -143,6 +178,20 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
             exit 1
         fi
         echo "✓ All Ziro config options applied"
+        if [ "$CONFIG_ONLY" = "1" ]; then
+            cp .config /build/config && chown "$HOST_UID:$HOST_GID" /build/config
+            exit 0
+        fi
+        # Persistent module key (release builds): point MODULE_SIG_KEY at the mounted file. A key
+        # copied to certs/signing_key.pem would be regenerated by certs/Makefile (x509.genkey is
+        # newer), silently signing with an ephemeral key. Without the secret the kernel generates
+        # an ephemeral key as usual.
+        rm -f certs/signing_key.pem certs/signing_key.x509
+        if [ -s /keys/signing_key.pem ]; then
+            ./scripts/config --set-str MODULE_SIG_KEY /keys/signing_key.pem
+            make -s ARCH=$KARCH CC="ccache gcc" olddefconfig
+            grep -q "^CONFIG_MODULE_SIG_KEY=\"/keys/signing_key.pem\"" .config || { echo "❌ MODULE_SIG_KEY not applied" >&2; exit 1; }
+        fi
 
         echo "Compiling kernel + modules with $(nproc) jobs..."
         ccache -z >/dev/null
@@ -157,10 +206,21 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
 
         cp "$KOUT" /build/vmlinuz
         cp .config /build/config
+        # Public half of whatever key signed the modules (kernel kit: verify out-of-tree builds).
+        openssl x509 -inform DER -in certs/signing_key.x509 -out /build/module-signing.crt
         echo "$KREL" > /build/kernel.release
-        chown -R "$HOST_UID:$HOST_GID" /build/vmlinuz /build/config /build/kernel.release /build/modroot /ccache /dl
+        chown -R "$HOST_UID:$HOST_GID" /build/vmlinuz /build/config /build/kernel.release /build/module-signing.crt /build/modroot /ccache /dl
     '
+if [ "${CONFIG_ONLY:-0}" = "1" ]; then
+    echo "✅ Config verified: $OUT/config"
+    exit 0
+fi
+if [ "$KEY_MODE" = persistent ] && ! certMatches; then
+    echo "❌ modules were not signed with the persistent Ziro key (kernel/certs/ziro-modules.crt)" >&2
+    exit 1
+fi
 echo "$STAMP" > "$OUT/stamp"
+echo "$KEY_MODE" > "$OUT/key-mode"
 
 echo "=================================================="
 echo "✅ Custom kernel $(cat "$OUT/kernel.release") ready: $OUT/vmlinuz ($(du -h "$OUT/vmlinuz" | cut -f1))"

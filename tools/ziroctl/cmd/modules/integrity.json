@@ -1,0 +1,28 @@
+{
+  "name": "integrity",
+  "version": "1.0",
+  "description": "Host integrity: IMA measures what runs; a daily check compares it to the OS image and signed packages",
+  "cron": [
+    "45 3 * * * /usr/bin/ziroctl security integrity --quiet"
+  ],
+  "post_start": [
+    {
+      "exec": "/usr/bin/ziroctl",
+      "args": [
+        "security",
+        "integrity",
+        "load-policy"
+      ]
+    }
+  ],
+  "health": {
+    "exec": "/usr/bin/ziroctl",
+    "args": [
+      "security",
+      "integrity",
+      "load-policy"
+    ],
+    "expect": "IMA policy loaded",
+    "timeout": "30s"
+  }
+}

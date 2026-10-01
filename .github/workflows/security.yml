@@ -122,6 +122,8 @@ jobs:
   container-security:
     name: Container Security
     runs-on: ubuntu-latest
+    env:
+      KERNEL_FLAVOR: alpine # the image scan covers userland; kernel-custom.yml builds the custom kernel
     
     steps:
     - name: Checkout code

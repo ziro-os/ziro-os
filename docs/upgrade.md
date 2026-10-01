@@ -29,6 +29,8 @@ on the same filesystem and swapped in with atomic `rename(2)` calls.
 | `/lib/modules/<old>` | Kept, so the previous kernel can still boot |
 
 The kernel flavor (`alpine` or `custom`, from `/etc/ziro-release`) and the architecture are preserved.
+To move a host to the hardened Ziro kernel (the default for new installs), run `ziroctl upgrade --flavor custom`.
+This works at the same version too. `ziroctl upgrade rollback` restores the previous kernel.
 An image for another architecture is refused.
 
 ## Remote upgrade

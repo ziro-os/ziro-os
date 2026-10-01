@@ -24,11 +24,14 @@ jobs:
   custom-kernel:
     name: Custom kernel flavor
     uses: ./.github/workflows/kernel-custom.yml
+    secrets: inherit # ZIRO_MODULE_SIGNING_KEY signs the release kernel's modules
 
   # Runs in parallel with the custom-kernel jobs; only 'publish' waits for both.
   build:
     name: Build alpine flavor & tools
     runs-on: ubuntu-latest
+    env:
+      KERNEL_FLAVOR: alpine
     permissions:
       contents: read
     outputs:
