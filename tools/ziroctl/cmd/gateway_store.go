@@ -231,6 +231,7 @@ var syncLocalGatewayService = func(on bool) error {
 		startClusterServices("gateway")
 	} else {
 		stopClusterServices("gateway")
+		syncGatewayFirewall(nil) // close the ports it opened
 	}
 	return nil
 }
@@ -938,7 +939,7 @@ var gatewayStatusCmd = &cobra.Command{
 					if !u.Healthy {
 						state = "DOWN"
 					}
-					fmt.Printf("  %-24s weight %-5d %-8s active %d\n", u.Addr, u.Weight, state, u.Active)
+					fmt.Printf("  %-24s share %3d%%  %-8s active %d\n", u.Addr, u.Share, state, u.Active)
 				}
 				if len(r.Requests) > 0 {
 					fmt.Printf("  requests: %v\n", r.Requests)

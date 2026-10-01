@@ -463,6 +463,7 @@ func syncGatewayConfig(cfg *GatewayConfig) error {
 	if cfg == nil {
 		if fileExists(gatewayConfigPath) {
 			stopClusterServices("gateway")
+			syncGatewayFirewall(nil) // this node no longer serves: close the gateway's ports
 			return os.Remove(gatewayConfigPath)
 		}
 		return nil

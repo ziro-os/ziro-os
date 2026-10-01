@@ -752,15 +752,15 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 		}()
 
 		rt := g.match(host, req)
-		switch {
-		case rt == nil:
+		if rt == nil {
 			http.Error(sw, "no route", http.StatusNotFound)
-			return
-		case !isTLS && rt.TLS != "off":
-			http.Redirect(sw, req, "https://"+host+req.URL.RequestURI(), http.StatusPermanentRedirect)
 			return
 		}
 		routeName = rt.Name
+		if !isTLS && rt.TLS != "off" {
+			http.Redirect(sw, req, "https://"+host+req.URL.RequestURI(), http.StatusPermanentRedirect)
+			return
+		}
 		if !clientAllowed(rt, ip) {
 			http.Error(sw, "forbidden", http.StatusForbidden)
 			return
@@ -1350,7 +1350,7 @@ type GatewayRouteStatus struct {
 
 type UpstreamHealth struct {
 	Addr    string `json:"addr"`
-	Weight  int    `json:"weight"`
+	Share   int    `json:"share"` // percent of the route's traffic by weight
 	Healthy bool   `json:"healthy"`
 	Active  int64  `json:"active"`
 }
@@ -1377,8 +1377,12 @@ func (g *gatewayServer) status() GatewayStatus {
 				targets = append(targets, GatewayTarget{Addr: u, Weight: 1})
 			}
 		}
+		total := 0
 		for _, t := range targets {
-			rst.Upstreams = append(rst.Upstreams, UpstreamHealth{Addr: t.Addr, Weight: t.Weight, Healthy: g.usable(r, t.Addr, now),
+			total += t.Weight
+		}
+		for _, t := range targets {
+			rst.Upstreams = append(rst.Upstreams, UpstreamHealth{Addr: t.Addr, Share: t.Weight * 100 / max(total, 1), Healthy: g.usable(r, t.Addr, now),
 				Active: g.activeCounter(t.Addr).Load()})
 		}
 		if rm := g.metrics.routes[rs.Name]; rm != nil {
