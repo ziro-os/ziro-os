@@ -469,6 +469,8 @@ type AppDeployRequest struct {
 	Replicas  int               `json:"replicas,omitempty"`
 	Publish   int               `json:"publish,omitempty"`
 	AllowFrom []string          `json:"allow_from,omitempty"`
+	Expose    string            `json:"expose,omitempty"`     // publish through the gateway on this hostname
+	ExposeTLS string            `json:"expose_tls,omitempty"` // auto, internal, off or cert:<name>
 }
 
 var appRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}(:[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$`)
@@ -513,6 +515,19 @@ func (req AppDeployRequest) deployJobArgs() ([]string, error) {
 			}
 		}
 		args = append(args, "--allow-from="+a)
+	}
+	if req.Expose != "" {
+		if !validHost(req.Expose) || strings.HasPrefix(req.Expose, "*.") {
+			return nil, fmt.Errorf("invalid expose host %q", req.Expose)
+		}
+		args = append(args, "--expose="+req.Expose)
+	}
+	if req.ExposeTLS != "" {
+		if req.ExposeTLS != "auto" && req.ExposeTLS != "internal" && req.ExposeTLS != "off" &&
+			!(strings.HasPrefix(req.ExposeTLS, "cert:") && validName(strings.TrimPrefix(req.ExposeTLS, "cert:")) == nil) {
+			return nil, fmt.Errorf("invalid expose_tls %q", req.ExposeTLS)
+		}
+		args = append(args, "--expose-tls="+req.ExposeTLS)
 	}
 	return append(args, "--", req.App), nil
 }

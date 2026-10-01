@@ -16,7 +16,7 @@ Ziro-OS is under active development and is not ready for production use. Start w
 - [Architecture](architecture.md): host components and cluster design.
 - [Security](security.md): current controls and limitations.
 - [Virtualization](virtualization.md) and [multi-architecture builds](multi-architecture-guide.md).
-- [Clustering](clustering.md) and [gateway](gateway.md).
+- [Clustering](clustering.md), and the [gateway](gateway.md): L4/L7 routing with TLS and HTTP/3, managed by CLI and API, on clusters and standalone hosts.
 - [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes with rollback.
 - [Storage](storage.md): automatic disk growth and data disks.
 - [Smart DNS](dns.md): caching resolver, split DNS, cluster records, container egress control.

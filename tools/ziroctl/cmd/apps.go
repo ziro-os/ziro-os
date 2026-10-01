@@ -297,6 +297,9 @@ type appDeployOpts struct {
 	// NewVersion allows moving an instance to another version line; data written by one major
 	// version is often unreadable by another (postgres 16 -> 17 needs a dump and restore).
 	NewVersion bool
+	// Expose publishes the app's entry point through the gateway on this hostname (HTTPS).
+	Expose    string
+	ExposeTLS string
 }
 
 // parseAppRef splits "name[:version]".
@@ -377,9 +380,47 @@ func deployAppRef(ref string, o appDeployOpts) error {
 		return err
 	}
 	fmt.Printf("✓ %s deployed. Connection details: ziroctl apps credentials %s\n", o.Name, o.Name)
+	if o.Expose != "" {
+		if err := exposeApp(in, o.Expose, o.ExposeTLS); err != nil {
+			return fmt.Errorf("deployed, but exposing it failed: %w", err)
+		}
+	}
 	if d.Notes != "" {
 		fmt.Println("  " + d.Notes)
 	}
+	return nil
+}
+
+// exposeApp routes a hostname to the app's entry point (the first component with a port).
+func exposeApp(in *AppInstance, host, tlsMode string) error {
+	target := in.Name // local: the instance's published address
+	if in.Mode == "cluster" {
+		target = ""
+		for _, c := range in.Def.Components {
+			if c.Port > 0 {
+				target = componentApp(in.Name, in.Def, c)
+				break
+			}
+		}
+		if target == "" {
+			return fmt.Errorf("%s has no component with a port", in.App)
+		}
+	}
+	if tlsMode == "" {
+		tlsMode = "auto"
+	}
+	s, err := gatewayStore()
+	if err != nil {
+		return err
+	}
+	r, err := exposeRoute(target, host, "/", tlsMode, in.Name)
+	if err != nil {
+		return err
+	}
+	if _, err := putRoute(s, r); err != nil {
+		return err
+	}
+	fmt.Printf("✓ %s is live at https://%s (gateway route %s)\n", in.Name, host, in.Name)
 	return nil
 }
 
@@ -482,6 +523,9 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 		}
 		if o.Publish > 0 && c.Port > 0 && !published {
 			app.Port, published = fmt.Sprintf("%d:%d", o.Publish, c.Port), true
+		} else if o.Expose != "" && c.Port > 0 && !published {
+			// The gateway reaches it over the mesh only: no public host port.
+			app.Port, app.MeshOnly, published = fmt.Sprintf("%d:%d", c.Port, c.Port), true, true
 		}
 		if err := deployApp(func(st *ClusterState) (*ClusteredApp, error) {
 			if cur := st.app(name); cur != nil && !slices.Contains(in.Components, name) {
@@ -676,6 +720,12 @@ func removeAppInstance(name string, purge bool) error {
 			_ = os.Remove(appSecretsPath(name))
 		}
 	}
+	// A route exposing the app goes with it (the hostname would otherwise answer 503).
+	if s, err := gatewayStore(); err == nil {
+		if err := deleteRoute(s, name); err == nil {
+			fmt.Printf("  removed gateway route %s\n", name)
+		}
+	}
 	if err := os.Remove(appInstancePath(name)); err != nil {
 		return err
 	}
@@ -743,6 +793,8 @@ var (
 	appsLocal      bool
 	appsPurge      bool
 	appsNewVersion bool
+	appsExpose     string
+	appsExposeTLS  string
 )
 
 var appsCmd = &cobra.Command{
@@ -865,7 +917,8 @@ var appsDeployCmd = &cobra.Command{
 			}
 		}
 		return deployAppRef(args[0], appDeployOpts{Name: appsName, Set: set, Replicas: appsReplicas, Publish: appsPublish,
-			Bind: appsBind, AllowFrom: appsAllowFrom, Local: appsLocal, NewVersion: appsNewVersion})
+			Bind: appsBind, AllowFrom: appsAllowFrom, Local: appsLocal, NewVersion: appsNewVersion,
+			Expose: appsExpose, ExposeTLS: appsExposeTLS})
 	},
 }
 
@@ -993,6 +1046,8 @@ func init() {
 	f.StringSliceVar(&appsAllowFrom, "allow-from", nil, "Cluster apps allowed to connect ('*' = any)")
 	f.BoolVar(&appsLocal, "local", false, "Deploy on this host even if it is a cluster master")
 	f.BoolVar(&appsNewVersion, "new-version", false, "Allow moving an existing instance to another version")
+	f.StringVar(&appsExpose, "expose", "", "Publish it through the gateway on this hostname (HTTPS)")
+	f.StringVar(&appsExposeTLS, "expose-tls", "auto", "TLS for --expose: auto (ACME), internal, off or cert:<name>")
 	appsRmCmd.Flags().BoolVar(&appsPurge, "purge", false, "Also delete the app's data and credentials")
 	appsCmd.AddCommand(appsSearchCmd, appsInfoCmd, appsDeployCmd, appsListCmd, appsCredentialsCmd, appsRmCmd, appsPurgeCmd)
 	rootCmd.AddCommand(appsCmd)

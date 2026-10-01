@@ -55,8 +55,9 @@ func TestAppDefValidation(t *testing.T) {
 // stubApps puts every path an app touches in a temp dir and records nerdctl calls.
 func stubApps(t *testing.T) *[][]string {
 	root := t.TempDir()
-	oldState, oldData, oldSecrets, oldCluster, oldNerd := appStateDir, appDataRoot, secretEnvDir, clusterDir, appNerdctl
+	oldState, oldData, oldSecrets, oldCluster, oldNerd, oldGW := appStateDir, appDataRoot, secretEnvDir, clusterDir, appNerdctl, gatewayLocalDir
 	appStateDir, appDataRoot, secretEnvDir, clusterDir = filepath.Join(root, "apps"), filepath.Join(root, "data"), filepath.Join(root, "run"), filepath.Join(root, "cluster")
+	gatewayLocalDir = filepath.Join(root, "gateway")
 	var calls [][]string
 	appNerdctl = func(args ...string) error {
 		if args[0] == "run" { // the env file must exist while the container is created
@@ -72,7 +73,7 @@ func stubApps(t *testing.T) *[][]string {
 		return nil
 	}
 	t.Cleanup(func() {
-		appStateDir, appDataRoot, secretEnvDir, clusterDir, appNerdctl = oldState, oldData, oldSecrets, oldCluster, oldNerd
+		appStateDir, appDataRoot, secretEnvDir, clusterDir, appNerdctl, gatewayLocalDir = oldState, oldData, oldSecrets, oldCluster, oldNerd, oldGW
 	})
 	return &calls
 }
