@@ -49,6 +49,10 @@ under active development and is not ready for production use.
 - **SDK:** the formats and their validators, catalog signing, the API types and a typed client live in the
   `sdk/` Go module; `ziroctl` imports it, so tools built on the SDK validate with the host's exact rules.
   `sdk/openapi.yaml` describes the API, kept complete by a test ([SDK guide](sdk.md)).
+  `ziroctl dev` reuses the host code paths (the validators, `plugin install -f`, `apps deploy -f`, verified
+  release downloads) instead of reimplementing them. `dev run` drives a live-mode VM over its serial console,
+  like the boot smoke test. The kernel kit (`kernel-devel-<arch>.tar.gz`) comes out of the same kernel build as
+  the release kernel, so modules and eBPF programs built against it match exactly.
 - **Gateway:** zirogate is one L4/L7 data plane (HTTP/1.1, HTTP/2, HTTP/3, TCP, TLS passthrough) fed by a
   route store: cluster state, resolved by the master to running replicas, or a local file on standalone hosts.
   The CLI and the API server edit routes; the gateway re-validates and hot-swaps them ([gateway guide](gateway.md)).

@@ -167,6 +167,25 @@ func deployAppRef(ref string, o appDeployOpts) error {
 			return fmt.Errorf("unknown app %q (see: ziroctl apps search)", name)
 		}
 	}
+	return deployAppDef(d, version, o)
+}
+
+// deployAppFile deploys a definition from a local file (app development; unsigned).
+func deployAppFile(path, version string, o appDeployOpts) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	d, err := parseAppDef(b)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	fmt.Fprintf(os.Stderr, "WARNING: %s is an unsigned local app definition (development only).\n", path)
+	return deployAppDef(d, version, o)
+}
+
+func deployAppDef(d AppDef, version string, o appDeployOpts) error {
+	name := d.Name
 	if version == "" {
 		version = d.Default
 	}
@@ -731,15 +750,22 @@ var appsInfoCmd = &cobra.Command{
 	},
 }
 
+var appsFile string
+
 var appsDeployCmd = &cobra.Command{
-	Use:   "deploy <app>[:<version>]",
+	Use:   "deploy <app>[:<version>] | -f app.json [version]",
 	Short: "Deploy an app with generated credentials and persistent data (redeploy updates it)",
 	Example: `  ziroctl apps deploy postgres                 # latest pinned version, on 127.0.0.1:5432
   ziroctl apps deploy postgres:16 --name db2 --publish 5433
   ziroctl apps deploy mysql:8.4
   ziroctl apps deploy mysql-cluster             # on a cluster master: 3-node Group Replication
   ziroctl apps credentials postgres`,
-	Args: cobra.ExactArgs(1),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if appsFile != "" {
+			return cobra.MaximumNArgs(1)(cmd, args)
+		}
+		return cobra.ExactArgs(1)(cmd, args)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		set, err := parseSetFlags(appsSets)
 		if err != nil {
@@ -758,9 +784,17 @@ var appsDeployCmd = &cobra.Command{
 				}
 			}
 		}
-		return deployAppRef(args[0], appDeployOpts{Name: appsName, Set: set, Replicas: appsReplicas, Publish: appsPublish,
+		o := appDeployOpts{Name: appsName, Set: set, Replicas: appsReplicas, Publish: appsPublish,
 			Bind: appsBind, AllowFrom: appsAllowFrom, Local: appsLocal, NewVersion: appsNewVersion,
-			Expose: appsExpose, ExposeTLS: appsExposeTLS})
+			Expose: appsExpose, ExposeTLS: appsExposeTLS}
+		if appsFile != "" {
+			version := ""
+			if len(args) == 1 {
+				version = args[0]
+			}
+			return deployAppFile(appsFile, version, o)
+		}
+		return deployAppRef(args[0], o)
 	},
 }
 
@@ -871,6 +905,7 @@ var appsRmCmd = &cobra.Command{
 func init() {
 	f := appsDeployCmd.Flags()
 	f.StringVar(&appsName, "name", "", "Instance name (default: the app name)")
+	f.StringVarP(&appsFile, "file", "f", "", "Deploy a local app.json (development; unsigned, CLI only)")
 	f.StringArrayVar(&appsSets, "set", nil, "Set an app setting (name=value; see `apps info`)")
 	f.IntVar(&appsReplicas, "replicas", 0, "Replicas, for apps that allow scaling")
 	f.IntVar(&appsPublish, "publish", 0, "Host port (local default: the app's port on 127.0.0.1; cluster default: none)")

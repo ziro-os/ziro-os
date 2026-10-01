@@ -50,6 +50,11 @@ driver (virtio/NVMe/AHCI/Hyper-V/Xen storage, ext4, serial console, initramfs su
   - Release kernels sign with the persistent Ziro key. It is the CI secret `ZIRO_MODULE_SIGNING_KEY`, and its
     public certificate is `certs/ziro-modules.crt`. Modules built later by Ziro CI therefore still load.
   - A local build without the secret uses an ephemeral key, and a wrong secret fails the build.
+  - `ZIRO_EXTRA_TRUSTED_CERT=<pem>` builds a kernel that also trusts modules signed by your key (your own
+    kernel; official builds never set it).
+- **Kernel kit:** every build also packs `kernel-devel.tar.gz` (released as `kernel-devel-<arch>.tar.gz`): the
+  headers, scripts and `Module.symvers`, `vmlinux.h` and the signing certificate, for `ziroctl dev kmod|bpf
+  build` ([SDK](../docs/sdk.md#kernel-modules-and-ebpf)).
 
 ## Performance defaults
 

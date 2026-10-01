@@ -12,6 +12,9 @@ on:
       - 'packages/build-rootfs.sh'
       - 'images/iso/**'
       - 'tests/qemu/**'
+      - 'sdk/examples/kmod-hello/**'
+      - 'sdk/examples/bpf/**'
+      - 'tools/ziroctl/cmd/dev*.go'
       - '.github/workflows/kernel-custom.yml'
   push:
     branches: [main]
@@ -88,6 +91,7 @@ jobs:
             build/kernel-custom-${{ matrix.arch }}/module-signing.crt
             build/kernel-custom-${{ matrix.arch }}/key-mode
             build/kernel-custom-${{ matrix.arch }}/modroot
+            build/kernel-custom-${{ matrix.arch }}/kernel-devel.tar.gz
           key: kernel-out-${{ matrix.arch }}-${{ hashFiles('kernel/configs/**', 'kernel/build-kernel.sh', 'kernel/certs/**') }}
 
       # On a miss, ccache + the cached kernel.org tarball keep a config change to minutes.
@@ -120,6 +124,7 @@ jobs:
             build/kernel-custom-${{ matrix.arch }}/module-signing.crt
             build/kernel-custom-${{ matrix.arch }}/key-mode
             build/kernel-custom-${{ matrix.arch }}/modroot
+            build/kernel-custom-${{ matrix.arch }}/kernel-devel.tar.gz
           key: ${{ steps.kernel-out.outputs.cache-primary-key }}
 
       - name: Save ccache and kernel tarball
@@ -150,6 +155,30 @@ jobs:
 
       - name: Verify archive security metadata
         run: python3 tests/security/test-artifact-metadata.py build/ziro-rootfs-$TARGET_ARCH.tar.gz build/ziro-initramfs-$TARGET_ARCH-custom.cpio.gz
+
+      # The SDK kernel kit end to end: an out-of-tree module built against the kit is rejected
+      # unsigned and loads signed with the Ziro key (MODULE_SIG_FORCE), in a `dev run` VM; the CO-RE
+      # eBPF example compiles against the kit's vmlinux.h.
+      - name: Kernel kit (signed out-of-tree module, CO-RE eBPF)
+        env:
+          ZIRO_MODULE_SIGNING_KEY: ${{ secrets.ZIRO_MODULE_SIGNING_KEY }}
+        run: |
+          kit=build/kernel-custom-$TARGET_ARCH/kernel-devel.tar.gz
+          cp "$kit" build/kernel-devel-$TARGET_ARCH.tar.gz
+          bin/ziroctl dev kmod build sdk/examples/kmod-hello --kit "$kit"
+          mv sdk/examples/kmod-hello/ziro-hello.ko build/unsigned.ko
+          copies=(--copy build/unsigned.ko:/tmp/unsigned.ko)
+          checks=(--check '! insmod /tmp/unsigned.ko')
+          if [ -n "$ZIRO_MODULE_SIGNING_KEY" ]; then # absent on fork PRs (ephemeral-key kernels)
+            key="$RUNNER_TEMP/module-key.pem"
+            (umask 077; printf '%s\n' "$ZIRO_MODULE_SIGNING_KEY" > "$key")
+            bin/ziroctl dev kmod build sdk/examples/kmod-hello --kit "$kit" --sign-key "$key"
+            rm -f "$key"
+            copies+=(--copy sdk/examples/kmod-hello/ziro-hello.ko:/tmp/hello.ko)
+            checks+=(--check 'insmod /tmp/hello.ko && dmesg | grep "ziro-hello: loaded"')
+          fi
+          bin/ziroctl dev run --image-dir build --boot-timeout 10m "${copies[@]}" "${checks[@]}"
+          bin/ziroctl dev bpf build sdk/examples/bpf/execcount.bpf.c --kit "$kit"
 
       - name: Verify rebuilt DHCP CNI plugin
         run: python3 tests/security/test-cni-dhcp.py build/rootfs-full-$TARGET_ARCH-custom $TARGET_ARCH
@@ -188,5 +217,6 @@ jobs:
             build/ziro-initramfs-${{ matrix.arch }}-custom.cpio.gz
             build/ziro-os-${{ matrix.arch }}-custom.iso
             build/kernel-config-${{ matrix.arch }}-custom
+            build/kernel-devel-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           retention-days: 7

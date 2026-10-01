@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -443,19 +441,6 @@ func raiseScanAlerts(rep SecurityScanReport) {
 	}
 }
 
-func computeSHA256Hash(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 var fimCriticalFiles = []string{
 	"/bin/busybox",
 	"/sbin/init",
@@ -472,7 +457,7 @@ var fimCriticalFiles = []string{
 func checkFIM() (bool, []string) {
 	current := map[string]string{}
 	for _, f := range fimCriticalFiles {
-		if h, err := computeSHA256Hash(f); err == nil {
+		if h, err := computeFileSHA256(f); err == nil {
 			current[f] = h
 		}
 	}
