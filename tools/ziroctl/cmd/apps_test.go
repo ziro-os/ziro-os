@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,33 +22,6 @@ func testPostgresDef() AppDef {
 		Components: []AppComponent{{Name: "db", Port: 5432, Env: map[string]string{"POSTGRES_USER": "{{setting.user}}"},
 			Secrets: []string{"POSTGRES_PASSWORD"}, Data: []string{"/var/lib/postgresql/data"}, Health: []string{"pg_isready"}}},
 		Outputs: map[string]string{"url": "postgres://{{setting.user}}:{{secret.POSTGRES_PASSWORD}}@{{host}}:{{port}}/app"}}
-}
-
-func TestAppDefValidation(t *testing.T) {
-	if err := testPostgresDef().validate(); err != nil {
-		t.Fatal(err)
-	}
-	for name, mut := range map[string]func(d *AppDef){
-		"image without digest": func(d *AppDef) { d.Versions["18"].Images["db"] = "postgres:18" },
-		"secret in env":        func(d *AppDef) { d.Components[0].Env["X"] = "{{secret.POSTGRES_PASSWORD}}" },
-		"secret in args":       func(d *AppDef) { d.Components[0].Args = []string{"--pw={{secret.POSTGRES_PASSWORD}}"} },
-		"replicas w/o cluster": func(d *AppDef) { d.Components[0].Replicas = 3 },
-		"unknown secret":       func(d *AppDef) { d.Components[0].Secrets = []string{"NOPE"} },
-		"bad data path":        func(d *AppDef) { d.Components[0].Data = []string{"/var/lib/x:/etc"} },
-		"reserved env":         func(d *AppDef) { d.Components[0].Env["ZIRO_REPLICA"] = "7" },
-		"missing default":      func(d *AppDef) { d.Default = "99" },
-		"unknown placeholder":  func(d *AppDef) { d.Outputs["x"] = "{{secret.NOPE}}" },
-	} {
-		d := testPostgresDef()
-		mut(&d)
-		if d.validate() == nil {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-	b, _ := json.Marshal(testPostgresDef())
-	if _, err := parseAppDef(append(b[:len(b)-1], []byte(`,"privileged":true}`)...)); err == nil {
-		t.Error("unknown field accepted")
-	}
 }
 
 // stubApps puts every path an app touches in a temp dir and records nerdctl calls.
@@ -177,7 +149,7 @@ func TestAppDeployCluster(t *testing.T) {
 		Secrets:  map[string]string{"GR_PASSWORD": "alnum:32", "GR_GROUP": "hex:16"},
 		Components: []AppComponent{{Name: "mysql", Replicas: 3, MaxReplicas: 9, Port: 3306, Secrets: []string{"GR_PASSWORD", "GR_GROUP"},
 			Data: []string{"/var/lib/mysql"}, Args: []string{"bash", "-c", "exec mysqld"}}}}
-	if err := d.validate(); err != nil {
+	if err := d.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	in := &AppInstance{Name: "mc", App: d.Name, Version: "8.4", Mode: "cluster", Def: d}
@@ -264,7 +236,7 @@ func TestDataPathsAreValidatedOnTheAgent(t *testing.T) {
 }
 
 func TestAppDeployRequestArgs(t *testing.T) {
-	args, err := AppDeployRequest{App: "postgres:18", Name: "db", Set: map[string]string{"user": "x"}, Publish: 5433}.deployJobArgs()
+	args, err := deployJobArgs(AppDeployRequest{App: "postgres:18", Name: "db", Set: map[string]string{"user": "x"}, Publish: 5433})
 	if err != nil || strings.Join(args, " ") != "apps deploy --name=db --set=user=x --publish=5433 -- postgres:18" {
 		t.Fatalf("%v %v", args, err)
 	}
@@ -273,7 +245,7 @@ func TestAppDeployRequestArgs(t *testing.T) {
 		{App: "pg", Set: map[string]string{"a\nb": "1"}}, {App: "pg", Set: map[string]string{"a": "1\n2"}},
 		{App: "pg", Publish: 70000}, {App: "pg", AllowFrom: []string{"-x"}},
 	} {
-		if _, err := bad.deployJobArgs(); err == nil {
+		if _, err := deployJobArgs(bad); err == nil {
 			t.Errorf("accepted %+v", bad)
 		}
 	}

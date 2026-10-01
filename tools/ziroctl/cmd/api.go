@@ -42,12 +42,6 @@ var (
 
 type apiCallerKey struct{}
 
-type APIMessage struct {
-	Status  string      `json:"status"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
-}
-
 var apiCmd = &cobra.Command{
 	Use:     "api",
 	Aliases: []string{"server", "controlplane"},
@@ -333,151 +327,7 @@ func startAPIServer() {
 		}
 	}
 
-	// Prometheus metrics (any token; a viewer token is enough).
-	mux.HandleFunc("/api/v1/metrics", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_, _ = w.Write([]byte(collectMetrics()))
-	}))
-
-	// 1. Health
-	mux.HandleFunc("/api/v1/health", wrapHandler(true, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "healthy",
-			"version":  Version,
-			"os":       "Ziro-OS",
-			"uptime":   time.Since(apiStartTime).Round(time.Second).String(),
-			"arch":     runtime.GOARCH,
-			"features": []string{"containers", "clustering", "wireguard", "firewall", "sentinel", "compose"},
-		})
-	}))
-
-	// 2. System status
-	mux.HandleFunc("/api/v1/system", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		sys := inspectSystem()
-		platform, hypervisor := detectCloudPlatform()
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"system":     sys,
-			"platform":   platform,
-			"hypervisor": hypervisor,
-			"cpus":       runtime.NumCPU(),
-		})
-	}))
-
-	// 3. Services list & management
-	mux.HandleFunc("/api/v1/services", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			services := listAllServices()
-			_ = json.NewEncoder(w).Encode(services)
-			return
-		}
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-	}))
-
-	mux.HandleFunc("/api/v1/services/", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		// Path: /api/v1/services/{name}/{action}
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/services/"), "/")
-		if len(parts) >= 2 && r.Method == "POST" {
-			name := parts[0]
-			action := parts[1]
-			// Only existing, trusted service definitions: the name never reaches anything else.
-			if _, err := loadServiceDef(name); err != nil {
-				w.WriteHeader(http.StatusNotFound)
-				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
-				return
-			}
-			var err error
-			switch action {
-			case "start", "stop", "restart":
-				err = runServiceCLI(serviceActions[action], name)
-			case "enable":
-				err = enableService(name)
-			case "disable":
-				err = disableService(name)
-			default:
-				http.Error(w, "Unknown action", http.StatusBadRequest)
-				return
-			}
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-			caller, _ := r.Context().Value(apiCallerKey{}).(string)
-			if aerr := auditLog(caller, "api:"+ip, "service "+action, name, err); aerr != nil {
-				fmt.Printf("[api] audit log: %v\n", aerr)
-			}
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
-				return
-			}
-			_ = json.NewEncoder(w).Encode(APIMessage{Status: "ok", Message: fmt.Sprintf("Service %s %sed", name, action)})
-			return
-		}
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-	}))
-
-	// 4. Containers
-	mux.HandleFunc("/api/v1/containers", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			out, err := exec.Command("nerdctl", "ps", "-a", "--format", "json").Output()
-			if err != nil || len(out) == 0 {
-				_ = json.NewEncoder(w).Encode([]string{})
-				return
-			}
-			w.Write(out)
-			return
-		}
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-	}))
-
-	// 5. Firewall
-	mux.HandleFunc("/api/v1/firewall", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		cfg := loadFirewallConfig()
-		_ = json.NewEncoder(w).Encode(cfg)
-	}))
-
-	// 6. WireGuard
-	mux.HandleFunc("/api/v1/wireguard", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		out, _ := exec.Command("wg", "show").Output()
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"active": len(out) > 0,
-			"raw":    string(out),
-		})
-	}))
-
-	// 7. Cluster
-	mux.HandleFunc("/api/v1/cluster", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		// Never expose join/node tokens: return an explicit, redacted view.
-		cfg, err := loadClusterConfig()
-		if err != nil {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"role": "standalone"})
-			return
-		}
-		view := map[string]interface{}{
-			"cluster_id": cfg.ClusterID, "role": cfg.Role, "node_id": cfg.NodeID, "master": cfg.MasterAddr,
-		}
-		if cfg.Role == "master" {
-			if st, err := readState(); err == nil {
-				apps := []map[string]interface{}{}
-				for _, a := range st.Apps {
-					apps = append(apps, map[string]interface{}{
-						"name": a.Name, "image": a.Image, "replicas": a.Replicas, "port": a.Port, "status": st.appStatus(a),
-					})
-				}
-				view["nodes"], view["apps"], view["placements"] = st.Nodes, apps, st.Replicas
-			}
-		}
-		_ = json.NewEncoder(w).Encode(view)
-	}))
-
-	// 8. Security Scan
-	mux.HandleFunc("/api/v1/security", wrapHandler(false, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(cachedSecurityScan())
-	}))
-	registerSecurityRoutes(mux, wrapHandler)
-	registerHostRoutes(mux, wrapHandler)
-	registerDNSRoutes(mux, wrapHandler)
-	registerModuleRoutes(mux, wrapHandler)
-	registerAppRoutes(mux, wrapHandler)
-	registerNFSRoutes(mux, wrapHandler)
-	registerGatewayRoutes(mux, wrapHandler)
+	registerAPIRoutes(mux, wrapHandler)
 
 	addr := fmt.Sprintf("%s:%d", apiBindHost, apiPort)
 	fmt.Println("================================================================")
@@ -556,4 +406,159 @@ func runServiceCLI(action, name string) error {
 		return fmt.Errorf("%s", strings.TrimSpace(strings.SplitN(msg, "\n", 2)[0]))
 	}
 	return nil
+}
+
+// apiMux is what route registration needs from an http.ServeMux (tests record the routes).
+type apiMux interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
+// registerAPIRoutes registers every /api/v1 route. sdk/openapi.yaml must describe each one
+// (TestOpenAPICoversEveryRoute).
+func registerAPIRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+	// Prometheus metrics (any token; a viewer token is enough).
+	mux.HandleFunc("/api/v1/metrics", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(collectMetrics()))
+	}))
+
+	// 1. Health
+	mux.HandleFunc("/api/v1/health", wrap(true, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "healthy",
+			"version":  Version,
+			"os":       "Ziro-OS",
+			"uptime":   time.Since(apiStartTime).Round(time.Second).String(),
+			"arch":     runtime.GOARCH,
+			"features": []string{"containers", "clustering", "wireguard", "firewall", "sentinel", "compose"},
+		})
+	}))
+
+	// 2. System status
+	mux.HandleFunc("/api/v1/system", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		sys := inspectSystem()
+		platform, hypervisor := detectCloudPlatform()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"system":     sys,
+			"platform":   platform,
+			"hypervisor": hypervisor,
+			"cpus":       runtime.NumCPU(),
+		})
+	}))
+
+	// 3. Services list & management
+	mux.HandleFunc("/api/v1/services", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			services := listAllServices()
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}))
+
+	mux.HandleFunc("/api/v1/services/", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		// Path: /api/v1/services/{name}/{action}
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/services/"), "/")
+		if len(parts) >= 2 && r.Method == "POST" {
+			name := parts[0]
+			action := parts[1]
+			// Only existing, trusted service definitions: the name never reaches anything else.
+			if _, err := loadServiceDef(name); err != nil {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
+				return
+			}
+			var err error
+			switch action {
+			case "start", "stop", "restart":
+				err = runServiceCLI(serviceActions[action], name)
+			case "enable":
+				err = enableService(name)
+			case "disable":
+				err = disableService(name)
+			default:
+				http.Error(w, "Unknown action", http.StatusBadRequest)
+				return
+			}
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			caller, _ := r.Context().Value(apiCallerKey{}).(string)
+			if aerr := auditLog(caller, "api:"+ip, "service "+action, name, err); aerr != nil {
+				fmt.Printf("[api] audit log: %v\n", aerr)
+			}
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(APIMessage{Status: "ok", Message: fmt.Sprintf("Service %s %sed", name, action)})
+			return
+		}
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+	}))
+
+	// 4. Containers
+	mux.HandleFunc("/api/v1/containers", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			out, err := exec.Command("nerdctl", "ps", "-a", "--format", "json").Output()
+			if err != nil || len(out) == 0 {
+				_ = json.NewEncoder(w).Encode([]string{})
+				return
+			}
+			w.Write(out)
+			return
+		}
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}))
+
+	// 5. Firewall
+	mux.HandleFunc("/api/v1/firewall", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		cfg := loadFirewallConfig()
+		_ = json.NewEncoder(w).Encode(cfg)
+	}))
+
+	// 6. WireGuard
+	mux.HandleFunc("/api/v1/wireguard", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		out, _ := exec.Command("wg", "show").Output()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"active": len(out) > 0,
+			"raw":    string(out),
+		})
+	}))
+
+	// 7. Cluster
+	mux.HandleFunc("/api/v1/cluster", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		// Never expose join/node tokens: return an explicit, redacted view.
+		cfg, err := loadClusterConfig()
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"role": "standalone"})
+			return
+		}
+		view := map[string]interface{}{
+			"cluster_id": cfg.ClusterID, "role": cfg.Role, "node_id": cfg.NodeID, "master": cfg.MasterAddr,
+		}
+		if cfg.Role == "master" {
+			if st, err := readState(); err == nil {
+				apps := []map[string]interface{}{}
+				for _, a := range st.Apps {
+					apps = append(apps, map[string]interface{}{
+						"name": a.Name, "image": a.Image, "replicas": a.Replicas, "port": a.Port, "status": st.appStatus(a),
+					})
+				}
+				view["nodes"], view["apps"], view["placements"] = st.Nodes, apps, st.Replicas
+			}
+		}
+		_ = json.NewEncoder(w).Encode(view)
+	}))
+
+	// 8. Security Scan
+	mux.HandleFunc("/api/v1/security", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(cachedSecurityScan())
+	}))
+	registerSecurityRoutes(mux, wrap)
+	registerHostRoutes(mux, wrap)
+	registerDNSRoutes(mux, wrap)
+	registerModuleRoutes(mux, wrap)
+	registerAppRoutes(mux, wrap)
+	registerNFSRoutes(mux, wrap)
+	registerGatewayRoutes(mux, wrap)
 }

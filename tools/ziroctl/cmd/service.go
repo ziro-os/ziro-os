@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,19 +16,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-type ServiceDef struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Exec        string `json:"exec"`
-	Args        string `json:"args"`
-	PIDFile     string `json:"pidfile"`
-	LogFile     string `json:"logfile"`
-	Check       string `json:"check,omitempty"`    // args that make exec validate its config (sshd: -t)
-	User        string `json:"user,omitempty"`     // run as this user (and its primary group) instead of root
-	EnvFile     string `json:"env_file,omitempty"` // KEY=VALUE lines added to the environment (root-owned, not world-readable)
-	Autostart   bool   `json:"autostart"`
-}
 
 type ServiceStatusInfo struct {
 	Name        string `json:"name"`
@@ -373,31 +359,10 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// validName guards every user-supplied identifier that ends up in a file path.
-var validNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
-
-func validName(name string) error {
-	if !validNameRe.MatchString(name) || strings.Contains(name, "..") {
-		return fmt.Errorf("invalid name %q (allowed: a-z 0-9 _ . -)", name)
-	}
-	return nil
-}
-
 // rootOwnedFile: a regular file owned by root and not writable by group or others.
 func rootOwnedFile(fi os.FileInfo) bool {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	return ok && fi.Mode().IsRegular() && st.Uid == 0 && fi.Mode().Perm()&0o022 == 0
-}
-
-// checkServicePaths keeps a definition's pid and log files where ziroctl and ziro-init expect
-// them (both delete or truncate these paths as root).
-func checkServicePaths(def *ServiceDef) error {
-	for _, c := range []struct{ path, dir string }{{def.PIDFile, "/run/"}, {def.LogFile, "/var/log/"}} {
-		if c.path != "" && (!strings.HasPrefix(c.path, c.dir) || strings.Contains(c.path, "..")) {
-			return fmt.Errorf("%q must be under %s", c.path, c.dir)
-		}
-	}
-	return nil
 }
 
 // trustedExecutable: an absolute, clean path to a root-owned executable nobody else can write.
@@ -795,17 +760,28 @@ func enableService(name string) error {
 	if _, err := loadServiceDef(name); err != nil {
 		return err
 	}
-	_ = os.MkdirAll(enabledDir, 0755)
-	target := filepath.Join(enabledDir, name)
-	return os.WriteFile(target, []byte("enabled\n"), 0644)
+	return writeServiceState(name, "enabled\n")
 }
 
 func disableService(name string) error {
 	if err := validName(name); err != nil {
 		return err
 	}
-	_ = os.MkdirAll(enabledDir, 0755)
-	return os.WriteFile(filepath.Join(enabledDir, name), []byte("disabled\n"), 0644)
+	return writeServiceState(name, "disabled\n")
+}
+
+// writeServiceState records a service's enabled state through os.Root: the name (validated by the
+// callers) can only ever select a file inside enabledDir, never follow ".." or a symlink out of it.
+func writeServiceState(name, state string) error {
+	if err := os.MkdirAll(enabledDir, 0755); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(enabledDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.WriteFile(name, []byte(state), 0644)
 }
 
 func printRecentLogs(path string, maxLines int) {

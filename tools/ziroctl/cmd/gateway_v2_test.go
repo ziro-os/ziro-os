@@ -249,38 +249,6 @@ func TestGatewayV2Transforms(t *testing.T) {
 	}
 }
 
-func TestGatewayV2Validation(t *testing.T) {
-	ok := GatewayRoute{Name: "ok", Hosts: []string{"a.test"}, To: []GatewayUpstream{{App: "web"}}}
-	for name, mut := range map[string]func(r *GatewayRoute){
-		"two handlers": func(r *GatewayRoute) { r.Redirect = "https://x.test" },
-		"header injection": func(r *GatewayRoute) {
-			r.RequestHeaders = &HeaderRules{Set: map[string]string{"X": "a\r\nInjected: 1"}}
-		},
-		"bad header name":    func(r *GatewayRoute) { r.Headers = map[string]string{"Bad Name": "1"} },
-		"plaintext password": func(r *GatewayRoute) { r.BasicAuth = map[string]string{"admin": "hunter2"} },
-		"hostname upstream":  func(r *GatewayRoute) { r.To = []GatewayUpstream{{Address: "evil.example:80"}} },
-		"acme wildcard":      func(r *GatewayRoute) { r.Hosts = []string{"*.a.test"}; r.TLS = "auto" },
-		"bad lb":             func(r *GatewayRoute) { r.LB = "random" },
-		"bad redirect":       func(r *GatewayRoute) { r.To = nil; r.Redirect = "javascript:alert(1)" },
-		"tcp on 443":         func(r *GatewayRoute) { r.Kind = "tcp"; r.Listen = 443 },
-		"weight 0 overflow":  func(r *GatewayRoute) { r.To[0].Weight = 5000 },
-		"cookie without tls": func(r *GatewayRoute) { r.LB = "cookie"; r.TLS = "off" },
-	} {
-		r := ok
-		r.To = append([]GatewayUpstream(nil), ok.To...)
-		mut(&r)
-		r.normalize()
-		if err := validateRoute(&r); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-	r := ok
-	r.normalize()
-	if err := validateRoute(&r); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func freePort(t *testing.T) int {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

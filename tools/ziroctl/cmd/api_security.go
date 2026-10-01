@@ -44,7 +44,7 @@ func apiReply(w http.ResponseWriter, err error, ok any) {
 	_ = json.NewEncoder(w).Encode(ok)
 }
 
-func registerSecurityRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+func registerSecurityRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
 	// Protection state and bans. Reading is for any token; banning/unbanning needs admin.
 	mux.HandleFunc("/api/v1/security/protect", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		fw := loadFirewallConfig()
@@ -166,7 +166,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // registerHostRoutes: networking, disks and SSH keys.
-func registerHostRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+func registerHostRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("/api/v1/network", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -327,7 +327,7 @@ func registerHostRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) ht
 
 // registerDNSRoutes: reading is for any token. Records and blocks: operator. Upstreams and
 // forwards decide where every lookup goes (a hijack vector): admin.
-func registerDNSRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+func registerDNSRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("/api/v1/dns", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		cfg, _ := loadDNSConfig()
 		var st dnsStatsFile
@@ -420,7 +420,7 @@ func mutateDNS(edit func(*DNSConfig) error) error {
 // registerModuleRoutes: listing modules is for any token; enabling, upgrading or disabling installs software
 // as root, so it needs admin. The work runs detached through the ziroctl CLI (a ClamAV signature
 // download outlasts any HTTP timeout); poll GET /api/v1/modules for its status.
-func registerModuleRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+func registerModuleRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("/api/v1/modules", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		mods, err := listModules()
 		apiReply(w, err, mods)
@@ -461,23 +461,11 @@ func registerModuleRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) 
 	}))
 }
 
-// AppDeployRequest is the body of POST /api/v1/apps/deploy.
-type AppDeployRequest struct {
-	App       string            `json:"app"` // name[:version]
-	Name      string            `json:"name,omitempty"`
-	Set       map[string]string `json:"set,omitempty"`
-	Replicas  int               `json:"replicas,omitempty"`
-	Publish   int               `json:"publish,omitempty"`
-	AllowFrom []string          `json:"allow_from,omitempty"`
-	Expose    string            `json:"expose,omitempty"`     // publish through the gateway on this hostname
-	ExposeTLS string            `json:"expose_tls,omitempty"` // auto, internal, off or cert:<name>
-}
-
 var appRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}(:[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$`)
 
 // deployJobArgs turns a request into `ziroctl apps deploy` argv. Every value goes in a
 // --flag=value form after validation, and the app ref after "--", so nothing can become a flag.
-func (req AppDeployRequest) deployJobArgs() ([]string, error) {
+func deployJobArgs(req AppDeployRequest) ([]string, error) {
 	if !appRefRe.MatchString(req.App) {
 		return nil, fmt.Errorf("invalid app %q (want name[:version])", req.App)
 	}
@@ -535,7 +523,7 @@ func (req AppDeployRequest) deployJobArgs() ([]string, error) {
 // registerAppRoutes: listing deployed apps is for any token; deploying and removing run
 // containers, so they need admin. Deploys run detached (image pulls outlast HTTP timeouts); poll
 // GET /api/v1/apps. Credentials are never served over the API: use the CLI on the host.
-func registerAppRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+func registerAppRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("/api/v1/apps", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		apiReply(w, nil, appsStatus())
 	}))
@@ -579,7 +567,7 @@ func registerAppRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) htt
 			apiReply(w, fmt.Errorf("bad request: %w", err), nil)
 			return
 		}
-		args, err := req.deployJobArgs()
+		args, err := deployJobArgs(req)
 		if err == nil {
 			err = startJob(args, "/var/log/ziro-apps.log")
 		}
@@ -595,7 +583,7 @@ func registerAppRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) htt
 
 // registerNFSRoutes: read-only views of NFS (any token). Exports change through the CLI, which
 // also opens the firewall to the clients.
-func registerNFSRoutes(mux *http.ServeMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+func registerNFSRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("/api/v1/nfs", wrap(false, func(w http.ResponseWriter, r *http.Request) {
 		c, err := loadNFSConfig()
 		if os.IsNotExist(err) {

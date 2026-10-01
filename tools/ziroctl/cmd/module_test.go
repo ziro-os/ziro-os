@@ -43,7 +43,7 @@ func TestManifestValidationRejectsUnsafe(t *testing.T) {
 		{Name: "a", Services: []ModuleService{{Name: "s", Exec: "/bin/x", PIDFile: "/etc/p", LogFile: "/var/log/s"}}},
 		{Name: "a", Cron: []string{"* * * * * x\n* * * * * y"}},
 	} {
-		if err := m.validate(); err == nil {
+		if err := m.Validate(); err == nil {
 			t.Errorf("accepted %+v", m)
 		}
 	}

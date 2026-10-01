@@ -1,0 +1,592 @@
+openapi: 3.1.0
+info:
+  title: Ziro OS API
+  version: "1"
+  summary: Manage a Ziro OS host or cluster master (ziroctl api)
+  description: |
+    The API server (`ziroctl api start`) listens on loopback by default (HTTPS optional).
+    Authenticate with `Authorization: Bearer <token>` (`ziroctl api token`, or scoped tokens from
+    `ziroctl api token create <name> --role viewer|operator|admin`).
+
+    Roles: **viewer** may GET; **operator** may also change services, DNS records and security
+    bans; **admin** may do everything (modules, apps, gateway, network, disks, SSH keys, DNS
+    upstreams). Requests are rate limited (120/min per client) and every change is audited.
+
+    Long jobs (module enable, app deploy) answer `202 Accepted` and run in the background; poll the
+    matching GET. The Go client is `github.com/ziro-os/ziro-os/sdk/client`.
+  license:
+    name: MIT
+servers:
+  - url: https://127.0.0.1:8443
+security:
+  - bearer: []
+tags:
+  - name: host
+  - name: security
+  - name: network
+  - name: storage
+  - name: modules
+  - name: apps
+  - name: gateway
+  - name: cluster
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [host]
+      summary: Liveness (no token needed)
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/system:
+    get:
+      tags: [host]
+      summary: Host metrics and cloud metadata
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/metrics:
+    get:
+      tags: [host]
+      summary: Prometheus metrics (text format)
+      responses:
+        "200":
+          description: Prometheus exposition format
+          content:
+            text/plain: { schema: { type: string } }
+  /api/v1/services:
+    get:
+      tags: [host]
+      summary: Services and their status
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/services/{name}/{action}:
+    post:
+      tags: [host]
+      summary: Start, stop, restart, enable or disable a service (operator)
+      parameters:
+        - $ref: "#/components/parameters/Name"
+        - name: action
+          in: path
+          required: true
+          schema: { type: string, enum: [start, stop, restart, enable, disable] }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/containers:
+    get:
+      tags: [host]
+      summary: Containers on this host
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/firewall:
+    get:
+      tags: [security]
+      summary: Firewall status and rules
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/wireguard:
+    get:
+      tags: [network]
+      summary: WireGuard status
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/cluster:
+    get:
+      tags: [cluster]
+      summary: Cluster nodes, apps and replicas
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/security:
+    get:
+      tags: [security]
+      summary: Security scan report
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/security/protect:
+    get:
+      tags: [security]
+      summary: Protection settings (SSH auto-ban, scan and flood guards)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      tags: [security]
+      summary: Change protection settings (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/security/bans:
+    get:
+      tags: [security]
+      summary: Banned addresses
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      tags: [security]
+      summary: Ban an address (operator)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/security/bans/{ip}:
+    delete:
+      tags: [security]
+      summary: Lift a ban (operator)
+      parameters:
+        - name: ip
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/security/alerting:
+    get:
+      tags: [security]
+      summary: Alert webhooks
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      tags: [security]
+      summary: Add a webhook (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/security/alerting/{name}:
+    delete:
+      tags: [security]
+      summary: Remove a webhook (admin)
+      parameters: [{ $ref: "#/components/parameters/Name" }]
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/security/alerting/{name}/test:
+    post:
+      tags: [security]
+      summary: Send a test alert to a webhook (admin)
+      parameters: [{ $ref: "#/components/parameters/Name" }]
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/network:
+    get:
+      tags: [network]
+      summary: Network configuration (applied and pending)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    put:
+      tags: [network]
+      summary: Replace and apply the network configuration; rolls back unless confirmed (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/network/{action}:
+    post:
+      tags: [network]
+      summary: Confirm a network change, or set the hostname or resolvers (admin)
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema: { type: string, enum: [confirm, hostname, dns] }
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/disks:
+    get:
+      tags: [storage]
+      summary: Disks and filesystems
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      tags: [storage]
+      summary: Format and mount a data disk, {"device","mount"} (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/disks/expand:
+    post:
+      tags: [storage]
+      summary: Grow the root filesystem to its disk (admin)
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/ssh/keys:
+    get:
+      tags: [security]
+      summary: Authorized SSH keys
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      tags: [security]
+      summary: Import keys, {"source":"gh:alice","sync":false} (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+    delete:
+      tags: [security]
+      summary: Remove keys imported from a source (admin)
+      parameters:
+        - name: source
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns:
+    get:
+      tags: [network]
+      summary: Smart DNS configuration and statistics
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/dns/records:
+    post:
+      tags: [network]
+      summary: Add a DNS record (operator)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+    delete:
+      tags: [network]
+      summary: Remove a DNS record (operator)
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns/block:
+    put:
+      tags: [network]
+      summary: Replace blocklists (operator)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns/upstreams:
+    put:
+      tags: [network]
+      summary: Replace upstream resolvers (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns/forwards:
+    put:
+      tags: [network]
+      summary: Replace split-DNS forwards (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/modules:
+    get:
+      tags: [modules]
+      summary: Built-in and catalog modules (plugins) with their status
+      responses:
+        "200":
+          description: Modules
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ModuleInfo" } }
+  /api/v1/modules/{name}/{action}:
+    post:
+      tags: [modules]
+      summary: Enable, upgrade, disable or purge a module in the background (admin)
+      parameters:
+        - $ref: "#/components/parameters/Name"
+        - name: action
+          in: path
+          required: true
+          schema: { type: string, enum: [enable, upgrade, disable, purge] }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+        "404": { $ref: "#/components/responses/Message" }
+  /api/v1/apps:
+    get:
+      tags: [apps]
+      summary: Deployed apps and how many replicas run
+      responses:
+        "200":
+          description: Apps
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/AppStatus" } }
+  /api/v1/apps/deploy:
+    post:
+      tags: [apps]
+      summary: Deploy (or update) an app from a catalog in the background (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppDeployRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/apps/{name}:
+    delete:
+      tags: [apps]
+      summary: Remove an app; purge=true also deletes its data and credentials (admin)
+      parameters:
+        - $ref: "#/components/parameters/Name"
+        - { name: purge, in: query, schema: { type: boolean } }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/nfs:
+    get:
+      tags: [storage]
+      summary: NFS exports and mounts
+      responses:
+        "200":
+          description: NFS configuration
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NFSConfig" }
+  /api/v1/nfs/clients:
+    get:
+      tags: [storage]
+      summary: NFS clients connected to this server
+      responses:
+        "200":
+          description: Clients
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/NFSClient" } }
+  /api/v1/gateway/routes:
+    get:
+      tags: [gateway]
+      summary: Routes with their resolved upstreams
+      responses:
+        "200":
+          description: Routes
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/GatewayRouteState" } }
+    post:
+      tags: [gateway]
+      summary: Create or replace a route (admin; live within a second)
+      requestBody: { $ref: "#/components/requestBodies/GatewayRoute" }
+      responses:
+        "200": { description: The stored route, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayRoute" } } } }
+        "400": { $ref: "#/components/responses/Message" }
+  /api/v1/gateway/routes/{name}:
+    get:
+      tags: [gateway]
+      summary: One route
+      parameters: [{ $ref: "#/components/parameters/Name" }]
+      responses:
+        "200": { description: Route, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayRouteState" } } } }
+    put:
+      tags: [gateway]
+      summary: Create or replace this route (admin)
+      parameters: [{ $ref: "#/components/parameters/Name" }]
+      requestBody: { $ref: "#/components/requestBodies/GatewayRoute" }
+      responses:
+        "200": { description: The stored route, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayRoute" } } } }
+        "400": { $ref: "#/components/responses/Message" }
+    delete:
+      tags: [gateway]
+      summary: Remove this route (admin)
+      parameters: [{ $ref: "#/components/parameters/Name" }]
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/gateway/status:
+    get:
+      tags: [gateway]
+      summary: Upstream health, active connections and requests per route
+      responses:
+        "200": { description: Status, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayStatus" } } } }
+  /api/v1/gateway/ca:
+    get:
+      tags: [gateway]
+      summary: The internal CA certificate (PEM) to trust for `tls internal` routes
+      responses:
+        "200": { description: PEM, content: { application/x-pem-file: { schema: { type: string } } } }
+  /api/v1/gateway/certs:
+    get:
+      tags: [gateway]
+      summary: Names of uploaded certificates
+      responses:
+        "200": { description: Names, content: { application/json: { schema: { type: array, items: { type: string } } } } }
+    post:
+      tags: [gateway]
+      summary: Upload a certificate, {"name","cert","key"} PEM (admin)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/gateway/certs/{name}:
+    delete:
+      tags: [gateway]
+      summary: Remove a certificate (refused while a route uses it; admin)
+      parameters: [{ $ref: "#/components/parameters/Name" }]
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  parameters:
+    Name:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z0-9][a-z0-9_.-]{0,62}$" }
+  requestBodies:
+    Object:
+      content:
+        application/json:
+          schema: { type: object }
+    GatewayRoute:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/GatewayRoute" }
+  responses:
+    Object:
+      description: JSON object
+      content:
+        application/json:
+          schema: { type: object }
+    Message:
+      description: Result
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Message" }
+  schemas:
+    Message:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, error, accepted] }
+        message: { type: string }
+    ModuleInfo:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: string }
+        available: { type: string, description: newer version in a catalog }
+        description: { type: string }
+        source: { type: string, description: builtin, a catalog repo, or local }
+        requires: { type: array, items: { type: string } }
+        status: { type: string, enum: [available, installing, enabled, failed, disabling] }
+        error: { type: string }
+        auto: { type: boolean }
+    AppStatus:
+      type: object
+      properties:
+        name: { type: string }
+        app: { type: string }
+        version: { type: string }
+        mode: { type: string, enum: [local, cluster] }
+        publish: { type: string }
+        components: { type: array, items: { type: string } }
+        running: { type: string, examples: ["3/3"] }
+    AppDeployRequest:
+      type: object
+      required: [app]
+      properties:
+        app: { type: string, examples: ["postgres:18"] }
+        name: { type: string }
+        set: { type: object, additionalProperties: { type: string } }
+        replicas: { type: integer }
+        publish: { type: integer }
+        allow_from: { type: array, items: { type: string } }
+        expose: { type: string, description: publish through the gateway on this hostname }
+        expose_tls: { type: string, examples: [auto, internal, off, "cert:name"] }
+    NFSExport:
+      type: object
+      properties:
+        path: { type: string }
+        clients: { type: array, items: { type: string } }
+        read_only: { type: boolean }
+        squash: { type: string, enum: [root, all, none] }
+        owner: { type: string, examples: ["1000:1000"] }
+    NFSConfig:
+      type: object
+      properties:
+        exports: { type: array, items: { $ref: "#/components/schemas/NFSExport" } }
+        mounts: { type: array, items: { type: object } }
+    NFSClient:
+      type: object
+      properties:
+        address: { type: string }
+        name: { type: string }
+        minor_version: { type: string }
+        status: { type: string }
+        open_files: { type: integer }
+        exports: { type: array, items: { type: string } }
+    GatewayUpstream:
+      type: object
+      properties:
+        app: { type: string }
+        address: { type: string, description: "IP:port" }
+        weight: { type: integer, minimum: 1, maximum: 1000 }
+    GatewayRoute:
+      type: object
+      description: A routing rule. Exactly one of to, redirect, respond.
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [http, tcp, tls], default: http }
+        hosts: { type: array, items: { type: string }, description: 'exact names or "*.domain" (one label)' }
+        path_prefix: { type: string, default: / }
+        path_exact: { type: boolean }
+        methods: { type: array, items: { type: string } }
+        headers: { type: object, additionalProperties: { type: string } }
+        listen: { type: integer, description: port of a tcp route }
+        to: { type: array, items: { $ref: "#/components/schemas/GatewayUpstream" } }
+        lb: { type: string, enum: [round_robin, least_conn, ip_hash, cookie] }
+        health:
+          type: object
+          properties:
+            path: { type: string }
+            interval: { type: string, examples: [10s] }
+            expect: { type: integer }
+        redirect: { type: string, description: '"{uri}" is the request URI' }
+        redirect_code: { type: integer, enum: [301, 302, 307, 308] }
+        respond:
+          type: object
+          properties:
+            status: { type: integer }
+            body: { type: string }
+        strip_prefix: { type: string }
+        request_headers: { $ref: "#/components/schemas/HeaderRules" }
+        response_headers: { $ref: "#/components/schemas/HeaderRules" }
+        retries: { type: integer, minimum: 0, maximum: 5 }
+        timeout: { type: string }
+        compress: { type: boolean }
+        tls: { type: string, examples: [auto, off, internal, "cert:name"] }
+        allow_cidrs: { type: array, items: { type: string } }
+        rate_rps: { type: integer }
+        max_body_mb: { type: integer }
+        basic_auth: { type: object, additionalProperties: { type: string }, description: user -> bcrypt hash }
+    HeaderRules:
+      type: object
+      properties:
+        set: { type: object, additionalProperties: { type: string } }
+        remove: { type: array, items: { type: string } }
+    GatewayRouteState:
+      allOf:
+        - $ref: "#/components/schemas/GatewayRoute"
+        - type: object
+          properties:
+            upstreams: { type: array, items: { type: string } }
+            targets:
+              type: array
+              items:
+                type: object
+                properties:
+                  addr: { type: string }
+                  weight: { type: integer }
+    GatewayStatus:
+      type: object
+      properties:
+        routes:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              kind: { type: string }
+              match: { type: string }
+              tls: { type: string }
+              upstreams:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    addr: { type: string }
+                    share: { type: integer, description: percent of the route's traffic }
+                    healthy: { type: boolean }
+                    active: { type: integer }
+              requests: { type: object, additionalProperties: { type: integer } }
+        internal_ca: { type: string }

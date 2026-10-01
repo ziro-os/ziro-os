@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -151,19 +150,6 @@ var appDataRoot = "/var/lib/ziro/apps"
 
 func dataDir(app string, replica int, path string) string {
 	return filepath.Join(appDataRoot, app, strconv.Itoa(replica), strings.ReplaceAll(strings.Trim(path, "/"), "/", "_"))
-}
-
-// validateDataPaths: absolute, clean, not "/", and nothing nerdctl -v would misparse.
-func validateDataPaths(paths []string) error {
-	if len(paths) > 8 {
-		return errors.New("too many data paths (max 8)")
-	}
-	for _, p := range paths {
-		if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" || strings.ContainsAny(p, ":,\x00\n") || len(p) > 256 {
-			return fmt.Errorf("invalid data path %q", p)
-		}
-	}
-	return nil
 }
 
 // ensureDataDirs creates a replica's data dirs (root-only; the image's entrypoint chowns its

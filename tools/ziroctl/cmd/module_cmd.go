@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ziro-os/ziro-os/sdk/catalog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,18 +32,6 @@ var moduleCmd = &cobra.Command{
 	Use:     "module",
 	Aliases: []string{"plugin", "plugins", "modules"},
 	Short:   "Plugins and modules (built in, or from signed catalogs): search, enable, upgrade, disable",
-}
-
-type moduleInfo struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Available   string   `json:"available,omitempty"` // a newer version in a catalog (upgrade)
-	Description string   `json:"description"`
-	Source      string   `json:"source,omitempty"`
-	Requires    []string `json:"requires,omitempty"`
-	Status      string   `json:"status"`
-	Error       string   `json:"error,omitempty"`
-	Auto        bool     `json:"auto,omitempty"`
 }
 
 func listModules() ([]moduleInfo, error) {
@@ -404,7 +393,7 @@ var moduleNewCmd = &cobra.Command{
 				PIDFile: "/run/ziro-" + name + ".pid", LogFile: "/var/log/" + name + ".log"}},
 			Health: &ModuleCmd{Exec: "/usr/bin/wget", Args: []string{"-qO-", "http://127.0.0.1:{{setting.port}}/"}, Expect: "hello", Timeout: "30s"},
 		}
-		if err := m.validate(); err != nil {
+		if err := m.Validate(); err != nil {
 			return err
 		}
 		p := filepath.Join(name, "manifest.json")
@@ -475,7 +464,7 @@ official modules and apps.`,
 			return err
 		}
 		r := CatalogRepo{Name: args[0], URL: strings.TrimSuffix(args[1], "/"), Key: string(key), Kind: repoKind}
-		if err := r.validate(); err != nil {
+		if err := r.Validate(); err != nil {
 			return err
 		}
 		repos, err := loadExtraRepos()
@@ -559,7 +548,7 @@ var catalogBuildCmd = &cobra.Command{
 		if check == nil {
 			return fmt.Errorf("unknown kind %q", catalogKind)
 		}
-		idx, err := buildCatalog(args[0], catalogOut, catalogRepo, catalogKind, catalogTTL, check)
+		idx, err := catalog.Build(args[0], catalogOut, catalogRepo, catalogKind, catalogTTL, catalogNow(), check)
 		if err != nil {
 			return err
 		}
@@ -577,7 +566,7 @@ var catalogSignCmd = &cobra.Command{
 		if key == "" {
 			return errors.New("ZIRO_CATALOG_KEY is not set")
 		}
-		return signCatalog(args[0], []byte(key))
+		return catalog.Sign(args[0], []byte(key))
 	},
 }
 

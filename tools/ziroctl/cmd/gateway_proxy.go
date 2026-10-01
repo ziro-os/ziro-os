@@ -352,7 +352,7 @@ func (g *gatewayServer) load(cfg *GatewayConfig) error {
 		certs[name] = &kp
 	}
 	for i, rs := range cfg.Routes {
-		rs.normalize()
+		rs.Normalize()
 		if err := validateRoute(&rs.GatewayRoute); err != nil {
 			return fmt.Errorf("route %q: %w", rs.Name, err)
 		}
@@ -1333,28 +1333,6 @@ func (m *gwMetrics) write(w io.Writer) {
 	}
 }
 
-// GatewayStatus is what the admin endpoint (and GET /api/v1/gateway/status) reports.
-type GatewayStatus struct {
-	Routes []GatewayRouteStatus `json:"routes"`
-	CA     string               `json:"internal_ca,omitempty"` // PEM, to trust "internal" routes
-}
-
-type GatewayRouteStatus struct {
-	Name      string            `json:"name"`
-	Kind      string            `json:"kind"`
-	Match     string            `json:"match"`
-	TLS       string            `json:"tls,omitempty"`
-	Upstreams []UpstreamHealth  `json:"upstreams"`
-	Requests  map[string]uint64 `json:"requests,omitempty"` // status -> count
-}
-
-type UpstreamHealth struct {
-	Addr    string `json:"addr"`
-	Share   int    `json:"share"` // percent of the route's traffic by weight
-	Healthy bool   `json:"healthy"`
-	Active  int64  `json:"active"`
-}
-
 func (g *gatewayServer) status() GatewayStatus {
 	g.mu.RLock()
 	cfg := g.cfg
@@ -1367,7 +1345,7 @@ func (g *gatewayServer) status() GatewayStatus {
 	g.metrics.mu.Lock()
 	defer g.metrics.mu.Unlock()
 	for _, rs := range cfg.Routes {
-		rs.normalize()
+		rs.Normalize()
 		match, _ := describeRoute(rs)
 		rst := GatewayRouteStatus{Name: rs.Name, Kind: rs.Kind, Match: match, TLS: rs.TLS, Upstreams: []UpstreamHealth{}}
 		r := &gwRoute{GatewayRouteState: rs}

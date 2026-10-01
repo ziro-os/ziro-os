@@ -29,18 +29,6 @@ var (
 	nfsClusterFile = "/etc/exports.d/ziro-cluster.exports" // cluster shares (the agent)
 )
 
-type NFSExport struct {
-	Path     string   `json:"path"`
-	Clients  []string `json:"clients"` // IPv4 addresses or CIDRs
-	ReadOnly bool     `json:"read_only,omitempty"`
-	// Squash maps client identities: "root" (default: root becomes the anonymous user), "all"
-	// (every client user becomes the owner below) or "none" (client root is root here).
-	Squash string `json:"squash,omitempty"`
-	// Owner ("uid:gid") is the anonymous identity squashed users write as; with Squash "all" every
-	// client write lands as this owner, so files stay usable on the server.
-	Owner string `json:"owner,omitempty"`
-}
-
 var ownerRe = regexp.MustCompile(`^([0-9]{1,10}):([0-9]{1,10})$`)
 
 // exportIdentity returns the exports(5) identity options for e.
@@ -88,18 +76,6 @@ func resolveOwner(s string) (string, error) {
 		gid = g.Gid
 	}
 	return u.Uid + ":" + gid, nil
-}
-
-type NFSMount struct {
-	Server   string `json:"server"` // IPv4 address
-	Path     string `json:"path"`
-	Target   string `json:"target"`
-	ReadOnly bool   `json:"read_only,omitempty"`
-}
-
-type NFSConfig struct {
-	Exports []NFSExport `json:"exports,omitempty"`
-	Mounts  []NFSMount  `json:"mounts,omitempty"`
 }
 
 // Exporting these would hand out the OS itself.
@@ -471,16 +447,6 @@ var nfsListCmd = &cobra.Command{
 		}
 		return nil
 	},
-}
-
-// NFSClient is a connected NFSv4 client, from /proc/fs/nfsd/clients.
-type NFSClient struct {
-	Address      string   `json:"address"`
-	Name         string   `json:"name"`
-	MinorVersion string   `json:"minor_version"`
-	Status       string   `json:"status"`
-	OpenFiles    int      `json:"open_files"`
-	Exports      []string `json:"exports"` // exports whose client list admits this address
 }
 
 var nfsdClientsDir = "/proc/fs/nfsd/clients"
