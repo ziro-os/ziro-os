@@ -332,6 +332,10 @@ func detectCloudPlatform() (string, string) {
 		return "Oracle VirtualBox", "VirtualBox Hypervisor"
 	}
 
+	// arm64 guests have no DMI: QEMU's virt machine shows in the device tree.
+	if dt, err := os.ReadFile("/proc/device-tree/compatible"); err == nil && strings.Contains(string(dt), "linux,dummy-virt") {
+		return "QEMU Virtual Machine", "KVM / QEMU"
+	}
 	// Check /proc/cpuinfo flags
 	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
 		if strings.Contains(string(data), "hypervisor") {
@@ -339,7 +343,7 @@ func detectCloudPlatform() (string, string) {
 		}
 	}
 
-	return "Bare Metal Physical Hardware", "None (Direct Hardware)"
+	return "Bare metal", "None (Direct Hardware)"
 }
 
 func checkMetadataService() {

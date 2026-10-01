@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -195,22 +194,9 @@ var (
 	apkAdd       = func(pkgs []string) error {
 		return runLogged(10*time.Minute, "apk", append([]string{"add", "--no-cache"}, pkgs...)...)
 	}
-	apkDel     = func(pkgs []string) error { return runLogged(5*time.Minute, "apk", append([]string{"del"}, pkgs...)...) }
-	memTotalMB = func() int {
-		f, err := os.Open("/proc/meminfo")
-		if err != nil {
-			return 0
-		}
-		defer f.Close()
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			var kb int
-			if n, _ := fmt.Sscanf(sc.Text(), "MemTotal: %d kB", &kb); n == 1 {
-				return kb / 1024
-			}
-		}
-		return 0
-	}
+	apkDel             = func(pkgs []string) error { return runLogged(5*time.Minute, "apk", append([]string{"del"}, pkgs...)...) }
+	memTotalMB         = func() int { return int(readMeminfo()["MemTotal"] >> 20) }
+	memAvailableMB     = func() int { return int(readMeminfo()["MemAvailable"] >> 20) }
 	artifactDownload   = func(rawURL, dst string, max int64) (string, error) { return catalogDownload(rawURL, dst, max) }
 	startModuleService = startService
 	stopModuleService  = stopService
@@ -468,6 +454,12 @@ func installModule(m ModuleManifest, opts moduleOpts) error {
 	if m.MinMemoryMB > 0 && !opts.Force {
 		if mem := memTotalMB(); mem > 0 && mem < m.MinMemoryMB {
 			return fmt.Errorf("needs %d MB RAM, host has %d MB (--force to override)", m.MinMemoryMB, mem)
+		}
+		// A new module must also fit next to what already runs (an upgrade's own use is counted).
+		if st, err := loadModuleState(m.Name); err != nil || st.Status != "enabled" {
+			if avail := memAvailableMB(); avail > 0 && avail < m.MinMemoryMB {
+				return fmt.Errorf("needs %d MB RAM, only %d MB of %d MB is available (--force to override)", m.MinMemoryMB, avail, memTotalMB())
+			}
 		}
 	}
 	st := &ModuleState{Name: m.Name, Version: m.Version, Status: "installing", Auto: opts.Auto, Source: m.Source}
@@ -795,6 +787,7 @@ func upgradeModule(name string, force bool) error {
 // reconcileModules re-applies enabled modules at boot: packages vanish after an OS upgrade and
 // /run is empty on every boot. Idempotent and cheap when nothing is missing.
 func reconcileModules() {
+	reconcileExtraPackages()
 	all, err := loadManifests()
 	if err != nil {
 		return

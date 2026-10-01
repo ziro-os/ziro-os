@@ -81,6 +81,7 @@ func stubModules(t *testing.T) (root string, installed map[string]bool, started 
 		return nil
 	}
 	memTotalMB = func() int { return 4096 }
+	memAvailableMB = func() int { return 3072 }
 	startModuleService = func(n string) error { *started = append(*started, n); return nil }
 	stopModuleService = func(n string) error { return nil }
 	return root, installed, started
@@ -173,6 +174,12 @@ func TestModuleMemoryGate(t *testing.T) {
 	}
 	if err := installModule(m, moduleOpts{Force: true}); err != nil {
 		t.Fatalf("--force: %v", err)
+	}
+	// Enough RAM in total, but not next to what already runs.
+	memTotalMB, memAvailableMB = func() int { return 4096 }, func() int { return 900 }
+	m2 := ModuleManifest{Name: "big2", Version: "1", MinMemoryMB: 1536}
+	if err := installModule(m2, moduleOpts{}); err == nil || !strings.Contains(err.Error(), "only 900 MB") {
+		t.Fatalf("available gate: %v", err)
 	}
 }
 

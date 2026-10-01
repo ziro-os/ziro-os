@@ -754,6 +754,18 @@ func fetchRelease(ctx context.Context, tag string) (*ghRelease, error) {
 		}
 		endpoint = githubAPI + "/repos/" + upgradeRepo + "/releases/tags/" + tag
 	}
+	rel, err := getRelease(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if !upgradeTagRe.MatchString(rel.TagName) {
+		return nil, fmt.Errorf("release has invalid tag %q", rel.TagName)
+	}
+	return rel, nil
+}
+
+// getRelease fetches one release from the GitHub API.
+func getRelease(ctx context.Context, endpoint string) (*ghRelease, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -773,9 +785,6 @@ func fetchRelease(ctx context.Context, tag string) (*ghRelease, error) {
 	var rel ghRelease
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
 		return nil, fmt.Errorf("decode release: %w", err)
-	}
-	if !upgradeTagRe.MatchString(rel.TagName) {
-		return nil, fmt.Errorf("release has invalid tag %q", rel.TagName)
 	}
 	return &rel, nil
 }
@@ -953,14 +962,15 @@ func validateHostConfig(root string) []string {
 // Commands
 
 var (
-	upgradeCheckOnly bool
-	upgradeVersion   string
-	upgradeYes       bool
-	upgradeReboot    bool
-	upgradeForce     bool
-	upgradeFlavor    string
-	upgradeRoot      string
-	upgradeImage     string
+	upgradeCheckOnly     bool
+	upgradeVersion       string
+	upgradeYes           bool
+	upgradeReboot        bool
+	upgradeForce         bool
+	upgradeAllowUnsigned bool
+	upgradeFlavor        string
+	upgradeRoot          string
+	upgradeImage         string
 )
 
 var upgradeCmd = &cobra.Command{
@@ -1136,6 +1146,22 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if sig := rel.asset("SHA256SUMS.sig"); sig != nil {
+		sigPath := filepath.Join(dir, "SHA256SUMS.sig")
+		if _, err := download(sig.URL, sigPath, 4<<10); err != nil {
+			return err
+		}
+		sigData, err := os.ReadFile(sigPath)
+		if err != nil {
+			return err
+		}
+		if err := verifyReleaseSums(sumsData, sigData, releasePublicKey); err != nil {
+			return err
+		}
+		fmt.Println("✓ release signature verified")
+	} else if !upgradeAllowUnsigned {
+		return fmt.Errorf("release %s is not signed (no SHA256SUMS.sig); releases before signing was introduced need --allow-unsigned", rel.TagName)
+	}
 	want, ok := parseSums(sumsData)[assetName]
 	if !ok {
 		return fmt.Errorf("SHA256SUMS has no entry for %s", assetName)
@@ -1161,9 +1187,27 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		fmt.Println("Upgrade cancelled. Nothing was changed.")
 		return nil
 	}
+	// A tools release newer than the image's ziroctl/ziropkg (ziroctl update) is kept.
+	keepTools := compareSemver(strings.TrimPrefix(Version, "v"), latest) > 0
+	if keepTools {
+		for _, n := range toolsBinaries {
+			if err := copyFileSync(filepath.Join(toolsBinDir, n), filepath.Join(dir, "keep-"+n)); err != nil {
+				return err
+			}
+		}
+	}
 	state, err := applyUpgrade("/", image)
 	if err != nil {
 		return err
+	}
+	if keepTools {
+		for _, n := range toolsBinaries {
+			if err := installTool(n, filepath.Join(dir, "keep-"+n)); err != nil {
+				return fmt.Errorf("restore the newer %s: %w", n, err)
+			}
+		}
+		_ = trustToolHashes(toolsBinaries)
+		fmt.Printf("✓ kept ziroctl/ziropkg %s (newer than the image's)\n", Version)
 	}
 	_ = reportUpgrade(state, fmt.Sprintf("✅ Ziro-OS upgraded %s → %s. Rollback: 'ziroctl upgrade rollback'.", state.From, state.To))
 
@@ -1191,6 +1235,7 @@ func init() {
 	upgradeCmd.Flags().BoolVarP(&upgradeYes, "yes", "y", false, "Do not prompt for confirmation")
 	upgradeCmd.Flags().BoolVar(&upgradeReboot, "reboot", false, "Reboot automatically after a successful upgrade")
 	upgradeCmd.Flags().StringVar(&upgradeFlavor, "flavor", "", "Kernel flavor to install: custom (hardened Ziro kernel, the default for new installs) or alpine; also switches at the same version")
+	upgradeCmd.Flags().BoolVar(&upgradeAllowUnsigned, "allow-unsigned", false, "Accept a release published before release signing (SHA256SUMS still verified)")
 	upgradeCmd.Flags().BoolVar(&upgradeForce, "force", false, "Continue despite doctor/config preflight failures (never skips checksum verification)")
 
 	upgradeRollbackCmd.Flags().StringVar(&upgradeRoot, "root", "/", "Root filesystem to roll back")

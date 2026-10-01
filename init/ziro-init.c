@@ -24,6 +24,7 @@
 #include <sys/sysmacros.h>
 #include <time.h>
 #include <limits.h>
+#include <sys/sysinfo.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -346,7 +347,7 @@ static void check_and_switch_root(void) {
     // 5. Fallback: Live ISO tmpfs migration
     printf("[init] migrating live environment to tmpfs...\n");
     safe_mkdir("/sysroot", 0755);
-    if (mount("tmpfs", "/sysroot", "tmpfs", 0, "mode=0755,size=100%") < 0) {
+    if (mount("tmpfs", "/sysroot", "tmpfs", 0, "mode=0755,size=75%") < 0) {
         fprintf(stderr, "[init] failed to mount tmpfs on /sysroot: %s\n", strerror(errno));
         return;
     }
@@ -433,11 +434,11 @@ static void init_filesystems(void) {
     safe_mkdir("/dev/pts", 0755);
     mount_essential("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "gid=5,mode=620");
     safe_mkdir("/dev/shm", 0755);
-    mount_essential("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+    mount_essential("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777,size=25%");
     safe_mkdir("/run", 0755);
-    mount_essential("run", "/run", "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755");
+    mount_essential("run", "/run", "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755,size=10%");
     safe_mkdir("/tmp", 0777);
-    mount_essential("tmp", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+    mount_essential("tmp", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777,size=25%");
 
     safe_mkdir("/var", 0755);
     safe_mkdir("/var/log", 0755);
@@ -582,6 +583,14 @@ static void init_devices(void) {
     }
 }
 
+/* Writes a short value to a kernel interface file (cgroup, sysctl); errors are ignored. */
+static void write_file(const char *path, const char *value) {
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    if (write(fd, value, strlen(value)) < 0) { /* best effort */ }
+    close(fd);
+}
+
 static void init_cgroups(void) {
     printf("[init] initializing cgroups v2...\n");
     safe_mkdir("/sys/fs/cgroup", 0755);
@@ -617,6 +626,36 @@ static void init_cgroups(void) {
             }
         }
     }
+
+    /* Service cgroups (tools/ziroctl/cmd/cgroup.go): ziro/system holds the platform daemons and
+     * keeps a memory reservation, so sshd and the management plane survive memory pressure;
+     * ziro/workloads holds plugin services, bounded by their own limits. */
+    static const char *dirs[] = {"/sys/fs/cgroup/ziro", "/sys/fs/cgroup/ziro/system", "/sys/fs/cgroup/ziro/workloads"};
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        safe_mkdir(dirs[i], 0755);
+        char ctl[128];
+        snprintf(ctl, sizeof(ctl), "%s/cgroup.subtree_control", dirs[i]);
+        static const char *ctrls[] = {"+memory", "+cpu", "+pids", "+io"};
+        for (size_t c = 0; c < 4; c++) write_file(ctl, ctrls[c]); /* a missing controller is skipped */
+    }
+    struct sysinfo si;
+    if (sysinfo(&si) == 0) {
+        unsigned long long ram = (unsigned long long)si.totalram * si.mem_unit;
+        unsigned long long reserve = ram / 20;               /* 5% of RAM ... */
+        if (reserve > 256ULL << 20) reserve = 256ULL << 20;  /* ... at most 256 MiB */
+        char v[32];
+        snprintf(v, sizeof(v), "%llu", reserve);
+        write_file("/sys/fs/cgroup/ziro/system/memory.min", v);
+    }
+}
+
+/* In a forked child before exec: run in ziro/system/<name>. */
+static void join_system_cgroup(const char *name) {
+    char path[160];
+    snprintf(path, sizeof(path), "/sys/fs/cgroup/ziro/system/%s", name);
+    safe_mkdir(path, 0755);
+    strncat(path, "/cgroup.procs", sizeof(path) - strlen(path) - 1);
+    write_file(path, "0");
 }
 
 static void init_hostname(void) {
@@ -792,6 +831,7 @@ static void start_containerd(void) {
     if (pid == 0) {
         char *bin = access("/usr/bin/containerd", X_OK) == 0 ? "/usr/bin/containerd" : "/bin/containerd";
         char *argv[] = {"containerd", "--config", "/etc/containerd/config.toml", NULL};
+        join_system_cgroup("containerd");
         int log_fd = open("/var/log/containerd.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (log_fd >= 0) {
             dup2(log_fd, STDOUT_FILENO);
@@ -867,6 +907,7 @@ static void start_sshd(void) {
     if (pid == 0) {
         char *bin = access("/usr/sbin/sshd", X_OK) == 0 ? "/usr/sbin/sshd" : "/sbin/sshd";
         char *argv[] = {bin, "-D", "-e", NULL};
+        join_system_cgroup("sshd");
         int log_fd = open("/var/log/sshd.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (log_fd >= 0) {
             dup2(log_fd, STDOUT_FILENO);
@@ -976,29 +1017,22 @@ static void exec_console_session(void) {
     _exit(1);
 }
 
-static void print_host_ips(void) {
-    DIR *d = opendir("/sys/class/net");
-    if (!d) return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.' || strcmp(ent->d_name, "lo") == 0) continue;
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "ip -4 addr show %s 2>/dev/null | awk '/inet /{print $2}'", ent->d_name);
-        FILE *p = popen(cmd, "r");
-        char ip[64] = {0};
-        if (p) {
-            if (fgets(ip, sizeof(ip), p)) {
-                ip[strcspn(ip, "\r\n")] = '\0';
-            }
-            pclose(p);
-        }
-        if (strlen(ip) > 0) {
-            printf("  * IPv4 (%s):    %s\n", ent->d_name, ip);
-        } else {
-            printf("  * IPv4 (%s):    configuring (DHCP auto-assign)...\n", ent->d_name);
-        }
+/* The host summary (addresses, resources, anything needing attention) comes from `ziroctl motd`,
+ * the same one shown at login. Bounded to 5 s so a slow probe never delays the console. */
+static void print_host_summary(void) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"ziroctl", "motd", "--console", NULL};
+        execv("/usr/bin/ziroctl", argv);
+        _exit(127);
     }
-    closedir(d);
+    if (pid < 0) return;
+    for (int i = 0; i < 50; i++) {
+        if (waitpid(pid, NULL, WNOHANG) == pid) return;
+        usleep(100000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
 }
 
 static void setup_controlling_tty(void) {
@@ -1491,15 +1525,8 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    if (is_installed_system()) {
-        printf("\n================================================================================\n");
-        printf("  Ziro-OS Enterprise Container Host (x86_64)\n");
-        printf("  Minimal by design. Born for the cloud.\n");
-        printf("================================================================================\n");
-    } else {
-        printf(BANNER);
-        printf("[init] starting Ziro-OS Live & Installer Init...\n");
-    }
+    printf(BANNER);
+    printf("[init] starting Ziro OS (%s)...\n", is_installed_system() ? "installed" : "live");
 
     init_cgroups();
     init_hostname();
@@ -1510,22 +1537,14 @@ int main(int argc, char *argv[]) {
     start_sshd();
     start_enabled_services();
 
+    printf("\n");
     if (is_installed_system()) {
-        char hname[64] = "ziro-os";
-        gethostname(hname, sizeof(hname));
-        printf("\n================================================================================\n");
-        printf("  Ziro-OS Enterprise Container Host Status:\n");
-        printf("  * Hostname:       %s\n", hname);
-        print_host_ips();
-        printf("  * Container:      containerd (active)\n");
-        printf("  * OCI Runtime:    runc / crun\n");
-        printf("  * Storage:        LABEL=ZIRO_ROOT (ext4)\n");
-        printf("  * Management:     ziroctl (container, network, cluster, image)\n");
-        printf("================================================================================\n\n");
+        print_host_summary(); /* live mode logs straight into a shell, whose profile shows it */
+        printf("\n[init] Ziro OS ready (installed)\n\n");
     } else {
-        printf("\n[init] Ziro-OS Live initialization complete!\n");
-        printf("[init] Type 'ziro-install' to install Ziro-OS to physical or virtual disk.\n");
-        printf("[init] Type 'ziroctl help' for container OS commands.\n\n");
+        /* "Live initialization complete" is kept: older `ziroctl dev run` and tooling wait for it. */
+        printf("\n[init] Ziro OS ready (live). Live initialization complete.\n");
+        printf("[init] Run 'ziro-install' to install to disk, 'ziroctl help' for commands.\n\n");
     }
 
     if (autoinstall_requested) {

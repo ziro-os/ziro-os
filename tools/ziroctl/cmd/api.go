@@ -555,6 +555,7 @@ func registerAPIRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.Handle
 		_ = json.NewEncoder(w).Encode(cachedSecurityScan())
 	}))
 	registerSecurityRoutes(mux, wrap)
+	registerSystemRoutes(mux, wrap)
 	registerHostRoutes(mux, wrap)
 	registerDNSRoutes(mux, wrap)
 	registerModuleRoutes(mux, wrap)

@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bufio"
+	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -321,6 +323,11 @@ const maxLogSize = 10 << 20
 
 // rotateLog keeps one previous generation once a log exceeds maxLogSize.
 // Copy+truncate (not rename) so daemons holding the file with O_APPEND keep working.
+// logGenerations is how many compressed rotations are kept (path.1.gz newest).
+const logGenerations = 3
+
+// rotateLog compresses a log over maxLogSize into path.1.gz, shifting older generations, then
+// truncates it in place (daemons keep their open descriptor, O_APPEND writes continue at 0).
 func rotateLog(path string) {
 	fi, err := os.Stat(path)
 	if err != nil || fi.Size() < maxLogSize {
@@ -331,19 +338,35 @@ func rotateLog(path string) {
 		return
 	}
 	defer src.Close()
-	dst, err := os.OpenFile(path+".1", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	tmp := path + ".1.gz.tmp"
+	dst, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return
 	}
-	defer dst.Close()
-	if _, err := io.Copy(dst, src); err == nil {
+	zw := gzip.NewWriter(dst)
+	_, err = io.Copy(zw, src)
+	if cerr := zw.Close(); err == nil {
+		err = cerr
+	}
+	if cerr := dst.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return
+	}
+	for i := logGenerations - 1; i >= 1; i-- {
+		_ = os.Rename(fmt.Sprintf("%s.%d.gz", path, i), fmt.Sprintf("%s.%d.gz", path, i+1))
+	}
+	_ = os.Remove(path + ".1") // the old uncompressed generation
+	if os.Rename(tmp, path+".1.gz") == nil {
 		_ = os.Truncate(path, 0)
 	}
 }
 
 var serviceRotateLogsCmd = &cobra.Command{
 	Use:    "rotate-logs",
-	Short:  "Rotate /var/log/*.log files larger than 10MB (run hourly by crond)",
+	Short:  "Rotate /var/log/*.log files larger than 10MB, keeping 3 compressed generations (run hourly by crond)",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logs, _ := filepath.Glob(filepath.Join(logsDir, "*.log"))
@@ -425,12 +448,31 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 						def.User = v
 					case "env_file":
 						def.EnvFile = v
+					case "memory", "cpus", "pids":
+						if def.Resources == nil {
+							def.Resources = &Resources{}
+						}
+						switch k {
+						case "memory":
+							def.Resources.Memory = v
+						case "cpus": // unparseable -> -1, rejected by Validate below
+							if def.Resources.CPUs, err = strconv.ParseFloat(v, 64); err != nil {
+								def.Resources.CPUs = -1
+							}
+						case "pids":
+							if def.Resources.PIDs, err = strconv.Atoi(v); err != nil {
+								def.Resources.PIDs = -1
+							}
+						}
 					case "autostart":
 						def.Autostart = (v == "true" || v == "1" || v == "yes")
 					}
 				}
 			}
 			if err := checkServicePaths(def); err != nil {
+				return nil, fmt.Errorf("%s: %w", confPath, err)
+			}
+			if err := def.Resources.Validate(); err != nil {
 				return nil, fmt.Errorf("%s: %w", confPath, err)
 			}
 			return def, nil
@@ -626,8 +668,16 @@ func startService(name string) error {
 		}
 		return err
 	}
+	closeCg := func() {}
+	if cg, err := serviceCgroup(def); err == nil {
+		closeCg = startInCgroup(cmd.SysProcAttr, cg)
+	} else if !errors.Is(err, errNoCgroup) {
+		fmt.Fprintf(os.Stderr, "warning: %s: cgroup: %v\n", name, err)
+	}
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	closeCg()
+	if err != nil {
 		if logF != nil {
 			logF.Close()
 		}
@@ -635,6 +685,7 @@ func startService(name string) error {
 	}
 
 	newPID := cmd.Process.Pid
+	setOOMScoreAdj(newPID, serviceClass(name))
 	if def.PIDFile != "" {
 		_ = os.WriteFile(def.PIDFile, []byte(strconv.Itoa(newPID)), 0644)
 	}
@@ -872,6 +923,17 @@ func supervisedConf(d ServiceDef) string {
 	}
 	if d.EnvFile != "" {
 		fmt.Fprintf(&b, "env_file=%s\n", d.EnvFile)
+	}
+	if r := d.Resources; r != nil {
+		if r.Memory != "" {
+			fmt.Fprintf(&b, "memory=%s\n", r.Memory)
+		}
+		if r.CPUs > 0 {
+			fmt.Fprintf(&b, "cpus=%g\n", r.CPUs)
+		}
+		if r.PIDs > 0 {
+			fmt.Fprintf(&b, "pids=%d\n", r.PIDs)
+		}
 	}
 	b.WriteString("autostart=true\nrestart=always\n")
 	return b.String()

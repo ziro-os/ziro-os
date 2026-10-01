@@ -137,7 +137,7 @@ or run your own catalog (below). Built-in modules live in `tools/ziroctl/cmd/mod
   "cron": ["0 4 * * * /usr/bin/example --nightly"],
   "prepare": [{"exec": "/usr/bin/example-init", "args": [], "creates": "/var/lib/example/db*", "timeout": "10m"}],
   "services": [{"name": "exampled", "description": "...", "exec": "/usr/sbin/exampled", "args": "--port {{setting.port}}",
-                "user": "example", "env_file": "/etc/example.env",
+                "user": "example", "env_file": "/etc/example.env", "resources": {"memory": "512Mi", "cpus": 1},
                 "pidfile": "/run/ziro-exampled.pid", "logfile": "/var/log/exampled.log"}],
   "post_start": [],
   "stop": [],
@@ -152,7 +152,8 @@ or run your own catalog (below). Built-in modules live in `tools/ziroctl/cmd/mod
 | `secrets` | Generated once on the host (`hex:N` or `base64:N` random bytes, `alnum:N` characters, N = 12..64), stored in `/etc/ziro/modules/<name>.secrets` (0600), kept across upgrades, removed on disable. Use them as `{{secret.name}}` in `files` only. |
 | `artifacts` | Files that aren't Alpine packages (a static binary, a helper script). Downloaded over HTTPS, checked against `sha256`, placed under `/var/lib/ziro/plugins/<name>/`. `arch` (`x86_64`, `aarch64`) limits one to an architecture. |
 | `files` | Config files, written atomically. A package default is kept as `<file>.ziro-orig` and restored on disable. A file you edit is never overwritten or removed. |
-| `services` | Supervised daemons (`restart=always`). `user` runs it unprivileged; `env_file` (root-owned, not world-readable) passes secrets outside argv. |
+| `services` | Supervised daemons (`restart=always`). `user` runs it unprivileged; `env_file` (root-owned, not world-readable) passes secrets outside argv. `resources` (`memory` like `512Mi`, `cpus`, `pids`) bounds it in its own cgroup; over its memory limit only the service is killed and restarted ([operations](operations.md#memory-how-a-host-protects-itself)). |
+| `min_memory_mb` | Memory the plugin needs: enabling it is refused unless the host has that much in total *and* available next to what already runs (`--force` overrides). |
 | `prepare`, `post_start`, `stop`, `health` | Commands (absolute path, argument list, no shell) run before services start, after they start (and at every boot), on disable, and as the health check (`expect`: text the output must contain). |
 
 Rules, enforced when a manifest is loaded (`plugin validate`, catalog CI, `go test`):

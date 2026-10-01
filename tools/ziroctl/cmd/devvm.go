@@ -92,6 +92,21 @@ func devReleaseFiles(names ...string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if sig := rel.asset("SHA256SUMS.sig"); sig != nil {
+		sigPath := filepath.Join(dir, "SHA256SUMS.sig")
+		if _, err := download(sig.URL, sigPath, 4<<10); err != nil {
+			return nil, err
+		}
+		sigData, err := os.ReadFile(sigPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyReleaseSums(data, sigData, releasePublicKey); err != nil {
+			return nil, err
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: release %s predates release signing; verified by SHA256SUMS only\n", rel.TagName)
+	}
 	sums := parseSums(data)
 	var out []string
 	for _, name := range names {
@@ -143,11 +158,50 @@ func devQemuArgs(arch, kernel, initrd string, mem int, forwards []string) (bin s
 		"-kernel", kernel, "-initrd", initrd, "-netdev", netdev, "-device", "virtio-net-pci,netdev=n0"}
 	switch arch {
 	case "x86_64":
-		return "qemu-system-x86_64", append(args, "-append", "console=ttyS0 rdinit=/init panic=-1"), nil
+		return qemuBinary(arch), append(args, "-append", "console=ttyS0 rdinit=/init panic=-1"), nil
 	case "arm64":
-		return "qemu-system-aarch64", append([]string{"-machine", "virt"}, append(args, "-append", "console=ttyAMA0 rdinit=/init panic=-1")...), nil
+		return qemuBinary(arch), append([]string{"-machine", "virt"}, append(args, "-append", "console=ttyAMA0 rdinit=/init panic=-1")...), nil
 	}
 	return "", nil, fmt.Errorf("unsupported arch %q (x86_64 or arm64)", arch)
+}
+
+func qemuBinary(arch string) string {
+	return map[string]string{"x86_64": "qemu-system-x86_64", "arm64": "qemu-system-aarch64"}[arch]
+}
+
+var devInstallDeps bool
+
+// ensureQEMU finds the emulator, or installs it on a Ziro host (recorded so it survives OS
+// upgrades), or says exactly how to install it elsewhere.
+func ensureQEMU(arch string) error {
+	bin := qemuBinary(arch)
+	if bin == "" {
+		return fmt.Errorf("unsupported arch %q (x86_64 or arm64)", arch)
+	}
+	if _, err := exec.LookPath(bin); err == nil {
+		return nil
+	}
+	if fileExists("/etc/ziro-release") {
+		if !devInstallDeps && !confirm(fmt.Sprintf("%s is not installed. Install it now (apk add %s)? [y/N]: ", bin, bin)) {
+			return fmt.Errorf("%s is needed: ziroctl pkg install %s (or dev run --install-deps)", bin, bin)
+		}
+		if err := apkAdd([]string{bin}); err != nil {
+			return err
+		}
+		return recordExtraPackages([]string{bin}, nil)
+	}
+	hint := "install QEMU with your package manager"
+	switch {
+	case runtime.GOOS == "darwin":
+		hint = "brew install qemu"
+	case fileExists("/etc/debian_version"):
+		hint = "sudo apt-get install " + map[string]string{"x86_64": "qemu-system-x86", "arm64": "qemu-system-arm"}[arch]
+	case fileExists("/etc/fedora-release") || fileExists("/etc/redhat-release"):
+		hint = "sudo dnf install " + map[string]string{"x86_64": "qemu-system-x86", "arm64": "qemu-system-aarch64"}[arch]
+	case fileExists("/etc/alpine-release"):
+		hint = "apk add " + bin
+	}
+	return fmt.Errorf("%s not found: %s", bin, hint)
 }
 
 // devArchName is --arch, or the host's architecture in Ziro's naming (x86_64, arm64).
@@ -333,6 +387,9 @@ QEMU uses KVM on Linux and HVF on macOS when the VM's arch matches the host, oth
 			}
 		}
 		arch := devArchName()
+		if err := ensureQEMU(arch); err != nil { // before downloading anything
+			return err
+		}
 		kernel, initrd, err := devImage(arch)
 		if err != nil {
 			return err
@@ -451,5 +508,6 @@ func init() {
 	f.StringArrayVar(&devSets, "set", nil, "Plugin or app setting (name=value)")
 	f.StringArrayVar(&devCopies, "copy", nil, "Copy a local file into the VM before install (file:/guest/path; repeatable)")
 	f.DurationVar(&devBootWait, "boot-timeout", 5*time.Minute, "How long to wait for the VM to boot")
+	f.BoolVar(&devInstallDeps, "install-deps", false, "On a Ziro host, install QEMU without asking")
 	devCmd.AddCommand(devRunCmd)
 }

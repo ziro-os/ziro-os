@@ -14,6 +14,7 @@ import (
 
 type (
 	ServiceDef     = schema.ServiceDef
+	Resources      = schema.Resources
 	ModuleCmd      = schema.ModuleCmd
 	ModuleService  = schema.ModuleService
 	ModuleFile     = schema.ModuleFile
