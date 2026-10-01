@@ -74,14 +74,19 @@ if [ -n "${ZIRO_MODULE_SIGNING_KEY:-}" ]; then
     KEY_MODE=persistent
 fi
 
-STAMP=$(cat "$REPO_ROOT"/kernel/configs/*.config "$SCRIPT_DIR/build-kernel.sh" "$REPO_ROOT/kernel/certs/ziro-modules.crt" | { cat; echo "$KERNEL_VER $ALPINE_IMAGE $TARGET_ARCH $KEY_MODE"; } | sha256sum | cut -d' ' -f1)
+STAMP=$(cat "$REPO_ROOT"/kernel/configs/*.config "$SCRIPT_DIR/build-kernel.sh" "$REPO_ROOT/kernel/certs/ziro-modules.crt" | { cat; echo "$KERNEL_VER $ALPINE_IMAGE $TARGET_ARCH"; } | sha256sum | cut -d' ' -f1)
+# A build signed with the persistent key is reused even without the secret (later build steps
+# don't carry it); an ephemeral-key build is replaced as soon as the persistent key is available.
+BUILT_MODE=$(cat "$OUT/key-mode" 2>/dev/null || echo ephemeral)
+KEY_OK=1
+[ "$KEY_MODE" = persistent ] && [ "$BUILT_MODE" != persistent ] && KEY_OK=0
 if [ "${CONFIG_ONLY:-0}" != "1" ] && [ "${FORCE_KERNEL_BUILD:-0}" != "1" ] && [ -f "$OUT/vmlinuz" ] && [ -d "$OUT/modroot" ] && \
-   [ "$(cat "$OUT/stamp" 2>/dev/null)" = "$STAMP" ]; then
-    echo "✓ Custom kernel $(cat "$OUT/kernel.release") for $TARGET_ARCH is up to date (stamp ${STAMP:0:12}); skipping build."
+   [ "$KEY_OK" = 1 ] && [ "$(cat "$OUT/stamp" 2>/dev/null)" = "$STAMP" ]; then
+    echo "✓ Custom kernel $(cat "$OUT/kernel.release") for $TARGET_ARCH is up to date (stamp ${STAMP:0:12}, $BUILT_MODE module key); skipping build."
     echo "  Set FORCE_KERNEL_BUILD=1 to rebuild."
     exit 0
 fi
-rm -f "$OUT/stamp"
+rm -f "$OUT/stamp" "$OUT/key-mode"
 
 echo "=================================================="
 echo " Ziro custom kernel $KERNEL_VER for $TARGET_ARCH"
@@ -202,6 +207,7 @@ if [ "${CONFIG_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 echo "$STAMP" > "$OUT/stamp"
+echo "$KEY_MODE" > "$OUT/key-mode"
 
 echo "=================================================="
 echo "✅ Custom kernel $(cat "$OUT/kernel.release") ready: $OUT/vmlinuz ($(du -h "$OUT/vmlinuz" | cut -f1))"

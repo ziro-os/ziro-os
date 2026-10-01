@@ -86,6 +86,7 @@ jobs:
             build/kernel-custom-${{ matrix.arch }}/kernel.release
             build/kernel-custom-${{ matrix.arch }}/stamp
             build/kernel-custom-${{ matrix.arch }}/module-signing.crt
+            build/kernel-custom-${{ matrix.arch }}/key-mode
             build/kernel-custom-${{ matrix.arch }}/modroot
           key: kernel-out-${{ matrix.arch }}-${{ hashFiles('kernel/configs/**', 'kernel/build-kernel.sh', 'kernel/certs/**') }}
 
@@ -117,6 +118,7 @@ jobs:
             build/kernel-custom-${{ matrix.arch }}/kernel.release
             build/kernel-custom-${{ matrix.arch }}/stamp
             build/kernel-custom-${{ matrix.arch }}/module-signing.crt
+            build/kernel-custom-${{ matrix.arch }}/key-mode
             build/kernel-custom-${{ matrix.arch }}/modroot
           key: ${{ steps.kernel-out.outputs.cache-primary-key }}
 
@@ -131,6 +133,20 @@ jobs:
 
       - name: Build host rootfs & initramfs with the custom kernel
         run: make rootfs
+
+      - name: Verify module signing key
+        # Same-repo builds must ship modules signed by the persistent key (kernel/certs/ziro-modules.crt);
+        # only fork PRs (no secrets) fall back to an ephemeral key.
+        env:
+          HAS_KEY: ${{ secrets.ZIRO_MODULE_SIGNING_KEY != '' }}
+        run: |
+          mode=$(cat build/kernel-custom-$TARGET_ARCH/key-mode)
+          echo "modules signed with the $mode key"
+          if [ "$HAS_KEY" = "true" ]; then
+            [ "$mode" = persistent ] || { echo "::error::kernel was not signed with the persistent module key"; exit 1; }
+            cmp <(openssl x509 -in build/kernel-custom-$TARGET_ARCH/module-signing.crt -noout -pubkey) \
+                <(openssl x509 -in kernel/certs/ziro-modules.crt -noout -pubkey)
+          fi
 
       - name: Verify archive security metadata
         run: python3 tests/security/test-artifact-metadata.py build/ziro-rootfs-$TARGET_ARCH.tar.gz build/ziro-initramfs-$TARGET_ARCH-custom.cpio.gz
