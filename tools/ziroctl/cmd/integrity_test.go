@@ -18,22 +18,27 @@ func TestIntegrityCheck(t *testing.T) {
 			"10 aa ima-ng sha256:" + h('6') + " /srv/data/tool\n" + // outside system paths
 			"10 aa ima-sig sha256:" + h('7') + " /ignored\n"))
 	baseline := readBaseline(strings.NewReader(h('1') + "  /usr/bin/ziroctl\n" + h('9') + "  /bin/busybox\n"))
-	apk := apkChecksums(strings.NewReader("P:clamav-daemon\nF:usr/sbin\nR:clamd\nZ:Q1clamd\n\nP:garage\nF:usr/bin\nR:garage\nZ:Q1garage\n"))
-	if apk["/usr/sbin/clamd"] != "Q1clamd" || apk["/usr/bin/garage"] != "Q1garage" {
-		t.Fatalf("apk db %v", apk)
+	owned := apkOwnedFiles(strings.NewReader("P:clamav-daemon\nF:usr/sbin\nR:clamd\nZ:Q1x\n\nP:garage\nF:usr/bin\nR:garage\nZ:Q1y\n"))
+	if !owned["/usr/sbin/clamd"] || !owned["/usr/bin/garage"] || len(owned) != 2 {
+		t.Fatalf("apk db %v", owned)
 	}
-	orig := fileDigests
-	defer func() { fileDigests = orig }()
-	fileDigests = func(p string) (string, string, error) {
+	// apk audit's verdict: garage was changed after installation.
+	modified := parseAPKAudit("U usr/bin/garage\nA usr/bin/other\n")
+	if !modified["/usr/bin/garage"] || modified["/usr/bin/other"] {
+		t.Fatalf("audit parse %v", modified)
+	}
+	orig := fileSHA256
+	defer func() { fileSHA256 = orig }()
+	fileSHA256 = func(p string) (string, error) {
 		switch p {
 		case "/usr/sbin/clamd":
-			return h('3'), "Q1clamd", nil
+			return h('3'), nil
 		case "/usr/bin/garage":
-			return h('4'), "Q1other", nil
+			return h('4'), nil
 		}
-		return "", "", nil
+		return "", nil
 	}
-	rep := checkIntegrity(ms, baseline, apk)
+	rep := checkIntegrity(ms, baseline, owned, modified)
 	if rep.Measured != 6 || rep.Image != 1 || rep.Package != 1 || rep.Other != 1 || len(rep.Findings) != 3 {
 		t.Fatalf("%+v", rep)
 	}

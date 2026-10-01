@@ -44,9 +44,10 @@ func TestParseKeySource(t *testing.T) {
 
 func TestAcceptKeysAndMerge(t *testing.T) {
 	edPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	weakRSA, _ := rsa.GenerateKey(rand.Reader, 1024)
 	goodRSA, _ := rsa.GenerateKey(rand.Reader, 2048)
-	ed, weak, good := pubLine(t, edPub), pubLine(t, &weakRSA.PublicKey), pubLine(t, &goodRSA.PublicKey)
+	// A fixed 1024-bit public key: only its rejection is under test, so no weak key is generated.
+	const weak = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQCwjVNzwHNG5kvpKL9iUAhYd2lZGpMfXvBB7VyArPMxaNd9ezyiRW/S5iz6sbx8pV2CcAgksjejnsKf9QCz9XQ0GHGVF4axh+liX4Qw2pZ8wz9o6oVmODZv5F5DY+o0fAXfMilJbEu7mbtRihxYSfFJJvHwS7yb0mePJsSuBvESfw=="
+	ed, good := pubLine(t, edPub), pubLine(t, &goodRSA.PublicKey)
 	data := ed + " provider-comment\n" + weak + "\n" + good + "\n" + ed + "\n" +
 		`command="/bin/evil" ` + good + "\n" + "garbage\n"
 	keys, rejected := acceptKeys([]byte(data), "ziro-import:gh:alice")

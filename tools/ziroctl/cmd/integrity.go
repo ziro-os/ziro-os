@@ -2,17 +2,18 @@ package cmd
 
 import (
 	"bufio"
-	"crypto/sha1"
+	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -21,7 +22,8 @@ import (
 // library and kernel module the host runs (container overlays excluded). `security integrity`
 // checks each measured system file against what the OS image shipped
 // (/etc/ziro/integrity.sha256, written at build time) or, for files a package added later
-// (modules), against the signed apk database. Anything else is a finding and raises a critical
+// (modules), against the signed apk database. Package files are verified by apk itself
+// (`apk audit`, against its database); ziroctl only hashes with SHA-256. Anything else is a finding and raises a critical
 // alert.
 
 var (
@@ -107,10 +109,10 @@ func readBaseline(r io.Reader) map[string]string {
 	return out
 }
 
-// apkChecksums maps "/path" -> "Q1<base64 sha1>" from the apk database (signed packages).
-func apkChecksums(r io.Reader) map[string]string {
-	out := map[string]string{}
-	dir, file := "", ""
+// apkOwnedFiles lists the files installed packages own ("/path"), from the apk database.
+func apkOwnedFiles(r io.Reader) map[string]bool {
+	out := map[string]bool{}
+	dir := ""
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -122,14 +124,35 @@ func apkChecksums(r io.Reader) map[string]string {
 		case 'F':
 			dir = l[2:]
 		case 'R':
-			file = l[2:]
-		case 'Z':
-			if file != "" {
-				out["/"+path.Join(dir, file)] = l[2:]
-			}
+			out["/"+path.Join(dir, l[2:])] = true
 		}
 	}
 	return out
+}
+
+// apkModified asks apk which package files in dirs differ from its database
+// (`apk audit --system`: "U path" for a changed file, "D" for a removed one).
+var apkModified = func(dirs []string) (map[string]bool, error) {
+	if len(dirs) == 0 {
+		return map[string]bool{}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "apk", append([]string{"audit", "--system", "--"}, dirs...)...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("apk audit: %w", err)
+	}
+	return parseAPKAudit(string(out)), nil
+}
+
+func parseAPKAudit(out string) map[string]bool {
+	mod := map[string]bool{}
+	for _, l := range strings.Split(out, "\n") {
+		if code, p, ok := strings.Cut(l, " "); ok && (code == "U" || code == "D") {
+			mod["/"+strings.TrimPrefix(p, "/")] = true
+		}
+	}
+	return mod
 }
 
 type integrityFinding struct {
@@ -154,24 +177,24 @@ func isSystemPath(p string) bool {
 	return false
 }
 
-// fileDigests returns the current sha256 (hex) and apk-style sha1 ("Q1"+base64) of a file.
-var fileDigests = func(p string) (string, string, error) {
+// fileSHA256 is a file's current SHA-256 (hex).
+var fileSHA256 = func(p string) (string, error) {
 	f, err := os.Open(p)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	defer f.Close()
-	h256, h1 := sha256.New(), sha1.New()
-	if _, err := io.Copy(io.MultiWriter(h256, h1), f); err != nil {
-		return "", "", err
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(h256.Sum(nil)), "Q1" + base64.StdEncoding.EncodeToString(h1.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // checkIntegrity classifies every measured system file: shipped by the image (hash matches the
-// baseline), installed by a signed package (current file matches the apk database and what was
-// measured), or a finding.
-func checkIntegrity(ms []imaMeasurement, baseline, apk map[string]string) integrityReport {
+// baseline), installed by a signed package (apk reports it unchanged, and it still has the
+// content that was measured), or a finding. modified is apk's verdict for owned files.
+func checkIntegrity(ms []imaMeasurement, baseline map[string]string, owned, modified map[string]bool) integrityReport {
 	rep := integrityReport{Findings: []integrityFinding{}}
 	seen := map[string]bool{}
 	for _, m := range ms {
@@ -193,18 +216,17 @@ func checkIntegrity(ms []imaMeasurement, baseline, apk map[string]string) integr
 			}
 			continue
 		}
-		sum, ok := apk[m.Path]
-		if !ok {
+		if !owned[m.Path] {
 			rep.Findings = append(rep.Findings, integrityFinding{m.Path, "not part of the OS image or any installed package"})
 			continue
 		}
-		cur256, cur1, err := fileDigests(m.Path)
+		cur, err := fileSHA256(m.Path)
 		switch {
 		case err != nil:
 			rep.Findings = append(rep.Findings, integrityFinding{m.Path, "package file can't be read: " + err.Error()})
-		case cur1 != sum:
+		case modified[m.Path]:
 			rep.Findings = append(rep.Findings, integrityFinding{m.Path, "differs from its package"})
-		case cur256 != m.Hash:
+		case cur != m.Hash:
 			rep.Findings = append(rep.Findings, integrityFinding{m.Path, "ran with different content than its package"})
 		default:
 			rep.Package++
@@ -228,12 +250,28 @@ func runIntegrityCheck() (integrityReport, error) {
 	} else {
 		return integrityReport{}, fmt.Errorf("no integrity baseline at %s", integrityBaseline)
 	}
-	apk := map[string]string{}
+	owned := map[string]bool{}
 	if af, err := os.Open(apkInstalledDB); err == nil {
-		apk = apkChecksums(af)
+		owned = apkOwnedFiles(af)
 		af.Close()
 	}
-	return checkIntegrity(ms, baseline, apk), nil
+	// apk audits only the directories holding measured package files (not in the image baseline).
+	dirSet := map[string]bool{}
+	for _, m := range ms {
+		if _, inImage := baseline[m.Path]; !inImage && owned[m.Path] && isSystemPath(m.Path) {
+			dirSet[path.Dir(m.Path)] = true
+		}
+	}
+	dirs := make([]string, 0, len(dirSet))
+	for d := range dirSet {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	modified, err := apkModified(dirs)
+	if err != nil {
+		return integrityReport{}, err
+	}
+	return checkIntegrity(ms, baseline, owned, modified), nil
 }
 
 var integrityQuiet bool

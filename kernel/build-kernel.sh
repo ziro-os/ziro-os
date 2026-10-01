@@ -113,7 +113,10 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     "$ALPINE_IMAGE" sh -euc '
         apk add --no-cache build-base linux-headers bc bison flex openssl-dev elfutils-dev \
-            perl python3 xz bash curl diffutils findutils kmod gzip openssl gawk ccache pahole zstd gnupg >/dev/null
+            perl python3 xz bash curl diffutils findutils kmod gzip openssl gawk ccache pahole zstd gnupg coreutils >/dev/null
+        # Reproducible builds: the kernel parses KBUILD_BUILD_TIMESTAMP with `date -d`, which needs
+        # GNU date (BusyBox date rejects it and the timestamp would silently not apply).
+        date -d "$KBUILD_BUILD_TIMESTAMP" +%s >/dev/null || { echo "❌ KBUILD_BUILD_TIMESTAMP is not parseable" >&2; exit 1; }
         # Kernel scripts (e.g. x86 scripts/orc_hash.sh) need GNU awk; BusyBox awk rejects
         # regexes like "^struct orc_entry {$". /usr/local/bin is first in PATH.
         mkdir -p /usr/local/bin && ln -sf "$(command -v gawk)" /usr/local/bin/awk

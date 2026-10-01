@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -17,6 +18,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseImageRef(t *testing.T) {
@@ -74,13 +76,18 @@ func (f *fakeRegistry) handler(t *testing.T) http.Handler {
 			return
 		}
 		const base = "/v2/library/app/"
+		// Serve only the fixture's own bytes, as an opaque download.
+		serve := func(b []byte) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(b))
+		}
 		switch p := strings.TrimPrefix(r.URL.Path, base); {
 		case p == "manifests/v1":
-			_, _ = w.Write(f.manifest)
+			serve(f.manifest)
 		case strings.HasPrefix(p, "manifests/") && f.sigs[strings.TrimPrefix(p, "manifests/")] != nil:
-			_, _ = w.Write(f.sigs[strings.TrimPrefix(p, "manifests/")])
+			serve(f.sigs[strings.TrimPrefix(p, "manifests/")])
 		case strings.HasPrefix(p, "blobs/") && f.blobs[strings.TrimPrefix(p, "blobs/")] != nil:
-			_, _ = w.Write(f.blobs[strings.TrimPrefix(p, "blobs/")])
+			serve(f.blobs[strings.TrimPrefix(p, "blobs/")])
 		default:
 			http.NotFound(w, r)
 		}
