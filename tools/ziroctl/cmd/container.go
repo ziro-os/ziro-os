@@ -253,9 +253,9 @@ var containerImagesCmd = &cobra.Command{
 }
 
 var containerStopCmd = &cobra.Command{
-	Use:     "stop <container...>",
-	Short:   "Stop one or more running containers",
-	Args:    cobra.MinimumNArgs(1),
+	Use:   "stop <container...>",
+	Short: "Stop one or more running containers",
+	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {

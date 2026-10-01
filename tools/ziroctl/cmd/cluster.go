@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/ziro-os/ziro-os/sdk/schema"
 	"net"
 	"net/http"
 	"net/netip"
@@ -399,7 +400,7 @@ func requireMaster() (*ClusterConfig, error) {
 // ---- validation (trust boundary for deploy/apply/join input) ----
 
 var (
-	envKeyRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	envKeyRe  = schema.EnvKeyRe
 	portMapRe = regexp.MustCompile(`^(\d{1,5}):(\d{1,5})(/(tcp|udp))?$`)
 )
 

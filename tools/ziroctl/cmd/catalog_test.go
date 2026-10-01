@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"github.com/ziro-os/ziro-os/sdk/catalog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,10 +34,10 @@ func publishCatalog(t *testing.T, dir string, priv []byte, mods ...ModuleManifes
 		b, _ := json.Marshal(m)
 		os.WriteFile(p, b, 0644)
 	}
-	if _, err := buildCatalog(src, dir, "test", "module", 24*time.Hour, catalogCheckers["module"]); err != nil {
+	if _, err := catalog.Build(src, dir, "test", "module", 24*time.Hour, catalogNow(), catalogCheckers["module"]); err != nil {
 		t.Fatal(err)
 	}
-	if err := signCatalog(dir, priv); err != nil {
+	if err := catalog.Sign(dir, priv); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -81,7 +82,7 @@ func TestCatalogRefreshVerifyAndLoad(t *testing.T) {
 	// A bad signature fails the refresh and leaves the cache alone.
 	publishCatalog(t, dir, priv, demoPlugin)
 	_, otherPriv := testCatalogKey(t)
-	signCatalog(dir, otherPriv)
+	catalog.Sign(dir, otherPriv)
 	before, _ := os.ReadFile(filepath.Join(repoCache(repo), "index.json"))
 	if _, err := refreshRepo(repo); err == nil || !strings.Contains(err.Error(), "signature") {
 		t.Fatalf("bad signature: %v", err)
@@ -117,81 +118,6 @@ func TestCatalogEntryHashMismatch(t *testing.T) {
 	}
 }
 
-func TestRepoValidation(t *testing.T) {
-	pub, _ := testCatalogKey(t)
-	for _, r := range []CatalogRepo{
-		{Name: "x", URL: "http://example.com", Kind: "module", Key: pub},
-		{Name: "x", URL: "https://u:p@example.com", Kind: "module", Key: pub},
-		{Name: "x", URL: "https://example.com", Kind: "module", Key: "junk"},
-		{Name: "../x", URL: "https://example.com", Kind: "module", Key: pub},
-		{Name: "x", URL: "https://example.com", Kind: "binary", Key: pub},
-	} {
-		if r.validate() == nil {
-			t.Errorf("accepted %+v", r)
-		}
-	}
-	for _, p := range []string{"../x", "/etc/x", "a/../../x", ""} {
-		if safeEntryPath(p) == nil {
-			t.Errorf("accepted entry path %q", p)
-		}
-	}
-}
-
-func TestExpandAndSettings(t *testing.T) {
-	vars := map[string]string{"setting.port": "80", "secret.k": "{{setting.port}}"}
-	if out, err := expand("p={{ setting.port }} k={{secret.k}}", vars); err != nil || out != "p=80 k={{setting.port}}" {
-		t.Fatalf("%q %v (values must not be re-expanded)", out, err)
-	}
-	for _, bad := range []string{"{{setting.nope}}", "{{ bad", "{{exec \"x\"}}"} {
-		if _, err := expand(bad, vars); err == nil {
-			t.Errorf("accepted %q", bad)
-		}
-	}
-	defs := []Setting{{Name: "port", Default: "80", Pattern: `^[0-9]{2,5}$`}}
-	if _, err := resolveSettings(defs, nil, map[string]string{"port": "80\nevil"}); err == nil {
-		t.Fatal("setting with a newline accepted")
-	}
-	if _, err := resolveSettings(defs, nil, map[string]string{"nope": "1"}); err == nil {
-		t.Fatal("unknown setting accepted")
-	}
-	if got, _ := resolveSettings(defs, map[string]string{"port": "81"}, nil); got["port"] != "81" {
-		t.Fatal("previous setting not kept")
-	}
-	if validateSettings([]Setting{{Name: "a", Default: "x", Pattern: "x"}}) == nil {
-		t.Fatal("unanchored pattern accepted")
-	}
-	s, err := genSecret("hex:32")
-	if err != nil || len(s) != 64 {
-		t.Fatal(s, err)
-	}
-	if _, err := genSecret("hex:8"); err == nil {
-		t.Fatal("short secret accepted")
-	}
-}
-
-func TestPluginManifestRejectsUnsafe(t *testing.T) {
-	sha := strings.Repeat("a", 64)
-	for _, m := range []ModuleManifest{
-		{Name: "p", Artifacts: []ModuleArtifact{{URL: "https://x/y", SHA256: sha, Path: "/usr/bin/y", Mode: "0755"}}},
-		{Name: "p", Artifacts: []ModuleArtifact{{URL: "https://x/y", SHA256: sha, Path: "/var/lib/ziro/plugins/q/y", Mode: "0755"}}},
-		{Name: "p", Artifacts: []ModuleArtifact{{URL: "http://x/y", SHA256: sha, Path: "/var/lib/ziro/plugins/p/y", Mode: "0755"}}},
-		{Name: "p", Artifacts: []ModuleArtifact{{URL: "https://x/y", Path: "/var/lib/ziro/plugins/p/y", Mode: "0755"}}},
-		{Name: "p", Artifacts: []ModuleArtifact{{URL: "https://x/y", SHA256: sha, Path: "/var/lib/ziro/plugins/p/y", Mode: "0777"}}},
-		{Name: "p", Secrets: map[string]string{"k": "hex:32"}, Files: []ModuleFile{{Path: "/etc/p.conf", Mode: "0644", Content: "k={{secret.k}}"}}},
-		{Name: "p", Secrets: map[string]string{"k": "hex:32"}, PostStart: []ModuleCmd{{Exec: "/bin/x", Args: []string{"--token={{secret.k}}"}}}},
-		{Name: "p", Files: []ModuleFile{{Path: "/etc/p.conf", Mode: "0644", Content: "{{setting.undefined}}"}}},
-		{Name: "p", Packages: []string{"x; rm -rf /"}},
-		{Name: "p", Services: []ModuleService{{Name: "s", Exec: "/bin/s", User: "root:0", PIDFile: "/run/s.pid", LogFile: "/var/log/s.log"}}},
-	} {
-		if err := m.validate(); err == nil {
-			t.Errorf("accepted %+v", m)
-		}
-	}
-	if _, err := parseManifest([]byte(`{"name":"p","version":"1","servces":[]}`)); err == nil {
-		t.Error("unknown field accepted")
-	}
-}
-
 func TestPluginInstallSecretsSettingsArtifactsUpgrade(t *testing.T) {
 	root, installed, _ := stubModules(t)
 	moduleDirRoot = root
@@ -209,7 +135,7 @@ func TestPluginInstallSecretsSettingsArtifactsUpgrade(t *testing.T) {
 		Files:     []ModuleFile{{Path: "/etc/garage.toml", Mode: "0600", Content: "rpc_secret = \"{{secret.rpc}}\"\ncap = {{setting.capacity}}\n"}},
 		Services: []ModuleService{{Name: "garage", Exec: "/usr/bin/garage", Args: "server", User: "garage", EnvFile: "/etc/garage.env",
 			PIDFile: "/run/ziro-garage.pid", LogFile: "/var/log/garage.log"}, {Name: "old-helper", Exec: "/usr/bin/h", PIDFile: "/run/h.pid", LogFile: "/var/log/h.log"}}}
-	if err := v1.validate(); err != nil {
+	if err := v1.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if err := installModule(v1, moduleOpts{Set: map[string]string{"capacity": "50G"}}); err != nil {
@@ -273,7 +199,7 @@ func TestBackupRemoteValidation(t *testing.T) {
 
 func TestOfficialReposValid(t *testing.T) {
 	for _, r := range officialRepos {
-		if err := r.validate(); err != nil {
+		if err := r.Validate(); err != nil {
 			t.Fatal(err)
 		}
 	}

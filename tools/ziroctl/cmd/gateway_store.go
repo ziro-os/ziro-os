@@ -245,7 +245,7 @@ func (s localRouteStore) config() (*GatewayConfig, error) {
 	}
 	cfg := &GatewayConfig{ACME: d.ACME, Routes: []GatewayRouteState{}}
 	for _, r := range d.Routes {
-		r.normalize()
+		r.Normalize()
 		cfg.Routes = append(cfg.Routes, resolveTargets(r, localAppTargets))
 		if name, ok := strings.CutPrefix(r.TLS, "cert:"); ok {
 			if c, err := s.readCert(name); err == nil {
@@ -336,7 +336,7 @@ func (s localRouteStore) appTargetsKnown(app string) error {
 
 // putRoute validates r and creates or replaces it in the store.
 func putRoute(s routeStore, r GatewayRoute) (GatewayRoute, error) {
-	r.normalize()
+	r.Normalize()
 	if err := validateRoute(&r); err != nil {
 		return r, err
 	}
@@ -351,7 +351,7 @@ func putRoute(s routeStore, r GatewayRoute) (GatewayRoute, error) {
 			if x.Name == r.Name {
 				continue
 			}
-			x.normalize()
+			x.Normalize()
 			if err := routesConflict(x, r); err != nil {
 				return err
 			}

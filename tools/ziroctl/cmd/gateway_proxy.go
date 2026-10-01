@@ -352,7 +352,7 @@ func (g *gatewayServer) load(cfg *GatewayConfig) error {
 		certs[name] = &kp
 	}
 	for i, rs := range cfg.Routes {
-		rs.normalize()
+		rs.Normalize()
 		if err := validateRoute(&rs.GatewayRoute); err != nil {
 			return fmt.Errorf("route %q: %w", rs.Name, err)
 		}
@@ -1367,7 +1367,7 @@ func (g *gatewayServer) status() GatewayStatus {
 	g.metrics.mu.Lock()
 	defer g.metrics.mu.Unlock()
 	for _, rs := range cfg.Routes {
-		rs.normalize()
+		rs.Normalize()
 		match, _ := describeRoute(rs)
 		rst := GatewayRouteStatus{Name: rs.Name, Kind: rs.Kind, Match: match, TLS: rs.TLS, Upstreams: []UpstreamHealth{}}
 		r := &gwRoute{GatewayRouteState: rs}

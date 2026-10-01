@@ -148,4 +148,3 @@ func TestMotdCommand(t *testing.T) {
 		t.Errorf("expected motd output to contain 'Ziro-OS', got: %s", out)
 	}
 }
-

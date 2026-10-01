@@ -25,7 +25,10 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/ziro-os/ziro-os/sdk v0.0.0
 	go.etcd.io/bbolt v1.4.1 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
+
+replace github.com/ziro-os/ziro-os/sdk => ../../sdk
