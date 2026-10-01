@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -12,7 +13,8 @@ import (
 
 func upstream(t *testing.T, name string) (*httptest.Server, string) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, name+" "+r.Host+" xff="+r.Header.Get("X-Forwarded-For"))
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.WriteString(w, name+" "+html.EscapeString(r.Host)+" xff="+html.EscapeString(r.Header.Get("X-Forwarded-For")))
 	}))
 	t.Cleanup(s.Close)
 	return s, strings.TrimPrefix(s.URL, "http://")
