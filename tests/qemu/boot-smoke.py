@@ -340,19 +340,20 @@ def main():
         con.run(f"printf '%s' '{hog}' > /tmp/hog.json && ziroctl plugin install -f /tmp/hog.json >/dev/null 2>&1", timeout=120)
         ok, out = retry(con, "cat /sys/fs/cgroup/ziro/workloads/hog/memory.max /sys/fs/cgroup/ziro/workloads/hog/memory.events",
                         lambda rc, o: "67108864" in o and "oom_kill 0" not in o and "oom_kill" in o, 60)
-        rc, out2 = con.run("ziroctl service status sshd | grep -c RUNNING; ziroctl motd | grep -c 'hog killed'")
+        # init logs the hog's restarts on this console, so read tagged values, not whole lines.
+        rc, out2 = con.run("echo SSHD=$(ziroctl service status sshd | grep -c RUNNING) KILLED=$(ziroctl motd | grep -c 'hog killed')")
         check("plugin over its memory limit is OOM-killed in its own cgroup; sshd unaffected; login summary says so",
-              ok and out2.split() == ["1", "1"], out + out2)
+              ok and "SSHD=1" in out2 and "KILLED=1" in out2, out + out2)
         con.run("ziroctl plugin disable hog --purge >/dev/null 2>&1; rm -f /tmp/hog.json", timeout=120)
 
         # Login summary: each address once (no container veths), nothing hardcoded.
-        rc, out = con.run("ziroctl motd; ziroctl motd --json | grep -c '\"addresses\"'")
+        rc, out = con.run("ziroctl motd; echo JSONADDR=$(ziroctl motd --json | grep -c '\"addresses\"')")
         addrs = re.findall(r"\b\d+\.\d+\.\d+\.\d+\b", out.split("Network", 1)[-1].split("\n")[0]) if "Network" in out else []
         check("motd: summary with each address once", rc == 0 and "Resources" in out and len(addrs) == len(set(addrs)) > 0
-              and "AI Threat" not in out and out.split()[-1] == "1", out)
-        rc, out = con.run("ziroctl system top --once --json | grep -c '\"processes\"'; ziroctl system df --json | grep -c logs; "
+              and "AI Threat" not in out and "JSONADDR=1" in out, out)
+        rc, out = con.run("echo TOP=$(ziroctl system top --once --json | grep -c '\"processes\"') DF=$(ziroctl system df --json | grep -c logs); "
                           "ziroctl system prune --dry-run --only logs,tmp >/dev/null && echo PRUNEOK")
-        check("system top snapshot, df, prune dry-run", out.split()[:2] == ["1", "1"] and "PRUNEOK" in out, out)
+        check("system top snapshot, df, prune dry-run", "TOP=1" in out and "DF=1" in out and "PRUNEOK" in out, out)
         # Ziro Guard: an "attacker" in its own network namespace (veth, so traffic isn't loopback).
         # Sysctls present on every kernel (perf/kexec may be compiled out of the custom flavor).
         rc, out = con.run("sysctl -n net.ipv4.conf.all.log_martians net.ipv4.tcp_rfc1337 dev.tty.ldisc_autoload; "
