@@ -95,11 +95,11 @@ idx, err = catalog.VerifyIndex(repo, raw, sig, time.Now())
 `ziroctl dev` runs on Linux and macOS (it needs QEMU, and Docker for the kernel kit):
 
 ```sh
-ziroctl dev new plugin hello            # modules/hello/manifest.json, README.md, .github/workflows/catalog.yml
-ziroctl dev new app web                 # apps/web/app.json (a pinned, non-root web server to start from)
+ziroctl dev new plugin hello            # modules/hello/manifest.yaml, README.md, .github/workflows/catalog.yml
+ziroctl dev new app web                 # apps/web/app.yaml (a pinned, non-root web server to start from)
 ziroctl dev validate .                  # the host's rules, plus lints; --strict makes warnings fail (CI)
-ziroctl dev run modules/hello/manifest.json --check 'wget -qO- http://127.0.0.1:8080/'
-ziroctl dev run apps/web/app.json --forward 8080:8080   # then http://127.0.0.1:8080 on your machine
+ziroctl dev run modules/hello/manifest.yaml --check 'wget -qO- http://127.0.0.1:8080/'
+ziroctl dev run apps/web/app.yaml --forward 8080:8080   # then http://127.0.0.1:8080 on your machine
 ```
 
 - `dev validate` reports a service running as root, a missing health check, a `bind` setting not on loopback by
