@@ -162,9 +162,7 @@ func collectMetrics() string {
 	var h hostMetrics
 	sys := inspectSystem()
 	h.MemTotal, h.MemFree, h.ContainerdUp, h.Cgroups2 = sys.TotalMemMB<<20, sys.FreeMemMB<<20, sys.ContainerdOK, sys.CgroupsV2
-	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
-		fmt.Sscanf(string(b), "%f %f %f", &h.Load1, &h.Load5, &h.Load15)
-	}
+	h.Load1, h.Load5, h.Load15 = readLoadavg()
 	if b, err := os.ReadFile("/proc/uptime"); err == nil {
 		fmt.Sscanf(string(b), "%f", &h.Uptime)
 	}

@@ -1,0 +1,88 @@
+name: Tools Release (ziroctl & ziropkg)
+
+# Publishes ziroctl and ziropkg on their own release stream (tags tools/vX.Y.Z), independent of
+# OS releases. Hosts install them with `ziroctl update`, which accepts a release only if
+# SHA256SUMS carries a valid signature from the Ziro release key (secret ZIRO_RELEASE_KEY,
+# ed25519; public half in tools/ziroctl/cmd/update.go) and every binary matches it.
+on:
+  push:
+    tags:
+      - 'tools/v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tools version (e.g. v1.0.17)'
+        required: true
+      min_os:
+        description: 'Oldest Ziro OS version these binaries run on'
+        required: true
+        default: '1.0.16'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Version
+        id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_MIN_OS: ${{ github.event.inputs.min_os }}
+        run: |
+          v="${INPUT_VERSION:-${GITHUB_REF_NAME#tools/}}"
+          v="${v#v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version $v"; exit 1; }
+          min_os="${INPUT_MIN_OS:-$(cat tools/MIN_OS)}"
+          [[ "$min_os" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad min_os $min_os"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "min_os=$min_os" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: |
+            tools/ziroctl/go.sum
+            tools/ziropkg/go.sum
+
+      - name: Test
+        run: cd tools/ziroctl && go test ./...
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          MIN_OS: ${{ steps.v.outputs.min_os }}
+        run: |
+          make tools-all VERSION="$VERSION"
+          mkdir -p out
+          cp bin/ziroctl-x86_64 bin/ziroctl-arm64 bin/ziropkg-x86_64 bin/ziropkg-arm64 out/
+          printf '{"version":"%s","min_os":"%s"}\n' "$VERSION" "$MIN_OS" > out/tools.json
+          (cd out && sha256sum ziroctl-* ziropkg-* tools.json > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Sign SHA256SUMS
+        env:
+          ZIRO_RELEASE_KEY: ${{ secrets.ZIRO_RELEASE_KEY }}
+        run: scripts/release/sign-sums.sh out
+
+      - name: Publish
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: tools/v${{ steps.v.outputs.version }}
+          name: "ziroctl & ziropkg v${{ steps.v.outputs.version }}"
+          make_latest: false # OS releases stay "latest"; ziroctl update lists tools/v* itself
+          generate_release_notes: true
+          files: |
+            out/ziroctl-*
+            out/ziropkg-*
+            out/tools.json
+            out/SHA256SUMS
+            out/SHA256SUMS.sig

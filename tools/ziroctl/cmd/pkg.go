@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -21,7 +24,13 @@ var pkgInstallCmd = &cobra.Command{
 	Example: "  ziroctl pkg install curl\n  ziroctl pkg install htop git",
 	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runZiropkg(cmd, append([]string{"install"}, args...)...)
+		if err := validPackageNames(args); err != nil {
+			return err
+		}
+		if err := runZiropkg(cmd, append([]string{"install"}, args...)...); err != nil {
+			return err
+		}
+		return recordExtraPackages(args, nil)
 	},
 }
 
@@ -32,8 +41,77 @@ var pkgRemoveCmd = &cobra.Command{
 	Example: "  ziroctl pkg remove curl",
 	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runZiropkg(cmd, append([]string{"remove"}, args...)...)
+		if err := validPackageNames(args); err != nil {
+			return err
+		}
+		if err := runZiropkg(cmd, append([]string{"remove"}, args...)...); err != nil {
+			return err
+		}
+		return recordExtraPackages(nil, args)
 	},
+}
+
+// Packages installed on top of the image (pkg install, dev run's QEMU) are recorded so the boot
+// reconcile reinstalls them after an OS upgrade replaced /usr.
+var (
+	extraPackagesFile = "/etc/ziro/packages"
+	packageNameRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9+._-]{0,99}$`)
+)
+
+func validPackageNames(names []string) error {
+	for _, n := range names {
+		if !packageNameRe.MatchString(n) {
+			return fmt.Errorf("invalid package name %q", n)
+		}
+	}
+	return nil
+}
+
+func extraPackages() []string {
+	b, err := os.ReadFile(extraPackagesFile)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, l := range strings.Fields(string(b)) {
+		if packageNameRe.MatchString(l) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func recordExtraPackages(add, remove []string) error {
+	cur := extraPackages()
+	for _, a := range add {
+		if !slices.Contains(cur, a) {
+			cur = append(cur, a)
+		}
+	}
+	cur = slices.DeleteFunc(cur, func(p string) bool { return slices.Contains(remove, p) })
+	slices.Sort(cur)
+	data := strings.Join(cur, "\n")
+	if data != "" {
+		data += "\n"
+	}
+	return writeFileAtomic(extraPackagesFile, []byte(data), 0644)
+}
+
+// reconcileExtraPackages reinstalls recorded packages that are missing (after an OS upgrade).
+func reconcileExtraPackages() {
+	var missing []string
+	for _, p := range extraPackages() {
+		if !apkInstalled(p) {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	fmt.Printf("[packages] reinstalling %s\n", strings.Join(missing, " "))
+	if err := apkAdd(missing); err != nil {
+		fmt.Printf("[packages] %v\n", err)
+	}
 }
 
 var pkgSearchCmd = &cobra.Command{

@@ -259,6 +259,7 @@ var securityMonitorCmd = &cobra.Command{
 		fmt.Println("🛡️  Ziro Sentinel Continuous Protection Monitor started.")
 		ensureCanary()
 		go runGuardWatcher()
+		go runResourceWatchdog()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 

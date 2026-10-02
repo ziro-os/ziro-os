@@ -160,6 +160,11 @@ jobs:
           echo "Generated SHA256SUMS:"
           cat ../build/SHA256SUMS
 
+      - name: Sign SHA256SUMS
+        env:
+          ZIRO_RELEASE_KEY: ${{ secrets.ZIRO_RELEASE_KEY }}
+        run: scripts/release/sign-sums.sh build
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
@@ -179,6 +184,7 @@ jobs:
             build/kernel-config-*
             build/kernel-devel-*.tar.gz
             build/SHA256SUMS
+            build/SHA256SUMS.sig
             bin/ziroctl-*
             bin/ziropkg-*
 

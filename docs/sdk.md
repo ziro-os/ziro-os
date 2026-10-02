@@ -79,6 +79,8 @@ ziroctl dev run apps/web/app.json --forward 8080:8080   # then http://127.0.0.1:
 - `dev validate` reports a service running as root, a missing health check, a `bind` setting not on loopback by
   default, an arch-specific artifact without `arch`, and an app command wrapped in a shell that never drops
   privileges.
+- `dev run` needs QEMU. It checks for it before downloading anything. On a Ziro host it offers to install it
+  (`--install-deps` skips the question); elsewhere it prints the install command.
 - `dev run` boots the latest release (`--release vX.Y.Z` for another, `--image-dir build` for a local build). It
   downloads it once into your cache and verifies it against the release's `SHA256SUMS`. The VM boots in live mode,
   so nothing persists. It installs the plugin (`plugin install -f`) or deploys the app (`apps deploy -f`).

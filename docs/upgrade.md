@@ -10,7 +10,7 @@ There are two ways to upgrade, and both use the same engine (`ziroctl upgrade ap
 |---|---|---|
 | When | Host is reachable and online | Offline hosts, or a host that no longer boots |
 | Source | Public GitHub release | `boot/initramfs.cpio.gz` on the ISO |
-| Verification | Release `SHA256SUMS` (hard fail on mismatch) | ISO `SHA256SUMS` |
+| Verification | Release `SHA256SUMS`, signed with the Ziro release key (hard fail on mismatch) | ISO `SHA256SUMS` |
 | Snapshot | `ziroctl backup create` (pre-upgrade) | Same, run with the installed ziroctl |
 
 ## What is kept and what is replaced
@@ -27,6 +27,10 @@ on the same filesystem and swapped in with atomic `rename(2)` calls.
 | `/root /home /data` | Untouched (SSH keys, user data) |
 | `/boot` | New `vmlinuz` and `initramfs.cpio.gz`. The previous pair is kept as `*.prev` |
 | `/lib/modules/<old>` | Kept, so the previous kernel can still boot |
+
+Releases sign their `SHA256SUMS` (`SHA256SUMS.sig`, ed25519). `ziroctl upgrade` refuses a release whose signature
+doesn't verify. A release published before signing was introduced needs `--allow-unsigned`; its checksums are
+still verified. A `ziroctl` newer than the image's (from `ziroctl update`, see [operations](operations.md)) is kept.
 
 The kernel flavor (`alpine` or `custom`, from `/etc/ziro-release`) and the architecture are preserved.
 To move a host to the hardened Ziro kernel (the default for new installs), run `ziroctl upgrade --flavor custom`.

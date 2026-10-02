@@ -3,14 +3,13 @@ package cmd
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -98,12 +97,15 @@ func parseIMAMeasurements(r io.Reader) []imaMeasurement {
 }
 
 // readBaseline parses "sha256  /path" lines.
-func readBaseline(r io.Reader) map[string]string {
-	out := map[string]string{}
+// readBaseline maps each path to its known-good hashes. A path can have several: `ziroctl
+// update` adds the new binary's hash and keeps the old one, which IMA measured before the update
+// and keeps in its (append-only) log until reboot.
+func readBaseline(r io.Reader) map[string][]string {
+	out := map[string][]string{}
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		if hash, p, ok := strings.Cut(sc.Text(), "  "); ok && len(hash) == 64 {
-			out[p] = hash
+			out[p] = append(out[p], hash)
 		}
 	}
 	return out
@@ -178,23 +180,12 @@ func isSystemPath(p string) bool {
 }
 
 // fileSHA256 is a file's current SHA-256 (hex).
-var fileSHA256 = func(p string) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
+var fileSHA256 = computeFileSHA256
 
 // checkIntegrity classifies every measured system file: shipped by the image (hash matches the
 // baseline), installed by a signed package (apk reports it unchanged, and it still has the
 // content that was measured), or a finding. modified is apk's verdict for owned files.
-func checkIntegrity(ms []imaMeasurement, baseline map[string]string, owned, modified map[string]bool) integrityReport {
+func checkIntegrity(ms []imaMeasurement, baseline map[string][]string, owned, modified map[string]bool) integrityReport {
 	rep := integrityReport{Findings: []integrityFinding{}}
 	seen := map[string]bool{}
 	for _, m := range ms {
@@ -209,7 +200,7 @@ func checkIntegrity(ms []imaMeasurement, baseline map[string]string, owned, modi
 			continue
 		}
 		if want, ok := baseline[m.Path]; ok {
-			if want == m.Hash {
+			if slices.Contains(want, m.Hash) {
 				rep.Image++
 			} else {
 				rep.Findings = append(rep.Findings, integrityFinding{m.Path, "differs from the OS image"})
@@ -243,7 +234,7 @@ func runIntegrityCheck() (integrityReport, error) {
 	}
 	defer mf.Close()
 	ms := parseIMAMeasurements(mf)
-	baseline := map[string]string{}
+	var baseline map[string][]string
 	if bf, err := os.Open(integrityBaseline); err == nil {
 		baseline = readBaseline(bf)
 		bf.Close()

@@ -186,6 +186,9 @@ func (m ModuleManifest) Validate() error {
 		if s.User != "" && !UserNameRe.MatchString(s.User) {
 			return fmt.Errorf("service %s: bad user %q", s.Name, s.User)
 		}
+		if err := s.Resources.Validate(); err != nil {
+			return fmt.Errorf("service %s: %w", s.Name, err)
+		}
 		if s.EnvFile != "" {
 			if err := abs(s.EnvFile); err != nil {
 				return err

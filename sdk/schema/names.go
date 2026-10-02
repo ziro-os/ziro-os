@@ -14,16 +14,17 @@ import (
 )
 
 type ServiceDef struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Exec        string `json:"exec"`
-	Args        string `json:"args"`
-	PIDFile     string `json:"pidfile"`
-	LogFile     string `json:"logfile"`
-	Check       string `json:"check,omitempty"`    // args that make exec Validate its config (sshd: -t)
-	User        string `json:"user,omitempty"`     // run as this user (and its primary group) instead of root
-	EnvFile     string `json:"env_file,omitempty"` // KEY=VALUE lines added to the environment (root-owned, not world-readable)
-	Autostart   bool   `json:"autostart"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Exec        string     `json:"exec"`
+	Args        string     `json:"args"`
+	PIDFile     string     `json:"pidfile"`
+	LogFile     string     `json:"logfile"`
+	Check       string     `json:"check,omitempty"`     // args that make exec Validate its config (sshd: -t)
+	User        string     `json:"user,omitempty"`      // run as this user (and its primary group) instead of root
+	EnvFile     string     `json:"env_file,omitempty"`  // KEY=VALUE lines added to the environment (root-owned, not world-readable)
+	Resources   *Resources `json:"resources,omitempty"` // cgroup limits for the service
+	Autostart   bool       `json:"autostart"`
 }
 
 // ValidName guards every user-supplied identifier that ends up in a file path.

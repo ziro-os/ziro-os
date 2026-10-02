@@ -1149,9 +1149,7 @@ func registerGatewayRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.Ha
 	}
 	readRoute := func(w http.ResponseWriter, r *http.Request) (GatewayRoute, bool) {
 		var rt GatewayRoute
-		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&rt); err != nil {
+		if err := decodeStrict(w, r, &rt, 1<<20); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "bad route: " + err.Error()})
 			return rt, false

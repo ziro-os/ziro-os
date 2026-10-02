@@ -40,6 +40,7 @@ type AppComponent struct {
 	Data        []string          `json:"data,omitempty"`         // container paths kept on the host
 	Args        []string          `json:"args,omitempty"`
 	Health      []string          `json:"health,omitempty"` // run in the container; exit 0 = ready
+	Resources   *Resources        `json:"resources,omitempty"`
 }
 
 func ParseAppDef(b []byte) (AppDef, error) {
@@ -90,6 +91,9 @@ func (d AppDef) Validate() error {
 		}
 		if c.Port < 0 || c.Port > 65535 {
 			return fmt.Errorf("component %s: bad port", c.Name)
+		}
+		if err := c.Resources.Validate(); err != nil {
+			return fmt.Errorf("component %s: %w", c.Name, err)
 		}
 		if err := ValidateDataPaths(c.Data); err != nil {
 			return fmt.Errorf("component %s: %w", c.Name, err)

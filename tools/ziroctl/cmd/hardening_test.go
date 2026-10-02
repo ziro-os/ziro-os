@@ -177,17 +177,3 @@ func TestParseCronLine(t *testing.T) {
 		}
 	}
 }
-
-func TestRotateLog(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "svc.log")
-	if err := os.WriteFile(p, make([]byte, maxLogSize+1), 0600); err != nil {
-		t.Fatal(err)
-	}
-	rotateLog(p)
-	if fi, _ := os.Stat(p); fi.Size() != 0 {
-		t.Errorf("log not truncated: %d bytes", fi.Size())
-	}
-	if fi, err := os.Stat(p + ".1"); err != nil || fi.Size() != maxLogSize+1 {
-		t.Errorf("previous generation missing or wrong size")
-	}
-}

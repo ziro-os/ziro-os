@@ -103,9 +103,10 @@ type ClusteredApp struct {
 	// Data are container paths kept on the replica's node (/var/lib/ziro/apps/<app>/<index>/...).
 	// They follow the replica index, not the node: a replica that moves starts empty and must
 	// recover through the app's own replication or a backup.
-	Data      []string `json:"data,omitempty"`
-	Revision  int      `json:"revision,omitempty"`
-	CreatedAt string   `json:"created_at,omitempty"`
+	Data      []string   `json:"data,omitempty"`
+	Resources *Resources `json:"resources,omitempty"` // per replica
+	Revision  int        `json:"revision,omitempty"`
+	CreatedAt string     `json:"created_at,omitempty"`
 }
 
 // Replica is one placed (or pending, Node == "") instance of an app.
@@ -431,6 +432,9 @@ func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 	}
 	if a.Replicas < 0 || a.Replicas > 1000 {
 		return fmt.Errorf("replicas must be between 0 and 1000")
+	}
+	if err := a.Resources.Validate(); err != nil {
+		return err
 	}
 	if a.Port != "" {
 		m := portMapRe.FindStringSubmatch(a.Port)
@@ -989,6 +993,8 @@ var (
 	appEnv      []string
 	appSecrets  []string
 	appArgs     []string
+	appMemory   string
+	appCPUs     float64
 	appMeshOnly bool
 	appPrivEsc  bool
 	appAllow    []string
@@ -1071,6 +1077,22 @@ var clusterDeployCmd = &cobra.Command{
 			}
 			if f.Changed("arg") {
 				app.Args = appArgs
+			}
+			if f.Changed("memory") || f.Changed("cpus") {
+				r := Resources{}
+				if app.Resources != nil {
+					r = *app.Resources
+				}
+				if f.Changed("memory") {
+					r.Memory = appMemory
+				}
+				if f.Changed("cpus") {
+					r.CPUs = appCPUs
+				}
+				app.Resources = &r
+				if r == (Resources{}) {
+					app.Resources = nil
+				}
 			}
 			if f.Changed("volume") {
 				app.Volumes = nil
@@ -1609,6 +1631,8 @@ func init() {
 	clusterDeployCmd.Flags().StringArrayVarP(&appEnv, "env", "e", nil, "Environment variable KEY=VALUE (repeatable; KEY= removes)")
 	clusterDeployCmd.Flags().StringArrayVar(&appSecrets, "secret", nil, "Cluster secret to inject as env (repeatable)")
 	clusterDeployCmd.Flags().StringArrayVar(&appArgs, "arg", nil, "Command/argument passed after the image (repeatable, in order)")
+	clusterDeployCmd.Flags().StringVar(&appMemory, "memory", "", "Memory limit per replica, e.g. 512Mi or 2Gi ('' = none)")
+	clusterDeployCmd.Flags().Float64Var(&appCPUs, "cpus", 0, "CPU limit per replica, e.g. 0.5 (0 = none)")
 	clusterDeployCmd.Flags().BoolVar(&appMeshOnly, "mesh-only", false, "Publish --port only on the node's mesh IP (not the public interface)")
 	clusterDeployCmd.Flags().BoolVar(&appPrivEsc, "allow-privilege-escalation", false, "Run without no-new-privileges and keep NET_RAW (setuid binaries, ping); off by default")
 	clusterDeployCmd.Flags().StringArrayVar(&appVolumes, "volume", nil, "Cluster share to mount: <share>:/path[:ro] (repeatable; '' = none)")

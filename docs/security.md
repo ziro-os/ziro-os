@@ -15,7 +15,10 @@ Security is a foundational design pillar of Ziro-OS. Unlike general-purpose dist
 - `/run` and `/tmp` use tmpfs. Deployments requiring immutable root must provide and verify that enforcement.
 
 ### 3. Unified cgroups v2 & Namespaces
-- PID 1 enables cgroup2 controllers. Workload CPU, memory, and PID limits must be supplied by runtime/CRI policy.
+- PID 1 enables cgroup2 controllers. Every service runs in its own cgroup: platform daemons in `ziro/system`
+  (memory reservation, OOM score -900), plugin services in `ziro/workloads` (OOM score +300). Plugins and apps
+  declare `resources` (memory, CPUs, PIDs), enforced by the kernel; a sentinel watchdog reacts to sustained memory
+  pressure. See [operations](operations.md#memory-how-a-host-protects-itself).
 - Namespace and seccomp support must be paired with verified runtime settings; host binds, privileged mode,
   runtime sockets, and host networking grant additional authority. Local `ctr` fallback uses host networking.
 

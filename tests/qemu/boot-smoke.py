@@ -21,7 +21,7 @@ import threading
 import time
 
 BOOT_MARKER = "Live initialization complete"
-INSTALLED_MARKER = "Enterprise Container Host Status"
+INSTALLED_MARKER = "Ziro OS ready (installed)"
 
 
 def qemu_command(arch, build_dir, flavor, initrd=None, append="rdinit=/init", disk=None, data_disk=None, qmp=None):
@@ -323,6 +323,37 @@ def main():
         check("Sentinel started at boot (service boot)", ok, out)
         rc, out = con.run("ziroctl service status crond")
         check("crond started at boot", "RUNNING" in out, out)
+
+        # Memory protection: platform daemons in ziro/system (reserved memory, OOM-protected),
+        # plugin services in ziro/workloads, bounded by their limits; tmpfs mounts capped.
+        rc, out = con.run("cat /proc/$(cat /run/sshd.pid)/cgroup /proc/$(cat /run/ziro-sentinel.pid)/cgroup; "
+                          "cat /proc/$(cat /run/ziro-sentinel.pid)/oom_score_adj /sys/fs/cgroup/ziro/system/memory.min; "
+                          "df -k /tmp /run | awk 'NR>1{print $2}'; awk '/MemTotal/{print $2}' /proc/meminfo")
+        f = out.split()
+        tmp_kb, run_kb, mem_kb = (int(x) for x in f[-3:]) if len(f) >= 3 and all(x.isdigit() for x in f[-3:]) else (0, 0, 1)
+        check("service cgroups: sshd/sentinel in ziro/system, OOM-protected, memory reserved; /tmp and /run capped",
+              "0::/ziro/system/sshd" in out and "0::/ziro/system/sentinel" in out and "-900" in f and len(f) > 3 and f[3].isdigit() and int(f[3]) > 0
+              and tmp_kb < mem_kb * 0.3 and run_kb < mem_kb * 0.15, out)
+        hog = ('{"name":"hog","version":"1","description":"memory hog","services":[{"name":"hog","description":"hog",'
+               '"exec":"/usr/bin/tail","args":"/dev/zero","pidfile":"/run/ziro-hog.pid","logfile":"/var/log/hog.log",'
+               '"user":"nobody","resources":{"memory":"64Mi"}}]}')
+        con.run(f"printf '%s' '{hog}' > /tmp/hog.json && ziroctl plugin install -f /tmp/hog.json >/dev/null 2>&1", timeout=120)
+        ok, out = retry(con, "cat /sys/fs/cgroup/ziro/workloads/hog/memory.max /sys/fs/cgroup/ziro/workloads/hog/memory.events",
+                        lambda rc, o: "67108864" in o and "oom_kill 0" not in o and "oom_kill" in o, 60)
+        # init logs the hog's restarts on this console, so read tagged values, not whole lines.
+        rc, out2 = con.run("echo SSHD=$(ziroctl service status sshd | grep -c RUNNING) KILLED=$(ziroctl motd | grep -c 'hog killed')")
+        check("plugin over its memory limit is OOM-killed in its own cgroup; sshd unaffected; login summary says so",
+              ok and "SSHD=1" in out2 and "KILLED=1" in out2, out + out2)
+        con.run("ziroctl plugin disable hog --purge >/dev/null 2>&1; rm -f /tmp/hog.json", timeout=120)
+
+        # Login summary: each address once (no container veths), nothing hardcoded.
+        rc, out = con.run("ziroctl motd; echo JSONADDR=$(ziroctl motd --json | grep -c '\"addresses\"')")
+        addrs = re.findall(r"\b\d+\.\d+\.\d+\.\d+\b", out.split("Network", 1)[-1].split("\n")[0]) if "Network" in out else []
+        check("motd: summary with each address once", rc == 0 and "Resources" in out and len(addrs) == len(set(addrs)) > 0
+              and "AI Threat" not in out and "JSONADDR=1" in out, out)
+        rc, out = con.run("echo TOP=$(ziroctl system top --once --json | grep -c '\"processes\"') DF=$(ziroctl system df --json | grep -c logs); "
+                          "ziroctl system prune --dry-run --only logs,tmp >/dev/null && echo PRUNEOK")
+        check("system top snapshot, df, prune dry-run", "TOP=1" in out and "DF=1" in out and "PRUNEOK" in out, out)
         # Ziro Guard: an "attacker" in its own network namespace (veth, so traffic isn't loopback).
         # Sysctls present on every kernel (perf/kexec may be compiled out of the custom flavor).
         rc, out = con.run("sysctl -n net.ipv4.conf.all.log_martians net.ipv4.tcp_rfc1337 dev.tty.ldisc_autoload; "

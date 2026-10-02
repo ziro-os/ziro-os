@@ -46,6 +46,12 @@ under active development and is not ready for production use.
 - **Plugins:** a plugin is a declarative JSON manifest (packages, sha256-pinned artifacts, config files, generated
   secrets, validated settings, unprivileged supervised services, health check), applied and exactly reversed by
   `ziroctl plugin`. Manifests are built into `ziroctl` or come from signed catalogs ([modules guide](modules.md)).
+- **Resource isolation:** every service runs in its own cgroup (`ziro/system` for the platform, protected and
+  reserved; `ziro/workloads` for plugins, bounded by their `resources`), started directly in it
+  (`CLONE_INTO_CGROUP`). Containers get the same `resources` as runtime limits. A PSI watchdog in the sentinel
+  turns sustained memory stalls into an alert and a controlled restart ([operations](operations.md)).
+- **Tools releases:** `ziroctl`/`ziropkg` ship on their own signed stream (`tools/vX.Y.Z`); `ziroctl update` swaps
+  them atomically and updates the integrity baselines. OS releases sign their `SHA256SUMS` with the same key.
 - **SDK:** the formats and their validators, catalog signing, the API types and a typed client live in the
   `sdk/` Go module; `ziroctl` imports it, so tools built on the SDK validate with the host's exact rules.
   `sdk/openapi.yaml` describes the API, kept complete by a test ([SDK guide](sdk.md)).

@@ -79,11 +79,9 @@ func inspectSystem() SystemStatus {
 		f.Close()
 	}
 
-	// Kernel version
-	if out, err := exec.Command("uname", "-r").Output(); err == nil {
-		st.KernelVersion = strings.TrimSpace(string(out))
-	} else {
-		st.KernelVersion = "unknown"
+	st.KernelVersion = "unknown"
+	if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		st.KernelVersion = strings.TrimSpace(string(b))
 	}
 
 	// containerd check
@@ -98,22 +96,8 @@ func inspectSystem() SystemStatus {
 		st.CgroupsV2 = true
 	}
 
-	// Memory info
-	if f, err := os.Open("/proc/meminfo"); err == nil {
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := scanner.Text()
-			var val uint64
-			if strings.HasPrefix(line, "MemTotal:") {
-				fmt.Sscanf(line, "MemTotal: %d kB", &val)
-				st.TotalMemMB = val / 1024
-			} else if strings.HasPrefix(line, "MemAvailable:") {
-				fmt.Sscanf(line, "MemAvailable: %d kB", &val)
-				st.FreeMemMB = val / 1024
-			}
-		}
-		f.Close()
-	}
+	mi := readMeminfo()
+	st.TotalMemMB, st.FreeMemMB = mi["MemTotal"]>>20, mi["MemAvailable"]>>20
 
 	return st
 }

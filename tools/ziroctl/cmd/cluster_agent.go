@@ -83,6 +83,7 @@ func containerArgs(a Assignment, labels ...string) []string {
 		// Secure by default: setuid binaries can't gain privileges, and no raw sockets (spoofing).
 		args = append(args, "--security-opt", "no-new-privileges", "--cap-drop", "NET_RAW")
 	}
+	args = append(args, containerResourceArgs(a.Resources)...)
 	if a.Port != "" {
 		args = append(args, "-p", a.Port)
 	}

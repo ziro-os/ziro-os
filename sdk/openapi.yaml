@@ -44,6 +44,59 @@ paths:
       summary: Host metrics and cloud metadata
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/system/top:
+    get:
+      tags: [host]
+      summary: Resource use of containers (from their cgroups) and processes, sampled over one second
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/system/df:
+    get:
+      tags: [host]
+      summary: Disk usage by category and how much a prune can reclaim
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/system/prune:
+    post:
+      tags: [host]
+      summary: Plan (default) or, with confirm, remove unused containers, images, rotated logs, stale temp files and caches (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                categories: { type: array, items: { type: string, enum: [containers, images, logs, tmp, cache, rollback] } }
+                all: { type: boolean, description: Also remove the upgrade rollback generation }
+                confirm: { type: boolean, description: Remove (otherwise only plan) }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/system/reboot:
+    post:
+      tags: [host]
+      summary: Reboot the host after replying (admin)
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/system/poweroff:
+    post:
+      tags: [host]
+      summary: Power the host off after replying (admin)
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/system/update:
+    get:
+      tags: [host]
+      summary: Last ziroctl/ziropkg update check (refresh=true checks now)
+      parameters:
+        - { name: refresh, in: query, schema: { type: boolean } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      tags: [host]
+      summary: Install the newest signed tools release in the background (admin)
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
   /api/v1/metrics:
     get:
       tags: [host]

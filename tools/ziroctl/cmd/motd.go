@@ -3,135 +3,208 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
+var motdConsole bool
+
 var motdCmd = &cobra.Command{
 	Use:   "motd",
-	Short: "Print dynamic cloud status and MOTD banner",
+	Short: "Print the host summary shown at login (resources, addresses, workloads, what needs attention)",
 	Run: func(cmd *cobra.Command, args []string) {
-		printDynamicMOTD(cmd.OutOrStdout())
+		s := collectHostSummary(!motdConsole)
+		if jsonOutput {
+			_ = printResult(s, nil)
+			return
+		}
+		renderMOTD(cmd.OutOrStdout(), s, os.Getenv("NO_COLOR") == "")
 	},
 }
 
-func printDynamicMOTD(out io.Writer) {
-	cyan := "\033[1;36m"
-	green := "\033[1;32m"
-	yellow := "\033[1;33m"
-	white := "\033[1;37m"
-	reset := "\033[0m"
+// HostSummary is what an operator needs at a glance; Attention lists only what is wrong.
+type HostSummary struct {
+	Version     string        `json:"version"`
+	Hostname    string        `json:"hostname"`
+	Mode        string        `json:"mode"` // installed, live
+	Platform    string        `json:"platform"`
+	Arch        string        `json:"arch"`
+	Kernel      string        `json:"kernel"`
+	CPUs        int           `json:"cpus"`
+	Load1       float64       `json:"load1"`
+	MemTotal    uint64        `json:"mem_total"`
+	MemUsed     uint64        `json:"mem_used"`
+	Disks       []DiskUse     `json:"disks"`
+	Addresses   []HostAddress `json:"addresses"`
+	Containers  int           `json:"containers"`
+	ClusterRole string        `json:"cluster_role,omitempty"` // master, worker
+	ClusterInfo string        `json:"cluster_info,omitempty"`
+	API         bool          `json:"api"`
+	Attention   []string      `json:"attention,omitempty"`
+}
 
-	fmt.Fprintf(out, "%s", cyan)
-	fmt.Fprint(out, `
-  _____  _               ___  ____  
- |__  / (_) _ __  ___   / _ \/ ___| 
-   / /  | || '__/ _ \ | | | \___ \ 
-  / /_  | || |  | (_) || |_| |___) |
- |____| |_||_|   \___/  \___/|____/ 
-`)
-	fmt.Fprintf(out, "%s\n", reset)
+type DiskUse struct {
+	Path  string `json:"path"`
+	Used  uint64 `json:"used"`
+	Total uint64 `json:"total"`
+}
 
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "ziro-host"
+func (d DiskUse) Percent() int { return int(d.Used * 100 / max(d.Total, 1)) }
+
+// oneShotServices run to completion at boot; stopped is their normal state.
+var oneShotServices = map[string]bool{"firewall": true, "cloud-init": true, "wireguard": true}
+
+// collectHostSummary gathers the summary. slow allows probes that spawn processes (container
+// count); the boot console skips them.
+func collectHostSummary(slow bool) HostSummary {
+	s := HostSummary{Version: Version, Mode: "live", Arch: hostArch(), CPUs: runtime.NumCPU(), Addresses: hostAddresses()}
+	s.Hostname, _ = os.Hostname()
+	if fileExists("/etc/ziro-installed") {
+		s.Mode = "installed"
 	}
-
-	kernel := "unknown"
-	if out, err := exec.Command("uname", "-r").Output(); err == nil {
-		kernel = strings.TrimSpace(string(out))
+	s.Platform, _ = detectCloudPlatform()
+	if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		s.Kernel = strings.TrimSpace(string(b))
 	}
-
-	platform, _ := detectCloudPlatform()
-
-	mode := fmt.Sprintf("%s[LIVE BOOT MEDIA]%s", cyan, reset)
-	if _, err := os.Stat("/etc/ziro-installed"); err == nil {
-		mode = fmt.Sprintf("%s[INSTALLED HOST]%s", green, reset)
+	s.Load1, _, _ = readLoadavg()
+	mi := readMeminfo()
+	s.MemTotal, s.MemUsed = mi["MemTotal"], mi["MemTotal"]-min(mi["MemAvailable"], mi["MemTotal"])
+	for _, p := range []string{"/", "/var/lib/containerd"} {
+		if used, total, ok := diskUsage(p); ok && (p == "/" || !sameFilesystem(p, "/")) {
+			s.Disks = append(s.Disks, DiskUse{p, used, total})
+		}
 	}
-
-	// Memory info
-	sys := inspectSystem()
-	memStr := ""
-	if sys.TotalMemMB > 0 {
-		memStr = fmt.Sprintf("%d MB used / %d MB total", sys.TotalMemMB-sys.FreeMemMB, sys.TotalMemMB)
-	} else {
-		memStr = "Available"
+	s.API = isAPIServerRunning()
+	if slow {
+		if out, err := exec.Command("nerdctl", "ps", "-q").Output(); err == nil {
+			s.Containers = len(strings.Fields(string(out)))
+		}
 	}
-
-	// Active IP addresses
-	var ips []string
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			if addrs, err := iface.Addrs(); err == nil {
-				for _, addr := range addrs {
-					if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-						if ipnet.IP.To4() != nil {
-							ips = append(ips, ipnet.IP.String())
-						}
+	if cfg, err := loadClusterConfig(); err == nil && cfg.Role != "" {
+		s.ClusterRole = cfg.Role
+		if cfg.Role == "master" {
+			if st, err := readState(); err == nil {
+				ready := 0
+				for _, n := range st.Nodes {
+					if n.Status == "Ready" {
+						ready++
 					}
+				}
+				s.ClusterInfo = fmt.Sprintf("%d/%d nodes ready", ready, len(st.Nodes))
+				if ready < len(st.Nodes) {
+					s.Attention = append(s.Attention, fmt.Sprintf("%d cluster node(s) not ready", len(st.Nodes)-ready))
 				}
 			}
 		}
 	}
-	ipStr := strings.Join(ips, ", ")
-	if ipStr == "" {
-		ipStr = "Configuring / DHCP"
-	}
+	s.Attention = append(s.Attention, hostAttention(mi, s.Disks)...)
+	return s
+}
 
-	// Containerd status & running containers
-	containerdStatus := fmt.Sprintf("%sACTIVE%s", green, reset)
-	if !sys.ContainerdOK {
-		containerdStatus = fmt.Sprintf("%sSTOPPED%s", yellow, reset)
+// hostAttention lists conditions an operator should act on.
+func hostAttention(mi map[string]uint64, disks []DiskUse) []string {
+	var out []string
+	if some, _, ok := readPressure("memory"); ok && some >= 10 {
+		out = append(out, fmt.Sprintf("memory pressure %.0f%%", some))
+	} else if mi["MemTotal"] > 0 && mi["MemAvailable"]*10 < mi["MemTotal"] {
+		out = append(out, fmt.Sprintf("memory low (%s available)", humanBytes(mi["MemAvailable"])))
 	}
-
-	containerCount := "0"
-	if out, err := exec.Command("nerdctl", "ps", "-q").Output(); err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		if len(lines) == 1 && lines[0] == "" {
-			containerCount = "0"
-		} else {
-			containerCount = fmt.Sprintf("%d", len(lines))
+	for _, d := range disks {
+		if d.Percent() >= 85 {
+			out = append(out, fmt.Sprintf("disk %s %d%% full", d.Path, d.Percent()))
 		}
 	}
-
-	// Cluster Role
-	clusterRole := "Standalone Node"
-	if isClusterMaster() {
-		clusterRole = fmt.Sprintf("%sMaster (Mesh Coordinator)%s", green, reset)
-	} else if isClusterWorker() {
-		clusterRole = fmt.Sprintf("%sWorker (Connected)%s", cyan, reset)
+	kills := cgroupOOMKills()
+	names := make([]string, 0, len(kills))
+	for n := range kills {
+		names = append(names, n)
 	}
-
-	// Security Shield
-	shieldStatus := fmt.Sprintf("%sACTIVE%s (AI Threat Monitor & Canary Guard)", green, reset)
-
-	// API Status
-	apiStatus := fmt.Sprintf("%sSTANDBY%s (Enable via 'ziroctl service start ziro-api')", yellow, reset)
-	if isAPIServerRunning() {
-		apiStatus = fmt.Sprintf("%sACTIVE%s (Control Plane Port 8443)", green, reset)
+	sort.Strings(names)
+	for _, n := range names {
+		out = append(out, fmt.Sprintf("%s killed %dx for memory", n, kills[n]))
 	}
+	for _, svc := range listAllServices() {
+		if svc.Enabled && svc.Status != "RUNNING" && !oneShotServices[svc.Name] {
+			out = append(out, "service "+svc.Name+" not running")
+		}
+	}
+	if !loadFirewallConfig().Enabled {
+		out = append(out, "firewall disabled")
+	}
+	if u := readUpdateCheck(); u.Available() {
+		out = append(out, "ziroctl "+u.Latest+" available (ziroctl update)")
+	}
+	return out
+}
 
-	fmt.Fprintf(out, " %sSystem:%s        Ziro-OS v%s (Cloud-Native Container Host) %s\n", white, reset, Version, mode)
-	fmt.Fprintf(out, " %sEnvironment:%s   %s%s%s (%s)\n", white, reset, green, platform, reset, runtime.GOARCH)
-	fmt.Fprintf(out, " %sNode & Kernel:%s %s (Kernel %s, %d CPUs, %s)\n", white, reset, hostname, kernel, runtime.NumCPU(), memStr)
-	fmt.Fprintf(out, " %sIPv4 Address:%s  %s%s%s\n", white, reset, cyan, ipStr, reset)
-	fmt.Fprintf(out, " %sOCI Runtime:%s   containerd (%s, %s active containers)\n", white, reset, containerdStatus, containerCount)
-	fmt.Fprintf(out, " %sCluster Mesh:%s  %s\n", white, reset, clusterRole)
-	fmt.Fprintf(out, " %sSecurity:%s      %s\n", white, reset, shieldStatus)
-	fmt.Fprintf(out, " %sREST API:%s      %s\n", white, reset, apiStatus)
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, " Quick start: '%sziroctl help%s' | '%sziroctl service list%s' | '%sziroctl cluster status%s'\n", cyan, reset, cyan, reset, cyan, reset)
+func humanBytes(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%d MiB", b>>20)
+	}
+	return fmt.Sprintf("%d KiB", b>>10)
+}
+
+func renderMOTD(out io.Writer, s HostSummary, color bool) {
+	label, bold, warn, reset := "", "", "", ""
+	if color {
+		label, bold, warn, reset = "\033[2m", "\033[1m", "\033[1;33m", "\033[0m"
+	}
+	row := func(name, value string) { fmt.Fprintf(out, " %s%-10s%s %s\n", label, name, reset, value) }
+
+	head := []string{bold + "Ziro OS " + s.Version + reset, s.Hostname, s.Mode}
+	if s.Platform != "" {
+		head = append(head, s.Platform)
+	}
+	fmt.Fprintf(out, "\n %s\n", strings.Join(append(head, s.Arch, "kernel "+s.Kernel), "  "))
+
+	res := []string{fmt.Sprintf("%d vCPU", s.CPUs), fmt.Sprintf("load %.2f", s.Load1)}
+	if s.MemTotal > 0 {
+		res = append(res, fmt.Sprintf("memory %s/%s (%d%%)", humanBytes(s.MemUsed), humanBytes(s.MemTotal), s.MemUsed*100/s.MemTotal))
+	}
+	for _, d := range s.Disks {
+		res = append(res, fmt.Sprintf("disk %s %d%%", d.Path, d.Percent()))
+	}
+	row("Resources", strings.Join(res, "  "))
+
+	var addrs []string
+	for _, a := range s.Addresses {
+		switch a.Role {
+		case "primary", "nic":
+			addrs = append(addrs, fmt.Sprintf("%s (%s)", a.IP, a.Iface))
+		default:
+			addrs = append(addrs, a.Role+" "+a.IP)
+		}
+	}
+	if len(addrs) == 0 {
+		addrs = []string{"no address yet (DHCP)"}
+	}
+	row("Network", strings.Join(addrs, "  "))
+
+	work := []string{fmt.Sprintf("%d containers", s.Containers)}
+	if s.ClusterRole != "" {
+		work = append(work, strings.TrimSpace("cluster "+s.ClusterRole+" "+s.ClusterInfo))
+	}
+	if s.API {
+		work = append(work, "api on")
+	} else {
+		work = append(work, "api off")
+	}
+	row("Workloads", strings.Join(work, "  "))
+	if len(s.Attention) > 0 {
+		row("Attention", warn+strings.Join(s.Attention, "  ·  ")+reset)
+	}
 	fmt.Fprintln(out)
 }
 
 func init() {
+	motdCmd.Flags().BoolVar(&motdConsole, "console", false, "Fast summary for the boot console (no subprocess probes)")
 	rootCmd.AddCommand(motdCmd)
 }

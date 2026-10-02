@@ -4,3 +4,5 @@
 * * * * * /usr/bin/ziroctl disk expand --auto --quiet
 # Refresh subscribed DNS blocklists (no-op without any)
 17 4 * * * /usr/bin/ziroctl dns blocklist update >/dev/null 2>&1
+# Check for a newer ziroctl/ziropkg (shown at login); installs only with {"auto": true} in /etc/ziro/update.json
+43 3 * * * /usr/bin/ziroctl update --cron >/dev/null 2>&1

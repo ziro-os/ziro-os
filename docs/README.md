@@ -13,6 +13,8 @@ Ziro-OS is under active development and is not ready for production use. Start w
 
 ## System and operations
 
+- [Operating a host](operations.md): login summary, `system top`, disk usage and pruning, memory protection,
+  `ziroctl update`.
 - [Architecture](architecture.md): host components and cluster design.
 - [Security](security.md): current controls and limitations.
 - [Virtualization](virtualization.md) and [multi-architecture builds](multi-architecture-guide.md).

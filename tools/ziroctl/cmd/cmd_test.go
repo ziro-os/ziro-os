@@ -144,7 +144,27 @@ func TestMotdCommand(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "Ziro-OS") {
-		t.Errorf("expected motd output to contain 'Ziro-OS', got: %s", out)
+	for _, want := range []string{"Ziro OS", "Resources", "Network", "Workloads"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("motd output lacks %q: %s", want, out)
+		}
+	}
+}
+
+func TestMOTDAddresses(t *testing.T) {
+	var buf bytes.Buffer
+	renderMOTD(&buf, HostSummary{Version: "1.0", Hostname: "h", Mode: "installed", Addresses: []HostAddress{
+		{"172.26.1.108", "eth0", "primary"}, {"10.200.0.1", "ziro0", "mesh"}, {"10.201.0.1", "ziro-dns0", "pods"}},
+		Attention: []string{"memory pressure 12%"}}, false)
+	out := buf.String()
+	if !strings.Contains(out, "172.26.1.108 (eth0)  mesh 10.200.0.1  pods 10.201.0.1") || strings.Count(out, "10.201.0.1") != 1 ||
+		!strings.Contains(out, "Attention  memory pressure 12%") || strings.Contains(out, "\033") {
+		t.Errorf("motd:\n%s", out)
+	}
+	for name, want := range map[string]string{"eth0": "primary", "ens3": "nic", "ziro0": "mesh", "ziro-dns0": "pods",
+		"veth1a2b": "", "nerdctl0": "", "cni0": "", "docker0": "", "lo": ""} {
+		if got := ifaceRole(name, "eth0"); got != want {
+			t.Errorf("ifaceRole(%s) = %q, want %q", name, got, want)
+		}
 	}
 }

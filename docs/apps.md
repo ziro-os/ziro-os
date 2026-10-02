@@ -117,7 +117,8 @@ Start from `ziroctl dev new app <name>`. Test a definition with `ziroctl apps de
     "env": {"POSTGRES_DB": "{{setting.database}}", "PGDATA": "/var/lib/postgresql/data/pgdata"},
     "secrets": ["POSTGRES_PASSWORD"],
     "data": ["/var/lib/postgresql/data"],
-    "health": ["pg_isready", "-q", "-h", "127.0.0.1"]
+    "health": ["pg_isready", "-q", "-h", "127.0.0.1"],
+    "resources": {"memory": "1Gi", "cpus": 2}
   }],
   "outputs": {"url": "postgres://app:{{secret.POSTGRES_PASSWORD}}@{{host}}:{{port}}/{{setting.database}}"}
 }
@@ -137,4 +138,6 @@ Rules, enforced when a definition is loaded (catalog CI and every host):
 - **Privileges:** run the process as the image's own user, not root. If the command is wrapped in a shell, drop
   privileges yourself (the `valkey` definition uses `setpriv`). Never put a password in the command line; pass it
   on stdin or in a file.
+- **Resources:** `resources` (`memory`, `cpus`, `pids`) limits each container. Set them: a container without a
+  memory limit is the first the kernel kills when the host runs out of memory.
 - **Unknown fields** are errors.
