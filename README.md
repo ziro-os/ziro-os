@@ -47,6 +47,15 @@ limitations are described in the [architecture](docs/architecture.md) and [secur
 Contributions, questions, and feedback are welcome. Please use the contributing guide for development and pull
 request guidance. Report security vulnerabilities privately as described there.
 
+## Security partners
+
+Ziro-OS is part of the [Snyk Secure Developer Program](https://snyk.io/open-source/) for open-source projects.
+[Snyk](https://snyk.io) scans our code (Snyk Code), Go modules (Snyk Open Source), infrastructure as code (Snyk IaC) and
+container images (Snyk Container) on every pull request and on `main`; see [SECURITY.md](SECURITY.md).
+
+We permit and grant Snyk a license to use, reproduce and display the Ziro-OS name, logo and related project content
+on Snyk's website and materials.
+
 ## License
 
 Ziro-OS is licensed under the [MIT License](LICENSE). Copyright (c) 2026 Sambo Chea and Ziro-OS Contributors.

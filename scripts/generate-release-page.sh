@@ -667,7 +667,8 @@ cat > "$OUTPUT_DIR/index.html" <<EOF
       <p>
         <strong>Ziro-OS</strong> &middot;
         <a href="https://github.com/${REPO_NAME}" target="_blank">GitHub</a> &middot;
-        <a href="https://github.com/${REPO_NAME}/blob/main/LICENSE" target="_blank">MIT License</a>
+        <a href="https://github.com/${REPO_NAME}/blob/main/LICENSE" target="_blank">MIT License</a> &middot;
+        Security by <a href="https://snyk.io" target="_blank" rel="noopener">Snyk</a>
       </p>
     </div>
   </footer>
