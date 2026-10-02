@@ -44,13 +44,7 @@ jobs:
           for m in sdk tools/ziroctl tools/ziropkg; do
             echo "== $m"
             (cd "$m" && go vet ./...) || fail=1
-            rc=0
-            out=$(cd "$m" && "$(go env GOPATH)/bin/staticcheck" ./...) || rc=$?
-            # isClusterMaster's caller lands with #49 (stacks); drop this filter once it merges.
-            left=$(printf '%s\n' "$out" | grep -v -e '^cmd/cluster.go:[0-9]*:[0-9]*: func isClusterMaster is unused (U1000)$' -e '^$' || true)
-            if [ -n "$left" ] || { [ "$rc" -ne 0 ] && [ -z "$out" ]; }; then
-              printf '%s\n' "$left"; fail=1
-            fi
+            (cd "$m" && "$(go env GOPATH)/bin/staticcheck" ./...) || fail=1
           done
           exit "$fail"
 
