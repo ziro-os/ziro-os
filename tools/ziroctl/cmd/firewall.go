@@ -321,12 +321,6 @@ func parsePortProto(s string) (int, string) {
 	return p, proto
 }
 
-// parseBlockTarget validates an IP or CIDR and returns its nft family ("ip" or "ip6").
-func parseBlockTarget(s string) (string, error) {
-	family, _, err := canonicalBlockTarget(s)
-	return family, err
-}
-
 func canonicalBlockTarget(s string) (string, string, error) {
 	if prefix, err := netip.ParsePrefix(s); err == nil {
 		if prefix.Addr().Is4In6() {

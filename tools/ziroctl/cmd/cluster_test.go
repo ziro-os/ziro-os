@@ -91,7 +91,7 @@ func TestContainerNameChangesWithSpec(t *testing.T) {
 	if containerName(a, 1) == containerName(b, 1) {
 		t.Errorf("image change must produce a new container name")
 	}
-	if containerName(a, 1) != containerName(a, 1) || !strings.HasPrefix(containerName(a, 1), "zc-web-1-") {
+	if n1, n2 := containerName(a, 1), containerName(a, 1); n1 != n2 || !strings.HasPrefix(n1, "zc-web-1-") {
 		t.Errorf("unexpected name %s", containerName(a, 1))
 	}
 }

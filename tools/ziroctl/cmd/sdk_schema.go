@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"crypto/ed25519"
 	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
 
 	"github.com/ziro-os/ziro-os/sdk/catalog"
@@ -62,10 +61,7 @@ const (
 )
 
 var (
-	validNameRe   = schema.NameRe
-	placeholderRe = schema.PlaceholderRe
 	settingNameRe = schema.SettingNameRe
-	hostRe        = schema.HostRe
 	pluginRoot    = schema.PluginRoot
 )
 
@@ -76,13 +72,9 @@ func validateRoute(r *GatewayRoute) error                    { return r.Validate
 func validHost(h string) bool                                { return schema.ValidHost(h) }
 func routeApps(r GatewayRoute) []string                      { return schema.RouteApps(r) }
 func expand(s string, v map[string]string) (string, error)   { return schema.Expand(s, v) }
-func validateSettings(defs []Setting) error                  { return schema.ValidateSettings(defs) }
-func validSecretSpec(spec string) error                      { return schema.ValidSecretSpec(spec) }
 func genSecret(spec string) (string, error)                  { return schema.GenSecret(spec) }
 func parseManifest(b []byte) (ModuleManifest, error)         { return schema.ParseManifest(b) }
 func parseAppDef(b []byte) (AppDef, error)                   { return schema.ParseAppDef(b) }
-func ed25519Key(pemKey string) (ed25519.PublicKey, error)    { return catalog.Ed25519Key(pemKey) }
-func safeEntryPath(p string) error                           { return catalog.SafeEntryPath(p) }
 func parseSetFlags(sets []string) (map[string]string, error) { return schema.ParseSetFlags(sets) }
 
 func resolveSettings(defs []Setting, prev, set map[string]string) (map[string]string, error) {
