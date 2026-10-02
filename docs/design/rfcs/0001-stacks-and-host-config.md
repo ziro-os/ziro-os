@@ -1,6 +1,6 @@
 # RFC 0001: Stacks and declarative host config
 
-- **Status:** Accepted (implemented in #49, `feat/stacks-provisioning`)
+- **Status:** Accepted (implemented in #49)
 - **Pull request:** #49
 
 ## Summary

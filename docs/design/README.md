@@ -28,7 +28,7 @@ Every managed thing is a named resource with one schema in [`sdk/schema`](../../
 | cluster app | an `AppDef` placed on the cluster | `name` |
 | catalog | signed index of plugins, apps and stacks (`sdk/catalog`) | repository name |
 
-Rules for every format (YAML input, stacks and host configs land with #49, `feat/stacks-provisioning`):
+Rules for every format:
 
 - **Names** match `^[a-z0-9][a-z0-9_.-]{0,62}$` (`schema.ValidName`); a name is safe in a file path.
 - **YAML or JSON**, same schema, same rules. YAML is converted to JSON and both go through the same strict decoder.
@@ -84,7 +84,7 @@ being authorized and audited.
 |---|---|---|---|
 | Plugin | a host service and its packages, in its own cgroup | signed catalog, or `-f` locally | [modules.md](../modules.md) |
 | App | containers, images pinned by digest, generated secrets | signed catalog, or `-f` locally | [apps.md](../apps.md) |
-| Stack | several apps deployed together, with links between them | signed catalog, or `-f` locally | [provisioning.md](../provisioning.md) (with #49) |
+| Stack | several apps deployed together, with links between them | signed catalog, or `-f` locally | [provisioning.md](../provisioning.md) |
 | Catalog | your own repository of plugins, apps and stacks | ed25519-signed index; every entry pinned by sha256 | [modules.md](../modules.md) |
 | Kernel module / eBPF | drivers and programs for the Ziro kernel (kernel kit) | modules must be signed (`MODULE_SIG_FORCE`) | [sdk.md](../sdk.md) |
 | API client | automation in Go or any language | scoped API token | [sdk.md](../sdk.md) |
