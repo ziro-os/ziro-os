@@ -3,8 +3,6 @@
 package schema
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -75,9 +73,7 @@ type ModuleManifest struct {
 // hardening setting) and validates.
 func ParseManifest(b []byte) (ModuleManifest, error) {
 	var m ModuleManifest
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&m); err != nil {
+	if err := DecodeStrict(b, &m); err != nil {
 		return m, err
 	}
 	return m, m.Validate()

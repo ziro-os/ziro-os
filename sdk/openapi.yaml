@@ -32,6 +32,7 @@ tags:
   - name: apps
   - name: gateway
   - name: cluster
+  - name: stacks
 
 paths:
   /api/v1/health:
@@ -856,6 +857,60 @@ paths:
       summary: Roll the last OS upgrade back (takes effect at reboot)
       responses:
         "202": { $ref: "#/components/responses/Message" }
+  /api/v1/stacks:
+    get:
+      x-ziro-role: viewer
+      tags: [stacks]
+      summary: Deployed stacks; ?source=catalog lists the stacks published in the signed app catalogs
+      parameters:
+        - { name: source, in: query, schema: { type: string, enum: [catalog] } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/stacks/{name}:
+    get:
+      x-ziro-role: viewer
+      tags: [stacks]
+      summary: A stack and the status of each of its apps
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    put:
+      x-ziro-role: admin
+      tags: [stacks]
+      summary: Apply a stack in the background (catalog apps only); the body's stack name must match the URL
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      requestBody: { $ref: "#/components/requestBodies/Stack" }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+    delete:
+      x-ziro-role: admin
+      tags: [stacks]
+      summary: Remove a stack's apps in the background (?purge=true also deletes their data)
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/stacks/{name}/plan:
+    post:
+      x-ziro-role: operator
+      tags: [stacks]
+      summary: What applying this stack would create, update, keep or remove
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      requestBody: { $ref: "#/components/requestBodies/Stack" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/apply:
+    post:
+      x-ziro-role: admin
+      tags: [host]
+      summary: Make the host match a host config ({"host":{...}}); ?dry_run=true returns the plan, otherwise it applies in the background
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+        "202": { $ref: "#/components/responses/Message" }
 components:
   securitySchemes:
     bearer:
@@ -868,6 +923,11 @@ components:
       required: true
       schema: { type: string, pattern: "^[a-z0-9][a-z0-9_.-]{0,62}$" }
   requestBodies:
+    Stack:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Stack" }
     Object:
       content:
         application/json:
@@ -889,6 +949,29 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Message" }
   schemas:
+    Stack:
+      type: object
+      required: [stack, version, apps]
+      additionalProperties: false
+      properties:
+        stack: { type: string, description: the stack's name }
+        version: { type: integer, enum: [1] }
+        description: { type: string }
+        apps:
+          type: object
+          additionalProperties:
+            type: object
+            required: [app]
+            additionalProperties: false
+            properties:
+              app: { type: string, description: "catalog name[:version]" }
+              set: { type: object, additionalProperties: { type: string } }
+              replicas: { type: integer }
+              publish: { type: integer }
+              expose: { type: string }
+              expose_tls: { type: string }
+              resources: { type: object, properties: { memory: { type: string }, cpus: { type: number }, pids: { type: integer } } }
+              depends_on: { type: array, items: { type: string } }
     Message:
       type: object
       properties:

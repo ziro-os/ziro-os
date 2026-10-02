@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -52,5 +54,22 @@ func TestDevQemuArgs(t *testing.T) {
 	}
 	if got := shQuote("a'b"); got != `'a'\''b'` {
 		t.Errorf("shQuote: %s", got)
+	}
+}
+
+// The provisioning examples (host, worker, stack, app) must stay valid.
+func TestProvisioningExamplesValid(t *testing.T) {
+	files, _ := filepath.Glob("../../../sdk/examples/provisioning/*.yaml")
+	more, _ := filepath.Glob("../../../sdk/examples/provisioning/*/*.yaml")
+	apps, _ := filepath.Glob("../../../sdk/examples/provisioning/*/apps/*/*.yaml")
+	files = append(append(files, more...), apps...)
+	if len(files) < 4 {
+		t.Fatalf("examples not found: %v", files)
+	}
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		for _, l := range lintDefinition(f, b) {
+			t.Errorf("%s: %s: %s", f, l.Level, l.Message)
+		}
 	}
 }

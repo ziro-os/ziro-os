@@ -100,6 +100,9 @@ Open a pull request to [ziro-os/apps](https://github.com/ziro-os/apps) that adds
 your own catalog (`ziroctl catalog build . --kind app`, see [modules.md](modules.md#running-your-own-catalog))
 and add it with `ziroctl plugin repo add <name> <url> --key <pem> --kind app`.
 
+To deploy several apps together (in dependency order, as one unit), describe them in a
+[stack](provisioning.md#stacks). Definitions can be YAML or JSON.
+
 Start from `ziroctl dev new app <name>`. Test a definition with `ziroctl apps deploy -f app.json` on a host
 (unsigned, development only), or in a throwaway VM with `ziroctl dev run app.json` ([SDK](sdk.md#the-dev-toolchain)).
 

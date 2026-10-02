@@ -1,0 +1,15 @@
+#ziro-config
+# A single web host. Use it as cloud user-data as is (the first line marks it), with
+# `ziroctl apply -f host.yaml`, or with the installer: ziro.userdata=https://.../host.yaml
+host:
+  version: 1
+  hostname: web-1
+  ssh:
+    import: [gh:your-github-user]      # keys published on GitHub; or list them under keys:
+  firewall:
+    allow: [80/tcp, 443/tcp]           # SSH (22) stays open by default
+  packages: [htop]
+  plugins:
+    - name: auditd
+  stacks: [./shop/stack.yaml]
+  update: { auto: true }               # install signed ziroctl updates daily

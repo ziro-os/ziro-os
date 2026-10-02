@@ -198,8 +198,12 @@ func runUserDataScript(script []byte) error {
 		return nil
 	}
 	if bytes.HasPrefix(script, []byte("#cloud-config")) {
-		fmt.Println("User-data is #cloud-config (not supported); only shell scripts are executed.")
+		fmt.Println("User-data is #cloud-config (not supported): use #ziro-config (a ziroctl host file) or a shell script.")
 		return nil
+	}
+	if bytes.HasPrefix(script, []byte("#ziro-config")) {
+		fmt.Println("Applying the #ziro-config host configuration...")
+		return applyProvisioning(script)
 	}
 	f, err := os.CreateTemp("", "ziro-userdata-*.sh")
 	if err != nil {
@@ -217,6 +221,36 @@ func runUserDataScript(script []byte) error {
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr
 	return runCmd.Run()
+}
+
+// provisionFile is a host config staged by the installer (user-data starting with #ziro-config);
+// the first boot applies it once.
+var (
+	provisionFile    = "/etc/ziro/provision.yaml"
+	provisionApplied = "/var/lib/ziro/provision.applied"
+)
+
+// applyProvisioning applies a host config received at boot. Stack files it names resolve in
+// /etc/ziro/provision.d.
+func applyProvisioning(data []byte) error {
+	plan, err := applyHostFile(data, "/etc/ziro/provision.d", false, 0)
+	for _, c := range plan {
+		fmt.Printf("  %-9s %-30s %s\n", c.Section, c.Item, c.Action)
+	}
+	return err
+}
+
+// applyStagedProvisioning applies the installer-staged host config once.
+func applyStagedProvisioning() error {
+	data, err := os.ReadFile(provisionFile)
+	if err != nil || fileExists(provisionApplied) {
+		return nil
+	}
+	if err := applyProvisioning(data); err != nil {
+		return fmt.Errorf("provisioning %s: %w", provisionFile, err)
+	}
+	_ = os.MkdirAll(filepath.Dir(provisionApplied), 0700)
+	return os.WriteFile(provisionApplied, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0600)
 }
 
 var cloudUserDataCmd = &cobra.Command{
@@ -246,6 +280,9 @@ var cloudUserDataCmd = &cobra.Command{
 			return runUserDataScript(body)
 		}
 
+		if err := applyStagedProvisioning(); err != nil {
+			fmt.Println("⚠", err)
+		}
 		// 169.254.169.254 is only trustworthy on a real cloud: on a LAN anyone can
 		// answer it and would get root via SSH keys/user-data.
 		if !cloudMetadataTrusted() {

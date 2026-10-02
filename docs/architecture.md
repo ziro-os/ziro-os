@@ -50,6 +50,13 @@ under active development and is not ready for production use.
   reserved; `ziro/workloads` for plugins, bounded by their `resources`), started directly in it
   (`CLONE_INTO_CGROUP`). Containers get the same `resources` as runtime limits. A PSI watchdog in the sentinel
   turns sustained memory stalls into an alert and a controlled restart ([operations](operations.md)).
+- **Declarative definitions:**
+  - Plugins, apps, stacks and host configs share one strict loader in `sdk/schema`: YAML goes to JSON, then
+    unknown fields are rejected.
+  - `stack up` and `apply` plan first and apply only the differences, by calling the same operations as the CLI
+    commands. Applying twice is a no-op.
+  - Stack state lives in `/var/lib/ziro/stacks`.
+  - First-boot provisioning reuses the user-data path (`#ziro-config`).
 - **API:** one route table (method, path, minimum role, handler). Authentication, role checks, rate limits (per
   client and per token), the audit record of every change and JSON errors come from that table. Handlers call the
   same operation functions as the CLI commands, never the CLI binary or copied logic, and the OpenAPI spec is

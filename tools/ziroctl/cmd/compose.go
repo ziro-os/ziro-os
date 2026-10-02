@@ -1,8 +1,10 @@
 package cmd
 
 import (
-	"bufio"
+	"sort"
+
 	"fmt"
+	"go.yaml.in/yaml/v3"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +20,10 @@ type ComposeService struct {
 	Environment []string
 	Volumes     []string
 	Restart     string
-	Command     string
+	Command     []string
+	DependsOn   []string
+	Health      []string // from healthcheck.test
+	Unsupported []string // keys with no Ziro equivalent (build, privileged, ...)
 }
 
 var composeFile string
@@ -69,9 +74,7 @@ var composeUpCmd = &cobra.Command{
 				runArgs = append(runArgs, "-v", v)
 			}
 			runArgs = append(runArgs, "--", s.Image) // "--": an image can never be read as a flag
-			if s.Command != "" {
-				runArgs = append(runArgs, strings.Fields(s.Command)...)
-			}
+			runArgs = append(runArgs, s.Command...)
 
 			// Execute using nerdctl or ctr
 			runner := exec.Command("nerdctl", runArgs...)
@@ -155,100 +158,97 @@ func getProjectName(file string) string {
 	return strings.ToLower(dir)
 }
 
-// Lightweight, zero-dependency YAML parser for standard docker-compose files
+// parseComposeFile reads a docker-compose file (YAML) into the services it defines, normalizing
+// the forms compose allows (environment as a list or a map, command as a string or a list,
+// depends_on as a list or a map). Keys this tool doesn't use are ignored.
 func parseComposeFile(path string) ([]ComposeService, error) {
-	f, err := os.Open(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
-	var services []ComposeService
-	var currentSvc *ComposeService
-	inServices := false
-	currentList := "" // "ports", "environment", "volumes"
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		if trimmed == "services:" {
-			inServices = true
-			continue
-		}
-
-		if !inServices {
-			continue
-		}
-
-		// Detect indent
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-
-		// Service declaration at indent level 2 (e.g. "  web:")
-		if indent == 2 && strings.HasSuffix(trimmed, ":") {
-			if currentSvc != nil {
-				services = append(services, *currentSvc)
-			}
-			svcName := strings.TrimSuffix(trimmed, ":")
-			currentSvc = &ComposeService{Name: svcName}
-			currentList = ""
-			continue
-		}
-
-		if currentSvc == nil {
-			continue
-		}
-
-		// Direct service keys at indent 4
-		if indent == 4 {
-			currentList = ""
-			parts := strings.SplitN(trimmed, ":", 2)
-			key := strings.TrimSpace(parts[0])
-			val := ""
-			if len(parts) > 1 {
-				val = strings.Trim(strings.TrimSpace(parts[1]), "\"'\t ")
-			}
-
-			switch key {
-			case "image":
-				currentSvc.Image = val
-			case "restart":
-				currentSvc.Restart = val
-			case "command":
-				currentSvc.Command = val
-			case "ports":
-				currentList = "ports"
-			case "environment":
-				currentList = "environment"
-			case "volumes":
-				currentList = "volumes"
-			}
-			continue
-		}
-
-		// List items at indent 6 (e.g. "      - 80:80")
-		if indent >= 6 && strings.HasPrefix(trimmed, "-") {
-			val := strings.Trim(strings.TrimPrefix(trimmed, "-"), "\"'\t ")
-			switch currentList {
-			case "ports":
-				currentSvc.Ports = append(currentSvc.Ports, val)
-			case "environment":
-				currentSvc.Environment = append(currentSvc.Environment, val)
-			case "volumes":
-				currentSvc.Volumes = append(currentSvc.Volumes, val)
-			}
-		}
+	var doc struct {
+		Services map[string]map[string]any `yaml:"services"`
 	}
-
-	if currentSvc != nil {
-		services = append(services, *currentSvc)
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return nil, err
 	}
+	names := make([]string, 0, len(doc.Services))
+	for n := range doc.Services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out []ComposeService
+	for _, n := range names {
+		raw := doc.Services[n]
+		svc := ComposeService{Name: n, Image: str(raw["image"]), Restart: str(raw["restart"]), Ports: strList(raw["ports"]),
+			Volumes: strList(raw["volumes"]), DependsOn: keysOrList(raw["depends_on"])}
+		switch e := raw["environment"].(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(e))
+			for k := range e {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				svc.Environment = append(svc.Environment, k+"="+str(e[k]))
+			}
+		default:
+			svc.Environment = strList(e)
+		}
+		switch c := raw["command"].(type) {
+		case string:
+			svc.Command = strings.Fields(c)
+		default:
+			svc.Command = strList(c)
+		}
+		if hc, ok := raw["healthcheck"].(map[string]any); ok {
+			switch t := hc["test"].(type) {
+			case string:
+				svc.Health = []string{"sh", "-c", t}
+			default:
+				if l := strList(t); len(l) > 1 && l[0] == "CMD" {
+					svc.Health = l[1:]
+				} else if len(l) > 1 && l[0] == "CMD-SHELL" {
+					svc.Health = []string{"sh", "-c", strings.Join(l[1:], " ")}
+				}
+			}
+		}
+		for _, k := range []string{"build", "privileged", "network_mode", "cap_add", "devices", "pid", "ipc"} {
+			if _, ok := raw[k]; ok {
+				svc.Unsupported = append(svc.Unsupported, k)
+			}
+		}
+		out = append(out, svc)
+	}
+	return out, nil
+}
 
-	return services, nil
+func str(v any) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+func strList(v any) []string {
+	l, _ := v.([]any)
+	out := make([]string, 0, len(l))
+	for _, x := range l {
+		out = append(out, str(x))
+	}
+	return out
+}
+
+func keysOrList(v any) []string {
+	if m, ok := v.(map[string]any); ok {
+		out := make([]string, 0, len(m))
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	return strList(v)
 }
 
 func init() {

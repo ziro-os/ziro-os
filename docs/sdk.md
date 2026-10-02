@@ -6,7 +6,7 @@ a host accepts.
 
 | Piece | What it's for |
 |---|---|
-| [`sdk/schema`](../sdk/schema) | The formats: plugin manifests, app definitions, gateway routes, supervised services, settings and placeholders, generated secrets. It includes their validators. |
+| [`sdk/schema`](../sdk/schema) | The formats: plugin manifests, app definitions, stacks, host configs, gateway routes, supervised services, settings and placeholders, generated secrets. It includes their validators. YAML or JSON (`DecodeStrict`, `ToYAML`, `Kind`). |
 | [`sdk/catalog`](../sdk/catalog) | Build, sign (ed25519) and verify catalogs, like `ziro-os/pkgs` and `ziro-os/apps`, or your own. |
 | [`sdk/client`](../sdk/client) | A typed Go client for the API server (`ziroctl api`). |
 | [`sdk/api`](../sdk/api) | The API's request and response types, shared by the server and the client. |
@@ -95,11 +95,11 @@ idx, err = catalog.VerifyIndex(repo, raw, sig, time.Now())
 `ziroctl dev` runs on Linux and macOS (it needs QEMU, and Docker for the kernel kit):
 
 ```sh
-ziroctl dev new plugin hello            # modules/hello/manifest.json, README.md, .github/workflows/catalog.yml
-ziroctl dev new app web                 # apps/web/app.json (a pinned, non-root web server to start from)
+ziroctl dev new plugin hello            # modules/hello/manifest.yaml, README.md, .github/workflows/catalog.yml
+ziroctl dev new app web                 # apps/web/app.yaml (a pinned, non-root web server to start from)
 ziroctl dev validate .                  # the host's rules, plus lints; --strict makes warnings fail (CI)
-ziroctl dev run modules/hello/manifest.json --check 'wget -qO- http://127.0.0.1:8080/'
-ziroctl dev run apps/web/app.json --forward 8080:8080   # then http://127.0.0.1:8080 on your machine
+ziroctl dev run modules/hello/manifest.yaml --check 'wget -qO- http://127.0.0.1:8080/'
+ziroctl dev run apps/web/app.yaml --forward 8080:8080   # then http://127.0.0.1:8080 on your machine
 ```
 
 - `dev validate` reports a service running as root, a missing health check, a `bind` setting not on loopback by

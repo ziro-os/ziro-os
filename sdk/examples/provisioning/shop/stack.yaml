@@ -1,0 +1,13 @@
+# A web app and its cache, deployed in order: `ziroctl stack up -f stack.yaml`
+stack: shop
+version: 1
+description: Web shop with a cache
+apps:
+  cache:
+    app: valkey                         # from the signed apps catalog
+    resources: { memory: 256Mi }
+  web:
+    app: ./apps/web/app.yaml            # a definition next to this file
+    publish: 8080
+    resources: { memory: 128Mi, cpus: 0.5 }
+    depends_on: [cache]

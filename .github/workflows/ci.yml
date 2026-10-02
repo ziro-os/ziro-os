@@ -126,7 +126,7 @@ jobs:
           d=$(mktemp -d)
           (cd "$d" && "$GITHUB_WORKSPACE/bin/ziroctl" dev new app web && "$GITHUB_WORKSPACE/bin/ziroctl" dev new plugin hello)
           bin/ziroctl dev validate --strict "$d"
-          bin/ziroctl dev run "$d/apps/web/app.json" --image-dir build \
+          bin/ziroctl dev run "$d/apps/web/app.yaml" --image-dir build \
             --check 'ziroctl apps list | grep -q "^web "' --check 'wget -qO- http://127.0.0.1:8080/ | grep -q nginx'
 
       - name: Upload QEMU serial log

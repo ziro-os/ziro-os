@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/ziro-os/ziro-os/sdk/schema"
 	"os"
 	"os/exec"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -55,7 +55,7 @@ var pkgRemoveCmd = &cobra.Command{
 // reconcile reinstalls them after an OS upgrade replaced /usr.
 var (
 	extraPackagesFile = "/etc/ziro/packages"
-	packageNameRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9+._-]{0,99}$`)
+	packageNameRe     = schema.PackageNameRe
 )
 
 func validPackageNames(names []string) error {

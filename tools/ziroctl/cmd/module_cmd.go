@@ -142,6 +142,17 @@ var moduleSearchCmd = &cobra.Command{
 	},
 }
 
+// reinstallModule installs m over an enabled module (new settings or a new manifest), then
+// removes what the old one installed and the new one doesn't.
+func reinstallModule(m ModuleManifest, st *ModuleState, opts moduleOpts) error {
+	old := *st
+	if err := installModule(m, opts); err != nil {
+		return err
+	}
+	removeFootprint(m.Name, &old, m)
+	return nil
+}
+
 // searchModules lists built-in and catalog modules whose name or description contains q.
 func searchModules(q string) ([]moduleInfo, error) {
 	mods, err := listModules()
@@ -298,12 +309,7 @@ not signed: use it to develop and test a plugin before publishing it to a catalo
 		m.Source = "local"
 		all[m.Name] = m
 		if st := enabledModules()[m.Name]; st != nil && st.Status == "enabled" {
-			old := *st
-			if err := installModule(m, moduleOpts{Auto: st.Auto, Force: moduleForce, Set: set}); err != nil {
-				return err
-			}
-			removeFootprint(m.Name, &old, m)
-			return nil
+			return reinstallModule(m, st, moduleOpts{Auto: st.Auto, Force: moduleForce, Set: set})
 		}
 		return enableFrom(all, m.Name, moduleOpts{Force: moduleForce, Set: set})
 	},

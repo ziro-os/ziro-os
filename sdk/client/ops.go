@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/ziro-os/ziro-os/sdk/api"
+	"github.com/ziro-os/ziro-os/sdk/schema"
 )
 
 // Methods for every other /api/v1 route. Results without a dedicated type in sdk/api decode
@@ -361,4 +362,65 @@ func (c *Client) Events(ctx context.Context, fn func(api.AuditRecord) error) err
 		return err
 	}
 	return ctx.Err()
+}
+
+// ---- stacks and host provisioning ----
+
+func (c *Client) Stacks(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/stacks", &out)
+}
+
+// CatalogStacks lists the stacks published in the host's signed app catalogs.
+func (c *Client) CatalogStacks(ctx context.Context) ([]schema.Stack, error) {
+	var out []schema.Stack
+	return out, c.Get(ctx, "/api/v1/stacks?source=catalog", &out)
+}
+
+// Stack returns a stack and the status of each of its apps.
+func (c *Client) Stack(ctx context.Context, name string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/stacks/"+esc(name), &out)
+}
+
+// PlanStack reports what applying s would create, update, keep or remove. s is validated
+// locally first with the server's rules.
+func (c *Client) PlanStack(ctx context.Context, s schema.Stack) (map[string]any, error) {
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/stacks/"+esc(s.Stack)+"/plan", s, &out)
+}
+
+// ApplyStack applies s in the background (catalog apps only); poll Stack for progress.
+func (c *Client) ApplyStack(ctx context.Context, s schema.Stack) (api.Message, error) {
+	if err := s.Validate(); err != nil {
+		return api.Message{}, err
+	}
+	var m api.Message
+	return m, c.Do(ctx, http.MethodPut, "/api/v1/stacks/"+esc(s.Stack), s, &m)
+}
+
+// RemoveStack removes a stack's apps; purge also deletes their data and credentials.
+func (c *Client) RemoveStack(ctx context.Context, name string, purge bool) (api.Message, error) {
+	q := ""
+	if purge {
+		q = "?purge=true"
+	}
+	return c.del(ctx, "/api/v1/stacks/"+esc(name)+q)
+}
+
+// ApplyHost makes the host match cfg: with dryRun it returns the plan, otherwise it applies in
+// the background.
+func (c *Client) ApplyHost(ctx context.Context, cfg schema.HostConfig, dryRun bool) (map[string]any, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	q := ""
+	if dryRun {
+		q = "?dry_run=true"
+	}
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/apply"+q, cfg, &out)
 }

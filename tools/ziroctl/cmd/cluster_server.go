@@ -87,6 +87,7 @@ type Assignment struct {
 	Replica   int               `json:"replica"`              // replica index (ZIRO_REPLICA in the container)
 	Data      []string          `json:"data,omitempty"`       // container paths backed by node-local dirs
 	Resources *Resources        `json:"resources,omitempty"`  // memory/CPU/PID limits
+	Network   string            `json:"network,omitempty"`    // local apps: a named network (stacks)
 }
 
 // MeshPeer is another node on the WireGuard mesh.

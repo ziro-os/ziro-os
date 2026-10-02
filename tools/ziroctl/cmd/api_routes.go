@@ -68,6 +68,7 @@ func apiRoutes() *apiRouter {
 	registerFirewallRoutes(a)
 	registerClusterRoutes(a)
 	registerOpsRoutes(a)
+	registerStackRoutes(a)
 	return a
 }
 
