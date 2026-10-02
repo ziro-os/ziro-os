@@ -1,21 +1,21 @@
 package cmd
 
 import (
-	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -26,10 +26,12 @@ import (
 )
 
 const (
-	apiTokenFile = "/etc/ziro/api.token"
-	apiTLSKey    = "/etc/ziro/tls/server.key"
-	apiTLSCert   = "/etc/ziro/tls/server.crt"
-	apiPIDFile   = "/run/ziro-api.pid"
+	apiTokenFile     = "/etc/ziro/api.token"
+	apiLegacyRevoked = "/etc/ziro/api.token.revoked"
+	apiTLSKey        = "/etc/ziro/tls/server.key"
+	apiTLSCert       = "/etc/ziro/tls/server.crt"
+	apiPIDFile       = "/run/ziro-api.pid"
+	apiAddrFile      = "/run/ziro-api.addr" // scheme://host:port of the running server
 )
 
 var (
@@ -60,15 +62,15 @@ var apiStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show status and connectivity of Ziro REST API server",
 	Run: func(cmd *cobra.Command, args []string) {
-		if isAPIServerRunning() {
-			fmt.Printf("● Ziro REST API Server: \033[1;32mACTIVE (Running)\033[0m\n")
-			fmt.Printf("   Port:     %d (HTTPS / TLS 1.2+)\n", apiPort)
-			fmt.Printf("   Endpoint: https://127.0.0.1:%d/api/v1/health\n", apiPort)
-			fmt.Printf("   Auth:     Bearer Token (see 'ziroctl api token')\n")
-		} else {
-			fmt.Printf("● Ziro REST API Server: \033[1;33mSTANDBY (Stopped)\033[0m\n")
-			fmt.Println("   Start via: 'ziroctl api start' or 'ziroctl service start ziro-api'")
-		}
+		addr := apiServerAddr()
+		_ = printResult(map[string]any{"running": addr != "", "address": addr}, func() {
+			if addr == "" {
+				fmt.Println("ziro-api is not running (ziroctl service start ziro-api)")
+				return
+			}
+			fmt.Printf("ziro-api running at %s (health: %s/api/v1/health)\n", addr, addr)
+			fmt.Println("tokens: ziroctl api token create <name> --role viewer|operator|admin")
+		})
 	},
 }
 
@@ -77,9 +79,12 @@ var apiTokenCmd = &cobra.Command{
 	Short: "Display or generate the REST API Bearer Authentication Token",
 	Run: func(cmd *cobra.Command, args []string) {
 		token := getOrCreateAPIToken()
-		fmt.Printf("Ziro API Bearer Token: %s\n", token)
-		fmt.Println("Usage with curl:")
-		fmt.Printf("  curl -k -H \"Authorization: Bearer %s\" https://127.0.0.1:%d/api/v1/system\n", token, apiPort)
+		if token == "" {
+			fmt.Println("No bootstrap token: scoped tokens are in use. Create one with: ziroctl api token create <name> --role admin")
+			return
+		}
+		fmt.Printf("Bootstrap admin token: %s\n", token)
+		fmt.Println("Create scoped tokens (ziroctl api token create), then retire this one: ziroctl api token revoke legacy")
 	},
 }
 
@@ -95,25 +100,21 @@ var apiGenCertsCmd = &cobra.Command{
 	},
 }
 
-func isAPIServerRunning() bool {
-	// Check PID file
-	if fileExists(apiPIDFile) {
-		if data, err := os.ReadFile(apiPIDFile); err == nil {
-			pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-			if pid > 0 && isPIDRunning(pid) {
-				return true
-			}
+// apiServerAddr is the running server's scheme://host:port ("" when it isn't running).
+func apiServerAddr() string {
+	b, err := os.ReadFile(apiAddrFile)
+	if err != nil {
+		return ""
+	}
+	if data, err := os.ReadFile(apiPIDFile); err == nil {
+		if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 && isPIDRunning(pid) {
+			return strings.TrimSpace(string(b))
 		}
 	}
-
-	// Check local port probe
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", apiPort), 200*time.Millisecond)
-	if err == nil {
-		conn.Close()
-		return true
-	}
-	return false
+	return ""
 }
+
+func isAPIServerRunning() bool { return apiServerAddr() != "" }
 
 func getOrCreateAPIToken() string {
 	if envTok := os.Getenv("ZIRO_API_TOKEN"); envTok != "" {
@@ -125,6 +126,11 @@ func getOrCreateAPIToken() string {
 			return tok
 		}
 	}
+	// A first start with no scoped tokens gets one admin token to bootstrap with; once scoped
+	// tokens exist, or after `api token revoke legacy`, none is created.
+	if ts, _ := loadAPITokens(); len(ts) > 0 || fileExists(apiLegacyRevoked) {
+		return ""
+	}
 	// Generate new 32-byte hex token
 	b := make([]byte, 24)
 	_, _ = rand.Read(b)
@@ -134,70 +140,109 @@ func getOrCreateAPIToken() string {
 	return newTok
 }
 
-func ensureTLSCertificates() error {
-	if fileExists(apiTLSCert) && fileExists(apiTLSKey) {
-		return nil
+// apiCertIPs are the addresses the API certificate covers: loopback and every host address.
+func apiCertIPs() []net.IP {
+	ips := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	for _, a := range hostAddresses() {
+		ips = append(ips, net.ParseIP(a.IP))
 	}
-	_ = os.MkdirAll("/etc/ziro/tls", 0700)
+	return ips
+}
 
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+// tlsCertCurrent reports whether the certificate at path is ECDSA, valid for more than 30 days
+// and covers every address in ips.
+func tlsCertCurrent(path string, ips []net.IP, now time.Time) bool {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return false
 	}
-
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return err
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return false
 	}
-
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"Ziro-OS Cloud Control Plane"},
-			CommonName:   "ziro-host",
-		},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
-		DNSNames:              []string{"localhost", "ziro-host"},
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil || c.PublicKeyAlgorithm != x509.ECDSA || now.Add(30*24*time.Hour).After(c.NotAfter) {
+		return false
 	}
-
-	// Add local interfaces IPs
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, iface := range ifaces {
-			if addrs, err := iface.Addrs(); err == nil {
-				for _, addr := range addrs {
-					if ipnet, ok := addr.(*net.IPNet); ok {
-						template.IPAddresses = append(template.IPAddresses, ipnet.IP)
-					}
-				}
-			}
+	for _, ip := range ips {
+		if c.VerifyHostname(ip.String()) != nil {
+			return false
 		}
 	}
+	return true
+}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+// ensureTLSCertificates (re)issues the API's self-signed certificate (ECDSA P-256, one year)
+// when it is missing, expires within 30 days, or no longer covers the host's addresses.
+func ensureTLSCertificates() error {
+	ips := apiCertIPs()
+	if fileExists(apiTLSKey) && tlsCertCurrent(apiTLSCert, ips, time.Now()) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(apiTLSCert), 0700); err != nil {
+		return err
+	}
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
 	}
-
-	certOut, err := os.Create(apiTLSCert)
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return err
 	}
-	defer certOut.Close()
-	_ = pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-
-	keyOut, err := os.OpenFile(apiTLSKey, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	host, _ := os.Hostname()
+	tmpl := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{Organization: []string{"Ziro OS"}, CommonName: host},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           ips,
+		DNSNames:              []string{"localhost", host},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
 	if err != nil {
 		return err
 	}
-	defer keyOut.Close()
-	_ = pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	key, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(apiTLSKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0600); err != nil {
+		return err
+	}
+	return writeFileAtomic(apiTLSCert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644)
+}
 
-	return nil
+// certReloader serves the API certificate, renewing and reloading it at most hourly, so a
+// long-running server never presents an expired certificate.
+type certReloader struct {
+	mu      sync.Mutex
+	cert    *tls.Certificate
+	checked time.Time
+}
+
+func (c *certReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cert == nil || time.Since(c.checked) > time.Hour {
+		c.checked = time.Now()
+		if err := ensureTLSCertificates(); err != nil && c.cert != nil {
+			fmt.Printf("[api] certificate renewal: %v\n", err)
+			return c.cert, nil
+		}
+		kp, err := tls.LoadX509KeyPair(apiTLSCert, apiTLSKey)
+		if err != nil {
+			if c.cert != nil {
+				return c.cert, nil
+			}
+			return nil, err
+		}
+		c.cert = &kp
+	}
+	return c.cert, nil
 }
 
 // Simple in-memory sliding window rate limiter
@@ -270,106 +315,39 @@ func startAPIServer() {
 	_ = os.WriteFile(apiPIDFile, []byte(strconv.Itoa(os.Getpid())), 0644)
 	defer os.Remove(apiPIDFile)
 
-	mux := http.NewServeMux()
-	limiter := newRateLimiter(120, 1*time.Minute)
-
-	// API Middleware: Auth, Rate Limit, CORS, Security Headers
-	wrapHandler := func(isPublic bool, h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			// Security Headers
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("X-Frame-Options", "DENY")
-			w.Header().Set("X-XSS-Protection", "1; mode=block")
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-			// CORS
-			origin := r.Header.Get("Origin")
-			if origin != "" && apiCorsHost != "" {
-				w.Header().Set("Access-Control-Allow-Origin", apiCorsHost)
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-				if r.Method == "OPTIONS" {
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-			}
-
-			// Rate Limiting
-			clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-			if clientIP == "" {
-				clientIP = r.RemoteAddr
-			}
-			if !limiter.allow(clientIP) {
-				w.WriteHeader(http.StatusTooManyRequests)
-				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "Rate limit exceeded (120 req/min)"})
-				return
-			}
-
-			// Authentication (scoped tokens or the pre-RBAC admin token) and role check.
-			if !isPublic {
-				authHeader := r.Header.Get("Authorization")
-				name, role, ok := apiIdentity(trimBearer(authHeader), token, time.Now())
-				if !ok || !strings.HasPrefix(authHeader, "Bearer ") {
-					w.WriteHeader(http.StatusUnauthorized)
-					_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "Unauthorized: Invalid or missing Bearer token"})
-					return
-				}
-				if !apiAllowed(role, r.Method) {
-					w.WriteHeader(http.StatusForbidden)
-					_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "Forbidden: the " + role + " role cannot " + r.Method})
-					return
-				}
-				ctx := context.WithValue(r.Context(), apiCallerKey{}, "api-token:"+name+"("+role+")")
-				r = r.WithContext(context.WithValue(ctx, apiRoleKey{}, role))
-			}
-
-			h(w, r)
-		}
-	}
-
-	registerAPIRoutes(mux, wrapHandler)
+	handler := newAPIHandler(apiRoutes(), apiServerConfig{legacyToken: token, cors: apiCorsHost,
+		perIP: newRateLimiter(120, time.Minute), perToken: newRateLimiter(600, time.Minute)})
 
 	addr := fmt.Sprintf("%s:%d", apiBindHost, apiPort)
-	fmt.Println("================================================================")
-	fmt.Printf(" 🚀 Ziro-OS Control Plane REST API Server started!\n")
-	fmt.Println("================================================================")
-	fmt.Printf(" Listening on: %s (TLS 1.3 / HTTPS: %v)\n", addr, apiUseTLS)
-	fmt.Println(" Bearer Token: run 'ziroctl api token' (never logged)")
-	fmt.Println(" Control Endpoints:")
-	fmt.Println("   • GET  /api/v1/health       - Server & OS liveness check")
-	fmt.Println("   • GET  /api/v1/system       - System metrics & cloud metadata")
-	fmt.Println("   • GET  /api/v1/services     - Services list & status")
-	fmt.Println("   • POST /api/v1/services/... - Start, stop, restart services")
-	fmt.Println("   • GET  /api/v1/containers   - OCI containers inspection")
-	fmt.Println("   • GET  /api/v1/firewall     - Firewall status & active rules")
-	fmt.Println("   • GET  /api/v1/wireguard    - WireGuard mesh VPN status")
-	fmt.Println("   • GET  /api/v1/cluster      - Cluster nodes & deployments")
-	fmt.Println("   • GET  /api/v1/security     - Security scan & AI threat report")
-	fmt.Println("================================================================")
+	fmt.Printf("ziro-api listening on %s (TLS %v, TLS 1.2 minimum); %d routes, docs: sdk/openapi.yaml\n", addr, apiUseTLS, len(apiRoutes().routes))
 
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
+	scheme := "http"
 	if apiUseTLS {
+		scheme = "https"
 		if err := ensureTLSCertificates(); err != nil {
 			fmt.Printf("TLS certificate error: %v\n", err)
 			return
 		}
-		server.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-		if err := server.ListenAndServeTLS(apiTLSCert, apiTLSKey); err != nil {
-			fmt.Printf("TLS Server error: %v\n", err)
-		}
+		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: (&certReloader{}).get}
+	}
+	_ = writeFileAtomic(apiAddrFile, []byte(scheme+"://"+addr+"\n"), 0644)
+	defer os.Remove(apiAddrFile)
+	var err error
+	if apiUseTLS {
+		err = server.ListenAndServeTLS("", "")
 	} else {
-		if err := server.ListenAndServe(); err != nil {
-			fmt.Printf("HTTP Server error: %v\n", err)
-		}
+		err = server.ListenAndServe()
+	}
+	if err != nil {
+		fmt.Printf("API server error: %v\n", err)
 	}
 }
 
@@ -379,9 +357,6 @@ func init() {
 	apiStartCmd.Flags().BoolVar(&apiUseTLS, "tls", true, "Enable TLS / HTTPS encryption")
 	apiStartCmd.Flags().StringVar(&apiCorsHost, "cors", "", "Allowed CORS origin for Web GUI (disabled when empty)")
 
-	apiStatusCmd.Flags().IntVarP(&apiPort, "port", "p", 8443, "REST API listening port")
-	apiTokenCmd.Flags().IntVarP(&apiPort, "port", "p", 8443, "REST API listening port")
-
 	apiCmd.AddCommand(apiStartCmd)
 	apiCmd.AddCommand(apiStatusCmd)
 	apiCmd.AddCommand(apiTokenCmd)
@@ -389,177 +364,131 @@ func init() {
 	rootCmd.AddCommand(apiCmd)
 }
 
-// serviceActions maps the request's action to a constant, so the request never supplies argv text.
-var serviceActions = map[string]string{"start": "start", "stop": "stop", "restart": "restart"}
-
-// runServiceCLI applies a service action through the ziroctl CLI (fixed binary, argv, no shell).
-// The network-facing API never spawns daemons itself: the CLI re-validates the name and the
-// root-owned definition exactly as for a local operator, and the daemon is not tied to the API.
-func runServiceCLI(action, name string) error {
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	out, err := exec.Command(self, "service", action, name).CombinedOutput()
-	if err != nil {
-		msg := strings.TrimPrefix(strings.TrimSpace(string(out)), "Error: ")
-		return fmt.Errorf("%s", strings.TrimSpace(strings.SplitN(msg, "\n", 2)[0]))
-	}
-	return nil
-}
-
-// apiMux is what route registration needs from an http.ServeMux (tests record the routes).
-type apiMux interface {
-	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
-}
-
-// registerAPIRoutes registers every /api/v1 route. sdk/openapi.yaml must describe each one
-// (TestOpenAPICoversEveryRoute).
-func registerAPIRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
-	// Prometheus metrics (any token; a viewer token is enough).
-	mux.HandleFunc("/api/v1/metrics", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+// registerCoreRoutes: health, host status, services, metrics, cluster and security summaries.
+func registerCoreRoutes(a *apiRouter) {
+	// Prometheus metrics (a viewer token is enough).
+	a.get("/api/v1/metrics", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_, _ = w.Write([]byte(collectMetrics()))
-	}))
-
-	// 1. Health
-	mux.HandleFunc("/api/v1/health", wrap(true, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "healthy",
-			"version":  Version,
-			"os":       "Ziro-OS",
-			"uptime":   time.Since(apiStartTime).Round(time.Second).String(),
-			"arch":     runtime.GOARCH,
-			"features": []string{"containers", "clustering", "wireguard", "firewall", "sentinel", "compose"},
-		})
-	}))
-
-	// 2. System status
-	mux.HandleFunc("/api/v1/system", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+	})
+	a.get("/api/v1/health", "public", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, map[string]any{"status": "healthy", "version": Version, "os": "Ziro OS",
+			"uptime": time.Since(apiStartTime).Round(time.Second).String(), "arch": hostArch()})
+	})
+	a.get("/api/v1/system", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		sys := inspectSystem()
 		platform, hypervisor := detectCloudPlatform()
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"system":     sys,
-			"platform":   platform,
-			"hypervisor": hypervisor,
-			"cpus":       runtime.NumCPU(),
-		})
-	}))
+		apiReply(w, nil, map[string]any{"system": sys, "platform": platform, "hypervisor": hypervisor,
+			"cpus": runtime.NumCPU(), "summary": collectHostSummary(true)})
+	})
 
-	// 3. Services list & management
-	mux.HandleFunc("/api/v1/services", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			services := listAllServices()
-			_ = json.NewEncoder(w).Encode(services)
-			return
-		}
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-	}))
-
-	mux.HandleFunc("/api/v1/services/", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		// Path: /api/v1/services/{name}/{action}
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/services/"), "/")
-		if len(parts) >= 2 && r.Method == "POST" {
-			name := parts[0]
-			action := parts[1]
-			// Only existing, trusted service definitions: the name never reaches anything else.
-			if _, err := loadServiceDef(name); err != nil {
-				w.WriteHeader(http.StatusNotFound)
-				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
-				return
-			}
-			var err error
-			switch action {
-			case "start", "stop", "restart":
-				err = runServiceCLI(serviceActions[action], name)
-			case "enable":
-				err = enableService(name)
-			case "disable":
-				err = disableService(name)
-			default:
-				http.Error(w, "Unknown action", http.StatusBadRequest)
-				return
-			}
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-			caller, _ := r.Context().Value(apiCallerKey{}).(string)
-			if aerr := auditLog(caller, "api:"+ip, "service "+action, name, err); aerr != nil {
-				fmt.Printf("[api] audit log: %v\n", aerr)
-			}
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
-				return
-			}
-			_ = json.NewEncoder(w).Encode(APIMessage{Status: "ok", Message: fmt.Sprintf("Service %s %sed", name, action)})
-			return
-		}
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-	}))
-
-	// 4. Containers
-	mux.HandleFunc("/api/v1/containers", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			out, err := exec.Command("nerdctl", "ps", "-a", "--format", "json").Output()
-			if err != nil || len(out) == 0 {
-				_ = json.NewEncoder(w).Encode([]string{})
-				return
-			}
-			w.Write(out)
-			return
-		}
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-	}))
-
-	// 5. Firewall
-	mux.HandleFunc("/api/v1/firewall", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		cfg := loadFirewallConfig()
-		_ = json.NewEncoder(w).Encode(cfg)
-	}))
-
-	// 6. WireGuard
-	mux.HandleFunc("/api/v1/wireguard", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		out, _ := exec.Command("wg", "show").Output()
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"active": len(out) > 0,
-			"raw":    string(out),
-		})
-	}))
-
-	// 7. Cluster
-	mux.HandleFunc("/api/v1/cluster", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		// Never expose join/node tokens: return an explicit, redacted view.
-		cfg, err := loadClusterConfig()
+	a.get("/api/v1/services", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, listAllServices())
+	})
+	a.get("/api/v1/services/{name}", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		st, err := getServiceStatus(r.PathValue("name"))
 		if err != nil {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"role": "standalone"})
+			err = errNotFound(err.Error())
+		}
+		apiReply(w, err, st)
+	})
+	// Logs: the last ?lines= (default 100, at most 5000) of the service's log file.
+	a.get("/api/v1/services/{name}/logs", "operator", func(w http.ResponseWriter, r *http.Request) {
+		def, err := loadServiceDef(r.PathValue("name"))
+		if err != nil {
+			apiReply(w, errNotFound(err.Error()), nil)
 			return
 		}
-		view := map[string]interface{}{
-			"cluster_id": cfg.ClusterID, "role": cfg.Role, "node_id": cfg.NodeID, "master": cfg.MasterAddr,
+		lines, err := tailFile(def.LogFile, queryInt(r, "lines", 100, 5000))
+		apiReply(w, err, map[string]any{"service": def.Name, "lines": lines})
+	})
+	// Start, stop, restart, enable or disable a trusted (root-owned) service definition.
+	a.post("/api/v1/services/{name}/{action}", "operator", func(w http.ResponseWriter, r *http.Request) {
+		name, action := r.PathValue("name"), r.PathValue("action")
+		if _, err := loadServiceDef(name); err != nil {
+			apiReply(w, errNotFound(err.Error()), nil)
+			return
 		}
-		if cfg.Role == "master" {
-			if st, err := readState(); err == nil {
-				apps := []map[string]interface{}{}
-				for _, a := range st.Apps {
-					apps = append(apps, map[string]interface{}{
-						"name": a.Name, "image": a.Image, "replicas": a.Replicas, "port": a.Port, "status": st.appStatus(a),
-					})
-				}
-				view["nodes"], view["apps"], view["placements"] = st.Nodes, apps, st.Replicas
-			}
+		var err error
+		switch action {
+		case "start":
+			err = startService(name)
+		case "stop":
+			err = stopService(name)
+		case "restart":
+			err = restartService(name)
+		case "enable":
+			err = enableService(name)
+		case "disable":
+			err = disableService(name)
+		default:
+			apiReply(w, errNotFound("unknown action "+action), nil)
+			return
 		}
-		_ = json.NewEncoder(w).Encode(view)
-	}))
+		apiReply(w, err, APIMessage{Status: "ok", Message: "service " + name + ": " + action + " done"})
+	})
 
-	// 8. Security Scan
-	mux.HandleFunc("/api/v1/security", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(cachedSecurityScan())
-	}))
-	registerSecurityRoutes(mux, wrap)
-	registerSystemRoutes(mux, wrap)
-	registerHostRoutes(mux, wrap)
-	registerDNSRoutes(mux, wrap)
-	registerModuleRoutes(mux, wrap)
-	registerAppRoutes(mux, wrap)
-	registerNFSRoutes(mux, wrap)
-	registerGatewayRoutes(mux, wrap)
+	a.get("/api/v1/wireguard", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, wireguardStatus())
+	})
+	a.get("/api/v1/cluster", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, clusterView())
+	})
+	a.get("/api/v1/security", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, cachedSecurityScan())
+	})
+}
+
+// queryInt reads a positive integer query parameter, bounded by max.
+func queryInt(r *http.Request, key string, def, max int) int {
+	if v, err := strconv.Atoi(r.URL.Query().Get(key)); err == nil && v > 0 {
+		return min(v, max)
+	}
+	return def
+}
+
+// tailFile returns the last n lines of a file (reading at most the last 4 MiB).
+func tailFile(path string, n int) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	off := max(0, fi.Size()-4<<20)
+	b := make([]byte, fi.Size()-off)
+	if _, err := f.ReadAt(b, off); err != nil && err != io.EOF {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if off > 0 && len(lines) > 0 {
+		lines = lines[1:] // partial first line
+	}
+	return lines[max(0, len(lines)-n):], nil
+}
+
+// clusterView is the redacted cluster summary (no join or node tokens).
+func clusterView() map[string]any {
+	cfg, err := loadClusterConfig()
+	if err != nil {
+		return map[string]any{"role": "standalone"}
+	}
+	view := map[string]any{"cluster_id": cfg.ClusterID, "role": cfg.Role, "node_id": cfg.NodeID, "master": cfg.MasterAddr}
+	if cfg.Role == "master" {
+		if st, err := readState(); err == nil {
+			apps := []map[string]any{}
+			for _, a := range st.Apps {
+				apps = append(apps, map[string]any{"name": a.Name, "image": a.Image, "replicas": a.Replicas, "port": a.Port,
+					"status": st.appStatus(a), "resources": a.Resources})
+			}
+			view["nodes"], view["apps"], view["placements"] = st.Nodes, apps, st.Replicas
+		}
+	}
+	return view
 }

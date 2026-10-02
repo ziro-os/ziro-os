@@ -33,6 +33,9 @@ var networkListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List active network interfaces and CNI plugins",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if jsonOutput {
+			return printResult(map[string]any{"addresses": hostAddresses(), "default_iface": defaultRouteIface()}, nil)
+		}
 		fmt.Println("=== Network Interfaces ===")
 		ifaces, err := net.Interfaces()
 		if err != nil {

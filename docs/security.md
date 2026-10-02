@@ -74,10 +74,23 @@ Output:
   logged. To expose it: `ziroctl api start --bind 0.0.0.0` plus `ziroctl firewall allow 8443`.
   - Tokens are scoped: `ziroctl api token create <name> --role viewer|operator|admin [--ttl 90d]` prints the token
     once. Only its SHA-256 is stored (`/etc/ziro/api-tokens.json`, 0600).
-  - `viewer` can only read. `operator` can also act (for example, restart a service). `admin` can do everything.
+  - Every route declares its role, and the server enforces exactly that (each operation's `x-ziro-role` in
+    `sdk/openapi.yaml`; a test keeps the two identical).
+    - `viewer` reads.
+    - `operator` also runs day-to-day changes: services, containers, DNS records, scaling, cordon/drain.
+    - `admin` is needed for anything that grants or removes access, installs software, deletes data, or changes
+      where traffic or lookups go (hostname and resolvers included).
   - Tokens expire (90 days by default). `ziroctl api token ls` lists them and `ziroctl api token revoke` removes one.
-  - Every action is audited under the token's name.
-  - The pre-RBAC token in `/etc/ziro/api.token` still works as admin; delete the file to disable it.
+  - Every change is audited under the token's name, with its result. `GET /api/v1/events` streams the audit trail.
+  - **Rate limits:** 120 requests per minute per client address and 600 per token.
+  - **Errors:** always JSON, `{"status": "error", "code", "message"}`.
+  - **Bootstrap token:**
+    - The first start creates one admin token (`/etc/ziro/api.token`) only if no scoped token exists.
+    - Once scoped tokens exist, none is created.
+    - `ziroctl api token revoke legacy` retires it for good.
+  - **TLS certificate:**
+    - Self-signed ECDSA P-256, TLS 1.2 minimum.
+    - Renewed automatically 30 days before it expires, and when the host's addresses change.
 - **Sentinel**: alert-only by default. Use `ziroctl security monitor --enforce` to SIGKILL CRITICAL detections.
   File integrity is checked against a baseline in `/etc/ziro/fim.db`. Refresh it after upgrades with
   `ziroctl security harden`.

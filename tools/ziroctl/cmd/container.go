@@ -227,7 +227,13 @@ var containerListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-
+		if jsonOutput && backend == "nerdctl" {
+			list, err := listContainers()
+			if err != nil {
+				return err
+			}
+			return printResult(list, nil)
+		}
 		if backend == "nerdctl" {
 			return executeBackend(append([]string{"ps"}, args...)...)
 		}

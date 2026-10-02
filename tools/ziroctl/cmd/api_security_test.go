@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"context"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -15,20 +12,9 @@ import (
 func TestSecurityRoutesRBAC(t *testing.T) {
 	alertConfigPath = filepath.Join(t.TempDir(), "alerting.json")
 	alertSpoolDir = t.TempDir()
-	mux := http.NewServeMux()
 	var role string
-	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			ctx := context.WithValue(r.Context(), apiCallerKey{}, "api-token:t("+role+")")
-			h(w, r.WithContext(context.WithValue(ctx, apiRoleKey{}, role)))
-		}
-	}
-	registerSecurityRoutes(mux, wrap)
-	do := func(method, path, body string) int {
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
-		return rec.Code
-	}
+	api := newAPIHarness(t, registerSecurityRoutes)
+	do := func(method, path, body string) int { return api.code(role, method, path, body) }
 	add := `{"name":"soc","url":"https://hooks.example.com/x"}`
 	for _, r := range []string{"viewer", "operator"} {
 		role = r
@@ -58,19 +44,9 @@ func TestHostRoutesRBAC(t *testing.T) {
 	dir := t.TempDir()
 	hostnamePath, hostsPath, kernelHostnamePath = filepath.Join(dir, "hostname"), filepath.Join(dir, "hosts"), filepath.Join(dir, "khost")
 	netConfigPath, netAppliedPath, netRollbackPath = filepath.Join(dir, "n.json"), filepath.Join(dir, "a.json"), filepath.Join(dir, "r.json")
-	mux := http.NewServeMux()
 	var role string
-	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
-		}
-	}
-	registerHostRoutes(mux, wrap)
-	do := func(method, path, body string) int {
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
-		return rec.Code
-	}
+	api := newAPIHarness(t, registerHostRoutes)
+	do := func(method, path, body string) int { return api.code(role, method, path, body) }
 	role = "viewer"
 	if c := do("GET", "/api/v1/network", ""); c != http.StatusOK {
 		t.Errorf("viewer GET network: %d", c)
@@ -80,18 +56,20 @@ func TestHostRoutesRBAC(t *testing.T) {
 		{"PUT", "/api/v1/network", `{}`}, {"POST", "/api/v1/network/confirm", ""}, {"GET", "/api/v1/ssh/keys", ""},
 		{"POST", "/api/v1/ssh/keys", `{"source":"gh:x"}`}, {"POST", "/api/v1/disks", `{"device":"/dev/vdb","mount":"/data"}`},
 		{"POST", "/api/v1/disks/expand", ""},
+		// How the host is named and which resolvers it trusts: admin, like DNS upstreams.
+		{"POST", "/api/v1/network/hostname", `{"hostname":"api-node"}`}, {"POST", "/api/v1/network/dns", `{"servers":["198.51.100.53"]}`},
 	} {
 		if code := do(c.m, c.p, c.b); code != http.StatusForbidden {
 			t.Errorf("operator %s %s: %d, want 403", c.m, c.p, code)
 		}
 	}
+	role = "admin"
 	if c := do("POST", "/api/v1/network/hostname", `{"hostname":"api-node"}`); c != http.StatusOK {
-		t.Errorf("operator hostname: %d", c)
+		t.Errorf("admin hostname: %d", c)
 	}
 	if b, _ := os.ReadFile(hostnamePath); string(b) != "api-node\n" {
 		t.Errorf("hostname file %q", b)
 	}
-	role = "admin"
 	// Applying a network config over the API without a rollback timer is refused.
 	if c := do("PUT", "/api/v1/network", `{"config":{"interfaces":[{"name":"eth0","mode":"dhcp"}]}}`); c != http.StatusBadRequest {
 		t.Errorf("PUT without confirm_timeout: %d", c)
@@ -102,19 +80,9 @@ func TestDNSRoutesRBAC(t *testing.T) {
 	dir := t.TempDir()
 	dnsConfigPath, dnsStatsPath = filepath.Join(dir, "dns.json"), filepath.Join(dir, "stats.json")
 	resolvPinned = filepath.Join(dir, "udhcpc.conf")
-	mux := http.NewServeMux()
 	var role string
-	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
-		}
-	}
-	registerDNSRoutes(mux, wrap)
-	do := func(method, path, body string) int {
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
-		return rec.Code
-	}
+	api := newAPIHarness(t, registerDNSRoutes)
+	do := func(method, path, body string) int { return api.code(role, method, path, body) }
 	role = "viewer"
 	if c := do("GET", "/api/v1/dns", ""); c != http.StatusOK {
 		t.Errorf("viewer read: %d", c)
@@ -143,19 +111,9 @@ func TestDNSRoutesRBAC(t *testing.T) {
 }
 
 func TestModuleRoutesRBAC(t *testing.T) {
-	mux := http.NewServeMux()
 	var role string
-	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
-		}
-	}
-	registerModuleRoutes(mux, wrap)
-	do := func(method, path string) int {
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
-		return rec.Code
-	}
+	api := newAPIHarness(t, registerModuleRoutes)
+	do := func(method, path string) int { return api.code(role, method, path, "") }
 	for _, r := range []string{"viewer", "operator"} {
 		role = r
 		if code := do("POST", "/api/v1/modules/clamav/enable"); code != http.StatusForbidden {

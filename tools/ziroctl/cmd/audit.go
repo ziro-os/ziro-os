@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
 	"io"
 	"os"
 	"os/user"
@@ -32,15 +33,7 @@ const (
 	auditGenesis = "0000000000000000000000000000000000000000000000000000000000000000"
 )
 
-type auditRecord struct {
-	TS     string `json:"ts"`
-	Actor  string `json:"actor"`
-	Source string `json:"source,omitempty"`
-	Action string `json:"action"`
-	Target string `json:"target,omitempty"`
-	Result string `json:"result"`
-	Prev   string `json:"prev"`
-}
+type auditRecord = sdkapi.AuditRecord
 
 func lineHash(line []byte) string {
 	sum := sha256.Sum256(line)

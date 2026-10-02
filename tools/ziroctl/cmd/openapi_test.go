@@ -1,57 +1,76 @@
 package cmd
 
 import (
-	"net/http"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
-type recordingMux struct{ patterns []string }
-
-func (m *recordingMux) HandleFunc(p string, _ func(http.ResponseWriter, *http.Request)) {
-	m.patterns = append(m.patterns, p)
-}
-
-// TestOpenAPICoversEveryRoute fails when a route is registered but not documented in
-// sdk/openapi.yaml, or documented but not served (so clients generated from the spec work).
-func TestOpenAPICoversEveryRoute(t *testing.T) {
-	m := &recordingMux{}
-	registerAPIRoutes(m, func(_ bool, h http.HandlerFunc) http.HandlerFunc { return h })
-	spec, err := os.ReadFile("../../../sdk/openapi.yaml")
+// TestOpenAPIMatchesRoutes keeps sdk/openapi.yaml and the route table identical: every served
+// operation is documented with the role the server enforces (x-ziro-role), and nothing is
+// documented that isn't served.
+func TestOpenAPIMatchesRoutes(t *testing.T) {
+	raw, err := os.ReadFile("../../../sdk/openapi.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var paths []string
-	for _, mm := range regexp.MustCompile(`(?m)^  (/api/v1/\S*):\s*$`).FindAllStringSubmatch(string(spec), -1) {
-		paths = append(paths, mm[1])
+	var spec struct {
+		Paths map[string]map[string]struct {
+			Role string `yaml:"x-ziro-role"`
+		} `yaml:"paths"`
 	}
-	sort.Strings(paths)
-	if len(paths) < 30 {
-		t.Fatalf("only %d paths parsed from the spec", len(paths))
+	if err := yaml.Unmarshal(raw, &spec); err != nil {
+		t.Fatal(err)
 	}
-	served := func(p string) bool {
-		for _, pat := range m.patterns {
-			if p == pat || strings.HasSuffix(pat, "/") && strings.HasPrefix(p, pat) {
-				return true
+	documented := map[string]string{} // "METHOD /path" -> role
+	for path, ops := range spec.Paths {
+		for method, op := range ops {
+			if method == "parameters" {
+				continue
 			}
-		}
-		return false
-	}
-	for _, pat := range m.patterns {
-		ok := false
-		for _, p := range paths {
-			ok = ok || p == pat || strings.HasSuffix(pat, "/") && strings.HasPrefix(p, pat) && len(p) > len(pat)
-		}
-		if !ok {
-			t.Errorf("route %s is not documented in sdk/openapi.yaml", pat)
+			documented[strings.ToUpper(method)+" "+path] = op.Role
 		}
 	}
-	for _, p := range paths {
-		if !served(p) {
-			t.Errorf("sdk/openapi.yaml documents %s, which the server doesn't serve", p)
+	served := map[string]string{}
+	for _, rt := range apiRoutes().routes {
+		key := rt.Method + " " + rt.Path
+		if _, dup := served[key]; dup {
+			t.Errorf("%s is registered twice", key)
+		}
+		served[key] = rt.Role
+	}
+	var keys []string
+	for k := range served {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		role, ok := documented[k]
+		switch {
+		case !ok:
+			t.Errorf("%s is served but not documented in sdk/openapi.yaml", k)
+		case role != served[k]:
+			t.Errorf("%s: openapi says x-ziro-role %q, the server enforces %q", k, role, served[k])
+		}
+	}
+	for k := range documented {
+		if _, ok := served[k]; !ok {
+			t.Errorf("sdk/openapi.yaml documents %s, which the server doesn't serve", k)
+		}
+	}
+}
+
+// Every route that changes state requires more than a viewer, and nothing but health is public.
+func TestRoutePolicy(t *testing.T) {
+	for _, rt := range apiRoutes().routes {
+		if rt.Role == "public" && rt.Path != "/api/v1/health" {
+			t.Errorf("%s %s is public", rt.Method, rt.Path)
+		}
+		if rt.Method != "GET" && apiRoleRank[rt.Role] < apiRoleRank["operator"] {
+			t.Errorf("%s %s changes state with role %s", rt.Method, rt.Path, rt.Role)
 		}
 	}
 }

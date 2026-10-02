@@ -622,6 +622,32 @@ func editDNS(edit func(*DNSConfig) error) error {
 	return nil
 }
 
+// addDNSRecord normalizes and validates a local record and adds it (CLI and API).
+func addDNSRecord(c *DNSConfig, r DNSRecord) error {
+	r.Name, r.Type = strings.TrimSuffix(strings.ToLower(r.Name), "."), strings.ToUpper(r.Type)
+	if _, _, err := parseRecord(r); err != nil {
+		return err
+	}
+	c.Records = append(c.Records, r)
+	return nil
+}
+
+// removeDNSRecords removes the records named name (of type typ, or every type when empty).
+func removeDNSRecords(c *DNSConfig, name, typ string) error {
+	kept := c.Records[:0]
+	for _, r := range c.Records {
+		if fqdn(r.Name) == fqdn(name) && (typ == "" || strings.EqualFold(r.Type, typ)) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if len(kept) == len(c.Records) {
+		return errNotFound("no record " + name)
+	}
+	c.Records = kept
+	return nil
+}
+
 var dnsCmd = &cobra.Command{
 	Use:   "dns",
 	Short: "Smart DNS: caching resolver, split DNS, local records, blocklists, DNS-over-TLS",
@@ -774,12 +800,7 @@ var dnsRecordAddCmd = &cobra.Command{
 	Args:    cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return editDNS(func(c *DNSConfig) error {
-			r := DNSRecord{Name: strings.TrimSuffix(strings.ToLower(args[0]), "."), Type: strings.ToUpper(args[1]), Value: args[2], TTL: dnsRecordTTL}
-			if _, _, err := parseRecord(r); err != nil {
-				return err
-			}
-			c.Records = append(c.Records, r)
-			return nil
+			return addDNSRecord(c, DNSRecord{Name: args[0], Type: args[1], Value: args[2], TTL: dnsRecordTTL})
 		})
 	},
 }
@@ -789,20 +810,11 @@ var dnsRecordRmCmd = &cobra.Command{
 	Short: "Remove local records by name (and type)",
 	Args:  cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return editDNS(func(c *DNSConfig) error {
-			kept := c.Records[:0]
-			for _, r := range c.Records {
-				if fqdn(r.Name) == fqdn(args[0]) && (len(args) == 1 || strings.EqualFold(r.Type, args[1])) {
-					continue
-				}
-				kept = append(kept, r)
-			}
-			if len(kept) == len(c.Records) {
-				return fmt.Errorf("no record %s", args[0])
-			}
-			c.Records = kept
-			return nil
-		})
+		typ := ""
+		if len(args) == 2 {
+			typ = args[1]
+		}
+		return editDNS(func(c *DNSConfig) error { return removeDNSRecords(c, args[0], typ) })
 	},
 }
 

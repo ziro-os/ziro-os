@@ -397,18 +397,9 @@ func TestGatewayLocalStoreAndAPI(t *testing.T) {
 	}
 
 	// API: viewers read, admins change.
-	mux := http.NewServeMux()
 	var role string
-	registerGatewayRoutes(mux, func(_ bool, h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
-		}
-	})
-	do := func(method, path, body string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
-		return rec
-	}
+	api := newAPIHarness(t, registerGatewayRoutes)
+	do := func(method, path, body string) *httptest.ResponseRecorder { return api.req(role, method, path, body) }
 	role = "viewer"
 	if w := do("GET", "/api/v1/gateway/routes", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "www.test") {
 		t.Fatalf("list: %d %s", w.Code, w.Body.String())

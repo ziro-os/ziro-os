@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
 	"io"
 	"os"
 	"os/exec"
@@ -35,6 +36,23 @@ var backupPaths = []string{
 
 // validateBackupArchive rejects members outside backupPaths, path traversal,
 // hardlinks/devices, and writes through a symlink shipped in the same archive.
+// BackupInfo is one archive in the backup directory (the SDK's api.Backup).
+type BackupInfo = sdkapi.Backup
+
+func listBackups() []BackupInfo {
+	out := []BackupInfo{}
+	entries, _ := os.ReadDir(defaultBackupDir)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tar.gz") {
+			continue
+		}
+		if fi, err := e.Info(); err == nil {
+			out = append(out, BackupInfo{Name: e.Name(), Bytes: fi.Size(), Created: fi.ModTime(), Checksum: fileExists(filepath.Join(defaultBackupDir, e.Name()+".sha256"))})
+		}
+	}
+	return out
+}
+
 func validateBackupArchive(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -282,32 +300,17 @@ var backupListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List existing system backup archives",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		entries, err := os.ReadDir(defaultBackupDir)
-		if err != nil || len(entries) == 0 {
-			fmt.Printf("No backups found in %s\n", defaultBackupDir)
-			return nil
-		}
-
-		fmt.Printf("%-32s %-10s %-20s %s\n", "BACKUP ARCHIVE", "SIZE", "CREATED", "INTEGRITY")
-		fmt.Println(strings.Repeat("-", 80))
-
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".tar.gz") {
-				fpath := filepath.Join(defaultBackupDir, e.Name())
-				fi, _ := e.Info()
-				sizeStr := fmt.Sprintf("%d KB", fi.Size()/1024)
-				modStr := fi.ModTime().Format("2006-01-02 15:04:05")
-
-				integrity := "No Checksum"
-				manifestPath := fpath + ".sha256"
-				if fileExists(manifestPath) {
-					integrity = "Verified (SHA256)"
-				}
-
-				fmt.Printf("%-32s %-10s %-20s %s\n", e.Name(), sizeStr, modStr, integrity)
+		backups := listBackups()
+		return printResult(backups, func() {
+			if len(backups) == 0 {
+				fmt.Printf("No backups found in %s\n", defaultBackupDir)
+				return
 			}
-		}
-		return nil
+			fmt.Printf("%-48s %10s %-20s %s\n", "BACKUP ARCHIVE", "SIZE", "CREATED", "CHECKSUM")
+			for _, b := range backups {
+				fmt.Printf("%-48s %10s %-20s %v\n", b.Name, humanBytes(uint64(b.Bytes)), b.Created.Format("2006-01-02 15:04:05"), b.Checksum)
+			}
+		})
 	},
 }
 

@@ -151,6 +151,9 @@ var serviceListCmd = &cobra.Command{
 	Short: "List all system services, state, and enabled status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		services := listAllServices()
+		if jsonOutput {
+			return printResult(services, nil)
+		}
 		fmt.Printf("%-16s %-10s %-8s %-10s %s\n", "SERVICE", "STATUS", "PID", "ENABLED", "DESCRIPTION")
 		fmt.Println(strings.Repeat("-", 75))
 		for _, s := range services {
@@ -177,6 +180,9 @@ var serviceStatusCmd = &cobra.Command{
 		s, err := getServiceStatus(name)
 		if err != nil {
 			return fmt.Errorf("service '%s' not found", name)
+		}
+		if jsonOutput {
+			return printResult(s, nil)
 		}
 		fmt.Printf("● %s - %s\n", s.Name, s.Description)
 		fmt.Printf("   Loaded:  %s (/etc/ziro/services/%s.conf; enabled: %v)\n", s.Name, s.Name, s.Enabled)

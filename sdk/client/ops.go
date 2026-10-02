@@ -1,0 +1,364 @@
+package client
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/ziro-os/ziro-os/sdk/api"
+)
+
+// Methods for every other /api/v1 route. Results without a dedicated type in sdk/api decode
+// into map[string]any (the shapes are documented in sdk/openapi.yaml). Every call returns a
+// *Error with the server's status, code and message on failure.
+
+func (c *Client) post(ctx context.Context, path string, in any) (api.Message, error) {
+	var m api.Message
+	return m, c.Do(ctx, http.MethodPost, path, in, &m)
+}
+
+func (c *Client) del(ctx context.Context, path string) (api.Message, error) {
+	var m api.Message
+	return m, c.Do(ctx, http.MethodDelete, path, nil, &m)
+}
+
+func lines(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return "?lines=" + strconv.Itoa(n)
+}
+
+// ---- host and services ----
+
+// Metrics returns the Prometheus exposition text.
+func (c *Client) Metrics(ctx context.Context) (string, error) {
+	var b []byte
+	err := c.Get(ctx, "/api/v1/metrics", &b)
+	return string(b), err
+}
+
+func (c *Client) Services(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/services", &out)
+}
+
+func (c *Client) Service(ctx context.Context, name string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/services/"+esc(name), &out)
+}
+
+// ServiceLogs returns the last n lines (0 = server default) of a service's log.
+func (c *Client) ServiceLogs(ctx context.Context, name string, n int) ([]string, error) {
+	var out struct {
+		Lines []string `json:"lines"`
+	}
+	return out.Lines, c.Get(ctx, "/api/v1/services/"+esc(name)+"/logs"+lines(n), &out)
+}
+
+// Top samples container and process resource use over one second.
+func (c *Client) Top(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/system/top", &out)
+}
+
+func (c *Client) DiskUsage(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/system/df", &out)
+}
+
+// Prune plans (confirm=false) or removes unused containers, images, logs, temp files and caches.
+func (c *Client) Prune(ctx context.Context, categories []string, all, confirm bool) (map[string]any, error) {
+	var out map[string]any
+	body := map[string]any{"categories": categories, "all": all, "confirm": confirm}
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/system/prune", body, &out)
+}
+
+// Power reboots or powers off the host ("reboot" or "poweroff").
+func (c *Client) Power(ctx context.Context, action string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/system/"+esc(action), nil)
+}
+
+// ToolsUpdate reports the last ziroctl update check; refresh checks now.
+func (c *Client) ToolsUpdate(ctx context.Context, refresh bool) (map[string]any, error) {
+	var out map[string]any
+	q := ""
+	if refresh {
+		q = "?refresh=true"
+	}
+	return out, c.Get(ctx, "/api/v1/system/update"+q, &out)
+}
+
+func (c *Client) InstallToolsUpdate(ctx context.Context) (api.Message, error) {
+	return c.post(ctx, "/api/v1/system/update", nil)
+}
+
+func (c *Client) OSUpgrade(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/upgrade", &out)
+}
+
+// StartOSUpgrade upgrades the OS in the background (version "" = latest).
+func (c *Client) StartOSUpgrade(ctx context.Context, version string, reboot bool) (api.Message, error) {
+	return c.post(ctx, "/api/v1/upgrade", map[string]any{"version": version, "reboot": reboot})
+}
+
+func (c *Client) RollbackOSUpgrade(ctx context.Context) (api.Message, error) {
+	return c.post(ctx, "/api/v1/upgrade/rollback", nil)
+}
+
+// ---- containers ----
+
+func (c *Client) Containers(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/containers", &out)
+}
+
+func (c *Client) Container(ctx context.Context, id string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/containers/"+esc(id), &out)
+}
+
+func (c *Client) ContainerLogs(ctx context.Context, id string, n int) ([]string, error) {
+	var out struct {
+		Lines []string `json:"lines"`
+	}
+	return out.Lines, c.Get(ctx, "/api/v1/containers/"+esc(id)+"/logs"+lines(n), &out)
+}
+
+// ContainerAction starts, stops or restarts a container.
+func (c *Client) ContainerAction(ctx context.Context, id, action string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/containers/"+esc(id)+"/"+esc(action), nil)
+}
+
+func (c *Client) RemoveContainer(ctx context.Context, id string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/containers/"+esc(id))
+}
+
+func (c *Client) Images(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/images", &out)
+}
+
+func (c *Client) PullImage(ctx context.Context, image string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/images/pull", map[string]string{"image": image})
+}
+
+// ---- firewall, network, security ----
+
+func (c *Client) Firewall(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/firewall", &out)
+}
+
+// FirewallPort allows ("allow") or removes ("deny") an inbound port such as "443/tcp".
+func (c *Client) FirewallPort(ctx context.Context, action, port, comment string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/firewall/"+esc(action), map[string]string{"port": port, "comment": comment})
+}
+
+// FirewallBlock blocks (block=true) or unblocks an IP or CIDR.
+func (c *Client) FirewallBlock(ctx context.Context, target string, block bool) (api.Message, error) {
+	action := "unblock"
+	if block {
+		action = "block"
+	}
+	return c.post(ctx, "/api/v1/firewall/"+action, map[string]string{"target": target})
+}
+
+func (c *Client) SetFirewall(ctx context.Context, enabled bool) (api.Message, error) {
+	if enabled {
+		return c.post(ctx, "/api/v1/firewall/enable", nil)
+	}
+	return c.post(ctx, "/api/v1/firewall/disable", nil)
+}
+
+func (c *Client) WireGuard(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/wireguard", &out)
+}
+
+func (c *Client) Security(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/security", &out)
+}
+
+func (c *Client) Bans(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/security/bans", &out)
+}
+
+// Ban blocks ip for duration (Go duration, "" = 1h).
+func (c *Client) Ban(ctx context.Context, ip, duration string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/security/bans", map[string]string{"ip": ip, "duration": duration})
+}
+
+func (c *Client) Unban(ctx context.Context, ip string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/security/bans/"+esc(ip))
+}
+
+func (c *Client) Network(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/network", &out)
+}
+
+func (c *Client) SetHostname(ctx context.Context, hostname string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/network/hostname", map[string]string{"hostname": hostname})
+}
+
+func (c *Client) DNS(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/dns", &out)
+}
+
+// ---- cluster (on a master) ----
+
+func (c *Client) Cluster(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/cluster", &out)
+}
+
+// ApplyClusterApp creates or replaces a cluster app from its full spec (as `cluster apply`).
+func (c *Client) ApplyClusterApp(ctx context.Context, app map[string]any) (api.Message, error) {
+	return c.post(ctx, "/api/v1/cluster/apps", app)
+}
+
+func (c *Client) ScaleClusterApp(ctx context.Context, name string, replicas int) (api.Message, error) {
+	return c.post(ctx, "/api/v1/cluster/apps/"+esc(name)+"/scale", map[string]int{"replicas": replicas})
+}
+
+func (c *Client) RollbackClusterApp(ctx context.Context, name string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/cluster/apps/"+esc(name)+"/rollback", nil)
+}
+
+func (c *Client) RemoveClusterApp(ctx context.Context, name string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/cluster/apps/"+esc(name))
+}
+
+// NodeAction cordons, uncordons or drains a node.
+func (c *Client) NodeAction(ctx context.Context, id, action string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/cluster/nodes/"+esc(id)+"/"+esc(action), nil)
+}
+
+func (c *Client) RemoveNode(ctx context.Context, id string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/cluster/nodes/"+esc(id))
+}
+
+// SetClusterSecret creates or replaces a secret (values are write-only).
+func (c *Client) SetClusterSecret(ctx context.Context, name string, kv map[string]string) (api.Message, error) {
+	var m api.Message
+	return m, c.Do(ctx, http.MethodPut, "/api/v1/cluster/secrets/"+esc(name), kv, &m)
+}
+
+func (c *Client) RemoveClusterSecret(ctx context.Context, name string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/cluster/secrets/"+esc(name))
+}
+
+// ---- operations ----
+
+func (c *Client) Backups(ctx context.Context) ([]api.Backup, error) {
+	var out []api.Backup
+	return out, c.Get(ctx, "/api/v1/backups", &out)
+}
+
+func (c *Client) CreateBackup(ctx context.Context) (api.Message, error) {
+	return c.post(ctx, "/api/v1/backups", nil)
+}
+
+func (c *Client) RestoreBackup(ctx context.Context, name string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/backups/"+esc(name)+"/restore", nil)
+}
+
+// Audit returns the latest records (limit 0 = server default), at or after since (RFC 3339).
+func (c *Client) Audit(ctx context.Context, limit int, since string) ([]api.AuditRecord, error) {
+	q := url.Values{}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if since != "" {
+		q.Set("since", since)
+	}
+	var out []api.AuditRecord
+	p := "/api/v1/audit"
+	if len(q) > 0 {
+		p += "?" + q.Encode()
+	}
+	return out, c.Get(ctx, p, &out)
+}
+
+func (c *Client) Tokens(ctx context.Context) ([]api.Token, error) {
+	var out []api.Token
+	return out, c.Get(ctx, "/api/v1/tokens", &out)
+}
+
+// CreateToken issues a token; its Secret is returned only here. ttl is a Go duration ("" = 90 days, "0" = never).
+func (c *Client) CreateToken(ctx context.Context, name, role, ttl string) (api.Token, error) {
+	var out api.Token
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/tokens", map[string]string{"name": name, "role": role, "ttl": ttl}, &out)
+}
+
+func (c *Client) RevokeToken(ctx context.Context, name string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/tokens/"+esc(name))
+}
+
+func (c *Client) ModuleCatalog(ctx context.Context, query string) ([]api.ModuleInfo, error) {
+	var out []api.ModuleInfo
+	return out, c.Get(ctx, "/api/v1/modules/catalog?q="+url.QueryEscape(query), &out)
+}
+
+func (c *Client) AppCatalog(ctx context.Context, query string) ([]api.AppCatalogEntry, error) {
+	var out []api.AppCatalogEntry
+	return out, c.Get(ctx, "/api/v1/apps/catalog?q="+url.QueryEscape(query), &out)
+}
+
+// Events streams every audited change as it happens, calling fn for each until ctx ends, fn
+// returns an error, or the server closes the stream (reconnect to continue).
+func (c *Client) Events(ctx context.Context, fn func(api.AuditRecord) error) error {
+	u := *c.base
+	u.Path = c.base.Path + "/api/v1/events"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("User-Agent", c.ua)
+	hc := *c.http
+	hc.Timeout = 0 // a stream outlives the client's request timeout
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var m api.Message
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return &Error{Status: resp.StatusCode, Code: m.Code, Message: m.Message}
+	}
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		data, ok := bytes.CutPrefix(sc.Bytes(), []byte("data: "))
+		if !ok {
+			continue
+		}
+		var rec api.AuditRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return fmt.Errorf("bad event: %w", err)
+		}
+		if err := fn(rec); err != nil {
+			return err
+		}
+	}
+	if err := sc.Err(); err != nil && !strings.Contains(err.Error(), "context canceled") {
+		return err
+	}
+	return ctx.Err()
+}

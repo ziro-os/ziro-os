@@ -1163,12 +1163,8 @@ var clusterApplyCmd = &cobra.Command{
 			}
 			apps = []ClusteredApp{one}
 		}
-		for i := range apps {
-			a := apps[i]
-			if err := deployApp(func(st *ClusterState) (*ClusteredApp, error) {
-				a.Revision, a.CreatedAt = 0, ""
-				return &a, nil
-			}); err != nil {
+		for _, a := range apps {
+			if err := clusterApply(a); err != nil {
 				return fmt.Errorf("%s: %w", a.Name, err)
 			}
 		}
@@ -1188,15 +1184,7 @@ var clusterScaleCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("replicas must be a number")
 		}
-		return deployApp(func(st *ClusterState) (*ClusteredApp, error) {
-			cur := st.app(args[0])
-			if cur == nil {
-				return nil, fmt.Errorf("app %q not found", args[0])
-			}
-			a := *cur
-			a.Replicas = n
-			return &a, nil
-		})
+		return clusterScale(args[0], n)
 	},
 }
 
@@ -1208,18 +1196,7 @@ var clusterRollbackCmd = &cobra.Command{
 		if _, err := requireMaster(); err != nil {
 			return err
 		}
-		return deployApp(func(st *ClusterState) (*ClusteredApp, error) {
-			cur := st.app(args[0])
-			h := st.History[args[0]]
-			if cur == nil || len(h) == 0 {
-				return nil, fmt.Errorf("no previous revision of %q", args[0])
-			}
-			prev := h[len(h)-1]
-			st.History[args[0]] = h[:len(h)-1]
-			prev.Replicas = cur.Replicas   // rollback restores the spec, not the scale
-			prev.AllowFrom = cur.AllowFrom // ... nor an older (possibly looser) network policy
-			return &prev, nil
-		})
+		return clusterRollback(args[0])
 	},
 }
 
@@ -1231,22 +1208,11 @@ var clusterRemoveCmd = &cobra.Command{
 		if _, err := requireMaster(); err != nil {
 			return err
 		}
-		return withState(func(st *ClusterState) error {
-			var kept []ClusteredApp
-			for _, a := range st.Apps {
-				if a.Name != args[0] {
-					kept = append(kept, a)
-				}
-			}
-			if len(kept) == len(st.Apps) {
-				return fmt.Errorf("app %q not found", args[0])
-			}
-			st.Apps = kept
-			delete(st.History, args[0])
-			scheduleReplicas(st, time.Now())
-			fmt.Printf("✓ Removed '%s'; agents stop its containers within ~%ds\n", args[0], int(agentInterval.Seconds()))
-			return nil
-		})
+		if err := clusterRemoveApp(args[0]); err != nil {
+			return err
+		}
+		fmt.Printf("✓ Removed '%s'; agents stop its containers within ~%ds\n", args[0], int(agentInterval.Seconds()))
+		return nil
 	},
 }
 
@@ -1345,7 +1311,7 @@ func nodeOp(id string, fn func(st *ClusterState, n *ClusterNode) error) error {
 	return withState(func(st *ClusterState) error {
 		n := st.node(id)
 		if n == nil {
-			return fmt.Errorf("node %q not found", id)
+			return errNotFound(fmt.Sprintf("node %q not found", id))
 		}
 		if err := fn(st, n); err != nil {
 			return err
@@ -1360,44 +1326,36 @@ var clusterNodeCmd = &cobra.Command{Use: "node", Short: "Cordon, drain or remove
 var clusterCordonCmd = &cobra.Command{
 	Use: "cordon <node>", Short: "Stop scheduling new replicas on a node", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return nodeOp(args[0], func(st *ClusterState, n *ClusterNode) error { n.Cordoned = true; return nil })
+		return clusterNodeAction(args[0], "cordon")
 	},
 }
 
 var clusterUncordonCmd = &cobra.Command{
 	Use: "uncordon <node>", Short: "Allow scheduling on a node again", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return nodeOp(args[0], func(st *ClusterState, n *ClusterNode) error { n.Cordoned = false; return nil })
+		return clusterNodeAction(args[0], "uncordon")
 	},
 }
 
 var clusterDrainCmd = &cobra.Command{
 	Use: "drain <node>", Short: "Cordon a node and move its replicas to other nodes", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return nodeOp(args[0], func(st *ClusterState, n *ClusterNode) error {
-			n.Cordoned = true
-			for i := range st.Replicas {
-				if st.Replicas[i].Node == n.ID {
-					st.Replicas[i].Node = ""
-				}
-			}
-			fmt.Printf("✓ %s cordoned and drained\n", n.ID)
-			return nil
-		})
+		if err := clusterNodeAction(args[0], "drain"); err != nil {
+			return err
+		}
+		fmt.Printf("✓ %s cordoned and drained\n", args[0])
+		return nil
 	},
 }
 
 var clusterNodeRmCmd = &cobra.Command{
 	Use: "rm <node>", Short: "Remove a (dead) worker from the cluster and revoke its credentials", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return nodeOp(args[0], func(st *ClusterState, n *ClusterNode) error {
-			if n.Role == "master" {
-				return fmt.Errorf("the master cannot be removed")
-			}
-			removeNode(st, n.ID)
-			fmt.Printf("✓ %s removed; its token is revoked\n", args[0])
-			return nil
-		})
+		if err := clusterNodeAction(args[0], "remove"); err != nil {
+			return err
+		}
+		fmt.Printf("✓ %s removed; its token is revoked\n", args[0])
+		return nil
 	},
 }
 
@@ -1472,22 +1430,19 @@ var clusterSecretSetCmd = &cobra.Command{
 		if _, err := requireMaster(); err != nil {
 			return err
 		}
-		if err := validName(args[0]); err != nil {
-			return err
-		}
 		kv := map[string]string{}
 		for _, e := range args[1:] {
 			k, v, ok := strings.Cut(e, "=")
-			if !ok || !envKeyRe.MatchString(k) || strings.ContainsAny(v, "\x00\r\n") {
+			if !ok {
 				return fmt.Errorf("invalid secret entry %q (want KEY=VALUE, single line)", k)
 			}
 			kv[k] = v
 		}
-		return withState(func(st *ClusterState) error {
-			st.Secrets[args[0]] = kv
-			fmt.Printf("✓ secret '%s' saved (%d keys); apps using it pick it up on their next container start\n", args[0], len(kv))
-			return nil
-		})
+		if err := clusterSecretSet(args[0], kv); err != nil {
+			return err
+		}
+		fmt.Printf("✓ secret '%s' saved (%d keys); apps using it pick it up on their next container start\n", args[0], len(kv))
+		return nil
 	},
 }
 
@@ -1497,20 +1452,7 @@ var clusterSecretRmCmd = &cobra.Command{
 		if _, err := requireMaster(); err != nil {
 			return err
 		}
-		return withState(func(st *ClusterState) error {
-			for _, a := range st.Apps {
-				for _, s := range a.Secrets {
-					if s == args[0] {
-						return fmt.Errorf("secret %q is used by app %q", s, a.Name)
-					}
-				}
-			}
-			if _, ok := st.Secrets[args[0]]; !ok {
-				return fmt.Errorf("secret %q not found", args[0])
-			}
-			delete(st.Secrets, args[0])
-			return nil
-		})
+		return clusterSecretRm(args[0])
 	},
 }
 

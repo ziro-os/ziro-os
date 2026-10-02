@@ -35,8 +35,34 @@ _, err = c.DeployApp(ctx, api.AppDeployRequest{App: "postgres:18", Expose: "db.i
 apps, err := c.Apps(ctx)
 ```
 
-Errors are `*client.Error` values carrying the HTTP status and the server's message; `client.IsNotFound(err)`
-helps with lookups. A token is never sent over plain HTTP to a remote host. `Do` and `Get` reach any route.
+**Calls and errors:**
+- The client has a method for every route: services, containers, images, the firewall, WireGuard, security, network,
+  DNS, the cluster (apps, nodes, secrets), backups, OS and tools upgrades, audit, tokens, catalogs, system
+  top/df/prune.
+- `Events` streams every audited change as it happens, so you can watch instead of polling.
+- Errors are `*client.Error` values carrying the HTTP status, a machine-readable `Code` (`not_found`, `forbidden`,
+  `conflict`, ...) and the server's message. `client.IsNotFound` and `client.IsForbidden` help with the common
+  cases.
+- A token is never sent over plain HTTP to a remote host. `Do` and `Get` reach any route.
+
+```go
+err = c.Events(ctx, func(e api.AuditRecord) error {
+    fmt.Println(e.TS, e.Actor, e.Action, e.Target, e.Result) // e.g. "api POST /api/v1/cluster/apps/{name}/scale"
+    return nil
+})
+```
+
+**Routes:** the API follows one convention.
+- Paths are `/api/v1/<resource>[/{name}[/<action>]]`.
+- `GET` reads, `POST` creates or runs an action, `PUT` replaces, and `DELETE` removes.
+- Long operations (module enable, app deploy, upgrades, backups, image pulls) answer `202 Accepted` and run in the
+  background.
+
+**CLI-only on purpose:** a few commands have no API.
+- Interactive commands: `container run`/`exec`.
+- Commands that print key material: `wireguard peer add` (a private key), `apps credentials`.
+- Signing and building: catalog signing, `dev`.
+- Host-local actions: `install`, `nfs mount`.
 [`sdk/examples/canary`](../sdk/examples/canary) is a complete program: it shifts traffic to a new app in steps
 and rolls back on failed health checks.
 
@@ -123,9 +149,10 @@ local kit, and `--arch` cross-builds through Docker's emulation. See
 
 ## Other languages
 
-Generate a client from [`sdk/openapi.yaml`](../sdk/openapi.yaml) with any OpenAPI 3.1 generator. A test in
-`ziroctl` (`TestOpenAPICoversEveryRoute`) fails when a route is added without documenting it, or documented
-without being served, so the spec stays complete.
+Generate a client from [`sdk/openapi.yaml`](../sdk/openapi.yaml) with any OpenAPI 3.1 generator. The server builds
+its routes from one table (method, path, role, handler). A test in `ziroctl` (`TestOpenAPIMatchesRoutes`) fails when
+a route is served but not documented, documented but not served, or documented with a different role than the
+server enforces (`x-ziro-role`). The spec is therefore always complete and exact.
 
 ## Compatibility
 

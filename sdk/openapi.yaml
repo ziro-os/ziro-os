@@ -8,9 +8,12 @@ info:
     Authenticate with `Authorization: Bearer <token>` (`ziroctl api token`, or scoped tokens from
     `ziroctl api token create <name> --role viewer|operator|admin`).
 
-    Roles: **viewer** may GET; **operator** may also change services, DNS records and security
-    bans; **admin** may do everything (modules, apps, gateway, network, disks, SSH keys, DNS
-    upstreams). Requests are rate limited (120/min per client) and every change is audited.
+    Roles: each operation states the role it needs in `x-ziro-role` (the server enforces exactly
+    that). **viewer** reads; **operator** also runs day-to-day changes (services, containers, DNS
+    records, scaling, node cordon/drain); **admin** may do everything, including what grants or
+    removes access, installs software, deletes data or changes where traffic goes. Requests are
+    rate limited (120/min per client, 600/min per token) and every change is audited
+    (`GET /api/v1/events` streams the audit trail). Errors are `{"status": "error", "code", "message"}`.
 
     Long jobs (module enable, app deploy) answer `202 Accepted` and run in the background; poll the
     matching GET. The Go client is `github.com/ziro-os/ziro-os/sdk/client`.
@@ -33,6 +36,7 @@ tags:
 paths:
   /api/v1/health:
     get:
+      x-ziro-role: public
       tags: [host]
       summary: Liveness (no token needed)
       security: []
@@ -40,24 +44,28 @@ paths:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/system:
     get:
+      x-ziro-role: viewer
       tags: [host]
       summary: Host metrics and cloud metadata
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/system/top:
     get:
+      x-ziro-role: viewer
       tags: [host]
       summary: Resource use of containers (from their cgroups) and processes, sampled over one second
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/system/df:
     get:
+      x-ziro-role: viewer
       tags: [host]
       summary: Disk usage by category and how much a prune can reclaim
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/system/prune:
     post:
+      x-ziro-role: admin
       tags: [host]
       summary: Plan (default) or, with confirm, remove unused containers, images, rotated logs, stale temp files and caches (admin)
       requestBody:
@@ -74,18 +82,21 @@ paths:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/system/reboot:
     post:
+      x-ziro-role: admin
       tags: [host]
       summary: Reboot the host after replying (admin)
       responses:
         "202": { $ref: "#/components/responses/Message" }
   /api/v1/system/poweroff:
     post:
+      x-ziro-role: admin
       tags: [host]
       summary: Power the host off after replying (admin)
       responses:
         "202": { $ref: "#/components/responses/Message" }
   /api/v1/system/update:
     get:
+      x-ziro-role: viewer
       tags: [host]
       summary: Last ziroctl/ziropkg update check (refresh=true checks now)
       parameters:
@@ -93,12 +104,14 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Object" }
     post:
+      x-ziro-role: admin
       tags: [host]
       summary: Install the newest signed tools release in the background (admin)
       responses:
         "202": { $ref: "#/components/responses/Message" }
   /api/v1/metrics:
     get:
+      x-ziro-role: viewer
       tags: [host]
       summary: Prometheus metrics (text format)
       responses:
@@ -108,12 +121,14 @@ paths:
             text/plain: { schema: { type: string } }
   /api/v1/services:
     get:
+      x-ziro-role: viewer
       tags: [host]
       summary: Services and their status
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/services/{name}/{action}:
     post:
+      x-ziro-role: operator
       tags: [host]
       summary: Start, stop, restart, enable or disable a service (operator)
       parameters:
@@ -126,53 +141,62 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/containers:
     get:
+      x-ziro-role: viewer
       tags: [host]
       summary: Containers on this host
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/firewall:
     get:
+      x-ziro-role: viewer
       tags: [security]
       summary: Firewall status and rules
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/wireguard:
     get:
+      x-ziro-role: viewer
       tags: [network]
       summary: WireGuard status
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/cluster:
     get:
+      x-ziro-role: viewer
       tags: [cluster]
       summary: Cluster nodes, apps and replicas
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/security:
     get:
+      x-ziro-role: viewer
       tags: [security]
       summary: Security scan report
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/security/protect:
     get:
+      x-ziro-role: viewer
       tags: [security]
       summary: Protection settings (SSH auto-ban, scan and flood guards)
       responses:
         "200": { $ref: "#/components/responses/Object" }
-    post:
+    put:
+      x-ziro-role: admin
       tags: [security]
-      summary: Change protection settings (admin)
+      summary: Replace the protection settings (validated and applied like `security protect set`)
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/security/bans:
     get:
+      x-ziro-role: viewer
       tags: [security]
       summary: Banned addresses
       responses:
         "200": { $ref: "#/components/responses/Object" }
     post:
+      x-ziro-role: admin
       tags: [security]
       summary: Ban an address (operator)
       requestBody: { $ref: "#/components/requestBodies/Object" }
@@ -180,6 +204,7 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/security/bans/{ip}:
     delete:
+      x-ziro-role: admin
       tags: [security]
       summary: Lift a ban (operator)
       parameters:
@@ -191,11 +216,13 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/security/alerting:
     get:
+      x-ziro-role: admin
       tags: [security]
       summary: Alert webhooks
       responses:
         "200": { $ref: "#/components/responses/Object" }
     post:
+      x-ziro-role: admin
       tags: [security]
       summary: Add a webhook (admin)
       requestBody: { $ref: "#/components/requestBodies/Object" }
@@ -203,6 +230,7 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/security/alerting/{name}:
     delete:
+      x-ziro-role: admin
       tags: [security]
       summary: Remove a webhook (admin)
       parameters: [{ $ref: "#/components/parameters/Name" }]
@@ -210,6 +238,7 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/security/alerting/{name}/test:
     post:
+      x-ziro-role: admin
       tags: [security]
       summary: Send a test alert to a webhook (admin)
       parameters: [{ $ref: "#/components/parameters/Name" }]
@@ -217,35 +246,27 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/network:
     get:
+      x-ziro-role: viewer
       tags: [network]
       summary: Network configuration (applied and pending)
       responses:
         "200": { $ref: "#/components/responses/Object" }
     put:
+      x-ziro-role: admin
       tags: [network]
       summary: Replace and apply the network configuration; rolls back unless confirmed (admin)
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Message" }
-  /api/v1/network/{action}:
-    post:
-      tags: [network]
-      summary: Confirm a network change, or set the hostname or resolvers (admin)
-      parameters:
-        - name: action
-          in: path
-          required: true
-          schema: { type: string, enum: [confirm, hostname, dns] }
-      requestBody: { $ref: "#/components/requestBodies/Object" }
-      responses:
-        "200": { $ref: "#/components/responses/Message" }
   /api/v1/disks:
     get:
+      x-ziro-role: viewer
       tags: [storage]
       summary: Disks and filesystems
       responses:
         "200": { $ref: "#/components/responses/Object" }
     post:
+      x-ziro-role: admin
       tags: [storage]
       summary: Format and mount a data disk, {"device","mount"} (admin)
       requestBody: { $ref: "#/components/requestBodies/Object" }
@@ -253,23 +274,27 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/disks/expand:
     post:
+      x-ziro-role: admin
       tags: [storage]
       summary: Grow the root filesystem to its disk (admin)
       responses:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/ssh/keys:
     get:
+      x-ziro-role: admin
       tags: [security]
       summary: Authorized SSH keys
       responses:
         "200": { $ref: "#/components/responses/Object" }
     post:
+      x-ziro-role: admin
       tags: [security]
       summary: Import keys, {"source":"gh:alice","sync":false} (admin)
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Message" }
     delete:
+      x-ziro-role: admin
       tags: [security]
       summary: Remove keys imported from a source (admin)
       parameters:
@@ -281,18 +306,21 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/dns:
     get:
+      x-ziro-role: viewer
       tags: [network]
       summary: Smart DNS configuration and statistics
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/dns/records:
     post:
+      x-ziro-role: operator
       tags: [network]
       summary: Add a DNS record (operator)
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Message" }
     delete:
+      x-ziro-role: operator
       tags: [network]
       summary: Remove a DNS record (operator)
       parameters:
@@ -302,6 +330,7 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/dns/block:
     put:
+      x-ziro-role: operator
       tags: [network]
       summary: Replace blocklists (operator)
       requestBody: { $ref: "#/components/requestBodies/Object" }
@@ -309,6 +338,7 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/dns/upstreams:
     put:
+      x-ziro-role: admin
       tags: [network]
       summary: Replace upstream resolvers (admin)
       requestBody: { $ref: "#/components/requestBodies/Object" }
@@ -316,6 +346,7 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/dns/forwards:
     put:
+      x-ziro-role: admin
       tags: [network]
       summary: Replace split-DNS forwards (admin)
       requestBody: { $ref: "#/components/requestBodies/Object" }
@@ -323,6 +354,7 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/modules:
     get:
+      x-ziro-role: viewer
       tags: [modules]
       summary: Built-in and catalog modules (plugins) with their status
       responses:
@@ -333,6 +365,7 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/ModuleInfo" } }
   /api/v1/modules/{name}/{action}:
     post:
+      x-ziro-role: admin
       tags: [modules]
       summary: Enable, upgrade, disable or purge a module in the background (admin)
       parameters:
@@ -346,6 +379,7 @@ paths:
         "404": { $ref: "#/components/responses/Message" }
   /api/v1/apps:
     get:
+      x-ziro-role: viewer
       tags: [apps]
       summary: Deployed apps and how many replicas run
       responses:
@@ -356,6 +390,7 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/AppStatus" } }
   /api/v1/apps/deploy:
     post:
+      x-ziro-role: admin
       tags: [apps]
       summary: Deploy (or update) an app from a catalog in the background (admin)
       requestBody:
@@ -367,6 +402,7 @@ paths:
         "202": { $ref: "#/components/responses/Message" }
   /api/v1/apps/{name}:
     delete:
+      x-ziro-role: admin
       tags: [apps]
       summary: Remove an app; purge=true also deletes its data and credentials (admin)
       parameters:
@@ -376,6 +412,7 @@ paths:
         "202": { $ref: "#/components/responses/Message" }
   /api/v1/nfs:
     get:
+      x-ziro-role: viewer
       tags: [storage]
       summary: NFS exports and mounts
       responses:
@@ -386,6 +423,7 @@ paths:
               schema: { $ref: "#/components/schemas/NFSConfig" }
   /api/v1/nfs/clients:
     get:
+      x-ziro-role: viewer
       tags: [storage]
       summary: NFS clients connected to this server
       responses:
@@ -396,6 +434,7 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/NFSClient" } }
   /api/v1/gateway/routes:
     get:
+      x-ziro-role: viewer
       tags: [gateway]
       summary: Routes with their resolved upstreams
       responses:
@@ -405,6 +444,7 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/GatewayRouteState" } }
     post:
+      x-ziro-role: admin
       tags: [gateway]
       summary: Create or replace a route (admin; live within a second)
       requestBody: { $ref: "#/components/requestBodies/GatewayRoute" }
@@ -413,12 +453,14 @@ paths:
         "400": { $ref: "#/components/responses/Message" }
   /api/v1/gateway/routes/{name}:
     get:
+      x-ziro-role: viewer
       tags: [gateway]
       summary: One route
       parameters: [{ $ref: "#/components/parameters/Name" }]
       responses:
         "200": { description: Route, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayRouteState" } } } }
     put:
+      x-ziro-role: admin
       tags: [gateway]
       summary: Create or replace this route (admin)
       parameters: [{ $ref: "#/components/parameters/Name" }]
@@ -427,6 +469,7 @@ paths:
         "200": { description: The stored route, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayRoute" } } } }
         "400": { $ref: "#/components/responses/Message" }
     delete:
+      x-ziro-role: admin
       tags: [gateway]
       summary: Remove this route (admin)
       parameters: [{ $ref: "#/components/parameters/Name" }]
@@ -434,23 +477,27 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/gateway/status:
     get:
+      x-ziro-role: viewer
       tags: [gateway]
       summary: Upstream health, active connections and requests per route
       responses:
         "200": { description: Status, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayStatus" } } } }
   /api/v1/gateway/ca:
     get:
+      x-ziro-role: viewer
       tags: [gateway]
       summary: The internal CA certificate (PEM) to trust for `tls internal` routes
       responses:
         "200": { description: PEM, content: { application/x-pem-file: { schema: { type: string } } } }
   /api/v1/gateway/certs:
     get:
+      x-ziro-role: viewer
       tags: [gateway]
       summary: Names of uploaded certificates
       responses:
         "200": { description: Names, content: { application/json: { schema: { type: array, items: { type: string } } } } }
     post:
+      x-ziro-role: admin
       tags: [gateway]
       summary: Upload a certificate, {"name","cert","key"} PEM (admin)
       requestBody: { $ref: "#/components/requestBodies/Object" }
@@ -458,12 +505,357 @@ paths:
         "200": { $ref: "#/components/responses/Message" }
   /api/v1/gateway/certs/{name}:
     delete:
+      x-ziro-role: admin
       tags: [gateway]
       summary: Remove a certificate (refused while a route uses it; admin)
       parameters: [{ $ref: "#/components/parameters/Name" }]
       responses:
         "200": { $ref: "#/components/responses/Message" }
 
+  /api/v1/apps/catalog:
+    get:
+      x-ziro-role: viewer
+      tags: [apps]
+      summary: Search the app catalogs (?q=)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/apps/catalog/{app}:
+    get:
+      x-ziro-role: viewer
+      tags: [apps]
+      summary: An app definition from the catalogs
+      parameters:
+        - { name: app, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/audit:
+    get:
+      x-ziro-role: admin
+      tags: [security]
+      summary: Latest audit records (?limit=, ?since= RFC 3339)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/audit/verify:
+    get:
+      x-ziro-role: admin
+      tags: [security]
+      summary: Verify the audit hash chain
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/backups:
+    get:
+      x-ziro-role: operator
+      tags: [storage]
+      summary: Backup archives
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      x-ziro-role: admin
+      tags: [storage]
+      summary: Create a backup in the background
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/backups/{name}/restore:
+    post:
+      x-ziro-role: admin
+      tags: [storage]
+      summary: Restore a backup in the background
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/cluster/apps:
+    post:
+      x-ziro-role: admin
+      tags: [cluster]
+      summary: Create or replace a cluster app from its full spec (cluster apply)
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/cluster/apps/{name}:
+    delete:
+      x-ziro-role: admin
+      tags: [cluster]
+      summary: Remove a cluster app and its replicas
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/cluster/apps/{name}/rollback:
+    post:
+      x-ziro-role: operator
+      tags: [cluster]
+      summary: Roll an app back to its previous revision
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/cluster/apps/{name}/scale:
+    post:
+      x-ziro-role: operator
+      tags: [cluster]
+      summary: 'Scale an app, {"replicas": n}'
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/cluster/nodes/{id}:
+    delete:
+      x-ziro-role: admin
+      tags: [cluster]
+      summary: Remove a worker and revoke its credentials
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/cluster/nodes/{id}/{action}:
+    post:
+      x-ziro-role: operator
+      tags: [cluster]
+      summary: Cordon, uncordon or drain a node
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: action, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/cluster/secrets:
+    get:
+      x-ziro-role: admin
+      tags: [cluster]
+      summary: Secret names and keys (never values)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/cluster/secrets/{name}:
+    put:
+      x-ziro-role: admin
+      tags: [cluster]
+      summary: 'Create or replace a secret, {"KEY": "value"} (write-only)'
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    delete:
+      x-ziro-role: admin
+      tags: [cluster]
+      summary: Delete a secret no app uses
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/containers/{id}:
+    get:
+      x-ziro-role: viewer
+      tags: [host]
+      summary: Inspect a container
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    delete:
+      x-ziro-role: operator
+      tags: [host]
+      summary: 'Remove a stopped container (not an app or cluster container: 409)'
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/containers/{id}/logs:
+    get:
+      x-ziro-role: operator
+      tags: [host]
+      summary: The last ?lines= of a container log
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/containers/{id}/{action}:
+    post:
+      x-ziro-role: operator
+      tags: [host]
+      summary: Start, stop or restart a container
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: action, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/events:
+    get:
+      x-ziro-role: operator
+      tags: [host]
+      summary: 'Server-sent events: every audited change as it happens (text/event-stream)'
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/firewall/allow:
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: 'Allow inbound traffic on a port, {"port": "443/tcp"}'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/firewall/block:
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: 'Block an IP or CIDR, {"target": "203.0.113.0/24"}'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/firewall/deny:
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: 'Remove a port from the allow list, {"port": "443/tcp"}'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/firewall/disable:
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: Disable the firewall (all inbound traffic allowed)
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/firewall/enable:
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: Enable the firewall
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/firewall/unblock:
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: Unblock an IP or CIDR
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/images:
+    get:
+      x-ziro-role: viewer
+      tags: [host]
+      summary: Container images
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/images/pull:
+    post:
+      x-ziro-role: operator
+      tags: [host]
+      summary: 'Pull an image in the background, {"image": "..."}'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/modules/catalog:
+    get:
+      x-ziro-role: viewer
+      tags: [modules]
+      summary: Search built-in and catalog modules (?q=)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/modules/catalog/{name}:
+    get:
+      x-ziro-role: viewer
+      tags: [modules]
+      summary: A module manifest
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/network/confirm:
+    post:
+      x-ziro-role: admin
+      tags: [network]
+      summary: Confirm an applied network change (stops the rollback timer)
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/network/dns:
+    post:
+      x-ziro-role: admin
+      tags: [network]
+      summary: 'Pin resolvers, {"servers": [...], "search": [...]}; empty follows DHCP'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/network/hostname:
+    post:
+      x-ziro-role: admin
+      tags: [network]
+      summary: 'Set the hostname, {"hostname": "..."}'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/repos:
+    get:
+      x-ziro-role: viewer
+      tags: [modules]
+      summary: Catalog repositories
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/services/{name}:
+    get:
+      x-ziro-role: viewer
+      tags: [host]
+      summary: One service and its status
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/services/{name}/logs:
+    get:
+      x-ziro-role: operator
+      tags: [host]
+      summary: The last ?lines= of a service log
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/tokens:
+    get:
+      x-ziro-role: admin
+      tags: [security]
+      summary: API tokens (never the tokens themselves)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: 'Create a token, {"name","role","ttl"}; the token is returned once'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/tokens/{name}:
+    delete:
+      x-ziro-role: admin
+      tags: [security]
+      summary: 'Revoke a token ("legacy" revokes the bootstrap admin token for good)'
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/upgrade:
+    get:
+      x-ziro-role: viewer
+      tags: [host]
+      summary: Installed and latest OS release
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      x-ziro-role: admin
+      tags: [host]
+      summary: 'Upgrade the OS in the background, {"version", "reboot"}'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
+  /api/v1/upgrade/rollback:
+    post:
+      x-ziro-role: admin
+      tags: [host]
+      summary: Roll the last OS upgrade back (takes effect at reboot)
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
 components:
   securitySchemes:
     bearer:
@@ -501,6 +893,7 @@ components:
       type: object
       properties:
         status: { type: string, enum: [ok, error, accepted] }
+        code: { type: string, description: "errors: invalid, unauthorized, forbidden, not_found, method_not_allowed, conflict, too_large, rate_limited, internal" }
         message: { type: string }
     ModuleInfo:
       type: object

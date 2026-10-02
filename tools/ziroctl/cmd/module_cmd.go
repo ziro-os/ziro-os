@@ -126,19 +126,13 @@ var moduleSearchCmd = &cobra.Command{
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		refreshStaleCatalogs("module")
-		mods, err := listModules()
-		if err != nil {
-			return err
-		}
 		q := ""
 		if len(args) == 1 {
-			q = strings.ToLower(args[0])
+			q = args[0]
 		}
-		var hits []moduleInfo
-		for _, m := range mods {
-			if strings.Contains(m.Name, q) || strings.Contains(strings.ToLower(m.Description), q) {
-				hits = append(hits, m)
-			}
+		hits, err := searchModules(q)
+		if err != nil {
+			return err
 		}
 		if jsonOutput {
 			return json.NewEncoder(os.Stdout).Encode(hits)
@@ -146,6 +140,22 @@ var moduleSearchCmd = &cobra.Command{
 		printModules(hits)
 		return nil
 	},
+}
+
+// searchModules lists built-in and catalog modules whose name or description contains q.
+func searchModules(q string) ([]moduleInfo, error) {
+	mods, err := listModules()
+	if err != nil {
+		return nil, err
+	}
+	q = strings.ToLower(q)
+	hits := []moduleInfo{}
+	for _, m := range mods {
+		if strings.Contains(m.Name, q) || strings.Contains(strings.ToLower(m.Description), q) {
+			hits = append(hits, m)
+		}
+	}
+	return hits, nil
 }
 
 var moduleUpdateCmd = &cobra.Command{

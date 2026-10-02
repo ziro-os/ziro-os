@@ -86,10 +86,17 @@ func isLoopback(h string) bool { return h == "localhost" || h == "127.0.0.1" || 
 // Error is a non-2xx answer from the server.
 type Error struct {
 	Status  int
+	Code    string // invalid, unauthorized, forbidden, not_found, conflict, rate_limited, ...
 	Message string
 }
 
 func (e *Error) Error() string { return fmt.Sprintf("ziro api: %d %s", e.Status, e.Message) }
+
+// IsForbidden reports whether err is a 403: the token's role is too low for the operation.
+func IsForbidden(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == http.StatusForbidden
+}
 
 // IsNotFound reports whether err is a 404 from the server.
 func IsNotFound(err error) bool {
@@ -134,7 +141,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var m api.Message
 		if json.Unmarshal(data, &m) == nil && m.Message != "" {
-			return &Error{Status: resp.StatusCode, Message: m.Message}
+			return &Error{Status: resp.StatusCode, Code: m.Code, Message: m.Message}
 		}
 		return &Error{Status: resp.StatusCode, Message: strings.TrimSpace(string(data))}
 	}
