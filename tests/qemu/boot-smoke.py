@@ -302,6 +302,19 @@ def main():
             lines = out.split()
             check("custom kernel: ima+landlock+bpf LSMs, bbr/fq, hardening options built in",
                   "ima" in out and "landlock" in out and "bbr" in lines and "fq" in lines and lines[-2:] == ["4", "0"], out)
+        # Machine-dependent tuning by ziro-init: zram swap on small hosts, reclaim headroom, I/O
+        # schedulers; static sysctls from 99-ziro.conf.
+        rc, out = con.run("echo SWAP=$(grep -c zram0 /proc/swaps) MINFREE=$(cat /proc/sys/vm/min_free_kbytes) "
+                          "SCHED=$(cat /sys/block/vda/queue/scheduler 2>/dev/null | grep -o '\\[[a-z-]*\\]') "
+                          "PIDMAX=$(sysctl -n kernel.pid_max) DIRTY=$(sysctl -n vm.dirty_bytes)")
+        m = re.search(r"MINFREE=(\d+)", out)
+        check("memory/IO tuning: zram swap, min_free_kbytes >= 16 MiB, pid_max, bounded dirty pages",
+              "SWAP=1" in out and m is not None and int(m.group(1)) >= 16384 and "PIDMAX=4194304" in out and "DIRTY=268435456" in out, out)
+        if args.flavor == "custom":
+            rc, out = con.run("zcat /proc/config.gz | grep -cE '^CONFIG_(PREEMPT_DYNAMIC|PREEMPT_VOLUNTARY|ZRAM|SLAB_BUCKETS|INIT_STACK_ALL_ZERO|IMA_READ_POLICY)=y'; "
+                              "zcat /proc/config.gz | grep -c '^CONFIG_IMA_WRITE_POLICY=y'")
+            check("custom kernel: dynamic preemption (voluntary), zram, slab buckets, zeroed stacks, IMA policy locked",
+                  out.split()[:2] == ["6", "0"], out)
         rc, out = con.run("test -e /dev/fd/0 && test -e /dev/stdin && bash -c 'cat <(echo PSUB)'")
         check("/dev/fd + bash process substitution", "PSUB" in out, out)
         rc, out = con.run("ziroctl wg init >/dev/null && ziroctl wg up && ziroctl wg up && "

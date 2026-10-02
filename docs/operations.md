@@ -105,7 +105,11 @@ handles it in layers.
    ```json
    {"memory_full_percent": 10, "memory_for_seconds": 15, "restart_workloads": true, "disk_prune_percent": 90}
    ```
-5. **Bounded tmpfs.** `/tmp` is capped at 25% of RAM, `/run` at 10% and `/dev/shm` at 25%. In live mode the root is
+5. **zram swap and reclaim headroom.**
+   - On hosts with 8 GiB of RAM or less, ziro-init enables zstd-compressed swap in RAM (25% of RAM), so a short
+     spike costs some CPU instead of a killed process. `touch /etc/ziro/zram.disabled` turns it off.
+   - `vm.min_free_kbytes` is set to 1% of RAM, so the kernel reclaims before allocations stall.
+6. **Bounded tmpfs.** `/tmp` is capped at 25% of RAM, `/run` at 10% and `/dev/shm` at 25%. In live mode the root is
    capped at 75%, so filling a RAM-backed filesystem can't take the whole host down.
 
 ## Keeping `ziroctl` current: `ziroctl update`
