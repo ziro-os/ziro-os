@@ -23,11 +23,11 @@ func TestServiceCgroup(t *testing.T) {
 	}
 	read := func(f string) string { b, _ := os.ReadFile(filepath.Join(dir, f)); return string(b) }
 	if read("memory.max") != "1073741824" || read("memory.high") != "966367638" || read("cpu.max") != "150000 100000" ||
-		read("pids.max") != "64" || read("memory.oom.group") != "1" {
+		read("pids.max") != "64" || read("memory.oom.group") != "1" || read("memory.swap.max") != "0" {
 		t.Errorf("limits: %q %q %q %q", read("memory.max"), read("memory.high"), read("cpu.max"), read("pids.max"))
 	}
 	// Removing the limits resets them to max.
-	if _, err := serviceCgroup(&ServiceDef{Name: "clamd"}); err != nil || read("memory.max") != "max" || read("cpu.max") != "max 100000" {
+	if _, err := serviceCgroup(&ServiceDef{Name: "clamd"}); err != nil || read("memory.max") != "max" || read("memory.swap.max") != "max" || read("cpu.max") != "max 100000" {
 		t.Errorf("reset: %v %q", err, read("memory.max"))
 	}
 	if serviceClass("sshd") != "system" || serviceClass("sentinel") != "system" || serviceClass("clamd") != "workloads" {
@@ -43,7 +43,7 @@ func TestContainerResourceArgs(t *testing.T) {
 		t.Errorf("unbounded: %s", got)
 	}
 	got := containerResourceArgs(&Resources{Memory: "512Mi", CPUs: 0.5, PIDs: 100})
-	if !slices.Equal(got, []string{"--memory", "536870912", "--cpus", "0.5", "--pids-limit", "100"}) {
+	if !slices.Equal(got, []string{"--memory", "536870912", "--memory-swap", "536870912", "--cpus", "0.5", "--pids-limit", "100"}) {
 		t.Errorf("limited: %v", got)
 	}
 }

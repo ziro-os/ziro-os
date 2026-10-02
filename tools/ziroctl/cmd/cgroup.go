@@ -78,11 +78,13 @@ func serviceCgroup(def *ServiceDef) (string, error) {
 
 // applyCgroupLimits writes the limits ("max" when unset, so removing a limit takes effect).
 func applyCgroupLimits(dir string, r *Resources) error {
-	mem, high := "max", "max"
+	mem, high, swap := "max", "max", "max"
 	if n := r.MemoryBytes(); n > 0 {
 		// memory.high throttles and reclaims before memory.max kills: pressure shows up as
-		// slowness and in PSI before the service dies.
-		mem, high = strconv.FormatInt(n, 10), strconv.FormatInt(n/10*9, 10)
+		// slowness and in PSI before the service dies. The limit covers swap too (zram on small
+		// hosts): cgroup v2 limits swap separately, so without swap.max a service could grow
+		// past its limit into swap.
+		mem, high, swap = strconv.FormatInt(n, 10), strconv.FormatInt(n/10*9, 10), "0"
 	}
 	cpu := "max 100000"
 	pids := "max"
@@ -95,7 +97,7 @@ func applyCgroupLimits(dir string, r *Resources) error {
 		}
 	}
 	var errs []error
-	for f, v := range map[string]string{"memory.max": mem, "memory.high": high, "cpu.max": cpu, "pids.max": pids} {
+	for f, v := range map[string]string{"memory.max": mem, "memory.high": high, "memory.swap.max": swap, "cpu.max": cpu, "pids.max": pids} {
 		if err := cgroupWrite(dir, f, v); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("%s: %w", f, err))
 		}
@@ -118,7 +120,9 @@ func setOOMScoreAdj(pid int, class string) {
 func containerResourceArgs(r *Resources) []string {
 	var args []string
 	if n := r.MemoryBytes(); n > 0 {
-		args = append(args, "--memory", strconv.FormatInt(n, 10))
+		// --memory-swap is memory plus swap (Docker semantics): equal to --memory means no swap,
+		// so the limit holds on hosts with zram.
+		args = append(args, "--memory", strconv.FormatInt(n, 10), "--memory-swap", strconv.FormatInt(n, 10))
 	} else {
 		args = append(args, "--oom-score-adj", strconv.Itoa(workloadOOMScoreAdj))
 	}

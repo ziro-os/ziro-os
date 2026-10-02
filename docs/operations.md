@@ -88,7 +88,8 @@ handles it in layers.
      or kills them first.
 2. **Limits.** Plugins and apps declare `resources`. The limit is enforced by the kernel inside that service or
    container only, and the rest of the host isn't affected. `memory.high` (90% of the limit) throttles and
-   reclaims before `memory.max` kills:
+   reclaims before `memory.max` kills. The limit covers swap too (zram on small hosts), so a
+   service can't grow past it into swap:
    ```json
    "resources": {"memory": "1Gi", "cpus": 1.5, "pids": 512}
    ```
