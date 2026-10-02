@@ -699,7 +699,7 @@ reboot_countdown() {
         if [ -n "$tty_source" ]; then
             # Wait up to 1s for a line (POSIX read has no timeout). A finished
             # read appends "."; a lone "." is EOF, empty is the timeout.
-            reply=$(timeout 1 head -n 1 < "$tty_source" 2>/dev/null && echo .)
+            reply=$(timeout 1 head -n 1 < "$tty_source" 2>/dev/null && echo .) || true
             case "$reply" in
                 ""|.) ;;
                 [cC]?.)
