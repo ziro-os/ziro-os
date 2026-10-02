@@ -26,7 +26,6 @@ GREEN="\033[1;32m"
 CYAN="\033[1;36m"
 YELLOW="\033[1;33m"
 RED="\033[1;31m"
-BLUE="\033[1;34m"
 RESET="\033[0m"
 
 print_banner() {
@@ -281,7 +280,7 @@ populate_dev_nodes() {
 
     # Dynamically populate partition nodes from /proc/partitions
     if [ -r /proc/partitions ]; then
-        while read -r maj min blocks name; do
+        while read -r maj min _ name; do
             case "$maj" in
                 ''|*[!0-9]*) continue ;;
             esac
@@ -422,7 +421,7 @@ find_existing_install() {
     # 2. Resilient fallback: scan all candidate partitions in /proc/partitions
     if [ -z "$candidate_parts" ] || [ -n "$TARGET_DISK" ]; then
         if [ -r /proc/partitions ]; then
-            while read -r maj min blocks name; do
+            while read -r maj min _ name; do
                 case "$maj" in
                     ''|*[!0-9]*) continue ;;
                 esac
@@ -490,7 +489,6 @@ interactive_prompts() {
     echo ""
     printf "${BOLD}Available Storage Disks:${RESET}\n"
     i=1
-    disk_array=""
     for d in $AVAILABLE_DISKS; do
         devbase=$(basename "$d")
         size_bytes=$(cat "/sys/block/$devbase/size" 2>/dev/null || echo 0)
@@ -696,23 +694,24 @@ reboot_countdown() {
     cancelled=0
     while [ "$secs" -gt 0 ]; do
         printf "\r${BOLD}Auto-rebooting in ${YELLOW}%2d${RESET}${BOLD}s... (Press ${GREEN}[Enter]${RESET}${BOLD} to reboot now, ${YELLOW}[c]${RESET}${BOLD} to cancel): ${RESET}" "$secs"
-        user_key=""
         t_start=$(date +%s)
 
         if [ -n "$tty_source" ]; then
-            if read -t 1 user_key < "$tty_source" 2>/dev/null; then
-                case "$user_key" in
-                    c|C)
-                        cancelled=1
-                        break
-                        ;;
-                    *)
-                        printf "\n${GREEN}Rebooting immediately...${RESET}\n"
-                        secs=0
-                        break
-                        ;;
-                esac
-            fi
+            # Wait up to 1s for a line (POSIX read has no timeout). A finished
+            # read appends "."; a lone "." is EOF, empty is the timeout.
+            reply=$(timeout 1 head -n 1 < "$tty_source" 2>/dev/null && echo .) || true
+            case "$reply" in
+                ""|.) ;;
+                [cC]?.)
+                    cancelled=1
+                    break
+                    ;;
+                *)
+                    printf "\n${GREEN}Rebooting immediately...${RESET}\n"
+                    secs=0
+                    break
+                    ;;
+            esac
         fi
 
         t_end=$(date +%s)
@@ -892,26 +891,21 @@ EOF
     sleep 1
 
     # Resolve partition names (e.g., /dev/sda1/2/3 vs /dev/nvme0n1p1/p2/p3)
-    PART_BIOS=""
     PART_EFI=""
     PART_ROOT=""
     if [ -b "${TARGET_DISK}3" ]; then
-        PART_BIOS="${TARGET_DISK}1"
         PART_EFI="${TARGET_DISK}2"
         PART_ROOT="${TARGET_DISK}3"
     elif [ -b "${TARGET_DISK}p3" ]; then
-        PART_BIOS="${TARGET_DISK}p1"
         PART_EFI="${TARGET_DISK}p2"
         PART_ROOT="${TARGET_DISK}p3"
     else
         mdev -s 2>/dev/null || true
         sleep 1
         if [ -b "${TARGET_DISK}3" ]; then
-            PART_BIOS="${TARGET_DISK}1"
             PART_EFI="${TARGET_DISK}2"
             PART_ROOT="${TARGET_DISK}3"
         elif [ -b "${TARGET_DISK}p3" ]; then
-            PART_BIOS="${TARGET_DISK}p1"
             PART_EFI="${TARGET_DISK}p2"
             PART_ROOT="${TARGET_DISK}p3"
         else
@@ -920,7 +914,7 @@ EOF
         fi
     fi
 
-    # 3. Format filesystems (PART_BIOS is kept raw for GRUB core.img embedding)
+    # 3. Format filesystems (partition 1, the BIOS boot partition, stays raw for GRUB core.img embedding)
     printf "${BOLD}[3/6] Formatting partitions (FAT32 & ext4)...${RESET}\n"
     mkfs.vfat -F 32 -n ZIRO_ESP "$PART_EFI" >/dev/null 2>&1
     mkfs.ext4 -F -L ZIRO_ROOT "$PART_ROOT" >/dev/null 2>&1
@@ -1259,9 +1253,9 @@ EOF
     cp -f "$TARGET_MNT/sbin/shutdown" "$TARGET_MNT/usr/bin/shutdown" 2>/dev/null || true
 
     # Verify and restore authentic BusyBox binary on target installation
-    if [ ! -f "$TARGET_MNT/bin/busybox" ] || [ -L "$TARGET_MNT/bin/busybox" ] || [ $(wc -c < "$TARGET_MNT/bin/busybox") -lt 100000 ]; then
+    if [ ! -f "$TARGET_MNT/bin/busybox" ] || [ -L "$TARGET_MNT/bin/busybox" ] || [ "$(wc -c < "$TARGET_MNT/bin/busybox")" -lt 100000 ]; then
         echo "Restoring authentic BusyBox binary on target disk..."
-        if [ -f /bin/busybox ] && [ ! -L /bin/busybox ] && [ $(wc -c < /bin/busybox) -gt 100000 ]; then
+        if [ -f /bin/busybox ] && [ ! -L /bin/busybox ] && [ "$(wc -c < /bin/busybox)" -gt 100000 ]; then
             cp -f /bin/busybox "$TARGET_MNT/bin/busybox"
         fi
     fi

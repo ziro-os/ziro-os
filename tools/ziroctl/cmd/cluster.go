@@ -169,11 +169,6 @@ func isClusterMaster() bool {
 	return err == nil && cfg.Role == "master"
 }
 
-func isClusterWorker() bool {
-	cfg, err := loadClusterConfig()
-	return err == nil && cfg.Role == "worker"
-}
-
 func loadClusterConfig() (*ClusterConfig, error) {
 	data, err := os.ReadFile(clusterConfigPath())
 	if err != nil {

@@ -216,9 +216,7 @@ func (ag *agent) setupPods(resp heartbeatResponse) error {
 			egress: &egressLearner{add: nftAddLearned}}
 		go func(d *podDNS) {
 			for { // the address can briefly be missing while the link is (re)created: retry
-				if err := d.serve(net.JoinHostPort(gw, "53")); err != nil {
-					fmt.Printf("[agent] pod dns: %v\n", err)
-				}
+				fmt.Printf("[agent] pod dns: %v\n", d.serve(net.JoinHostPort(gw, "53"))) // serve returns only on error
 				time.Sleep(5 * time.Second)
 			}
 		}(ag.dns)

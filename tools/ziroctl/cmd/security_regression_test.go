@@ -235,7 +235,7 @@ func TestQuarantinePrecedesBroadAccepts(t *testing.T) {
 	for _, pair := range []struct{ bin, ip string }{{"iptables", "203.0.113.0/24"}, {"ip6tables", "2001:db8::/32"}} {
 		drop := pair.bin + " -A INPUT -s " + pair.ip + " -j DROP"
 		accept := pair.bin + " -A INPUT -m conntrack"
-		if strings.Index(string(data), drop) < 0 || strings.Index(string(data), drop) >= strings.Index(string(data), accept) {
+		if !strings.Contains(string(data), drop) || strings.Index(string(data), drop) >= strings.Index(string(data), accept) {
 			t.Fatalf("quarantine order: %s", data)
 		}
 	}

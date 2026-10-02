@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -927,15 +926,6 @@ var networkDNSCmd = &cobra.Command{
 		fmt.Printf("✅ Resolvers pinned: %s\n", strings.Join(args, ", "))
 		return nil
 	},
-}
-
-func sortedIfaceNames(c *NetConfig) []string {
-	var n []string
-	for _, i := range c.Interfaces {
-		n = append(n, i.Name)
-	}
-	sort.Strings(n)
-	return n
 }
 
 func init() {

@@ -152,18 +152,6 @@ func podEndpoints(st *ClusterState) map[string][]string {
 	return out
 }
 
-// placedPodIPs maps each app to the pod IPs of all its placed replicas (policy sources: a
-// replica that is still starting must already be admitted).
-func placedPodIPs(st *ClusterState) map[string][]string {
-	out := map[string][]string{}
-	for _, r := range st.Replicas {
-		if r.IP != "" {
-			out[r.App] = append(out[r.App], r.IP)
-		}
-	}
-	return out
-}
-
 var clusterNetworkCmd = &cobra.Command{Use: "network", Short: "Cluster pod network (routed container IPs + DNS)"}
 
 var clusterNetworkEnableCmd = &cobra.Command{

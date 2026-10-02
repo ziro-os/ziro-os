@@ -58,13 +58,12 @@ make test-container
 
 ## Checklist
 <!-- Mark completed items with an "x" -->
-- [ ] My code follows the project's coding standards
+- [ ] My change follows the [design standard](https://github.com/ziro-os/ziro-os/blob/main/docs/design/README.md) (an accepted [RFC](https://github.com/ziro-os/ziro-os/blob/main/docs/design/rfcs/README.md) for new resource kinds, API/schema or security model changes)
 - [ ] I have performed a self-review of my code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
+- [ ] I have added tests (unit, and `tests/qemu/boot-smoke.py` where a booted host is needed); new and existing tests pass locally
+- [ ] Lint gate is clean: `gofmt -l` prints nothing, `go vet`, `staticcheck` and `shellcheck -S warning` report nothing ([commands](https://github.com/ziro-os/ziro-os/blob/main/community/CONTRIBUTING.md#lint-gate))
+- [ ] API changes: route table, `sdk/openapi.yaml` (with `x-ziro-role`) and the `sdk/client` method are updated
+- [ ] I have updated the documentation in `docs/`
 - [ ] Any dependent changes have been merged and published
 
 ## Breaking Changes

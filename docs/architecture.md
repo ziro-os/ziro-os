@@ -4,6 +4,9 @@ Ziro-OS is a lightweight Linux host built for OCI container workloads. It uses `
 Docker and Podman command compatibility is provided through `nerdctl` aliases on the full host. The project is
 under active development and is not ready for production use.
 
+The rules every component follows (resource model, API and CLI conventions, extension points, security model) are
+in the [design standard](design/README.md); design decisions are recorded as [RFCs](design/rfcs/README.md).
+
 ---
 
 ## 1. Core Architectural Tenets

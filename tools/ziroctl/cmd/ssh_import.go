@@ -108,7 +108,7 @@ func acceptKeys(data []byte, tag string) (keys []importedKey, rejected []string)
 
 func weakKey(pk ssh.PublicKey) string {
 	switch pk.Type() {
-	case ssh.KeyAlgoDSA:
+	case "ssh-dss": // DSA (the x/crypto constant is deprecated: DSA is insecure at any size it allows)
 		return "ssh-dss (DSA) keys are not accepted"
 	case ssh.KeyAlgoRSA:
 		if ck, ok := pk.(ssh.CryptoPublicKey); ok {
