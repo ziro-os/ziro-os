@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/ziro-os/ziro-os/sdk/schema"
 	"io"
 	"os"
 	"os/exec"
@@ -347,7 +348,7 @@ func (c *vmConsole) copyIn(data []byte, path string) error {
 }
 
 var devRunCmd = &cobra.Command{
-	Use:   "run [manifest.json|app.json]",
+	Use:   "run [plugin|app|stack|host file]",
 	Short: "Boot a throwaway Ziro VM, install a plugin or deploy an app, then run --check commands or attach",
 	Long: `Boots a verified Ziro release (or a local build, --image-dir) in QEMU in live mode: nothing
 persists. The plugin is installed with 'plugin install -f', the app deployed with 'apps deploy -f'.
@@ -442,15 +443,20 @@ QEMU uses KVM on Linux and HVF on macOS when the VM's arch matches the host, oth
 			}
 		}
 		if def != nil {
-			install := "ziroctl plugin install -f /tmp/dev.json"
-			if definitionKind(def) == "app" {
-				install = "ziroctl apps deploy -f /tmp/dev.json --local"
-				if len(devForwards) > 0 {
-					install += " --bind 0.0.0.0" // reachable by --forward
-				}
+			kind, _ := schema.Kind(def)
+			install := map[string]string{
+				"plugin": "ziroctl plugin install -f /tmp/dev.json",
+				"app":    "ziroctl apps deploy -f /tmp/dev.json --local",
+				"stack":  "ziroctl stack up -f /tmp/dev.json", // catalog apps (local files aren't copied)
+				"host":   "ziroctl apply -f /tmp/dev.json",
+			}[kind]
+			if kind == "app" && len(devForwards) > 0 {
+				install += " --bind 0.0.0.0" // reachable by --forward
 			}
-			for _, s := range devSets {
-				install += " --set " + shQuote(s)
+			if kind == "plugin" || kind == "app" {
+				for _, s := range devSets {
+					install += " --set " + shQuote(s)
+				}
 			}
 			if err := con.copyIn(def, "/tmp/dev.json"); err != nil {
 				return err

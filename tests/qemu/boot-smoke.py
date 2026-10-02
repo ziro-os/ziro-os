@@ -12,6 +12,7 @@ fails closed (no shell, reboot).
 usage: tests/qemu/boot-smoke.py [--arch x86_64|arm64] [--build-dir build] [--no-pull] [--installed]
 """
 import argparse
+import base64
 import os
 import platform
 import re
@@ -412,6 +413,27 @@ def main():
         con.run("ziroctl security bans unban 10.99.0.2; kill $(cat /tmp/atk.pid); /sbin/ip link del atk0; ziroctl security alerting remove local")
         ok, out = retry(con, "nft list table inet ziro", lambda rc, o: rc == 0 and "policy drop" in o, 60)
         check("firewall table 'inet ziro' applied at boot", ok, out)
+
+        # Declarative provisioning: a YAML host file with a stack (local app) is applied, a second
+        # run plans no change, and the stack comes down cleanly.
+        if not args.no_pull:
+            app = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "sdk", "examples",
+                                    "provisioning", "shop", "apps", "web", "app.yaml"), "rb").read()
+            stack = b"stack: shop\nversion: 1\napps:\n  web: {app: ./web.yaml, publish: 18080, resources: {memory: 128Mi}}\n"
+            host = b"host:\n  version: 1\n  firewall: {allow: [18080/tcp]}\n  stacks: [./shop.yaml]\n"
+            files = {"web.yaml": app, "shop.yaml": stack, "host.yaml": host}
+            cmd = "mkdir -p /tmp/prov && cd /tmp/prov && " + " && ".join(
+                f"echo {base64.b64encode(b).decode()} | base64 -d > {n}" for n, b in files.items())
+            con.run(cmd)
+            rc, out = con.run("cd /tmp/prov && ziroctl apply -f host.yaml >/tmp/apply.out 2>&1; echo APPLY=$?; "
+                              "echo SECOND=$(ziroctl apply -f host.yaml --dry-run --json | grep -c '\"action\": \"update\"'); "
+                              "echo LIMIT=$(nerdctl inspect ziro-app-shop-web --format '{{.HostConfig.Memory}}'); "
+                              "echo WEB=$(wget -qO- http://127.0.0.1:18080/ | grep -c nginx); "
+                              "ziroctl stack down shop --purge >/dev/null 2>&1; echo DOWN=$(ziroctl apps list | grep -c shop-web); "
+                              "ziroctl firewall deny 18080/tcp >/dev/null", timeout=600)
+            check("apply: YAML host file with a stack deploys (limits set), a second apply changes nothing, stack down cleans up",
+                  all(k in out for k in ["APPLY=0", "SECOND=0", "LIMIT=134217728", "DOWN=0"]) and re.search(r"WEB=[1-9]", out) is not None,
+                  out + con.run("cat /tmp/apply.out")[1])
 
         ok, out = retry(con, "ip -4 addr show | grep 'inet 10.0.2.'", lambda rc, o: rc == 0, 90)
         check("DHCP network configured", ok, out)

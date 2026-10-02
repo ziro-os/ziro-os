@@ -3,8 +3,6 @@
 package schema
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -43,11 +41,10 @@ type AppComponent struct {
 	Resources   *Resources        `json:"resources,omitempty"`
 }
 
+// ParseAppDef decodes an app definition (YAML or JSON) strictly and validates it.
 func ParseAppDef(b []byte) (AppDef, error) {
 	var d AppDef
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&d); err != nil {
+	if err := DecodeStrict(b, &d); err != nil {
 		return d, err
 	}
 	return d, d.Validate()

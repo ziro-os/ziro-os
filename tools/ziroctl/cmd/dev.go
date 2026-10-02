@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/ziro-os/ziro-os/sdk/schema"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,23 @@ See docs/sdk.md.`,
 
 // ---- dev new ----
 
-var devNewDir string
+var (
+	devNewDir    string
+	devNewFormat string
+)
+
+// encodeDefinition writes a definition in the chosen format (YAML by default).
+func encodeDefinition(v any) ([]byte, string, error) {
+	if devNewFormat == "json" {
+		b, err := json.MarshalIndent(v, "", "  ")
+		return append(b, '\n'), ".json", err
+	}
+	if devNewFormat != "yaml" {
+		return nil, "", fmt.Errorf("--format must be yaml or json")
+	}
+	b, err := schema.ToYAML(v)
+	return b, ".yaml", err
+}
 
 // appScaffold is a small, valid app to start from: a static web server running as a non-root user.
 func appScaffold(name string) AppDef {
@@ -131,8 +148,8 @@ func writeNew(path string, data []byte, keepExisting bool) error {
 }
 
 var devNewCmd = &cobra.Command{
-	Use:   "new plugin|app <name>",
-	Short: "Scaffold a plugin or app in a catalog repository (definition, README, signing CI)",
+	Use:   "new plugin|app|stack <name>",
+	Short: "Scaffold a plugin, app or stack (YAML by default) in a catalog repository with README and signing CI",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		kind, name := args[0], args[1]
@@ -143,29 +160,56 @@ var devNewCmd = &cobra.Command{
 		if dir == "" {
 			dir = "."
 		}
-		var path string
-		var def []byte
+		var base string
+		var v any
 		switch kind {
 		case "plugin", "module":
 			m := scaffoldPlugin(name)
 			if err := m.Validate(); err != nil {
 				return err
 			}
-			path = filepath.Join(dir, "modules", name, "manifest.json")
-			def, _ = json.MarshalIndent(m, "", "  ")
-			kind = "module"
+			base, v, kind = filepath.Join(dir, "modules", name, "manifest"), m, "module"
 		case "app":
 			d := appScaffold(name)
 			if err := d.Validate(); err != nil {
 				return err
 			}
-			path = filepath.Join(dir, "apps", name, "app.json")
-			def, _ = json.MarshalIndent(d, "", "  ")
+			base, v = filepath.Join(dir, "apps", name, "app"), d
+		case "stack":
+			s := Stack{Stack: name, Version: 1, Description: "What " + name + " runs, in one line",
+				Apps: map[string]StackApp{
+					"cache": {App: "valkey", Resources: &Resources{Memory: "256Mi"}},
+					"web":   {App: "./apps/web/app.yaml", DependsOn: []string{"cache"}, Resources: &Resources{Memory: "128Mi"}},
+				}}
+			if err := s.Validate(); err != nil {
+				return err
+			}
+			base, v = filepath.Join(dir, "stacks", name, "stack"), s
+			app, ext, err := encodeDefinition(appScaffold("web"))
+			if err != nil {
+				return err
+			}
+			if devNewFormat == "json" {
+				s.Apps["web"] = StackApp{App: "./apps/web/app.json", DependsOn: []string{"cache"}, Resources: &Resources{Memory: "128Mi"}}
+				v = s
+			}
+			if err := writeNew(filepath.Join(dir, "stacks", name, "apps", "web", "app"+ext), app, false); err != nil {
+				return err
+			}
 		default:
-			return fmt.Errorf("kind must be plugin or app")
+			return fmt.Errorf("kind must be plugin, app or stack")
 		}
-		if err := writeNew(path, append(def, '\n'), false); err != nil {
+		def, ext, err := encodeDefinition(v)
+		if err != nil {
 			return err
+		}
+		path := base + ext
+		if err := writeNew(path, def, false); err != nil {
+			return err
+		}
+		if kind == "stack" {
+			fmt.Printf("✓ created %s\n  next: ziroctl dev validate %s && ziroctl stack up -f %s --dry-run\n", path, path, path)
+			return nil
 		}
 		abs, _ := filepath.Abs(dir)
 		repo := filepath.Base(abs)
@@ -192,22 +236,23 @@ type lintFinding struct {
 	Message string `json:"message"`
 }
 
-// definitionKind tells a plugin manifest from an app definition by its shape.
-func definitionKind(b []byte) string {
-	var probe map[string]json.RawMessage
-	if json.Unmarshal(b, &probe) != nil {
-		return ""
-	}
-	if _, ok := probe["components"]; ok {
-		return "app"
-	}
-	return "module"
-}
-
 func lintDefinition(path string, b []byte) []lintFinding {
 	var out []lintFinding
 	add := func(level, msg string) { out = append(out, lintFinding{path, level, msg}) }
-	switch definitionKind(b) {
+	kind, err := schema.Kind(b)
+	if err != nil {
+		add("error", err.Error())
+		return out
+	}
+	switch kind {
+	case "stack":
+		if _, err := schema.ParseStack(b); err != nil {
+			add("error", err.Error())
+		}
+	case "host":
+		if _, err := schema.ParseHostConfig(b); err != nil {
+			add("error", err.Error())
+		}
 	case "app":
 		d, err := parseAppDef(b)
 		if err != nil {
@@ -226,7 +271,7 @@ func lintDefinition(path string, b []byte) []lintFinding {
 				}
 			}
 		}
-	case "module":
+	case "plugin":
 		m, err := parseManifest(b)
 		if err != nil {
 			add("error", err.Error())
@@ -250,8 +295,6 @@ func lintDefinition(path string, b []byte) []lintFinding {
 				add("warning", "artifact "+a.Path+" looks architecture-specific: set \"arch\"")
 			}
 		}
-	default:
-		add("error", "not a plugin manifest or app definition (invalid JSON)")
 	}
 	return out
 }
@@ -268,13 +311,15 @@ func definitionFiles(paths []string) ([]string, error) {
 			out = append(out, p)
 			continue
 		}
-		for _, pat := range []string{"modules/*/manifest.json", "apps/*/app.json", "examples/*/manifest.json"} {
-			m, _ := filepath.Glob(filepath.Join(p, pat))
-			out = append(out, m...)
+		for _, pat := range []string{"modules/*/manifest", "apps/*/app", "stacks/*/stack", "examples/*/manifest"} {
+			for _, ext := range []string{".json", ".yaml", ".yml"} {
+				m, _ := filepath.Glob(filepath.Join(p, pat+ext))
+				out = append(out, m...)
+			}
 		}
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no plugin manifests or app definitions found")
+		return nil, errors.New("no plugin manifests, app definitions or stacks found")
 	}
 	return out, nil
 }
@@ -370,6 +415,7 @@ var devKeygenCmd = &cobra.Command{
 
 func init() {
 	devNewCmd.Flags().StringVar(&devNewDir, "dir", ".", "Catalog repository directory")
+	devNewCmd.Flags().StringVar(&devNewFormat, "format", "yaml", "Definition format: yaml or json")
 	devValidateCmd.Flags().BoolVar(&devStrict, "strict", false, "Treat warnings as errors (CI)")
 	devCatalogCmd.AddCommand(devKeygenCmd) // build/sign/verify: `ziroctl catalog ...`
 	devCmd.AddCommand(devNewCmd, devValidateCmd, devCatalogCmd)

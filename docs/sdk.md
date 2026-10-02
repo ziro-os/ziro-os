@@ -6,7 +6,7 @@ a host accepts.
 
 | Piece | What it's for |
 |---|---|
-| [`sdk/schema`](../sdk/schema) | The formats: plugin manifests, app definitions, gateway routes, supervised services, settings and placeholders, generated secrets. It includes their validators. |
+| [`sdk/schema`](../sdk/schema) | The formats: plugin manifests, app definitions, stacks, host configs, gateway routes, supervised services, settings and placeholders, generated secrets. It includes their validators. YAML or JSON (`DecodeStrict`, `ToYAML`, `Kind`). |
 | [`sdk/catalog`](../sdk/catalog) | Build, sign (ed25519) and verify catalogs, like `ziro-os/pkgs` and `ziro-os/apps`, or your own. |
 | [`sdk/client`](../sdk/client) | A typed Go client for the API server (`ziroctl api`). |
 | [`sdk/api`](../sdk/api) | The API's request and response types, shared by the server and the client. |

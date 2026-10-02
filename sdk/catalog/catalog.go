@@ -125,16 +125,23 @@ func VerifyIndex(r Repo, raw, sigB64 []byte, now time.Time) (*Index, error) {
 }
 
 // Build writes index.json for the definitions under src/<kind>s/<name>/<file> into out,
-// validating each with check and copying it to out/<kind>s/<name>.json.
+// validating each with check and writing it to out/<kind>s/<name>.json. A definition may be
+// YAML or JSON (manifest.yaml, app.yml, ...); the catalog always serves canonical JSON, which is
+// what the signed index pins.
 func Build(src, out, repo, kind string, ttl time.Duration, now time.Time, check func([]byte) (Entry, error)) (*Index, error) {
-	file := map[string]string{"module": "manifest.json", "app": "app.json"}[kind]
+	file := map[string]string{"module": "manifest", "app": "app"}[kind]
 	if file == "" {
 		return nil, fmt.Errorf("kind must be module or app")
 	}
-	dirs, err := filepath.Glob(filepath.Join(src, kind+"s", "*", file))
-	if err != nil {
-		return nil, err
+	var dirs []string
+	for _, ext := range []string{".json", ".yaml", ".yml"} {
+		m, err := filepath.Glob(filepath.Join(src, kind+"s", "*", file+ext))
+		if err != nil {
+			return nil, err
+		}
+		dirs = append(dirs, m...)
 	}
+	sort.Strings(dirs)
 	now = now.UTC()
 	idx := &Index{Schema: 1, Repo: repo, Kind: kind, Serial: now.Unix(), Expires: now.Add(ttl)}
 	seen := map[string]bool{}
@@ -142,6 +149,9 @@ func Build(src, out, repo, kind string, ttl time.Duration, now time.Time, check 
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return nil, err
+		}
+		if b, err = schema.ToJSON(b); err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 		e, err := check(b)
 		if err != nil {

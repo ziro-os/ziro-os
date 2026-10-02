@@ -1209,8 +1209,16 @@ EOF
             echo "Failed to stage authenticated user-data; script was not executed" >&2
             return 1
         fi
-        chroot "$TARGET_MNT" /bin/sh "/tmp/$(basename "$UD_SCRIPT")" || printf "${YELLOW}Warning: User-data script finished with errors.${RESET}\n"
-        rm -f "$UD_SCRIPT"
+        if head -n 1 "$UD_SCRIPT" | grep -q '^#ziro-config'; then
+            # A declarative host config: applied by `ziroctl apply` at first boot (cloud-init).
+            mkdir -p "$TARGET_MNT/etc/ziro"
+            mv "$UD_SCRIPT" "$TARGET_MNT/etc/ziro/provision.yaml"
+            chmod 0600 "$TARGET_MNT/etc/ziro/provision.yaml"
+            printf "${CYAN}Host config staged; applied at first boot.${RESET}\n"
+        else
+            chroot "$TARGET_MNT" /bin/sh "/tmp/$(basename "$UD_SCRIPT")" || printf "${YELLOW}Warning: User-data script finished with errors.${RESET}\n"
+            rm -f "$UD_SCRIPT"
+        fi
     fi
 
     # Install dedicated reboot, poweroff, halt, and shutdown control scripts

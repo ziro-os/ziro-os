@@ -1,0 +1,17 @@
+schema: 1
+name: web
+description: What web does, in one line
+default: "1"
+versions:
+  "1":
+    images:
+      web: docker.io/nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+components:
+  - name: web
+    port: 8080
+    health:
+      - wget
+      - -qO-
+      - http://127.0.0.1:8080/
+outputs:
+  url: http://{{host}}:{{port}}/

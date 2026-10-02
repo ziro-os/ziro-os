@@ -1,0 +1,11 @@
+#ziro-config
+# A cluster worker: joins the master at first boot. The join token is a file provided out of
+# band (cloud secret store, mounted volume), never written in this file.
+host:
+  version: 1
+  hostname: worker-1
+  cluster:
+    join:
+      address: 10.0.0.10:7443
+      token_file: /run/secrets/ziro-join-token
+      ca_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
