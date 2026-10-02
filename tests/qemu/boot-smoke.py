@@ -354,6 +354,22 @@ def main():
         rc, out = con.run("echo TOP=$(ziroctl system top --once --json | grep -c '\"processes\"') DF=$(ziroctl system df --json | grep -c logs); "
                           "ziroctl system prune --dry-run --only logs,tmp >/dev/null && echo PRUNEOK")
         check("system top snapshot, df, prune dry-run", "TOP=1" in out and "DF=1" in out and "PRUNEOK" in out, out)
+
+        # REST API: one route table drives auth, roles, audit and JSON errors.
+        rc, out = con.run("ziroctl service start ziro-api >/dev/null 2>&1; sleep 2; "
+                          "A=$(ziroctl api token create smoke-admin --role admin 2>/dev/null); "
+                          "V=$(ziroctl api token create smoke-viewer --role viewer 2>/dev/null); "
+                          "U=https://127.0.0.1:8443/api/v1; c() { curl -sk -o /tmp/api.out -w '%{http_code}' \"$@\"; }; "
+                          "echo NOAUTH=$(c $U/system) FORBID=$(c -X POST -H \"Authorization: Bearer $V\" $U/firewall/allow -d '{\"port\":\"9999/tcp\"}') "
+                          "NF=$(c -H \"Authorization: Bearer $A\" $U/nope) CODE=$(grep -o '\"code\":\"[a-z_]*\"' /tmp/api.out) "
+                          "READ=$(c -H \"Authorization: Bearer $V\" $U/system/df) "
+                          "ALLOW=$(c -X POST -H \"Authorization: Bearer $A\" $U/firewall/allow -d '{\"port\":\"9999/tcp\"}') "
+                          "AUDIT=$(grep -c 'api POST /api/v1/firewall/allow' /var/log/ziro/audit.log); "
+                          "ziroctl firewall deny 9999/tcp >/dev/null; ziroctl api token revoke smoke-admin >/dev/null; "
+                          "ziroctl api token revoke smoke-viewer >/dev/null; ziroctl service stop ziro-api >/dev/null", timeout=120)
+        check("api: 401 without token, viewer 403 on change, JSON 404, admin change audited",
+              all(k in out for k in ["NOAUTH=401", "FORBID=403", "NF=404", '"code":"not_found"', "READ=200", "ALLOW=200"])
+              and re.search(r"AUDIT=[1-9]", out) is not None, out)
         # Ziro Guard: an "attacker" in its own network namespace (veth, so traffic isn't loopback).
         # Sysctls present on every kernel (perf/kexec may be compiled out of the custom flavor).
         rc, out = con.run("sysctl -n net.ipv4.conf.all.log_martians net.ipv4.tcp_rfc1337 dev.tty.ldisc_autoload; "

@@ -212,6 +212,10 @@ var wgStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display WireGuard interface status, peer transfers, and handshakes",
 	Run: func(cmd *cobra.Command, args []string) {
+		if jsonOutput {
+			_ = printResult(wireguardStatus(), nil)
+			return
+		}
 		out, err := exec.Command("wg", "show").CombinedOutput()
 		if err != nil || len(out) == 0 {
 			fmt.Println("WireGuard interface is not currently active.")

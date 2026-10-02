@@ -62,32 +62,125 @@ var fwStatusCmd = &cobra.Command{
 
 		backend := "nftables"
 		if _, err := exec.LookPath("nft"); err != nil {
-			backend = "iptables (legacy fallback)"
+			backend = "iptables"
 		}
-
-		fmt.Println("=== Ziro-OS Cloud Firewall ===")
-		fmt.Printf("Status:        %s\n", statusStr)
-		fmt.Printf("Engine:        %s\n", backend)
-		fmt.Printf("Default Policy: INPUT %s, FORWARD ACCEPT, OUTPUT ACCEPT\n", cfg.DefaultInput)
-		fmt.Printf("Allowed Ports: %d port rule(s)\n", len(cfg.AllowedPorts))
-		fmt.Printf("Blocked IPs:   %d IP(s) quarantined\n", len(cfg.BlockedIPs))
-		return nil
+		return printResult(map[string]any{"enabled": cfg.Enabled, "engine": backend, "default_input": cfg.DefaultInput,
+			"allowed_ports": len(cfg.AllowedPorts), "blocked": len(cfg.BlockedIPs)}, func() {
+			fmt.Printf("Status:         %s\n", statusStr)
+			fmt.Printf("Engine:         %s\n", backend)
+			fmt.Printf("Default policy: input %s, forward accept, output accept\n", cfg.DefaultInput)
+			fmt.Printf("Allowed ports:  %d rule(s)\n", len(cfg.AllowedPorts))
+			fmt.Printf("Blocked:        %d address(es)\n", len(cfg.BlockedIPs))
+		})
 	},
 }
+
+// ---- operations (CLI and API) ----
+
+// commitFirewall saves the config and, when the firewall is on, applies it.
+func commitFirewall(cfg FirewallConfig) error {
+	if err := saveFirewallConfig(cfg); err != nil {
+		return err
+	}
+	if cfg.Enabled {
+		return applyFirewallRules(cfg)
+	}
+	return nil
+}
+
+func setFirewallEnabled(on bool) error {
+	cfg := loadFirewallConfig()
+	cfg.Enabled = on
+	if err := saveFirewallConfig(cfg); err != nil {
+		return err
+	}
+	if on {
+		return applyFirewallRules(cfg)
+	}
+	flushFirewallRules()
+	return nil
+}
+
+// firewallAllow opens a port (e.g. 8443, 80/tcp, 51820/udp); added is false when already open.
+func firewallAllow(spec, comment string) (added bool, err error) {
+	port, proto := parsePortProto(spec)
+	if port <= 0 {
+		return false, fmt.Errorf("invalid port specification: %s", spec)
+	}
+	cfg := loadFirewallConfig()
+	for _, r := range cfg.AllowedPorts {
+		if r.Port == port && r.Protocol == proto && r.Source == "" {
+			return false, nil
+		}
+	}
+	cfg.AllowedPorts = append(cfg.AllowedPorts, FirewallRule{Port: port, Protocol: proto, Comment: comment})
+	return true, commitFirewall(cfg)
+}
+
+func firewallDeny(spec string) error {
+	port, proto := parsePortProto(spec)
+	if port <= 0 {
+		return fmt.Errorf("invalid port specification: %s", spec)
+	}
+	cfg := loadFirewallConfig()
+	kept := cfg.AllowedPorts[:0]
+	for _, r := range cfg.AllowedPorts {
+		if !(r.Port == port && r.Protocol == proto && r.Source == "") {
+			kept = append(kept, r)
+		}
+	}
+	if len(kept) == len(cfg.AllowedPorts) {
+		return errNotFound(fmt.Sprintf("port %d/%s is not in the allow list", port, proto))
+	}
+	cfg.AllowedPorts = kept
+	return commitFirewall(cfg)
+}
+
+// firewallBlock quarantines an IP or CIDR (idempotent); it returns the canonical target.
+func firewallBlock(target, comment string) (string, error) {
+	_, ip, err := canonicalBlockTarget(strings.TrimSpace(target))
+	if err != nil {
+		return "", err
+	}
+	cfg := loadFirewallConfig()
+	for _, b := range cfg.BlockedIPs {
+		if _, saved, err := canonicalBlockTarget(b.IP); err == nil && saved == ip {
+			return ip, commitFirewall(cfg)
+		}
+	}
+	cfg.BlockedIPs = append(cfg.BlockedIPs, BlockedIP{IP: ip, Comment: comment})
+	return ip, commitFirewall(cfg)
+}
+
+func firewallUnblock(target string) (string, error) {
+	_, ip, err := canonicalBlockTarget(strings.TrimSpace(target))
+	if err != nil {
+		return "", err
+	}
+	cfg := loadFirewallConfig()
+	kept := cfg.BlockedIPs[:0]
+	for _, b := range cfg.BlockedIPs {
+		if _, saved, err := canonicalBlockTarget(b.IP); !(err == nil && saved == ip) {
+			kept = append(kept, b)
+		}
+	}
+	if len(kept) == len(cfg.BlockedIPs) {
+		return ip, errNotFound("IP " + ip + " is not in the blocked list")
+	}
+	cfg.BlockedIPs = kept
+	return ip, commitFirewall(cfg)
+}
+
+// ---- commands ----
 
 var fwEnableCmd = &cobra.Command{
 	Use:   "enable",
 	Short: "Enable cloud firewall and apply hardened security rules",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg := loadFirewallConfig()
-		cfg.Enabled = true
-		if err := saveFirewallConfig(cfg); err != nil {
+		if err := setFirewallEnabled(true); err != nil {
 			return err
 		}
-		if err := applyFirewallRules(cfg); err != nil {
-			return err
-		}
-		fmt.Println("✓ Ziro-OS Cloud Firewall ENABLED and active.")
+		fmt.Println("✓ Firewall enabled and applied")
 		return nil
 	},
 }
@@ -96,11 +189,10 @@ var fwDisableCmd = &cobra.Command{
 	Use:   "disable",
 	Short: "Disable firewall and permit all incoming traffic",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg := loadFirewallConfig()
-		cfg.Enabled = false
-		_ = saveFirewallConfig(cfg)
-		flushFirewallRules()
-		fmt.Println("✓ Ziro-OS Cloud Firewall DISABLED (All traffic allowed).")
+		if err := setFirewallEnabled(false); err != nil {
+			return err
+		}
+		fmt.Println("✓ Firewall disabled: all inbound traffic is allowed")
 		return nil
 	},
 }
@@ -110,31 +202,15 @@ var fwAllowCmd = &cobra.Command{
 	Short: "Allow inbound network traffic on a port (e.g. 8443, 80/tcp, 51820/udp)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		spec := args[0]
-		port, proto := parsePortProto(spec)
-		if port <= 0 {
-			return fmt.Errorf("invalid port specification: %s", spec)
+		added, err := firewallAllow(args[0], fwComment)
+		if err != nil {
+			return err
 		}
-
-		cfg := loadFirewallConfig()
-		// Avoid duplicate
-		for _, r := range cfg.AllowedPorts {
-			if r.Port == port && r.Protocol == proto && r.Source == "" {
-				fmt.Printf("Port %d/%s is already allowed.\n", port, proto)
-				return nil
-			}
+		if !added {
+			fmt.Printf("%s is already allowed\n", args[0])
+			return nil
 		}
-
-		cfg.AllowedPorts = append(cfg.AllowedPorts, FirewallRule{
-			Port:     port,
-			Protocol: proto,
-			Comment:  fwComment,
-		})
-		_ = saveFirewallConfig(cfg)
-		if cfg.Enabled {
-			applyFirewallRules(cfg)
-		}
-		fmt.Printf("✓ Allowed incoming traffic on port %d/%s\n", port, proto)
+		fmt.Printf("✓ Allowed inbound %s\n", args[0])
 		return nil
 	},
 }
@@ -144,33 +220,10 @@ var fwDenyCmd = &cobra.Command{
 	Short: "Deny and remove inbound allowance for a port",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		spec := args[0]
-		port, proto := parsePortProto(spec)
-		if port <= 0 {
-			return fmt.Errorf("invalid port specification: %s", spec)
+		if err := firewallDeny(args[0]); err != nil {
+			return err
 		}
-
-		cfg := loadFirewallConfig()
-		var newRules []FirewallRule
-		found := false
-		for _, r := range cfg.AllowedPorts {
-			if r.Port == port && r.Protocol == proto && r.Source == "" {
-				found = true
-				continue
-			}
-			newRules = append(newRules, r)
-		}
-
-		if !found {
-			return fmt.Errorf("port %d/%s is not in the allow list", port, proto)
-		}
-
-		cfg.AllowedPorts = newRules
-		_ = saveFirewallConfig(cfg)
-		if cfg.Enabled {
-			applyFirewallRules(cfg)
-		}
-		fmt.Printf("✓ Denied/removed port %d/%s from firewall allow list.\n", port, proto)
+		fmt.Printf("✓ Removed %s from the allow list\n", args[0])
 		return nil
 	},
 }
@@ -180,38 +233,11 @@ var fwBlockIPCmd = &cobra.Command{
 	Short: "Quarantine incoming traffic from an IP address or CIDR (loopback is trusted)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, ip, err := canonicalBlockTarget(strings.TrimSpace(args[0]))
+		ip, err := firewallBlock(args[0], fwComment)
 		if err != nil {
 			return err
 		}
-
-		cfg := loadFirewallConfig()
-		for _, b := range cfg.BlockedIPs {
-			_, saved, err := canonicalBlockTarget(b.IP)
-			if err == nil && saved == ip {
-				if cfg.Enabled {
-					return applyFirewallRules(cfg)
-				}
-				fmt.Printf("IP %s is already blocked.\n", ip)
-				return nil
-			}
-		}
-
-		cfg.BlockedIPs = append(cfg.BlockedIPs, BlockedIP{
-			IP:      ip,
-			Comment: fwComment,
-		})
-		if err := saveFirewallConfig(cfg); err != nil {
-			return err
-		}
-		if cfg.Enabled {
-			if err := applyFirewallRules(cfg); err != nil {
-				return err
-			}
-			fmt.Printf("🛡️ Quarantined & BLOCKED traffic from IP: %s\n", ip)
-		} else {
-			fmt.Printf("Saved quarantine for %s; firewall is disabled.\n", ip)
-		}
+		fmt.Printf("✓ Blocked inbound traffic from %s\n", ip)
 		return nil
 	},
 }
@@ -221,36 +247,11 @@ var fwUnblockIPCmd = &cobra.Command{
 	Short: "Remove IP quarantine and allow communication",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, ip, err := canonicalBlockTarget(strings.TrimSpace(args[0]))
+		ip, err := firewallUnblock(args[0])
 		if err != nil {
 			return err
 		}
-		cfg := loadFirewallConfig()
-		var newBlocked []BlockedIP
-		found := false
-		for _, b := range cfg.BlockedIPs {
-			_, saved, err := canonicalBlockTarget(b.IP)
-			if err == nil && saved == ip {
-				found = true
-				continue
-			}
-			newBlocked = append(newBlocked, b)
-		}
-
-		if !found {
-			return fmt.Errorf("IP %s is not in the blocked list", ip)
-		}
-
-		cfg.BlockedIPs = newBlocked
-		if err := saveFirewallConfig(cfg); err != nil {
-			return err
-		}
-		if cfg.Enabled {
-			if err := applyFirewallRules(cfg); err != nil {
-				return err
-			}
-		}
-		fmt.Printf("✓ Unblocked IP: %s\n", ip)
+		fmt.Printf("✓ Unblocked %s\n", ip)
 		return nil
 	},
 }
@@ -260,6 +261,9 @@ var fwListCmd = &cobra.Command{
 	Short: "List all active firewall rules, allowed ports, and blocked IPs",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
+		if jsonOutput {
+			return printResult(cfg, nil)
+		}
 		fmt.Println("--- Allowed Inbound Ports ---")
 		if len(cfg.AllowedPorts) == 0 {
 			fmt.Println("  (none)")

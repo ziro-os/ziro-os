@@ -2,8 +2,11 @@
 // (ziroctl api) and the client (package client) use these same types; sdk/openapi.yaml documents them.
 package api
 
+import "time"
+
 type Message struct {
-	Status  string      `json:"status"`
+	Status  string      `json:"status"`         // ok, accepted, error
+	Code    string      `json:"code,omitempty"` // errors: invalid, unauthorized, forbidden, not_found, conflict, rate_limited, ...
 	Message string      `json:"message,omitempty"`
 	Data    interface{} `json:"data,omitempty"`
 }
@@ -104,4 +107,34 @@ type UpstreamHealth struct {
 	Share   int    `json:"share"` // percent of the route's traffic by weight
 	Healthy bool   `json:"healthy"`
 	Active  int64  `json:"active"`
+}
+
+// Backup is one archive in the host's backup directory.
+type Backup struct {
+	Name     string    `json:"name"`
+	Bytes    int64     `json:"bytes"`
+	Created  time.Time `json:"created"`
+	Checksum bool      `json:"checksum"` // a .sha256 manifest sits next to it
+}
+
+// AuditRecord is one entry of the tamper-evident audit trail (each carries the previous
+// record's SHA-256 in Prev).
+type AuditRecord struct {
+	TS     string `json:"ts"`
+	Actor  string `json:"actor"`
+	Source string `json:"source,omitempty"`
+	Action string `json:"action"`
+	Target string `json:"target,omitempty"`
+	Result string `json:"result"`
+	Prev   string `json:"prev"`
+}
+
+// Token describes an API token (never the token itself, except Secret once on creation).
+type Token struct {
+	Name    string `json:"name"`
+	Role    string `json:"role"`
+	ID      string `json:"id,omitempty"`
+	Created string `json:"created,omitempty"`
+	Expires string `json:"expires,omitempty"`
+	Secret  string `json:"token,omitempty"`
 }

@@ -1138,7 +1138,10 @@ func init() {
 // registerGatewayRoutes: the gateway's management API (like Caddy's admin API, behind the API
 // server's tokens). Reading needs any token; changing routes or certificates needs admin.
 // Changes are live within a second; nothing is restarted.
-func registerGatewayRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.HandlerFunc) {
+// registerGatewayRoutes: reading routes and status is for any token; changing what the gateway
+// serves or its certificates is admin.
+func registerGatewayRoutes(a *apiRouter) {
+	// store answers the error itself and returns nil when the gateway's store can't be opened.
 	store := func(w http.ResponseWriter) routeStore {
 		s, err := gatewayStore()
 		if err != nil {
@@ -1147,105 +1150,75 @@ func registerGatewayRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.Ha
 		}
 		return s
 	}
-	readRoute := func(w http.ResponseWriter, r *http.Request) (GatewayRoute, bool) {
-		var rt GatewayRoute
-		if err := decodeStrict(w, r, &rt, 1<<20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: "bad route: " + err.Error()})
-			return rt, false
-		}
-		return rt, true
-	}
-	reply := func(w http.ResponseWriter, r *http.Request, action, target string, err error, v any) {
-		apiAudit(r, action, target, err)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(APIMessage{Status: "error", Message: err.Error()})
-			return
-		}
-		apiReply(w, nil, v)
-	}
-	mux.HandleFunc("/api/v1/gateway/routes", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+	put := func(w http.ResponseWriter, r *http.Request, name string) {
 		s := store(w)
 		if s == nil {
 			return
 		}
-		switch r.Method {
-		case http.MethodGet:
-			cfg, err := s.config()
-			if err == nil {
-				apiReply(w, nil, cfg.Routes)
-			} else {
-				apiReply(w, err, nil)
-			}
-		case http.MethodPost:
-			if !requireRole(w, r, "admin") {
-				return
-			}
-			rt, ok := readRoute(w, r)
-			if !ok {
-				return
-			}
-			rt, err := putRoute(s, rt)
-			reply(w, r, "gateway route put", rt.Name, err, rt)
-		default:
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	}))
-	mux.HandleFunc("/api/v1/gateway/routes/", wrap(false, func(w http.ResponseWriter, r *http.Request) {
-		name := strings.TrimPrefix(r.URL.Path, "/api/v1/gateway/routes/")
-		if err := validName(name); err != nil {
+		var rt GatewayRoute
+		if err := decodeStrict(w, r, &rt, 1<<20); err != nil {
 			apiReply(w, err, nil)
 			return
 		}
-		s := store(w)
-		if s == nil {
-			return
+		if name != "" {
+			rt.Name = name
 		}
-		switch r.Method {
-		case http.MethodGet:
+		rt, err := putRoute(s, rt)
+		apiReply(w, err, rt)
+	}
+	a.get("/api/v1/gateway/routes", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		if s := store(w); s != nil {
 			cfg, err := s.config()
 			if err != nil {
 				apiReply(w, err, nil)
 				return
 			}
-			for _, rt := range cfg.Routes {
-				if rt.Name == name {
-					apiReply(w, nil, rt)
-					return
-				}
-			}
-			http.Error(w, "route not found", http.StatusNotFound)
-		case http.MethodPut:
-			if !requireRole(w, r, "admin") {
-				return
-			}
-			rt, ok := readRoute(w, r)
-			if !ok {
-				return
-			}
-			rt.Name = name
-			rt, err := putRoute(s, rt)
-			reply(w, r, "gateway route put", name, err, rt)
-		case http.MethodDelete:
-			if !requireRole(w, r, "admin") {
-				return
-			}
-			err := deleteRoute(s, name)
-			reply(w, r, "gateway route rm", name, err, APIMessage{Status: "ok", Message: "route " + name + " removed"})
-		default:
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			apiReply(w, nil, cfg.Routes)
 		}
-	}))
-	mux.HandleFunc("/api/v1/gateway/status", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+	})
+	a.post("/api/v1/gateway/routes", "admin", func(w http.ResponseWriter, r *http.Request) { put(w, r, "") })
+	a.get("/api/v1/gateway/routes/{name}", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		s := store(w)
 		if s == nil {
 			return
 		}
-		st, err := gatewayStatus(s)
-		apiReply(w, err, st)
-	}))
-	mux.HandleFunc("/api/v1/gateway/ca", wrap(false, func(w http.ResponseWriter, r *http.Request) {
+		cfg, err := s.config()
+		if err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		for _, rt := range cfg.Routes {
+			if rt.Name == r.PathValue("name") {
+				apiReply(w, nil, rt)
+				return
+			}
+		}
+		apiReply(w, errNotFound("route not found"), nil)
+	})
+	a.put("/api/v1/gateway/routes/{name}", "admin", func(w http.ResponseWriter, r *http.Request) {
+		if err := validName(r.PathValue("name")); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		put(w, r, r.PathValue("name"))
+	})
+	a.delete("/api/v1/gateway/routes/{name}", "admin", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if s := store(w); s != nil {
+			err := validName(name)
+			if err == nil {
+				err = deleteRoute(s, name)
+			}
+			apiReply(w, err, APIMessage{Status: "ok", Message: "route " + name + " removed"})
+		}
+	})
+	a.get("/api/v1/gateway/status", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		if s := store(w); s != nil {
+			st, err := gatewayStatus(s)
+			apiReply(w, err, st)
+		}
+	})
+	a.get("/api/v1/gateway/ca", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		s := store(w)
 		if s == nil {
 			return
@@ -1257,51 +1230,43 @@ func registerGatewayRoutes(mux apiMux, wrap func(bool, http.HandlerFunc) http.Ha
 		}
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		_, _ = io.WriteString(w, pem)
-	}))
-	// POST /api/v1/gateway/certs {"name","cert","key"}; DELETE /api/v1/gateway/certs/{name}
-	certHandler := wrap(false, func(w http.ResponseWriter, r *http.Request) {
+	})
+	a.get("/api/v1/gateway/certs", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		if s := store(w); s != nil {
+			names, err := s.certNames()
+			apiReply(w, err, names)
+		}
+	})
+	a.post("/api/v1/gateway/certs", "admin", func(w http.ResponseWriter, r *http.Request) { // {"name","cert","key"}
 		s := store(w)
 		if s == nil {
 			return
 		}
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/gateway/certs":
-			names, err := s.certNames()
-			apiReply(w, err, names)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/gateway/certs":
-			if !requireRole(w, r, "admin") {
-				return
-			}
-			var req struct {
-				Name string `json:"name"`
-				GatewayCert
-			}
-			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			err := validName(req.Name)
-			if err == nil {
-				err = validateCert(req.GatewayCert)
-			}
-			if err == nil {
-				err = s.putCert(req.Name, req.GatewayCert)
-			}
-			reply(w, r, "gateway cert add", req.Name, err, APIMessage{Status: "ok", Message: "certificate " + req.Name + " stored"})
-		case r.Method == http.MethodDelete:
-			if !requireRole(w, r, "admin") {
-				return
-			}
-			name := strings.TrimPrefix(r.URL.Path, "/api/v1/gateway/certs/")
+		var req struct {
+			Name string `json:"name"`
+			GatewayCert
+		}
+		if err := decodeStrict(w, r, &req, 1<<20); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		err := validName(req.Name)
+		if err == nil {
+			err = validateCert(req.GatewayCert)
+		}
+		if err == nil {
+			err = s.putCert(req.Name, req.GatewayCert)
+		}
+		apiReply(w, err, APIMessage{Status: "ok", Message: "certificate " + req.Name + " stored"})
+	})
+	a.delete("/api/v1/gateway/certs/{name}", "admin", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if s := store(w); s != nil {
 			err := validName(name)
 			if err == nil {
 				err = s.rmCert(name)
 			}
-			reply(w, r, "gateway cert rm", name, err, APIMessage{Status: "ok", Message: "certificate " + name + " removed"})
-		default:
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			apiReply(w, err, APIMessage{Status: "ok", Message: "certificate " + name + " removed"})
 		}
 	})
-	mux.HandleFunc("/api/v1/gateway/certs", certHandler)
-	mux.HandleFunc("/api/v1/gateway/certs/", certHandler)
 }

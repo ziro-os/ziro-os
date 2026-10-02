@@ -50,6 +50,10 @@ under active development and is not ready for production use.
   reserved; `ziro/workloads` for plugins, bounded by their `resources`), started directly in it
   (`CLONE_INTO_CGROUP`). Containers get the same `resources` as runtime limits. A PSI watchdog in the sentinel
   turns sustained memory stalls into an alert and a controlled restart ([operations](operations.md)).
+- **API:** one route table (method, path, minimum role, handler). Authentication, role checks, rate limits (per
+  client and per token), the audit record of every change and JSON errors come from that table. Handlers call the
+  same operation functions as the CLI commands, never the CLI binary or copied logic, and the OpenAPI spec is
+  checked against the table.
 - **Tools releases:** `ziroctl`/`ziropkg` ship on their own signed stream (`tools/vX.Y.Z`); `ziroctl update` swaps
   them atomically and updates the integrity baselines. OS releases sign their `SHA256SUMS` with the same key.
 - **SDK:** the formats and their validators, catalog signing, the API types and a typed client live in the

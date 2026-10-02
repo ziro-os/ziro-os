@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
 	"os"
 	"regexp"
 	"sort"
@@ -93,13 +93,67 @@ func apiIdentity(bearer, legacy string, now time.Time) (name, role string, ok bo
 	return "", "", false
 }
 
-// apiAllowed: reads need viewer, anything that changes state needs operator.
-func apiAllowed(role, method string) bool {
-	need := "operator"
-	if method == http.MethodGet || method == http.MethodHead {
-		need = "viewer"
+// createAPIToken issues a token (returned once; only its hash is stored).
+func createAPIToken(name, role string, ttl time.Duration) (string, apiToken, error) {
+	if err := validName(name); err != nil {
+		return "", apiToken{}, err
 	}
-	return apiRoleRank[role] >= apiRoleRank[need]
+	if apiRoleRank[role] == 0 {
+		return "", apiToken{}, fmt.Errorf("role must be viewer, operator or admin")
+	}
+	if ttl < 0 || ttl > 5*365*24*time.Hour {
+		return "", apiToken{}, fmt.Errorf("ttl must be between 0 (no expiry) and 5 years")
+	}
+	ts, err := loadAPITokens()
+	if err != nil {
+		return "", apiToken{}, err
+	}
+	for _, t := range ts {
+		if t.Name == name {
+			return "", apiToken{}, fmt.Errorf("a token named %q exists; revoke it first", name)
+		}
+	}
+	tok := "ziro_" + randomHex(4) + "_" + randomHex(24)
+	sum := sha256.Sum256([]byte(tok))
+	t := apiToken{ID: tok[5:13], Name: name, Role: role, Hash: hex.EncodeToString(sum[:]), Created: time.Now().UTC().Format(time.RFC3339)}
+	if ttl > 0 {
+		t.Expires = time.Now().Add(ttl).UTC().Format(time.RFC3339)
+	}
+	return tok, t, saveAPITokens(append(ts, t))
+}
+
+// revokeAPIToken removes a token by name or id; "legacy" removes the pre-RBAC admin token.
+func revokeAPIToken(name string) error {
+	if name == "legacy" {
+		if err := os.Remove(apiTokenFile); err != nil {
+			return errNotFound("no legacy token")
+		}
+		return writeFileAtomic(apiLegacyRevoked, []byte("revoked\n"), 0600)
+	}
+	ts, err := loadAPITokens()
+	if err != nil {
+		return err
+	}
+	kept := ts[:0]
+	for _, t := range ts {
+		if t.Name != name && t.ID != name {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == len(ts) {
+		return errNotFound(fmt.Sprintf("no token named %q", name))
+	}
+	return saveAPITokens(kept)
+}
+
+// apiTokenViews lists tokens without their hashes.
+func apiTokenViews() []sdkapi.Token {
+	ts, _ := loadAPITokens()
+	view := []sdkapi.Token{}
+	for _, t := range ts {
+		view = append(view, sdkapi.Token{Name: t.Name, Role: t.Role, ID: t.ID, Created: t.Created, Expires: t.Expires})
+	}
+	return view
 }
 
 // ---- CLI ----
@@ -114,29 +168,8 @@ var apiTokenCreateCmd = &cobra.Command{
 	Short: "Create a scoped API token (printed once; only its hash is stored)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := validName(args[0]); err != nil {
-			return err
-		}
-		if apiRoleRank[apiTokenRole] == 0 {
-			return fmt.Errorf("--role must be viewer, operator or admin")
-		}
-		ts, err := loadAPITokens()
+		tok, t, err := createAPIToken(args[0], apiTokenRole, apiTokenTTL)
 		if err != nil {
-			return err
-		}
-		for _, t := range ts {
-			if t.Name == args[0] {
-				return fmt.Errorf("a token named %q exists; revoke it first", args[0])
-			}
-		}
-		tok := "ziro_" + randomHex(4) + "_" + randomHex(24)
-		sum := sha256.Sum256([]byte(tok))
-		t := apiToken{ID: tok[5:13], Name: args[0], Role: apiTokenRole, Hash: hex.EncodeToString(sum[:]),
-			Created: time.Now().UTC().Format(time.RFC3339)}
-		if apiTokenTTL > 0 {
-			t.Expires = time.Now().Add(apiTokenTTL).UTC().Format(time.RFC3339)
-		}
-		if err := saveAPITokens(append(ts, t)); err != nil {
 			return err
 		}
 		return printResult(map[string]string{"name": t.Name, "role": t.Role, "token": tok, "expires": t.Expires}, func() {
@@ -150,25 +183,21 @@ var apiTokenCreateCmd = &cobra.Command{
 var apiTokenLsCmd = &cobra.Command{
 	Use: "ls", Short: "List API tokens (never the tokens themselves)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ts, err := loadAPITokens()
-		if err != nil {
+		if _, err := loadAPITokens(); err != nil {
 			return err
 		}
-		view := []map[string]string{}
-		for _, t := range ts {
-			view = append(view, map[string]string{"name": t.Name, "role": t.Role, "id": t.ID, "created": t.Created, "expires": t.Expires})
-		}
+		view := apiTokenViews()
 		return printResult(view, func() {
 			fmt.Printf("%-20s %-9s %-10s %-22s %s\n", "NAME", "ROLE", "ID", "CREATED", "EXPIRES")
 			for _, v := range view {
-				exp := v["expires"]
+				exp := v.Expires
 				if exp == "" {
 					exp = "never"
 				}
-				fmt.Printf("%-20s %-9s %-10s %-22s %s\n", v["name"], v["role"], v["id"], v["created"], exp)
+				fmt.Printf("%-20s %-9s %-10s %-22s %s\n", v.Name, v.Role, v.ID, v.Created, exp)
 			}
 			if fileExists(apiTokenFile) {
-				fmt.Printf("\nThe pre-RBAC token in %s is also accepted, as admin (remove the file to disable it).\n", apiTokenFile)
+				fmt.Printf("\nThe pre-RBAC token in %s is also accepted, as admin (ziroctl api token revoke legacy).\n", apiTokenFile)
 			}
 		})
 	},
@@ -177,20 +206,7 @@ var apiTokenLsCmd = &cobra.Command{
 var apiTokenRevokeCmd = &cobra.Command{
 	Use: "revoke <name>", Short: "Revoke an API token immediately", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ts, err := loadAPITokens()
-		if err != nil {
-			return err
-		}
-		kept := ts[:0]
-		for _, t := range ts {
-			if t.Name != args[0] && t.ID != args[0] {
-				kept = append(kept, t)
-			}
-		}
-		if len(kept) == len(ts) {
-			return fmt.Errorf("no token named %q", args[0])
-		}
-		if err := saveAPITokens(kept); err != nil {
+		if err := revokeAPIToken(args[0]); err != nil {
 			return err
 		}
 		fmt.Printf("✓ token %q revoked\n", args[0])

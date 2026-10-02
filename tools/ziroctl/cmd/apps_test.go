@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"context"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -253,19 +251,9 @@ func TestAppDeployRequestArgs(t *testing.T) {
 
 func TestAppRoutesRBAC(t *testing.T) {
 	stubApps(t)
-	mux := http.NewServeMux()
 	var role string
-	wrap := func(_ bool, h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			h(w, r.WithContext(context.WithValue(r.Context(), apiRoleKey{}, role)))
-		}
-	}
-	registerAppRoutes(mux, wrap)
-	do := func(method, path, body string) int {
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
-		return rec.Code
-	}
+	api := newAPIHarness(t, registerAppRoutes)
+	do := func(method, path, body string) int { return api.code(role, method, path, body) }
 	for _, r := range []string{"viewer", "operator"} {
 		role = r
 		if code := do("POST", "/api/v1/apps/deploy", `{"app":"postgres"}`); code != http.StatusForbidden {

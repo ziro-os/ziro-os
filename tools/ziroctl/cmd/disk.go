@@ -20,77 +20,58 @@ var diskListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List storage disks, partitions, models, and sizes",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("==================================================")
-		fmt.Println(" 💾 Ziro-OS Storage Disks & Partitions")
-		fmt.Println("==================================================")
-
-		blocks, err := filepath.Glob("/sys/block/*")
-		if err != nil || len(blocks) == 0 {
-			// Fallback to lsblk or fdisk
-			out, err := exec.Command("fdisk", "-l").CombinedOutput()
-			if err == nil && len(out) > 0 {
-				fmt.Println(string(out))
-				return nil
+		disks := blockDevices()
+		return printResult(disks, func() {
+			if len(disks) == 0 {
+				fmt.Println("No disks found in /sys/block (are the virtio-blk, sd_mod or nvme drivers loaded?)")
+				return
 			}
-			fmt.Println("No storage block devices detected.")
-			return nil
-		}
-
-		found := 0
-		for _, b := range blocks {
-			name := filepath.Base(b)
-			if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") || strings.HasPrefix(name, "sr") {
-				continue
-			}
-
-			found++
-			sizeBytes := readBlockSize(b)
-			sizeGB := float64(sizeBytes) / (1024 * 1024 * 1024)
-			model := readSysAttr(filepath.Join(b, "device/model"))
-			if model == "" {
-				model = readSysAttr(filepath.Join(b, "device/name"))
-			}
-			if model == "" {
-				model = "Virtual / Generic Block Device"
-			}
-
-			driverType := "SCSI / SATA"
-			if strings.HasPrefix(name, "vd") {
-				driverType = "VirtIO Block (virtio_blk)"
-			} else if strings.HasPrefix(name, "nvme") {
-				driverType = "NVMe Storage"
-			} else if strings.HasPrefix(name, "xvd") {
-				driverType = "Xen Virtual Disk"
-			}
-
-			fmt.Printf("Disk /dev/%s:\n", name)
-			fmt.Printf("  Capacity: %.2f GB (%d bytes)\n", sizeGB, sizeBytes)
-			fmt.Printf("  Model:    %s\n", model)
-			fmt.Printf("  Type:     %s\n", driverType)
-
-			// Find partitions
-			parts, _ := filepath.Glob(filepath.Join(b, name+"*"))
-			if len(parts) > 0 {
-				fmt.Println("  Partitions:")
-				for _, p := range parts {
-					pname := filepath.Base(p)
-					psize := readBlockSize(p)
-					psizeMB := float64(psize) / (1024 * 1024)
-					fmt.Printf("    • /dev/%-10s (%.1f MB)\n", pname, psizeMB)
+			for _, d := range disks {
+				fmt.Printf("/dev/%s  %s  %s  %s\n", d.Name, humanBytes(uint64(d.Bytes)), d.Type, d.Model)
+				for _, p := range d.Partitions {
+					fmt.Printf("  /dev/%-12s %s\n", p.Name, humanBytes(uint64(p.Bytes)))
 				}
-			} else {
-				fmt.Println("  Partitions: (No partitions on disk)")
 			}
-			fmt.Println()
-		}
-
-		if found == 0 {
-			fmt.Println("⚠️  No physical or virtual disks detected in /sys/block.")
-			fmt.Println("Ensure virtio-blk, sd_mod, or nvme kernel drivers are loaded.")
-		}
-		fmt.Println("==================================================")
-		return nil
+		})
 	},
+}
+
+// BlockDevice is a disk with its partitions (from /sys/block).
+type BlockDevice struct {
+	Name       string        `json:"name"`
+	Bytes      int64         `json:"bytes"`
+	Model      string        `json:"model,omitempty"`
+	Type       string        `json:"type"`
+	Partitions []BlockDevice `json:"partitions,omitempty"`
+}
+
+func blockDevices() []BlockDevice {
+	out := []BlockDevice{}
+	blocks, _ := filepath.Glob("/sys/block/*")
+	for _, b := range blocks {
+		name := filepath.Base(b)
+		if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") || strings.HasPrefix(name, "sr") || strings.HasPrefix(name, "zram") {
+			continue
+		}
+		d := BlockDevice{Name: name, Bytes: readBlockSize(b), Model: readSysAttr(filepath.Join(b, "device/model")), Type: "scsi/sata"}
+		if d.Model == "" {
+			d.Model = readSysAttr(filepath.Join(b, "device/name"))
+		}
+		switch {
+		case strings.HasPrefix(name, "vd"):
+			d.Type = "virtio"
+		case strings.HasPrefix(name, "nvme"):
+			d.Type = "nvme"
+		case strings.HasPrefix(name, "xvd"):
+			d.Type = "xen"
+		}
+		parts, _ := filepath.Glob(filepath.Join(b, name+"*"))
+		for _, p := range parts {
+			d.Partitions = append(d.Partitions, BlockDevice{Name: filepath.Base(p), Bytes: readBlockSize(p), Type: "partition"})
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 var diskUsageCmd = &cobra.Command{

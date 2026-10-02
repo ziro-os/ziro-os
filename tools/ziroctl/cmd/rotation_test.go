@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,17 +62,6 @@ func TestAPITokens(t *testing.T) {
 	}
 	if _, _, ok := apiIdentity("", "", now); ok {
 		t.Error("an empty legacy token must not match an empty bearer")
-	}
-	for _, c := range []struct {
-		role, method string
-		ok           bool
-	}{
-		{"viewer", http.MethodGet, true}, {"viewer", http.MethodPost, false}, {"viewer", http.MethodDelete, false},
-		{"operator", http.MethodPost, true}, {"admin", http.MethodPut, true}, {"", http.MethodGet, false},
-	} {
-		if apiAllowed(c.role, c.method) != c.ok {
-			t.Errorf("%s %s: want %v", c.role, c.method, c.ok)
-		}
 	}
 }
 
