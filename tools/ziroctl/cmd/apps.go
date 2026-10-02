@@ -46,6 +46,9 @@ func loadAppDefs() map[string]AppDef {
 	out := map[string]AppDef{}
 	src := map[string]string{}
 	for _, it := range items {
+		if it.Type == "stack" { // stacks published in the app catalog (loadCatalogStacks)
+			continue
+		}
 		d, err := parseAppDef(it.Data)
 		if err == nil && d.Name != it.Name {
 			err = fmt.Errorf("app name %q differs from its index entry", d.Name)
@@ -150,6 +153,12 @@ type appDeployOpts struct {
 	// Expose publishes the app's entry point through the gateway on this hostname (HTTPS).
 	Expose    string
 	ExposeTLS string
+	// Links are extra environment variables (values from another app's outputs, which can hold
+	// credentials): delivered like generated secrets, through env files, never argv.
+	Links map[string]string
+	// Network (local only) attaches the containers to a named network, where the apps of one
+	// stack find each other by container name.
+	Network string
 }
 
 // parseAppRef splits "name[:version]".
@@ -347,7 +356,7 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 	// Generated secrets live in the cluster's (sealed, replicated) secret store, kept across
 	// redeploys so a database never loses its password.
 	secret := appClusterSecret(in.Name)
-	if len(d.Secrets) > 0 {
+	if len(d.Secrets) > 0 || len(o.Links) > 0 {
 		if err := withState(func(st *ClusterState) error {
 			cur := st.Secrets[secret]
 			next := map[string]string{}
@@ -360,6 +369,9 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 				if err != nil {
 					return err
 				}
+				next[k] = v
+			}
+			for k, v := range o.Links {
 				next[k] = v
 			}
 			if st.Secrets == nil {
@@ -387,7 +399,7 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 		for _, other := range d.Components { // components of one app reach each other
 			app.AllowFrom = uniq(append(app.AllowFrom, componentApp(in.Name, d, other)))
 		}
-		if len(c.Secrets) > 0 {
+		if len(c.Secrets) > 0 || len(o.Links) > 0 {
 			app.Secrets = []string{secret}
 		}
 		if o.Publish > 0 && c.Port > 0 && !published {
@@ -441,12 +453,19 @@ func deployAppLocal(in *AppInstance, o appDeployOpts) error {
 			return err
 		}
 		name := componentApp(in.Name, d, c)
-		a := Assignment{Name: "ziro-app-" + name, App: name, Image: d.Versions[in.Version].Images[c.Name], Args: args, Env: env, Data: c.Data, Resources: c.Resources}
+		a := Assignment{Name: "ziro-app-" + name, App: name, Image: d.Versions[in.Version].Images[c.Name], Args: args, Env: env,
+			Data: c.Data, Resources: c.Resources, Network: o.Network}
 		for _, s := range c.Secrets {
 			if a.SecretEnv == nil {
 				a.SecretEnv = map[string]string{}
 			}
 			a.SecretEnv[s] = secrets[s]
+		}
+		for k, v := range o.Links {
+			if a.SecretEnv == nil {
+				a.SecretEnv = map[string]string{}
+			}
+			a.SecretEnv[k] = v
 		}
 		if c.Port > 0 && !published { // the app's entry point is reachable from this host by default
 			host := o.Publish
@@ -498,7 +517,11 @@ func waitAppReady(container string, health []string) error {
 // ---- credentials, status, removal ----
 
 // appOutputs renders an instance's outputs (they may hold secrets: root-only CLI).
-func appOutputs(in *AppInstance) (map[string]string, error) {
+func appOutputs(in *AppInstance) (map[string]string, error) { return appOutputsFor(in, false) }
+
+// appOutputsFor renders outputs; internal gives the address other containers use (a local app's
+// container name and port on its stack network, instead of the host's published port).
+func appOutputsFor(in *AppInstance, internal bool) (map[string]string, error) {
 	vars := map[string]string{"app": in.Name, "peers": "", "replicas": ""}
 	for k, v := range in.Settings {
 		vars["setting."+k] = v
@@ -518,8 +541,16 @@ func appOutputs(in *AppInstance) (map[string]string, error) {
 			break
 		}
 	}
-	if in.Mode == "local" && in.Publish != "" {
+	if in.Mode == "local" && in.Publish != "" && !internal {
 		_, vars["port"], _ = strings.Cut(in.Publish, ":")
+	}
+	if in.Mode == "local" && internal {
+		for _, c := range in.Def.Components {
+			if c.Port > 0 {
+				vars["host"] = "ziro-app-" + componentApp(in.Name, in.Def, c)
+				break
+			}
+		}
 	}
 	secrets := map[string]string{}
 	if in.Mode == "local" {

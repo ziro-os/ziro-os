@@ -861,7 +861,9 @@ paths:
     get:
       x-ziro-role: viewer
       tags: [stacks]
-      summary: Stacks (apps deployed together from one definition)
+      summary: Deployed stacks; ?source=catalog lists the stacks published in the signed app catalogs
+      parameters:
+        - { name: source, in: query, schema: { type: string, enum: [catalog] } }
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/stacks/{name}:

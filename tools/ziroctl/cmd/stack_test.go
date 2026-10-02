@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"encoding/json"
+	"github.com/ziro-os/ziro-os/sdk/catalog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStackUpPlanApplyIdempotent(t *testing.T) {
@@ -78,5 +81,93 @@ apps:
 	}
 	if _, err := loadStackState("shop"); err == nil {
 		t.Error("state kept after down")
+	}
+}
+
+// A link passes the dependency's output (with its password) through the env file only, using
+// the dependency's container name on the stack network.
+func TestStackLinksDelivered(t *testing.T) {
+	stubApps(t)
+	old := stackStateDir
+	stackStateDir = t.TempDir()
+	defer func() { stackStateDir = old }()
+	oldDefs := loadAppDefsFn
+	loadAppDefsFn = func() map[string]AppDef { return map[string]AppDef{"postgres": testPostgresDef()} }
+	defer func() { loadAppDefsFn = oldDefs }()
+	var webRun []string
+	var webEnv string
+	stubbed := appNerdctl
+	appNerdctl = func(args ...string) error {
+		if args[0] == "run" && slices.Contains(args, "ziro-app-shop-web") {
+			webRun = args
+			for i, a := range args {
+				if a == "--env-file" {
+					b, _ := os.ReadFile(args[i+1])
+					webEnv = string(b)
+				}
+			}
+		}
+		return stubbed(args...)
+	}
+	dir := t.TempDir()
+	web := `{"schema":1,"name":"web","description":"w","default":"1","versions":{"1":{"images":{"web":"docker.io/library/nginx:1@sha256:` +
+		strings.Repeat("a", 64) + `"}}},"components":[{"name":"web","port":8080}]}`
+	os.WriteFile(filepath.Join(dir, "web.json"), []byte(web), 0644)
+	os.WriteFile(filepath.Join(dir, "s.yaml"), []byte("stack: shop\nversion: 1\napps:\n  db: {app: postgres}\n"+
+		"  web: {app: ./web.json, depends_on: [db], links: {DATABASE_URL: db.url}}\n"), 0644)
+	s, apps, err := loadStackFile(filepath.Join(dir, "s.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, _ := planStack(s, apps, nil)
+	if err := applyStack(s, apps, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(webEnv, "DATABASE_URL=postgres://app:") || !strings.Contains(webEnv, "@ziro-app-shop-db:5432/app") {
+		t.Errorf("env file: %q", webEnv)
+	}
+	for _, a := range webRun {
+		if strings.Contains(a, "DATABASE_URL") {
+			t.Errorf("the link leaked into argv: %v", webRun)
+		}
+	}
+	if !slices.Contains(webRun, "ziro-stack-shop") {
+		t.Errorf("web not on the stack network: %v", webRun)
+	}
+	// A link to an output the dependency doesn't have is refused before anything deploys.
+	os.WriteFile(filepath.Join(dir, "s.yaml"), []byte("stack: shop\nversion: 1\napps:\n  db: {app: postgres}\n"+
+		"  web: {app: ./web.json, depends_on: [db], links: {X: db.nope}}\n"), 0644)
+	if _, _, err := loadStackFile(filepath.Join(dir, "s.yaml")); err == nil || !strings.Contains(err.Error(), "no output") {
+		t.Errorf("bad link: %v", err)
+	}
+}
+
+// A stack published in a signed app catalog is found, separate from the apps, and only uses
+// catalog apps.
+func TestCatalogStacks(t *testing.T) {
+	stubModules(t)
+	pub, priv := testCatalogKey(t)
+	dir, _ := serveCatalog(t, pub)
+	repo := CatalogRepo{Name: "ziro-apps", URL: officialRepos[0].URL, Kind: "app", Key: pub, Official: true}
+	officialRepos = []CatalogRepo{repo}
+	src := t.TempDir()
+	app, _ := json.Marshal(testPostgresDef())
+	os.MkdirAll(filepath.Join(src, "apps", "postgres"), 0755)
+	os.WriteFile(filepath.Join(src, "apps", "postgres", "app.json"), app, 0644)
+	os.MkdirAll(filepath.Join(src, "stacks", "pgstack"), 0755)
+	os.WriteFile(filepath.Join(src, "stacks", "pgstack", "stack.yaml"), []byte("stack: pgstack\nversion: 1\ndescription: a db\napps:\n  db: {app: postgres}\n"), 0644)
+	if _, err := catalog.Build(src, dir, "ziro-apps", "app", 24*time.Hour, catalogNow(), catalogCheckers["app"]); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Sign(dir, priv)
+	if _, err := refreshRepo(repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loadAppDefs()["postgres"]; !ok {
+		t.Fatal("app missing")
+	}
+	s, ok := loadCatalogStacks()["pgstack"]
+	if !ok || s.Apps["db"].App != "postgres" || len(loadAppDefs()) != 1 {
+		t.Fatalf("stacks %+v", loadCatalogStacks())
 	}
 }

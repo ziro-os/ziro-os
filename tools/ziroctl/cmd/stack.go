@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -130,6 +131,19 @@ func resolveStackApps(s Stack, dir string) (map[string]resolvedApp, error) {
 		}
 		out[key] = r
 	}
+	for key, r := range out {
+		for env, ref := range r.Links {
+			from, output, _ := strings.Cut(ref, ".")
+			if _, ok := out[from].Def.Outputs[output]; !ok {
+				return nil, fmt.Errorf("app %s: link %s: %s has no output %q", key, env, out[from].Def.Name, output)
+			}
+			for _, c := range r.Def.Components {
+				if _, clash := c.Env[env]; clash || slices.Contains(c.Secrets, env) {
+					return nil, fmt.Errorf("app %s: link %s clashes with the app's own %s", key, env, env)
+				}
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -200,12 +214,23 @@ func applyStack(s Stack, apps map[string]resolvedApp, plan []StackChange, prev *
 		}
 		return writeFileAtomic(stackStatePath(s.Stack), b, 0600)
 	}
+	network := stackNetwork(s.Stack)
+	if !isClusterMaster() {
+		if err := ensureStackNetwork(network); err != nil {
+			return err
+		}
+	}
 	for _, c := range plan {
 		switch c.Action {
 		case "create", "update":
 			a := apps[c.Key]
-			err := deployAppDef(a.Def, a.Version, appDeployOpts{Name: c.Instance, Set: a.Set, Replicas: a.Replicas,
-				Publish: a.Publish, Expose: a.Expose, ExposeTLS: a.ExposeTLS})
+			links, err := stackLinkValues(s, a)
+			if err != nil {
+				_ = save()
+				return fmt.Errorf("%s: %w", c.Key, err)
+			}
+			err = deployAppDef(a.Def, a.Version, appDeployOpts{Name: c.Instance, Set: a.Set, Replicas: a.Replicas,
+				Publish: a.Publish, Expose: a.Expose, ExposeTLS: a.ExposeTLS, Links: links, Network: network})
 			if err != nil {
 				_ = save()
 				return fmt.Errorf("%s (%s): %w", c.Key, c.Instance, err)
@@ -218,6 +243,42 @@ func applyStack(s Stack, apps map[string]resolvedApp, plan []StackChange, prev *
 		}
 	}
 	return save()
+}
+
+// stackNetwork is the local network a stack's containers share (they reach each other by name).
+func stackNetwork(stack string) string { return "ziro-stack-" + stack }
+
+func ensureStackNetwork(name string) error {
+	if appNerdctl("network", "inspect", name) == nil {
+		return nil
+	}
+	return appNerdctl("network", "create", "--label", "ziro.stack=true", name)
+}
+
+// stackLinkValues renders an app's links from its (already deployed) dependencies' outputs, as
+// seen from inside a container.
+func stackLinkValues(s Stack, a resolvedApp) (map[string]string, error) {
+	if len(a.Links) == 0 {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for env, ref := range a.Links {
+		from, output, _ := strings.Cut(ref, ".")
+		in, err := loadAppInstance(s.Instance(from))
+		if err != nil {
+			return nil, fmt.Errorf("link %s: %s is not deployed", env, from)
+		}
+		outs, err := appOutputsFor(in, true)
+		if err != nil {
+			return nil, err
+		}
+		v, ok := outs[output]
+		if !ok {
+			return nil, fmt.Errorf("link %s: %s has no output %q", env, from, output)
+		}
+		out[env] = v
+	}
+	return out, nil
 }
 
 // stackDown removes every app of a stack, dependents first.
@@ -243,7 +304,42 @@ func stackDown(name string, purge bool) error {
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
+	_ = appNerdctl("network", "rm", stackNetwork(name)) // local stacks only; harmless otherwise
 	return os.Remove(stackStatePath(name))
+}
+
+// loadCatalogStacks returns the stacks published in the signed app catalogs (official repos
+// first; a name is never shadowed). They only use catalog apps.
+func loadCatalogStacks() map[string]Stack {
+	items, errs := catalogItems("app")
+	out := map[string]Stack{}
+	for _, it := range items {
+		if it.Type != "stack" {
+			continue
+		}
+		s, err := schema.ParseStack(it.Data)
+		if err == nil && s.Stack != it.Name {
+			err = fmt.Errorf("stack name %q differs from its index entry", s.Stack)
+		}
+		if err == nil {
+			for key, a := range s.Apps {
+				if schema.IsLocalRef(a.App) {
+					err = fmt.Errorf("app %s uses a local definition", key)
+				}
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("repo %s: stack %s: %w", it.Repo, it.Name, err))
+			continue
+		}
+		if _, taken := out[s.Stack]; !taken {
+			out[s.Stack] = s
+		}
+	}
+	for _, err := range errs {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	return out
 }
 
 // loadStackFile reads and validates a stack file; local app paths resolve next to it.
@@ -292,11 +388,31 @@ ziroctl stack up -f shop.yaml shows the plan and applies it; running it again ch
 }
 
 var stackUpCmd = &cobra.Command{
-	Use:   "up -f <stack.yaml>",
-	Short: "Plan and apply a stack (create, update and remove apps to match the file)",
-	Args:  cobra.NoArgs,
+	Use:   "up <catalog-stack> | -f <stack.yaml>",
+	Short: "Plan and apply a stack from a file or the signed catalog (create, update and remove apps to match)",
+	Args: func(cmd *cobra.Command, args []string) error {
+		if (stackFile == "") == (len(args) == 0) || len(args) > 1 {
+			return errors.New("give a catalog stack name or -f <file>")
+		}
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		s, apps, err := loadStackFile(stackFile)
+		var s Stack
+		var apps map[string]resolvedApp
+		var err error
+		if stackFile != "" {
+			s, apps, err = loadStackFile(stackFile)
+		} else {
+			cs, ok := loadCatalogStacks()[args[0]]
+			if !ok {
+				refreshStaleCatalogs("app")
+				if cs, ok = loadCatalogStacks()[args[0]]; !ok {
+					return fmt.Errorf("unknown stack %q (see: ziroctl stack search)", args[0])
+				}
+			}
+			s = cs
+			apps, err = resolveStackApps(s, "")
+		}
 		if err != nil {
 			return err
 		}
@@ -327,6 +443,37 @@ var stackUpCmd = &cobra.Command{
 			fmt.Printf("✓ stack %s is up\n", s.Stack)
 		}
 		return nil
+	},
+}
+
+var stackSearchCmd = &cobra.Command{
+	Use:   "search [query]",
+	Short: "Search the stacks published in the signed app catalogs",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		refreshStaleCatalogs("app")
+		q := ""
+		if len(args) == 1 {
+			q = strings.ToLower(args[0])
+		}
+		var hits []Stack
+		for _, s := range loadCatalogStacks() {
+			if strings.Contains(s.Stack, q) || strings.Contains(strings.ToLower(s.Description), q) {
+				hits = append(hits, s)
+			}
+		}
+		sort.Slice(hits, func(i, j int) bool { return hits[i].Stack < hits[j].Stack })
+		return printResult(hits, func() {
+			for _, s := range hits {
+				keys := make([]string, 0, len(s.Apps))
+				for k, a := range s.Apps {
+					keys = append(keys, k+"="+a.App)
+				}
+				sort.Strings(keys)
+				fmt.Printf("%-18s %s\n%18s apps: %s\n", s.Stack, s.Description, "", strings.Join(keys, " "))
+			}
+			fmt.Println("\nDeploy: ziroctl stack up <stack>")
+		})
 	},
 }
 
@@ -398,9 +545,8 @@ var stackDownCmd = &cobra.Command{
 
 func init() {
 	stackUpCmd.Flags().StringVarP(&stackFile, "file", "f", "", "Stack file (YAML or JSON)")
-	_ = stackUpCmd.MarkFlagRequired("file")
 	stackUpCmd.Flags().BoolVar(&stackDryRun, "dry-run", false, "Only show the plan")
 	stackDownCmd.Flags().BoolVar(&stackPurge, "purge", false, "Also delete the apps' data and credentials")
-	stackCmd.AddCommand(stackUpCmd, stackLsCmd, stackStatusCmd, stackDownCmd)
+	stackCmd.AddCommand(stackUpCmd, stackSearchCmd, stackLsCmd, stackStatusCmd, stackDownCmd)
 	rootCmd.AddCommand(stackCmd)
 }

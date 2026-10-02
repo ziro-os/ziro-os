@@ -63,10 +63,66 @@ ziroctl stack down shop [--purge]
 **Local definitions:** `./` paths must stay inside the stack's directory. Over the API (`PUT /api/v1/stacks/{name}`)
 only catalog apps are accepted.
 
-**Wiring apps together:**
-- Apps reach each other by name: through the mesh DNS on a cluster, and on 127.0.0.1 standalone.
-- Credentials stay in the host's secret store (`ziroctl apps credentials`). They are never copied into another
-  app's settings.
+**Published stacks:** an app catalog can publish stacks next to its apps (`stacks/<name>/stack.yaml`). They are
+signed and pinned in the same index, and may only use catalog apps.
+
+```sh
+ziroctl stack search            # stacks in the signed catalogs
+ziroctl stack up wordpress      # deploy one by name
+```
+
+To publish your own, add `stacks/<name>/stack.yaml` to your catalog repository. `ziroctl dev new stack <name>`
+scaffolds one, and `ziroctl catalog build . --kind app` signs it with the apps.
+
+**From docker-compose:**
+
+```sh
+ziroctl stack import docker-compose.yml -o shop   # shop/stack.yaml + shop/apps/<service>/app.yaml
+```
+
+| Compose | Becomes |
+|---|---|
+| service | an app definition with one component |
+| image | pinned by digest, resolved from its registry now |
+| first port | the component's port, plus the stack's `publish` |
+| named volumes | persistent `data` |
+| `command`, `healthcheck`, `environment` | args, health, env |
+| `depends_on` | `depends_on` |
+
+What has no safe equivalent is reported instead of silently dropped:
+- bind mounts
+- `build`, `privileged`, `network_mode`, `cap_add`, `devices`
+- additional ports
+- `${...}` interpolation
+- credentials typed into the file (move them to secrets or links)
+
+Review the result, then run `ziroctl stack up -f shop/stack.yaml --dry-run`.
+
+`ziroctl compose up|down|ps|logs` still runs a compose file directly, and reads the full YAML syntax (list or map
+`environment`, string or list `command`).
+
+**Wiring apps together: links**
+
+An app can receive a dependency's output, such as a connection URL with its password, as an environment variable:
+
+```yaml
+apps:
+  db:  { app: postgres }
+  web:
+    app: ./apps/web/app.yaml
+    depends_on: [db]
+    links:
+      DATABASE_URL: db.url       # <dependency>.<output>, from the dependency's definition
+```
+
+- Outputs can hold credentials, so linked values travel only like generated secrets: through the app's env file
+  (0600), or the sealed cluster secret on a cluster. They never go into settings, argv or plain env, and
+  `nerdctl inspect` doesn't show them in the command line.
+- The address in a linked value is the one containers use:
+  - On a host, a stack's apps share a network (`ziro-stack-<name>`) and reach each other by container name.
+  - On a cluster, they use the mesh DNS name.
+- A link must name an app in `depends_on` and an output its definition declares. A link that clashes with one of
+  the app's own variables is refused before anything deploys.
 
 ## Host provisioning: `ziroctl apply`
 
@@ -129,7 +185,7 @@ Stack files named by a first-boot config are looked up in `/etc/ziro/provision.d
 
 | Operation | Route | Role |
 |---|---|---|
-| list | `GET /api/v1/stacks` | viewer |
+| list | `GET /api/v1/stacks` (`?source=catalog` for published stacks) | viewer |
 | status | `GET /api/v1/stacks/{name}` | viewer |
 | plan | `POST /api/v1/stacks/{name}/plan` | operator |
 | apply (background) | `PUT /api/v1/stacks/{name}` | admin |
@@ -137,7 +193,7 @@ Stack files named by a first-boot config are looked up in `/etc/ziro/provision.d
 | host config | `POST /api/v1/apply?dry_run=true` | admin |
 
 In Go:
-- `client.PlanStack`, `ApplyStack`, `RemoveStack` and `ApplyHost`. Definitions are validated locally with the
+- `client.PlanStack`, `ApplyStack`, `RemoveStack`, `CatalogStacks` and `ApplyHost`. Definitions are validated locally with the
   host's own rules (`schema.ParseStack`, `schema.ParseHostConfig`) before anything is sent.
 - `schema.ToYAML` writes any definition as YAML.
 

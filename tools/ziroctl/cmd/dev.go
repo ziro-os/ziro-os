@@ -311,7 +311,7 @@ func definitionFiles(paths []string) ([]string, error) {
 			out = append(out, p)
 			continue
 		}
-		for _, pat := range []string{"modules/*/manifest", "apps/*/app", "stacks/*/stack", "examples/*/manifest"} {
+		for _, pat := range []string{"stack", "modules/*/manifest", "apps/*/app", "stacks/*/stack", "examples/*/manifest"} {
 			for _, ext := range []string{".json", ".yaml", ".yml"} {
 				m, _ := filepath.Glob(filepath.Join(p, pat+ext))
 				out = append(out, m...)

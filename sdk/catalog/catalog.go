@@ -21,6 +21,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +45,7 @@ type Entry struct {
 	Description string `json:"description,omitempty"`
 	Path        string `json:"path"` // relative to the repo URL
 	SHA256      string `json:"sha256"`
+	Type        string `json:"type,omitempty"` // "stack" for stacks in an app catalog; empty for the catalog's kind
 }
 
 type Index struct {
@@ -120,6 +122,9 @@ func VerifyIndex(r Repo, raw, sigB64 []byte, now time.Time) (*Index, error) {
 		if len(e.SHA256) != 64 {
 			return nil, fmt.Errorf("repo %s: entry %s has no sha256", r.Name, e.Name)
 		}
+		if e.Type != "" && (e.Type != "stack" || idx.Kind != "app") {
+			return nil, fmt.Errorf("repo %s: entry %s has unsupported type %q", r.Name, e.Name, e.Type)
+		}
 	}
 	return &idx, nil
 }
@@ -173,12 +178,74 @@ func Build(src, out, repo, kind string, ttl time.Duration, now time.Time, check 
 		}
 		idx.Entries = append(idx.Entries, e)
 	}
-	sort.Slice(idx.Entries, func(i, j int) bool { return idx.Entries[i].Name < idx.Entries[j].Name })
+	if kind == "app" { // app catalogs also publish stacks of their apps
+		stacks, err := buildStacks(src, out)
+		if err != nil {
+			return nil, err
+		}
+		idx.Entries = append(idx.Entries, stacks...)
+	}
+	sort.Slice(idx.Entries, func(i, j int) bool {
+		if idx.Entries[i].Type != idx.Entries[j].Type {
+			return idx.Entries[i].Type < idx.Entries[j].Type
+		}
+		return idx.Entries[i].Name < idx.Entries[j].Name
+	})
 	b, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return idx, os.WriteFile(filepath.Join(out, "index.json"), b, 0644)
+}
+
+// buildStacks validates src/stacks/<name>/stack.{yaml,yml,json} and writes them as canonical
+// JSON to out/stacks/<name>.json. A published stack may only use catalog apps: a host never
+// fetches anything a signed index doesn't pin.
+func buildStacks(src, out string) ([]Entry, error) {
+	var files []string
+	for _, ext := range []string{".json", ".yaml", ".yml"} {
+		m, err := filepath.Glob(filepath.Join(src, "stacks", "*", "stack"+ext))
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, m...)
+	}
+	sort.Strings(files)
+	var entries []Entry
+	seen := map[string]bool{}
+	for _, p := range files {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		b, err := schema.ToJSON(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		s, err := schema.ParseStack(b)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		for key, a := range s.Apps {
+			if schema.IsLocalRef(a.App) {
+				return nil, fmt.Errorf("%s: app %s uses %s: published stacks may only use catalog apps", p, key, a.App)
+			}
+		}
+		if dir := filepath.Base(filepath.Dir(p)); dir != s.Stack || seen[s.Stack] {
+			return nil, fmt.Errorf("%s: stack name %q must match its directory and be unique", p, s.Stack)
+		}
+		seen[s.Stack] = true
+		e := Entry{Name: s.Stack, Version: strconv.Itoa(s.Version), Description: s.Description, Type: "stack",
+			Path: "stacks/" + s.Stack + ".json", SHA256: sha256Hex(b)}
+		if err := os.MkdirAll(filepath.Join(out, "stacks"), 0755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(out, e.Path), b, 0644); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
 }
 
 // Sign signs out/index.json with an ed25519 private key (PKCS#8 PEM).

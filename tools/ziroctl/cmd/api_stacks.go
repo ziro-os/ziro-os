@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // Stacks and host provisioning over the API. A stack received here may only use catalog apps
@@ -23,7 +24,17 @@ func stageJobFile(dir, name string, data []byte) (string, error) {
 }
 
 func registerStackRoutes(a *apiRouter) {
+	// Deployed stacks, or with ?source=catalog the stacks published in the signed app catalogs.
 	a.get("/api/v1/stacks", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("source") == "catalog" {
+			list := []Stack{}
+			for _, s := range loadCatalogStacks() {
+				list = append(list, s)
+			}
+			sort.Slice(list, func(i, j int) bool { return list[i].Stack < list[j].Stack })
+			apiReply(w, nil, list)
+			return
+		}
 		apiReply(w, nil, listStacks())
 	})
 	a.get("/api/v1/stacks/{name}", "viewer", func(w http.ResponseWriter, r *http.Request) {

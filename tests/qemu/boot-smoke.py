@@ -419,9 +419,13 @@ def main():
         if not args.no_pull:
             app = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "sdk", "examples",
                                     "provisioning", "shop", "apps", "web", "app.yaml"), "rb").read()
-            stack = b"stack: shop\nversion: 1\napps:\n  web: {app: ./web.yaml, publish: 18080, resources: {memory: 128Mi}}\n"
+            kv = (b"schema: 1\nname: kv\ndescription: kv\ndefault: '1'\nversions:\n  '1': {images: {kv: "
+                  b"'docker.io/valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507'}}\n"
+                  b"components: [{name: kv, port: 6379, health: [valkey-cli, ping]}]\noutputs: {url: 'redis://{{host}}:{{port}}'}\n")
+            stack = (b"stack: shop\nversion: 1\napps:\n  kv: {app: ./kv.yaml, publish: 16379}\n"
+                     b"  web: {app: ./web.yaml, publish: 18080, resources: {memory: 128Mi}, depends_on: [kv], links: {KV_URL: kv.url}}\n")
             host = b"host:\n  version: 1\n  firewall: {allow: [18080/tcp]}\n  stacks: [./shop.yaml]\n"
-            files = {"web.yaml": app, "shop.yaml": stack, "host.yaml": host}
+            files = {"web.yaml": app, "kv.yaml": kv, "shop.yaml": stack, "host.yaml": host}
             cmd = "mkdir -p /tmp/prov && cd /tmp/prov && " + " && ".join(
                 f"echo {base64.b64encode(b).decode()} | base64 -d > {n}" for n, b in files.items())
             con.run(cmd)
@@ -429,10 +433,13 @@ def main():
                               "echo SECOND=$(ziroctl apply -f host.yaml --dry-run --json | grep -c '\"action\": \"update\"'); "
                               "echo LIMIT=$(nerdctl inspect ziro-app-shop-web --format '{{.HostConfig.Memory}}'); "
                               "echo WEB=$(wget -qO- http://127.0.0.1:18080/ | grep -c nginx); "
+                              "echo LINK=$(nerdctl exec ziro-app-shop-web sh -c 'echo $KV_URL'); "
+                              "echo REACH=$(nerdctl exec ziro-app-shop-web sh -c 'nc -z -w 3 ziro-app-shop-kv 6379 && echo yes'); "
                               "ziroctl stack down shop --purge >/dev/null 2>&1; echo DOWN=$(ziroctl apps list | grep -c shop-web); "
                               "ziroctl firewall deny 18080/tcp >/dev/null", timeout=600)
-            check("apply: YAML host file with a stack deploys (limits set), a second apply changes nothing, stack down cleans up",
-                  all(k in out for k in ["APPLY=0", "SECOND=0", "LIMIT=134217728", "DOWN=0"]) and re.search(r"WEB=[1-9]", out) is not None,
+            check("apply: YAML host file with a stack deploys (limits, link by name), a second apply changes nothing, stack down cleans up",
+                  all(k in out for k in ["APPLY=0", "SECOND=0", "LIMIT=134217728", "DOWN=0", "LINK=redis://ziro-app-shop-kv:6379", "REACH=yes"])
+                  and re.search(r"WEB=[1-9]", out) is not None,
                   out + con.run("cat /tmp/apply.out")[1])
 
         ok, out = retry(con, "ip -4 addr show | grep 'inet 10.0.2.'", lambda rc, o: rc == 0, 90)

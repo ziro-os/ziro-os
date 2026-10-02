@@ -71,3 +71,19 @@ host:
 		}
 	}
 }
+
+func TestStackLinks(t *testing.T) {
+	ok := "stack: s\nversion: 1\napps:\n  db: {app: postgres}\n  web: {app: x, depends_on: [db], links: {DATABASE_URL: db.url}}\n"
+	if _, err := ParseStack([]byte(ok)); err != nil {
+		t.Fatal(err)
+	}
+	for name, bad := range map[string]string{
+		"not a dependency": "stack: s\nversion: 1\napps:\n  db: {app: postgres}\n  web: {app: x, links: {DATABASE_URL: db.url}}\n",
+		"no output":        "stack: s\nversion: 1\napps:\n  db: {app: postgres}\n  web: {app: x, depends_on: [db], links: {DATABASE_URL: db}}\n",
+		"reserved name":    "stack: s\nversion: 1\napps:\n  db: {app: postgres}\n  web: {app: x, depends_on: [db], links: {ZIRO_X: db.url}}\n",
+	} {
+		if _, err := ParseStack([]byte(bad)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

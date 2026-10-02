@@ -103,6 +103,8 @@ func containerArgs(a Assignment, labels ...string) []string {
 	}
 	if a.IP != "" {
 		args = append(args, "--network", podNetName, "--ip", a.IP, "--dns", a.DNS, "--dns-search", meshDomain)
+	} else if a.Network != "" {
+		args = append(args, "--network", a.Network)
 	}
 	for _, v := range a.Volumes {
 		args = append(args, "-v", v)

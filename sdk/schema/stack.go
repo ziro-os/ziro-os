@@ -3,6 +3,7 @@ package schema
 import (
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -38,6 +39,10 @@ type StackApp struct {
 	ExposeTLS string            `json:"expose_tls,omitempty"` // auto, internal, off, cert:<name>
 	Resources *Resources        `json:"resources,omitempty"`  // limits for every component
 	DependsOn []string          `json:"depends_on,omitempty"` // deployed (and healthy) first
+	// Links pass a dependency's output into this app as an environment variable, e.g.
+	// DATABASE_URL: db.url. Outputs can hold credentials, so linked values travel only through
+	// the app's secret env file (never settings, argv or plain env).
+	Links map[string]string `json:"links,omitempty"`
 }
 
 // ParseStack decodes a stack (YAML or JSON) strictly and validates it.
@@ -98,6 +103,15 @@ func (s Stack) Validate() error {
 		for _, d := range a.DependsOn {
 			if _, ok := s.Apps[d]; !ok || d == key {
 				return fmt.Errorf("app %s: depends on unknown app %q", key, d)
+			}
+		}
+		for env, ref := range a.Links {
+			if !EnvKeyRe.MatchString(env) || strings.HasPrefix(env, "ZIRO_") {
+				return fmt.Errorf("app %s: bad link name %q", key, env)
+			}
+			from, output, ok := strings.Cut(ref, ".")
+			if !ok || output == "" || !slices.Contains(a.DependsOn, from) {
+				return fmt.Errorf("app %s: link %s=%q must be <dependency>.<output> of an app in depends_on", key, env, ref)
 			}
 		}
 	}

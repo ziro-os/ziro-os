@@ -371,6 +371,12 @@ func (c *Client) Stacks(ctx context.Context) ([]map[string]any, error) {
 	return out, c.Get(ctx, "/api/v1/stacks", &out)
 }
 
+// CatalogStacks lists the stacks published in the host's signed app catalogs.
+func (c *Client) CatalogStacks(ctx context.Context) ([]schema.Stack, error) {
+	var out []schema.Stack
+	return out, c.Get(ctx, "/api/v1/stacks?source=catalog", &out)
+}
+
 // Stack returns a stack and the status of each of its apps.
 func (c *Client) Stack(ctx context.Context, name string) (map[string]any, error) {
 	var out map[string]any
