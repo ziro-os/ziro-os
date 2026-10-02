@@ -30,6 +30,13 @@ Out of scope: vulnerabilities in upstream projects (Linux, containerd, runc, Bus
 doesn't make worse — report those upstream, though we're glad to hear about them to update quickly — and anything
 that needs root on the host already, unless it defeats a documented control.
 
+## Automated scanning
+
+Ziro-OS is part of the [Snyk Secure Developer Program](https://snyk.io/open-source/). The
+[Snyk Security workflow](.github/workflows/snyk-security.yml) runs [Snyk](https://snyk.io) Code, Open Source, IaC and Container scans on
+every pull request and on `main`; results go to the repository's code-scanning alerts. Alerts are fixed at their
+source, not suppressed.
+
 ## Signing keys
 
 | What | Key | Verified by |
