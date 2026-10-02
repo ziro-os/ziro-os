@@ -782,7 +782,67 @@ static void init_network(void) {
     system("sysctl -q -w net.ipv4.ip_forward=1 2>/dev/null || true");
     system("sysctl -q -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true");
     system("sysctl -p /etc/sysctl.d/99-ziro.conf 2>/dev/null || true");
-    system("sysctl -p /etc/sysctl.conf 2>/dev/null || true");
+    system("sysctl -p /etc/sysctl.conf 2>/dev/null || true"); /* the admin's overrides */
+}
+
+/* Memory and storage tuning that depends on the machine:
+ *  - vm.min_free_kbytes at 1% of RAM (16 MiB to 256 MiB): enough free pages that reclaim starts
+ *    before allocations stall (the kernel's default is tuned for desktops);
+ *  - zstd-compressed swap in RAM (zram, 25% of RAM) on hosts with 8 GiB or less: a memory spike
+ *    becomes a slowdown instead of an OOM kill. `touch /etc/ziro/zram.disabled` turns it off;
+ *  - I/O schedulers: none for NVMe and virtio (the device or hypervisor schedules), mq-deadline
+ *    for rotational disks. */
+static void init_memory_and_io(void) {
+    struct sysinfo si;
+    if (sysinfo(&si) != 0) return;
+    unsigned long long ram = (unsigned long long)si.totalram * si.mem_unit;
+    unsigned long long want = ram / 100 / 1024;               /* KiB */
+    if (want < 16 * 1024) want = 16 * 1024;
+    if (want > 256 * 1024) want = 256 * 1024;
+    char v[32];
+    long cur = 0;
+    FILE *f = fopen("/proc/sys/vm/min_free_kbytes", "r");
+    if (f) {
+        if (fscanf(f, "%ld", &cur) != 1) cur = 0;
+        fclose(f);
+    }
+    if ((unsigned long long)cur < want) {
+        snprintf(v, sizeof(v), "%llu", want);
+        write_file("/proc/sys/vm/min_free_kbytes", v);
+    }
+
+    if (ram <= (8ULL << 30) && access("/etc/ziro/zram.disabled", F_OK) != 0 && si.totalswap == 0) {
+        system("modprobe zram 2>/dev/null");
+        if (access("/sys/block/zram0/disksize", W_OK) == 0) {
+            write_file("/sys/block/zram0/comp_algorithm", "zstd"); /* the kernel default if unavailable */
+            snprintf(v, sizeof(v), "%llu", ram / 4);
+            write_file("/sys/block/zram0/disksize", v);
+            if (system("mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null") == 0) {
+                write_file("/proc/sys/vm/swappiness", "100"); /* swapping to compressed RAM is cheap */
+                write_file("/proc/sys/vm/page-cluster", "0"); /* no readahead on a RAM device */
+                printf("[init] zram swap: %llu MiB (zstd)\n", (ram / 4) >> 20);
+            }
+        }
+    }
+
+    DIR *d = opendir("/sys/block");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        const char *n = e->d_name;
+        if (n[0] == '.' || !strncmp(n, "loop", 4) || !strncmp(n, "ram", 3) || !strncmp(n, "zram", 4)) continue;
+        char path[300], rot[8] = "0";
+        snprintf(path, sizeof(path), "/sys/block/%s/queue/rotational", n);
+        FILE *rf = fopen(path, "r");
+        if (rf) {
+            if (!fgets(rot, sizeof(rot), rf)) rot[0] = '0';
+            fclose(rf);
+        }
+        snprintf(path, sizeof(path), "/sys/block/%s/queue/scheduler", n);
+        if (!strncmp(n, "nvme", 4) || !strncmp(n, "vd", 2)) write_file(path, "none");
+        else if (rot[0] == '1') write_file(path, "mq-deadline");
+    }
+    closedir(d);
 }
 
 /* Pidfile for a daemon PID 1 supervises, so 'ziroctl service' finds it even when it
@@ -1531,6 +1591,7 @@ int main(int argc, char *argv[]) {
     init_cgroups();
     init_hostname();
     init_network();
+    init_memory_and_io();
     mount_data_disks();
     apply_firewall_early();
     start_containerd();

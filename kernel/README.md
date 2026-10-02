@@ -33,6 +33,10 @@ driver (virtio/NVMe/AHCI/Hyper-V/Xen storage, ext4, serial console, initramfs su
 - **Memory and kernel hardening:**
   - stack protector, FORTIFY, hardened usercopy, `LIST_HARDENED`, `BUG_ON_DATA_CORRUPTION`
   - **init-on-alloc and init-on-free**: freed memory is zeroed. Opt out per host with `init_on_free=0`.
+  - Every stack variable is zero-initialized (`INIT_STACK_ALL_ZERO`).
+  - Separate kmalloc buckets for user-controlled allocations (`SLAB_BUCKETS`), which makes heap spraying much
+    harder.
+  - Indirect branch tracking (Intel CET IBT) on x86_64 CPUs that support it.
   - freelist hardening and randomization, randomized kmalloc caches, kstack offset randomization,
     `ZERO_CALL_USED_REGS`, no slab merging
   - page table checks, stack-end checks, KFENCE (sampling heap error detector)
@@ -40,9 +44,13 @@ driver (virtio/NVMe/AHCI/Hyper-V/Xen storage, ext4, serial console, initramfs su
 - **Removed attack surface:** kexec, hibernation, SysRq, `/dev/port`. On x86, `ioperm`/`iopl` too.
   - Kept on purpose: `userfaultfd` (limited to root by sysctl) for CRIU, and `binfmt_misc` (module) for
     multi-arch builds.
-  - arm64 kernel BTI and shadow call stacks need a clang build and are not enabled.
+  - arm64 kernel BTI and shadow call stacks need a clang build and are not enabled. The same goes for
+    RANDSTRUCT, which needs gcc plugin headers Alpine doesn't ship.
+  - `STATIC_USERMODEHELPER` is off on purpose: it would break on-demand module loading (netfilter matches,
+    crypto).
 - **Integrity:**
-  - IMA, with the policy loaded by the `integrity` module.
+  - IMA, with the policy loaded once by the `integrity` module. The kernel then refuses policy changes
+    (`IMA_WRITE_POLICY` off), and the policy can still be read back.
   - fs-verity.
   - fanotify permission events, used by `clamav-onaccess`.
 - **Modules:**
@@ -62,8 +70,21 @@ driver (virtio/NVMe/AHCI/Hyper-V/Xen storage, ext4, serial console, initramfs su
   `rootfs/etc/sysctl.d/99-ziro.conf` also set deep accept queues and a wide port range for gateways.
 - **Networking features:** MPTCP, kernel TLS, and nftables flowtables (the fast path for established forwarded
   flows).
-- **Memory:** transparent huge pages only on `madvise`, so databases don't hit khugepaged stalls. zswap is
-  available.
+- **Memory:**
+  - Transparent huge pages only on `madvise`, so databases don't hit khugepaged stalls.
+  - zram is built in. ziro-init enables zstd zram swap (25% of RAM) on hosts with 8 GiB or less, so a memory
+    spike slows the host instead of invoking the OOM killer. `touch /etc/ziro/zram.disabled` turns it off.
+  - `vm.min_free_kbytes` is set to 1% of RAM (16 to 256 MiB), so reclaim starts before allocations stall.
+  - Dirty pages are written back in bounded amounts (64 MiB background, 256 MiB limit).
+- **Scheduling:**
+  - Voluntary preemption by default for server throughput, with `PREEMPT_DYNAMIC`. Boot with `preempt=full`
+    (latency-sensitive) or `preempt=none` (batch) without another kernel.
+  - A 250 Hz tick, tickless when idle.
+- **Storage:** no I/O scheduler for NVMe and virtio disks (the device or hypervisor schedules), and mq-deadline
+  for rotational disks. Set by ziro-init.
+- **Scale:** `kernel.pid_max` 4M, and TCP buffers up to 16 MiB for fast long-distance links.
+- **Virtualization:** the x86_64 kernel ships the KVM host modules (Intel and AMD), for nested VMs, `ziroctl dev
+  run` on a Ziro host, and Firecracker/Kata.
 
 ## Boot
 
