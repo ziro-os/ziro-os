@@ -17,6 +17,50 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  lint:
+    name: Lint (gofmt, go vet, staticcheck, shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: |
+            tools/ziroctl/go.sum
+            tools/ziropkg/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l tools/ziroctl tools/ziropkg sdk)
+          [ -z "$unformatted" ] || { echo "::error::gofmt needed:"; echo "$unformatted"; exit 1; }
+
+      - name: go vet + staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          fail=0
+          for m in sdk tools/ziroctl tools/ziropkg; do
+            echo "== $m"
+            (cd "$m" && go vet ./...) || fail=1
+            rc=0
+            out=$(cd "$m" && "$(go env GOPATH)/bin/staticcheck" ./...) || rc=$?
+            # isClusterMaster's caller lands with #49 (stacks); drop this filter once it merges.
+            left=$(printf '%s\n' "$out" | grep -v -e '^cmd/cluster.go:[0-9]*:[0-9]*: func isClusterMaster is unused (U1000)$' -e '^$' || true)
+            if [ -n "$left" ] || { [ "$rc" -ne 0 ] && [ -z "$out" ]; }; then
+              printf '%s\n' "$left"; fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: shellcheck
+        run: |
+          curl -fsSLo /tmp/sc.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/sc.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/sc.tar.xz -C /tmp
+          /tmp/shellcheck-v0.11.0/shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh
+
   unit-tests:
     name: Unit & Audit Tests
     runs-on: ubuntu-latest

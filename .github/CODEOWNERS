@@ -1,0 +1,21 @@
+# Code owners review every change to the paths below (see GOVERNANCE.md).
+*                                   @sombochea
+
+# Trust boundaries: kernel, SDK schemas and API types, the REST API, signing keys, CI and releases.
+/kernel/                            @sombochea
+/sdk/                               @sombochea
+/tools/ziroctl/cmd/api*.go          @sombochea
+/tools/ziroctl/cmd/security*.go     @sombochea
+/tools/ziroctl/cmd/audit.go         @sombochea
+/tools/ziroctl/cmd/catalog*.go      @sombochea
+/tools/ziroctl/cmd/cluster_ca.go    @sombochea
+/tools/ziroctl/cmd/cluster_keys.go  @sombochea
+/tools/ziroctl/cmd/update.go        @sombochea
+/tools/ziroctl/cmd/upgrade.go       @sombochea
+/tools/ziroctl/cmd/release.pub      @sombochea
+/init/                              @sombochea
+/security/                          @sombochea
+/scripts/release/                   @sombochea
+/.github/workflows/                 @sombochea
+/.github/CODEOWNERS                 @sombochea
+/SECURITY.md                        @sombochea

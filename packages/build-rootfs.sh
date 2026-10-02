@@ -14,13 +14,11 @@ case "$RAW_ARCH" in
         TARGET_ARCH="x86_64"
         GOARCH="amd64"
         DOCKER_PLATFORM="linux/amd64"
-        ALPINE_ARCH="x86_64"
         ;;
     arm64|aarch64)
         TARGET_ARCH="arm64"
         GOARCH="arm64"
         DOCKER_PLATFORM="linux/arm64"
-        ALPINE_ARCH="aarch64"
         ;;
     *)
         echo "❌ Unsupported architecture: $RAW_ARCH"
@@ -301,7 +299,7 @@ SH_SHUTDOWN
         cp -f /rootfs/sbin/shutdown /rootfs/usr/bin/shutdown 2>/dev/null || true
 
         # Validate that busybox is an authentic binary and not a script or symlink
-        if [ ! -f /rootfs/bin/busybox ] || [ -L /rootfs/bin/busybox ] || [ $(wc -c < /rootfs/bin/busybox) -lt 100000 ]; then
+        if [ ! -f /rootfs/bin/busybox ] || [ -L /rootfs/bin/busybox ] || [ "$(wc -c < /rootfs/bin/busybox)" -lt 100000 ]; then
             echo "❌ FATAL: /rootfs/bin/busybox is missing, truncated, or a symlink!"
             exit 1
         fi
@@ -486,7 +484,7 @@ SH_SHUTDOWN
     cp -f /rootfs/sbin/shutdown /rootfs/usr/bin/shutdown 2>/dev/null || true
 
     # Validate that busybox is an authentic binary
-    if [ ! -f /rootfs/bin/busybox ] || [ -L /rootfs/bin/busybox ] || [ $(wc -c < /rootfs/bin/busybox) -lt 100000 ]; then
+    if [ ! -f /rootfs/bin/busybox ] || [ -L /rootfs/bin/busybox ] || [ "$(wc -c < /rootfs/bin/busybox)" -lt 100000 ]; then
         echo "❌ FATAL: /rootfs/bin/busybox is corrupt or overwritten in full rootfs!"
         exit 1
     fi
@@ -526,7 +524,7 @@ if cmp -s "$ROOTFS_FULL/bin/busybox" "$INIT_BIN"; then
     echo "❌ FATAL: /bin/busybox was overwritten by ziro-init!"
     exit 1
 fi
-if [ ! -f "$ROOTFS_FULL/bin/busybox" ] || [ -L "$ROOTFS_FULL/bin/busybox" ] || [ $(wc -c < "$ROOTFS_FULL/bin/busybox") -lt 100000 ]; then
+if [ ! -f "$ROOTFS_FULL/bin/busybox" ] || [ -L "$ROOTFS_FULL/bin/busybox" ] || [ "$(wc -c < "$ROOTFS_FULL/bin/busybox")" -lt 100000 ]; then
     echo "❌ FATAL: /bin/busybox in full rootfs is corrupted or overwritten!"
     exit 1
 fi

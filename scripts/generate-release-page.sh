@@ -26,11 +26,9 @@ fi
 
 # Ensure leading 'v'
 [[ "$RELEASE_VERSION" =~ ^v ]] || RELEASE_VERSION="v${RELEASE_VERSION}"
-VERSION_NUM="${RELEASE_VERSION#v}"
 
 DOWNLOAD_BASE="https://github.com/${REPO_NAME}/releases/download/${RELEASE_VERSION}"
 REGISTRY_IMAGE="ghcr.io/${REPO_NAME}:latest"
-REGISTRY_TAGGED="ghcr.io/${REPO_NAME}:${RELEASE_VERSION}"
 
 mkdir -p "$OUTPUT_DIR"
 

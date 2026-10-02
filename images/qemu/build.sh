@@ -16,7 +16,6 @@ if [ ! -f "$KERNEL_IMAGE" ]; then
 fi
 ROOTFS_DIR="../../rootfs"
 OUTPUT_DIR="./output"
-IMAGE_SIZE="512M"
 
 mkdir -p "$OUTPUT_DIR"
 

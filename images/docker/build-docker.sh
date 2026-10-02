@@ -9,15 +9,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOST_ARCH=$(uname -m)
 case "$HOST_ARCH" in
     x86_64|amd64)
-        DEFAULT_ARCH="amd64"
         DEFAULT_TARGET="x86_64"
         ;;
     arm64|aarch64)
-        DEFAULT_ARCH="arm64"
         DEFAULT_TARGET="arm64"
         ;;
     *)
-        DEFAULT_ARCH="amd64"
         DEFAULT_TARGET="x86_64"
         ;;
 esac

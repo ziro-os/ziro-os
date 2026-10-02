@@ -10,6 +10,9 @@ Ziro-OS is under active development and is not ready for production use. Start w
 - [Installation](installation-guide.md): installing from bootable media.
 - [Project goals](project-goals.md): intended use cases and future directions.
 - [Contributing](../community/CONTRIBUTING.md): development workflow and pull requests.
+- [Design standard](design/README.md): principles, resource model, API and CLI conventions, extension points,
+  security model, and [RFCs](design/rfcs/README.md).
+- [Security policy](../SECURITY.md) and [governance](../GOVERNANCE.md).
 
 ## System and operations
 

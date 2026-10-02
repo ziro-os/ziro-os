@@ -18,6 +18,9 @@ Every contribution to Ziro-OS should respect our core design tenets:
 4. **True Multi-Architecture**: Full support for both `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM64 cloud instances).
 5. **Static Linking & Zero Bloat**: Prefer statically compiled Go and C99 binaries with musl libc to avoid runtime dynamic library dependency issues.
 
+The [design standard](../docs/design/README.md) turns these into concrete rules: the resource model, API and CLI
+conventions, extension points and the security model. Larger changes need an [RFC](../docs/design/rfcs/README.md).
+
 ---
 
 ## 🚀 Development Environment Setup
@@ -155,6 +158,36 @@ cd tools/ziropkg && go test -v ./...
 - Make scripts architecture-aware: support both `x86_64` (or `amd64`) and `arm64` (or `aarch64`).
 - Avoid hardcoded paths; resolve repository roots dynamically via `$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)`.
 
+### Lint gate
+
+CI runs these on every pull request; run them before pushing. Fix findings at their source rather than suppressing
+them.
+
+```bash
+gofmt -l tools/ziroctl tools/ziropkg sdk          # must print nothing
+for m in sdk tools/ziroctl tools/ziropkg; do
+  (cd "$m" && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...)
+done
+shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh
+```
+
+---
+
+## 🧩 How to Add a Command
+
+Every operation has one implementation that the CLI, the REST API, declarative files and the SDK share (see the
+[design standard](../docs/design/README.md#how-to-add-a-feature)):
+
+1. **Operation:** a function in `tools/ziroctl/cmd` that validates its input with `sdk/schema` and does the work.
+2. **CLI:** a Cobra command (noun, then verb) that parses flags, calls the operation, and prints through
+   `printResult` so `--json` works.
+3. **API:** one entry in the route table (`api_routes.go` and the `register*Routes` functions) with the least role
+   that is safe; request and response types in `sdk/api`.
+4. **OpenAPI:** the route and its `x-ziro-role` in `sdk/openapi.yaml` (`TestOpenAPIMatchesRoutes` fails otherwise).
+5. **SDK:** a typed method in `sdk/client`.
+6. **Tests:** unit tests next to the code; `tests/qemu/boot-smoke.py` when it needs a booted host.
+7. **Docs:** the user guide in `docs/`.
+
 ---
 
 ## 🧪 Testing Your Changes
@@ -244,7 +277,8 @@ The script automatically:
 
 ## 🔒 Security Vulnerability Reporting
 
-If you discover a security vulnerability in Ziro-OS, please do **NOT** open a public issue. Instead, report it privately via GitHub Security Advisories or email security@ziro-os.io. Include reproduction steps and details about the affected versions.
+If you discover a security vulnerability in Ziro-OS, please do **NOT** open a public issue. Report it privately as
+described in [SECURITY.md](../SECURITY.md).
 
 ---
 

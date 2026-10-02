@@ -113,7 +113,7 @@ case "$BUILD_TYPE" in
         fi
         
         ./configure --prefix=/usr --enable-static --disable-shared $CONFIGURE_HOST
-        make -j$(nproc)
+        make -j"$(nproc)"
         make DESTDIR="$BUILD_DIR/install" install
         cp -r "$BUILD_DIR/install"/* "$ROOTFS_DIR/"
         ;;
@@ -135,7 +135,7 @@ case "$BUILD_TYPE" in
         fi
         
         make defconfig
-        make -j$(nproc) LDFLAGS=--static
+        make -j"$(nproc)" LDFLAGS=--static
         make CONFIG_PREFIX="$ROOTFS_DIR" install
         ;;
     *)
