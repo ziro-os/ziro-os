@@ -53,6 +53,6 @@ func printResult(v interface{}, text func()) error {
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output format as JSON")
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Print machine-readable JSON")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 }

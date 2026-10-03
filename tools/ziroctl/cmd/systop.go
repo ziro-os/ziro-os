@@ -422,6 +422,7 @@ type topView struct {
 	confirm string // pending stop/kill target
 	status  string
 	style   termStyle
+	plain   bool // one-shot text output: no key hints
 }
 
 func (v *topView) setPane(p string) {
@@ -587,6 +588,9 @@ func (v *topView) render(buf *bytes.Buffer, s TopSnapshot, w, h int) {
 		v.renderNetwork(line, hdr, s.Network, rows, w)
 	}
 	buf.WriteString("\033[J")
+	if v.plain {
+		return
+	}
 	foot := " q quit  tab/c/p/n pane  s sort  / filter"
 	if v.pane != "network" {
 		foot += "  k stop"
@@ -759,7 +763,7 @@ q quit. --once or --json prints one snapshot of every pane.`,
 		if topOnce || jsonOutput || !term.IsTerminal(fd) || !term.IsTerminal(int(os.Stdout.Fd())) {
 			s := takeSnapshot(time.Second)
 			v.sortSnapshot(&s)
-			v.style.depth = 0
+			v.style.depth, v.plain = 0, true
 			return printResult(s, func() {
 				var buf bytes.Buffer
 				for _, p := range topPanes {
