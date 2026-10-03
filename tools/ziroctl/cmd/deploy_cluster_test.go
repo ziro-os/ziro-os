@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -155,9 +156,10 @@ func TestImageFetchAndServe(t *testing.T) {
 		loaded = map[bool]string{true: digest, false: "sha256:" + strings.Repeat("0", 64)}[string(b) == "good-tar"]
 		return nil
 	}
-	tar := "good-tar"
+	tar, tok := "good-tar", strings.Repeat("ab", 32)
+	mesh := netip.MustParsePrefix("127.0.0.0/8")
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tok" || r.URL.Path != "/v1/images/"+digest {
+		if r.Header.Get("Authorization") != "Bearer "+tok || r.URL.Path != "/v1/images/"+digest {
 			http.Error(w, "no", http.StatusUnauthorized)
 			return
 		}
@@ -171,19 +173,24 @@ func TestImageFetchAndServe(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 	a := Assignment{Image: testLocalImage, ImageFrom: "127.0.0.1:7444"}
-	if name, err := fetchClusterImage(context.Background(), a, "tok"); err != nil || name != "ziro.local/web:b2" {
+	if name, err := fetchClusterImage(context.Background(), a, tok, mesh); err != nil || name != "ziro.local/web:b2" {
 		t.Fatalf("fetch %q %v", name, err)
 	}
 	loaded, tar = "", "tampered"
-	if _, err := fetchClusterImage(context.Background(), a, "tok"); err == nil || !strings.Contains(err.Error(), "rejected") {
+	if _, err := fetchClusterImage(context.Background(), a, tok, mesh); err == nil || !strings.Contains(err.Error(), "rejected") {
 		t.Errorf("tampered image accepted: %v", err)
 	}
 	loaded = ""
-	if _, err := fetchClusterImage(context.Background(), a, "wrong"); err == nil {
+	if _, err := fetchClusterImage(context.Background(), a, strings.Repeat("cd", 32), mesh); err == nil {
 		t.Error("fetched with a wrong token")
 	}
-	if _, err := fetchClusterImage(context.Background(), Assignment{Image: testLocalImage, ImageFrom: "evil.example:80"}, "tok"); err == nil {
-		t.Error("fetched from a non-mesh source")
+	for _, src := range []string{"evil.example:7444", "192.0.2.1:7444", "127.0.0.1:80", "169.254.169.254:7444"} {
+		if _, err := fetchClusterImage(context.Background(), Assignment{Image: testLocalImage, ImageFrom: src}, tok, mesh); err == nil || !strings.Contains(err.Error(), "not a node of the mesh") {
+			t.Errorf("fetched from %s: %v", src, err)
+		}
+	}
+	if _, err := fetchClusterImage(context.Background(), a, tok, netip.Prefix{}); err == nil {
+		t.Error("fetched with no known mesh")
 	}
 
 	// The serving side refuses a wrong token and unknown digests.

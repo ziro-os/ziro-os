@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -514,24 +516,35 @@ func localImageByDigest(digest string) string {
 
 // fetchClusterImage makes a.Image runnable here: present locally with the pinned digest, or
 // fetched from a.ImageFrom and loaded, then checked against the pin. It returns the local name.
-func fetchClusterImage(ctx context.Context, a Assignment, token string) (string, error) {
+// The source must be a node of this cluster's mesh (inside meshNet, port 7444): the request is
+// sent straight to that address, so the master's reply can't point the agent anywhere else.
+func fetchClusterImage(ctx context.Context, a Assignment, token string, meshNet netip.Prefix) (string, error) {
 	if name, err := localBuildImage(a.Image); err == nil {
 		return name, nil
 	}
 	if a.ImageFrom == "" || token == "" {
 		return "", fmt.Errorf("%s is not on this node and no node serves it", a.Image)
 	}
-	host, port, err := net.SplitHostPort(a.ImageFrom)
-	if ip := net.ParseIP(host); err != nil || ip == nil || port != strconv.Itoa(imageServerPort) {
-		return "", fmt.Errorf("invalid image source %q", a.ImageFrom)
+	src, err := netip.ParseAddrPort(a.ImageFrom)
+	if err != nil || !meshNet.IsValid() || !meshNet.Contains(src.Addr()) || src.Port() != imageServerPort {
+		return "", fmt.Errorf("image source %q is not a node of the mesh %s", a.ImageFrom, meshNet)
 	}
 	_, digest, _ := strings.Cut(a.Image, "@")
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+a.ImageFrom+"/v1/images/"+digest, nil)
+	if !digestRe.MatchString(digest) || !tokenRe.MatchString(token) {
+		return "", errors.New("invalid image digest or token")
+	}
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", src.String())
 	if err != nil {
+		return "", fmt.Errorf("fetch %s: %w", a.Image, err)
+	}
+	defer conn.Close()
+	// Plain HTTP inside the WireGuard mesh; the digest is checked after loading.
+	if _, err := fmt.Fprintf(conn, "GET /v1/images/%s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n",
+		digest, src, token); err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req) // plain HTTP inside the WireGuard mesh; the digest is checked after loading
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		return "", fmt.Errorf("fetch %s: %w", a.Image, err)
 	}
@@ -550,6 +563,8 @@ func fetchClusterImage(ctx context.Context, a Assignment, token string) (string,
 	}
 	return name, nil
 }
+
+var tokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // ---- ziroctl cluster node label ----
 

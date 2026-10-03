@@ -303,6 +303,7 @@ type agent struct {
 	builds  agentBuilds       // builds the master assigned to this node
 	images  imageServer       // serves this node's ziro.local images over the mesh
 	token   string            // image token from the master (fetching images from other nodes)
+	meshNet netip.Prefix      // the cluster mesh: the only place images are fetched from
 }
 
 func (ag *agent) setFailed(name string, err error) {
@@ -353,13 +354,13 @@ func (ag *agent) reconcile(desired []Assignment) error {
 		ag.setFailed(name, nerdctl(context.Background(), "start", name))
 	}
 	ag.mu.Lock()
-	token := ag.token
+	token, meshNet := ag.token, ag.meshNet
 	ag.mu.Unlock()
 	for _, a := range start {
 		ctx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
 		var err error
 		if strings.HasPrefix(a.Image, "ziro.local/") { // built in the cluster: fetched over the mesh, never pulled
-			a.Image, err = fetchClusterImage(ctx, a, token)
+			a.Image, err = fetchClusterImage(ctx, a, token, meshNet)
 		} else {
 			err = nerdctl(ctx, "pull", "-q", a.Image)
 		}
@@ -467,6 +468,11 @@ var clusterAgentCmd = &cobra.Command{
 				ag.images.ensure(resp.MeshIP, resp.ImageToken)
 				ag.mu.Lock()
 				ag.token = resp.ImageToken
+				if ip, err := netip.ParseAddr(resp.MeshIP); err == nil && resp.MeshPrefix > 0 {
+					if p, err := ip.Prefix(resp.MeshPrefix); err == nil {
+						ag.meshNet = p
+					}
+				}
 				ag.mu.Unlock()
 			}
 			// On heartbeat failure the master is unreachable: keep workloads running as they are,
