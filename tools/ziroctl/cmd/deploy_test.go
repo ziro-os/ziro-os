@@ -126,11 +126,11 @@ func TestDeployPipeline(t *testing.T) {
 	n := 0
 	deployExec = func(ctx context.Context, log io.Writer, env []string, name string, args ...string) error {
 		switch {
-		case name == "git" && args[len(args)-4] != "rev-parse":
+		case name == "git" && slices.Contains(args, "clone"): // the destination is the last argument
 			dst := args[len(args)-1]
 			os.MkdirAll(dst, 0755)
 			return os.WriteFile(filepath.Join(dst, "index.html"), []byte("hi"), 0644)
-		case name == "git":
+		case name == "git" && slices.Contains(args, "rev-parse"):
 			fmt.Fprint(log, "0123456789abcdef0123456789abcdef01234567\n")
 		case name == "buildctl":
 			n++
