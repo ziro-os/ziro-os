@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -250,11 +251,7 @@ func releaseBuild(d *Deployment, b *Build, plan BuildPlan, secrets map[string]st
 		Bind: "127.0.0.1", Expose: d.Expose, ExposeTLS: d.ExposeTLS, Secrets: secrets}); err != nil {
 		return err
 	}
-	health := plan.Health
-	if health == "" {
-		health = "/"
-	}
-	return deployCheck(fmt.Sprintf("http://127.0.0.1:%d%s", d.Publish, health), deployCheckLimit)
+	return deployCheck(d.Publish, plan.Health, deployCheckLimit)
 }
 
 // updateDeployment changes one field of the stored deployment (the spec may have been updated
@@ -268,24 +265,56 @@ func updateDeployment(app string, change func(*Deployment)) error {
 	return saveDeployment(cur)
 }
 
-// checkHTTP waits until url answers with anything but a server error.
-func checkHTTP(url string, limit time.Duration) error {
-	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+// healthPathRe is what a health path may be: an absolute HTTP path, no spaces, CR/LF or "//".
+var healthPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{0,255}$`)
+
+// checkHTTP waits until the app answers on 127.0.0.1:port with anything but a server error.
+// It only ever talks to the loopback address (the port is an int, the path checked against
+// healthPathRe), so no stored or repository value can point the daemon at another host.
+func checkHTTP(port int, path string, limit time.Duration) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port %d", port)
+	}
+	if path == "" {
+		path = "/"
+	}
+	if !healthPathRe.MatchString(path) || strings.HasPrefix(path, "//") {
+		return fmt.Errorf("invalid health path %q", path)
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	deadline := time.Now().Add(limit)
 	var last error
 	for time.Now().Before(deadline) {
-		resp, err := client.Get(url)
+		code, err := probeHTTP(addr, path)
+		if err == nil && code < 500 {
+			return nil
+		}
 		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode < 500 {
-				return nil
-			}
-			err = fmt.Errorf("HTTP %d", resp.StatusCode)
+			err = fmt.Errorf("HTTP %d", code)
 		}
 		last = err
 		time.Sleep(2 * time.Second)
 	}
-	return fmt.Errorf("not answering on %s after %s: %v", url, limit, last)
+	return fmt.Errorf("not answering on http://%s%s after %s: %v", addr, path, limit, last)
+}
+
+// probeHTTP sends one GET to addr (always loopback) and returns the status code.
+func probeHTTP(addr, path string) (int, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: localhost\r\nUser-Agent: ziroctld\r\nConnection: close\r\n\r\n", path); err != nil {
+		return 0, err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
 }
 
 // freeLocalPort picks a free port in 20000-29999 for an app's 127.0.0.1 publish.

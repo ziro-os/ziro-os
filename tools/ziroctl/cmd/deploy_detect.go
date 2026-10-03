@@ -139,7 +139,7 @@ func (c DeployConfig) validate() error {
 	if c.Start != "" && !startCmdRe.MatchString(c.Start) {
 		return errors.New("start: one line")
 	}
-	if c.Health != "" && (!strings.HasPrefix(c.Health, "/") || strings.ContainsAny(c.Health, " \r\n")) {
+	if c.Health != "" && (!healthPathRe.MatchString(c.Health) || strings.HasPrefix(c.Health, "//")) {
 		return errors.New("health: an HTTP path such as /healthz")
 	}
 	for k, v := range c.Env {

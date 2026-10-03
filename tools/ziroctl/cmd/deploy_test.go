@@ -165,7 +165,7 @@ func TestDeployPipeline(t *testing.T) {
 		return nil, nil
 	}
 	healthy := true
-	deployCheck = func(url string, _ time.Duration) error {
+	deployCheck = func(port int, path string, _ time.Duration) error {
 		if !healthy {
 			return errors.New("HTTP 502")
 		}
@@ -264,5 +264,37 @@ func TestDeployPipeline(t *testing.T) {
 	}
 	if _, err := loadDeployment("site"); err == nil {
 		t.Error("deployment still there")
+	}
+}
+
+// The release check only talks to 127.0.0.1 and only sends a validated path.
+func TestCheckHTTPLoopbackOnly(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.RequestURI()
+		if r.URL.Path == "/boom" {
+			w.WriteHeader(http.StatusBadGateway)
+		}
+	}))
+	defer srv.Close()
+	_, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://127.0.0.1"), ":")
+	port := 0
+	fmt.Sscanf(portStr, "%d", &port)
+	if err := checkHTTP(port, "/healthz?full=1", 3*time.Second); err != nil || got != "/healthz?full=1" {
+		t.Fatalf("healthy app: %v (path %q)", err, got)
+	}
+	if err := checkHTTP(port, "", 3*time.Second); err != nil || got != "/" {
+		t.Errorf("default path: %v %q", err, got)
+	}
+	if err := checkHTTP(port, "/boom", 100*time.Millisecond); err == nil || !strings.Contains(err.Error(), "HTTP 502") {
+		t.Errorf("server error accepted: %v", err)
+	}
+	for _, bad := range []string{"/a b", "/x\r\nHost: evil", "//evil.example/x", "http://evil.example/", "healthz"} {
+		if err := checkHTTP(port, bad, time.Second); err == nil || !strings.Contains(err.Error(), "invalid health path") {
+			t.Errorf("path %q accepted: %v", bad, err)
+		}
+	}
+	if checkHTTP(0, "/", time.Second) == nil || checkHTTP(70000, "/", time.Second) == nil {
+		t.Error("invalid port accepted")
 	}
 }
