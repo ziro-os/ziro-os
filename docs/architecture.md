@@ -67,6 +67,12 @@ in the [design standard](design/README.md); design decisions are recorded as [RF
 - **Tools releases:** `ziroctl`/`ziropkg` ship on their own signed stream (`tools/vX.Y.Z`); `ziroctl update` swaps
   them atomically and updates the integrity baselines. Each OS tag `vX.Y.Z` also publishes `tools/vX.Y.Z`;
   hosts find the newest one from the tag refs, so OS releases never push it off a page of releases. OS releases sign their `SHA256SUMS` with the same key.
+- **Deploy from git (ziroctld):** `ziroctl` run as `/usr/bin/ziroctld` (one binary, so `ziroctl update` keeps it
+  current) is the deploy daemon. It clones over https, detects the build or uses the repo's Dockerfile, builds with
+  BuildKit's containerd worker (images stay on the host as `ziro.local/<app>:b<N>`, pinned by digest), and releases
+  through the same app machinery as the catalog, with a health check and automatic fallback to the previous build.
+  Clients use the root-only socket `/run/ziro/ziroctld.sock`; the REST API proxies `/api/v1/deployments` to it.
+  See `docs/deploy.md`.
 - **SDK:** the formats and their validators, catalog signing, the API types and a typed client live in the
   `sdk/` Go module; `ziroctl` imports it, so tools built on the SDK validate with the host's exact rules.
   `sdk/openapi.yaml` describes the API, kept complete by a test ([SDK guide](sdk.md)).
