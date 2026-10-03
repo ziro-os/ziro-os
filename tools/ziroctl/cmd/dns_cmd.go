@@ -650,12 +650,16 @@ func removeDNSRecords(c *DNSConfig, name, typ string) error {
 
 var dnsCmd = &cobra.Command{
 	Use:   "dns",
-	Short: "Smart DNS: caching resolver, split DNS, local records, blocklists, DNS-over-TLS",
+	Short: "Run the caching resolver with split DNS and blocklists",
+	Example: `  ziroctl dns enable
+  ziroctl dns forward add corp.example 10.0.0.53
+  ziroctl dns status`,
 }
 
 var dnsEnableCmd = &cobra.Command{
-	Use:   "enable",
-	Short: "Run the smart DNS resolver and point the host at it (127.0.0.53)",
+	Use:     "enable",
+	Short:   "Start the resolver and point the host at it",
+	Example: `  ziroctl dns enable`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := enableDNS(); err != nil {
 			return err
@@ -666,8 +670,9 @@ var dnsEnableCmd = &cobra.Command{
 }
 
 var dnsDisableCmd = &cobra.Command{
-	Use:   "disable",
-	Short: "Stop the resolver and restore plain resolvers",
+	Use:     "disable",
+	Short:   "Stop the resolver and restore plain resolvers",
+	Example: `  ziroctl dns disable`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := disableDNS(); err != nil {
 			return err
@@ -685,8 +690,9 @@ var dnsServeCmd = &cobra.Command{
 }
 
 var dnsStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show resolver state, cache and upstream health",
+	Use:     "status",
+	Short:   "Show the resolver, cache and upstream health",
+	Example: `  ziroctl dns status`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, _ := loadDNSConfig()
 		var st dnsStatsFile
@@ -717,7 +723,7 @@ var dnsStatusCmd = &cobra.Command{
 
 var dnsUpstreamCmd = &cobra.Command{
 	Use:   "upstream <auto | server...>",
-	Short: "Set upstream resolvers (auto = from DHCP); tls://IP#name for DNS-over-TLS",
+	Short: "Set the upstream resolvers",
 	Example: `  ziroctl dns upstream tls://1.1.1.1#cloudflare-dns.com tls://9.9.9.9#dns.quad9.net
   ziroctl dns upstream 10.0.0.2 10.0.0.3
   ziroctl dns upstream auto`,
@@ -741,11 +747,11 @@ var dnsUpstreamCmd = &cobra.Command{
 	},
 }
 
-var dnsForwardCmd = &cobra.Command{Use: "forward", Short: "Split DNS: send a domain to specific resolvers"}
+var dnsForwardCmd = &cobra.Command{Use: "forward", Short: "Send a domain to specific resolvers", Example: "  ziroctl dns forward add corp.example 10.0.0.53\n  ziroctl dns forward remove corp.example"}
 
 var dnsForwardAddCmd = &cobra.Command{
 	Use:     "add <domain> <server...>",
-	Short:   "Forward a domain (and its subdomains) to specific resolvers",
+	Short:   "Forward a domain and its subdomains",
 	Example: `  ziroctl dns forward add corp.example 10.0.0.2 10.0.0.3`,
 	Args:    cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -771,9 +777,10 @@ var dnsForwardAddCmd = &cobra.Command{
 }
 
 var dnsForwardRmCmd = &cobra.Command{
-	Use:   "remove <domain>",
-	Short: "Remove a forward rule",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <domain>",
+	Short:   "Remove a forward rule",
+	Example: `  ziroctl dns forward remove corp.example`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return editDNS(func(c *DNSConfig) error {
 			kept := c.Forwards[:0]
@@ -791,7 +798,7 @@ var dnsForwardRmCmd = &cobra.Command{
 	},
 }
 
-var dnsRecordCmd = &cobra.Command{Use: "record", Short: "Local authoritative records (A, AAAA, CNAME, TXT)"}
+var dnsRecordCmd = &cobra.Command{Use: "record", Short: "Manage local A, AAAA, CNAME and TXT records", Example: "  ziroctl dns record add nas.lan A 192.168.1.20\n  ziroctl dns record list"}
 
 var dnsRecordAddCmd = &cobra.Command{
 	Use:     "add <name> <type> <value>",
@@ -807,8 +814,10 @@ var dnsRecordAddCmd = &cobra.Command{
 
 var dnsRecordRmCmd = &cobra.Command{
 	Use:   "remove <name> [type]",
-	Short: "Remove local records by name (and type)",
-	Args:  cobra.RangeArgs(1, 2),
+	Short: "Remove local records by name and type",
+	Example: `  ziroctl dns record remove nas.lan
+  ziroctl dns record remove nas.lan A`,
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		typ := ""
 		if len(args) == 2 {
@@ -819,8 +828,9 @@ var dnsRecordRmCmd = &cobra.Command{
 }
 
 var dnsRecordListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List local and cluster records",
+	Use:     "list",
+	Short:   "List local and cluster records",
+	Example: `  ziroctl dns record list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, _ := loadDNSConfig()
 		cl := loadClusterRecords()
@@ -837,12 +847,13 @@ var dnsRecordListCmd = &cobra.Command{
 	},
 }
 
-var dnsBlockCmd = &cobra.Command{Use: "block", Short: "Block domains (answered NXDOMAIN)"}
+var dnsBlockCmd = &cobra.Command{Use: "block", Short: "Block domains", Example: "  ziroctl dns block add ads.example.com\n  ziroctl dns block remove ads.example.com"}
 
 var dnsBlockAddCmd = &cobra.Command{
-	Use:   "add <domain...>",
-	Short: "Block domains and their subdomains",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "add <domain...>",
+	Short:   "Block domains and their subdomains",
+	Example: `  ziroctl dns block add ads.example.com tracker.example.net`,
+	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return editDNS(func(c *DNSConfig) error {
 			for _, d := range args {
@@ -858,9 +869,10 @@ var dnsBlockAddCmd = &cobra.Command{
 }
 
 var dnsBlockRmCmd = &cobra.Command{
-	Use:   "remove <domain...>",
-	Short: "Unblock domains",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "remove <domain...>",
+	Short:   "Unblock domains",
+	Example: `  ziroctl dns block remove ads.example.com`,
+	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return editDNS(func(c *DNSConfig) error {
 			drop := map[string]bool{}
@@ -879,12 +891,13 @@ var dnsBlockRmCmd = &cobra.Command{
 	},
 }
 
-var dnsBlocklistCmd = &cobra.Command{Use: "blocklist", Short: "Subscribe to blocklists (hosts or domain-per-line, HTTPS)"}
+var dnsBlocklistCmd = &cobra.Command{Use: "blocklist", Short: "Subscribe to blocklists over HTTPS", Example: "  ziroctl dns blocklist add https://big.oisd.nl/domainswild\n  ziroctl dns blocklist update"}
 
 var dnsBlocklistAddCmd = &cobra.Command{
-	Use:   "add <https-url>",
-	Short: "Subscribe to a blocklist (downloaded now and daily)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "add <https-url>",
+	Short:   "Subscribe to a blocklist, refreshed daily",
+	Example: `  ziroctl dns blocklist add https://big.oisd.nl/domainswild`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := editDNS(func(c *DNSConfig) error {
 			for _, u := range c.Blocklists {
@@ -903,9 +916,10 @@ var dnsBlocklistAddCmd = &cobra.Command{
 }
 
 var dnsBlocklistRmCmd = &cobra.Command{
-	Use:   "remove <https-url>",
-	Short: "Unsubscribe from a blocklist",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <https-url>",
+	Short:   "Unsubscribe from a blocklist",
+	Example: `  ziroctl dns blocklist remove https://big.oisd.nl/domainswild`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_ = os.Remove(blocklistFile(args[0]))
 		return editDNS(func(c *DNSConfig) error {
@@ -922,8 +936,9 @@ var dnsBlocklistRmCmd = &cobra.Command{
 }
 
 var dnsBlocklistUpdateCmd = &cobra.Command{
-	Use:   "update",
-	Short: "Download every subscribed blocklist (cron runs this daily)",
+	Use:     "update",
+	Short:   "Download every subscribed blocklist now",
+	Example: `  ziroctl dns blocklist update`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadDNSConfig()
 		if err != nil {
@@ -976,7 +991,7 @@ func setDNSUpstreamsFromResolvers(servers, search []string) error {
 
 // ---- cluster-wide records (master) ----
 
-var clusterDNSCmd = &cobra.Command{Use: "dns", Short: "Cluster-wide DNS records (served by every node's smart DNS)"}
+var clusterDNSCmd = &cobra.Command{Use: "dns", Short: "Manage DNS records every node resolves", Example: "  ziroctl cluster dns add db.internal A 10.200.0.5\n  ziroctl cluster dns ls"}
 
 var clusterDNSRecordAddCmd = &cobra.Command{
 	Use:     "add <name> <type> <value>",
@@ -1007,8 +1022,10 @@ var clusterDNSRecordAddCmd = &cobra.Command{
 
 var clusterDNSRecordRmCmd = &cobra.Command{
 	Use:   "rm <name> [type]",
-	Short: "Remove cluster records by name (and type)",
-	Args:  cobra.RangeArgs(1, 2),
+	Short: "Remove cluster DNS records by name and type",
+	Example: `  ziroctl cluster dns rm db.internal
+  ziroctl cluster dns rm db.internal A`,
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1031,7 +1048,7 @@ var clusterDNSRecordRmCmd = &cobra.Command{
 }
 
 var clusterDNSRecordLsCmd = &cobra.Command{
-	Use: "ls", Short: "List cluster records",
+	Use: "ls", Short: "List cluster DNS records", Example: "  ziroctl cluster dns ls",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err

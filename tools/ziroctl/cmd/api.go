@@ -47,20 +47,25 @@ type apiCallerKey struct{}
 var apiCmd = &cobra.Command{
 	Use:     "api",
 	Aliases: []string{"server", "controlplane"},
-	Short:   "Manage Ziro-OS Control Plane REST API server",
+	Short:   "Run the REST API that manages this host",
+	Example: `  ziroctl api start --bind 0.0.0.0
+  ziroctl api token create ci --role operator`,
 }
 
 var apiStartCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start the Ziro-OS Control Plane REST API server (secured with TLS and token auth)",
+	Short: "Start the REST API server",
+	Example: `  ziroctl api start
+  ziroctl api start --bind 0.0.0.0 --port 8443`,
 	Run: func(cmd *cobra.Command, args []string) {
 		startAPIServer()
 	},
 }
 
 var apiStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show status and connectivity of Ziro REST API server",
+	Use:     "status",
+	Short:   "Show whether the API server runs and where",
+	Example: `  ziroctl api status`,
 	Run: func(cmd *cobra.Command, args []string) {
 		addr := apiServerAddr()
 		_ = printResult(map[string]any{"running": addr != "", "address": addr}, func() {
@@ -76,7 +81,9 @@ var apiStatusCmd = &cobra.Command{
 
 var apiTokenCmd = &cobra.Command{
 	Use:   "token",
-	Short: "Display or generate the REST API Bearer Authentication Token",
+	Short: "Manage API tokens",
+	Example: `  ziroctl api token create grafana --role viewer --ttl 720h
+  ziroctl api token ls`,
 	Run: func(cmd *cobra.Command, args []string) {
 		token := getOrCreateAPIToken()
 		if token == "" {
@@ -89,8 +96,9 @@ var apiTokenCmd = &cobra.Command{
 }
 
 var apiGenCertsCmd = &cobra.Command{
-	Use:   "generate-certs",
-	Short: "Generate self-signed TLS/SSL certificates for HTTPS encryption",
+	Use:     "generate-certs",
+	Short:   "Issue a new self-signed TLS certificate for the API",
+	Example: `  ziroctl api generate-certs`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := ensureTLSCertificates(); err != nil {
 			fmt.Printf("Failed to generate TLS certs: %v\n", err)
@@ -379,7 +387,7 @@ func registerCoreRoutes(a *apiRouter) {
 		sys := inspectSystem()
 		platform, hypervisor := detectCloudPlatform()
 		apiReply(w, nil, map[string]any{"system": sys, "platform": platform, "hypervisor": hypervisor,
-			"cpus": runtime.NumCPU(), "summary": collectHostSummary(true)})
+			"cpus": runtime.NumCPU(), "summary": collectHostSummary()})
 	})
 
 	a.get("/api/v1/services", "viewer", func(w http.ResponseWriter, r *http.Request) {

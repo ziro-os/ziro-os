@@ -241,8 +241,8 @@ gcloud compute instances create my-vm \
 
 ### After Installation
 ```bash
-# Check system status
-ziroctl system status
+# Host summary
+ziroctl motd
 
 # Install packages
 ziropkg install nginx redis postgresql

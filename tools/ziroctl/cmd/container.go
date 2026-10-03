@@ -100,7 +100,10 @@ func executeBackend(args ...string) error {
 var containerCmd = &cobra.Command{
 	Use:     "container",
 	Aliases: []string{"c", "app"},
-	Short:   "Container workload and lifecycle management",
+	Short:   "Run and manage containers",
+	Example: `  ziroctl container run -d --name web -p 8080:80 nginx:1.27
+  ziroctl container list
+  ziroctl container logs web`,
 	Long: `Manage high-performance container workloads on Ziro-OS.
 Provides seamless Docker-compatible command line experience backed by containerd,
 with automatic image registry resolution, cgroups v2 resource control, and CNI networking.`,
@@ -200,7 +203,7 @@ var containerRunCmd = &cobra.Command{
 
 var containerPullCmd = &cobra.Command{
 	Use:     "pull <image>",
-	Short:   "Pull an image from an OCI container registry",
+	Short:   "Pull an image from a registry",
 	Example: "  ziroctl container pull nginx\n  ziroctl container pull redis:alpine\n  ziroctl container pull quay.io/coreos/etcd",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -221,7 +224,8 @@ var containerPullCmd = &cobra.Command{
 var containerListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls", "ps"},
-	Short:   "List active or all containers",
+	Short:   "List containers",
+	Example: `  ziroctl container list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {
@@ -244,7 +248,8 @@ var containerListCmd = &cobra.Command{
 var containerImagesCmd = &cobra.Command{
 	Use:     "images",
 	Aliases: []string{"image"},
-	Short:   "List downloaded container images",
+	Short:   "List downloaded images",
+	Example: `  ziroctl container images`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {
@@ -259,9 +264,10 @@ var containerImagesCmd = &cobra.Command{
 }
 
 var containerStopCmd = &cobra.Command{
-	Use:   "stop <container...>",
-	Short: "Stop one or more running containers",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "stop <container...>",
+	Short:   "Stop running containers",
+	Example: `  ziroctl container stop web`,
+	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {
@@ -279,9 +285,10 @@ var containerStopCmd = &cobra.Command{
 }
 
 var containerStartCmd = &cobra.Command{
-	Use:   "start <container...>",
-	Short: "Start one or more stopped containers",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "start <container...>",
+	Short:   "Start stopped containers",
+	Example: `  ziroctl container start web`,
+	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {
@@ -299,9 +306,10 @@ var containerStartCmd = &cobra.Command{
 }
 
 var containerRestartCmd = &cobra.Command{
-	Use:   "restart <container...>",
-	Short: "Restart one or more containers",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "restart <container...>",
+	Short:   "Restart containers",
+	Example: `  ziroctl container restart web`,
+	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {
@@ -322,7 +330,8 @@ var containerRestartCmd = &cobra.Command{
 var containerRmCmd = &cobra.Command{
 	Use:     "rm [flags] <container...>",
 	Aliases: []string{"remove"},
-	Short:   "Remove one or more containers",
+	Short:   "Remove containers",
+	Example: `  ziroctl container rm web`,
 	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
@@ -341,9 +350,10 @@ var containerRmCmd = &cobra.Command{
 }
 
 var containerLogsCmd = &cobra.Command{
-	Use:   "logs [flags] <container>",
-	Short: "Fetch logs of a container",
-	Args:  cobra.ExactArgs(1),
+	Use:     "logs [flags] <container>",
+	Short:   "Show a container's logs",
+	Example: `  ziroctl container logs web`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {
@@ -360,7 +370,9 @@ var containerLogsCmd = &cobra.Command{
 var containerExecCmd = &cobra.Command{
 	Use:   "exec [flags] <container> <command> [args...]",
 	Short: "Run a command in a running container",
-	Args:  cobra.MinimumNArgs(2),
+	Example: `  ziroctl container exec -it web sh
+  ziroctl container exec web nginx -t`,
+	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {
@@ -398,9 +410,10 @@ var containerExecCmd = &cobra.Command{
 }
 
 var containerInspectCmd = &cobra.Command{
-	Use:   "inspect <container...>",
-	Short: "Return low-level information on container objects",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "inspect <container...>",
+	Short:   "Show a container's full configuration",
+	Example: `  ziroctl container inspect web`,
+	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend, _, err := getContainerBackend()
 		if err != nil {

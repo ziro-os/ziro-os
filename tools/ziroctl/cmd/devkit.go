@@ -101,11 +101,13 @@ func kitDocker(arch, kit, dir string, mounts []string, env []string, script stri
 	return nil
 }
 
-var devKmodCmd = &cobra.Command{Use: "kmod", Short: "Out-of-tree kernel modules for the Ziro kernel"}
+var devKmodCmd = &cobra.Command{Use: "kmod", Short: "Build out-of-tree kernel modules for the Ziro kernel", Example: "  ziroctl dev kmod build ./mydriver"}
 
 var devKmodBuildCmd = &cobra.Command{
 	Use:   "build <dir>",
-	Short: "Build (and sign) the kernel module(s) in <dir> against the Ziro kernel kit",
+	Short: "Build and sign kernel modules against the kernel kit",
+	Example: `  ziroctl dev kmod build ./mydriver
+  ziroctl dev kmod build ./mydriver --sign-key signing.key --sign-cert signing.crt`,
 	Long: `Builds the Kbuild module(s) in <dir> (obj-m in its Makefile/Kbuild) against the kernel kit and
 writes the .ko files to <dir>.
 
@@ -158,11 +160,13 @@ built to trust your certificate (ZIRO_EXTRA_TRUSTED_CERT, see docs/sdk.md).`,
 	},
 }
 
-var devBpfCmd = &cobra.Command{Use: "bpf", Short: "CO-RE eBPF programs for the Ziro kernel"}
+var devBpfCmd = &cobra.Command{Use: "bpf", Short: "Build CO-RE eBPF programs for the Ziro kernel", Example: "  ziroctl dev bpf build trace.bpf.c"}
 
 var devBpfBuildCmd = &cobra.Command{
 	Use:   "build <prog.bpf.c>",
-	Short: "Compile a CO-RE eBPF program against the Ziro kernel's BTF (vmlinux.h from the kit)",
+	Short: "Compile an eBPF program against the Ziro kernel BTF",
+	Example: `  ziroctl dev bpf build trace.bpf.c
+  ziroctl dev bpf build trace.bpf.c --arch arm64 --release v1.0.17`,
 	Long: `Compiles <prog.bpf.c> with clang -target bpf, with vmlinux.h (all kernel types, from the
 kernel's BTF) and the libbpf headers on the include path. Writes <prog.bpf.o> next to it. The
 object is CO-RE: libbpf relocates it to the running kernel when it's loaded.`,

@@ -107,7 +107,8 @@ Ziro-OS implements standard OCI specifications:
 - **`containerd`**: Core container runtime managing image transfer, snapshotting, and task execution.
 - **`runc`**: Low-level OCI runtime executing containers using kernel namespaces and cgroups.
 - **`cni-plugins`**: Standard container networking plugins including `bridge`, `loopback`, `host-local`, `portmap`, and `firewall`.
-- **`ziroctl`**: Official management CLI providing declarative commands for container lifecycle, system status, network inspection, and security auditing.
+- **`ziroctl`**: the management CLI for containers and apps, networking, security, clusters and upgrades.
+  `ziroctl compose` is `nerdctl compose` behind a security preflight (no docker-compose ships).
 
 ---
 

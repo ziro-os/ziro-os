@@ -31,7 +31,10 @@ var (
 
 var installCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install Ziro-OS to physical or virtual disk (TUI / Automated)",
+	Short: "Install Ziro OS to a disk",
+	Example: `  ziroctl install
+  ziroctl install --disk /dev/vda --hostname web-1 --ssh-key ~/.ssh/id_ed25519.pub --yes
+  ziroctl install --disk /dev/sda --net-mode static --ip 192.168.1.50/24 --gateway 192.168.1.1 --yes`,
 	Long: `ziroctl install launches the Ziro-OS system installer.
 It formats and partitions the target disk, installs UEFI and BIOS bootloaders,
 deploys the minimal container host operating system, configures networking (DHCP / Static IP),

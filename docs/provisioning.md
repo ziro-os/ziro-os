@@ -98,8 +98,17 @@ What has no safe equivalent is reported instead of silently dropped:
 
 Review the result, then run `ziroctl stack up -f shop/stack.yaml --dry-run`.
 
-`ziroctl compose up|down|ps|logs` still runs a compose file directly, and reads the full YAML syntax (list or map
-`environment`, string or list `command`).
+`ziroctl compose` still runs a compose file directly: it is `nerdctl compose` (built into nerdctl; no
+docker-compose is installed), so every compose command works (`up -d`, `ps`, `logs -f`, `down`, `pull`, `config`).
+Before `up`, `create` and `run` it checks the file and refuses, unless `--allow-privileged` is given:
+- `privileged: true`
+- host `network_mode`, `pid` or `ipc`
+- `cap_add` and `devices`
+- an `unconfined` `security_opt`
+- bind mounts of `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/run/containerd`, `/var/lib/ziro` (outside
+  `/var/lib/ziro/volumes`) or a socket
+
+`build:` is refused (there is no image builder on the host), and images must pass the cluster image policy.
 
 **Wiring apps together: links**
 

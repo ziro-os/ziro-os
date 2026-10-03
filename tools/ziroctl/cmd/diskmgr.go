@@ -348,7 +348,9 @@ var (
 
 var diskExpandCmd = &cobra.Command{
 	Use:   "expand",
-	Short: "Grow partitions and filesystems to fill resized disks (root and data disks)",
+	Short: "Grow partitions and filesystems into resized disks",
+	Example: `  ziroctl disk expand --dry-run
+  ziroctl disk expand`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return expandAll(diskDryRun, diskQuiet)
 	},
@@ -356,7 +358,7 @@ var diskExpandCmd = &cobra.Command{
 
 var diskAddCmd = &cobra.Command{
 	Use:     "add <device>",
-	Short:   "Format and mount an empty disk (persistent; grows automatically when resized)",
+	Short:   "Format and mount an empty disk",
 	Example: `  ziroctl disk add /dev/vdb --mount /data`,
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -373,9 +375,10 @@ var diskAddCmd = &cobra.Command{
 }
 
 var diskRemoveCmd = &cobra.Command{
-	Use:   "remove <mount>",
-	Short: "Unmount a data disk and stop managing it (data is kept)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <mount>",
+	Short:   "Unmount a data disk and stop managing it",
+	Example: `  ziroctl disk remove /data`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		disks := loadDataDisks()
 		kept := disks[:0]

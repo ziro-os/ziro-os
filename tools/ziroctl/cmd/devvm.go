@@ -184,7 +184,7 @@ func ensureQEMU(arch string) error {
 	}
 	if fileExists("/etc/ziro-release") {
 		if !devInstallDeps && !confirm(fmt.Sprintf("%s is not installed. Install it now (apk add %s)? [y/N]: ", bin, bin)) {
-			return fmt.Errorf("%s is needed: ziroctl pkg install %s (or dev run --install-deps)", bin, bin)
+			return fmt.Errorf("%s is needed: ziropkg install %s (or dev run --install-deps)", bin, bin)
 		}
 		if err := apkAdd([]string{bin}); err != nil {
 			return err
@@ -349,7 +349,10 @@ func (c *vmConsole) copyIn(data []byte, path string) error {
 
 var devRunCmd = &cobra.Command{
 	Use:   "run [plugin|app|stack|host file]",
-	Short: "Boot a throwaway Ziro VM, install a plugin or deploy an app, then run --check commands or attach",
+	Short: "Try a plugin, app or stack in a throwaway VM",
+	Example: `  ziroctl dev run plugins/redis-exporter --check 'ziroctl service status redis-exporter'
+  ziroctl dev run apps/umami --forward 3000:3000
+  ziroctl dev run host.yaml --release v1.0.17`,
 	Long: `Boots a verified Ziro release (or a local build, --image-dir) in QEMU in live mode: nothing
 persists. The plugin is installed with 'plugin install -f', the app deployed with 'apps deploy -f'.
 

@@ -249,7 +249,10 @@ func pruneSelection(only []string, all bool) (map[string]bool, error) {
 
 var systemPruneCmd = &cobra.Command{
 	Use:   "prune",
-	Short: "Reclaim disk: stopped non-app containers, unused images, rotated logs, stale temp files, caches",
+	Short: "Free disk: old containers, images, logs, caches",
+	Example: `  ziroctl system prune --dry-run
+  ziroctl system prune --only logs,tmp --yes
+  ziroctl system prune --all --yes`,
 	Long: `Plans what to remove, shows it, and asks before removing anything (-y skips the question,
 --dry-run only shows the plan). Default categories: containers, images, logs, tmp, cache.
 --all adds the upgrade rollback generation (you can no longer roll back the last upgrade).
@@ -320,9 +323,10 @@ func printPrunePlan(items []PruneItem, total int64) {
 }
 
 var systemDfCmd = &cobra.Command{
-	Use:   "df",
-	Short: "Show disk usage by category and how much `system prune` can reclaim",
-	Args:  cobra.NoArgs,
+	Use:     "df",
+	Short:   "Show disk use by category and what prune frees",
+	Example: `  ziroctl system df`,
+	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		rows := systemDiskUsage()
 		return printResult(rows, func() {
@@ -330,7 +334,7 @@ var systemDfCmd = &cobra.Command{
 			for _, r := range rows {
 				fmt.Printf("%-22s %10s %12s  %s\n", r.Name, humanBytes(uint64(r.Bytes)), humanBytes(uint64(r.Reclaimable)), r.Path)
 			}
-			for _, d := range collectHostSummary(false).Disks {
+			for _, d := range collectHostSummary().Disks {
 				fmt.Printf("\nfilesystem %s: %s of %s used (%d%%)", d.Path, humanBytes(d.Used), humanBytes(d.Total), d.Percent())
 			}
 			fmt.Println()

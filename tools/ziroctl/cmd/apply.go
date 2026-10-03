@@ -240,7 +240,9 @@ var (
 
 var applyCmd = &cobra.Command{
 	Use:   "apply -f <host.yaml>",
-	Short: "Make this host match a declarative YAML/JSON file (plan first; applying twice changes nothing)",
+	Short: "Make this host match a YAML or JSON config file",
+	Example: `  ziroctl apply -f host.yaml --dry-run
+  ziroctl apply -f host.yaml --confirm-timeout 2m`,
 	Long: `Provisions the whole host from one file:
 
   host:

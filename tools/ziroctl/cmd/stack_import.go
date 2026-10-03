@@ -140,9 +140,10 @@ var (
 )
 
 var stackImportCmd = &cobra.Command{
-	Use:   "import <docker-compose.yaml>",
-	Short: "Convert a docker-compose project into a stack and app definitions (images pinned by digest)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "import <docker-compose.yaml>",
+	Short:   "Convert a compose project into a stack",
+	Example: `  ziroctl stack import docker-compose.yml --name shop --output shop/`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		services, err := parseComposeFile(args[0])
 		if err != nil {

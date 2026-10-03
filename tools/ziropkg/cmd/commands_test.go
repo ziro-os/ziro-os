@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -33,7 +34,7 @@ func TestInstallHelp(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "Install one or more packages") {
+	if !strings.Contains(out, "reinstalled at boot after an OS upgrade") {
 		t.Errorf("expected help output, got: %s", out)
 	}
 }
@@ -49,7 +50,7 @@ func TestSearchHelp(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "Search for available packages") {
+	if !strings.Contains(out, "Search available packages") {
 		t.Errorf("expected help output, got: %s", out)
 	}
 }
@@ -67,5 +68,23 @@ func TestListHelp(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "List installed packages") {
 		t.Errorf("expected help output, got: %s", out)
+	}
+}
+
+func TestRecordPackages(t *testing.T) {
+	old := packagesFile
+	packagesFile = t.TempDir() + "/etc/ziro/packages"
+	defer func() { packagesFile = old }()
+	if err := recordPackages([]string{"jq", "curl", "jq"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordPackages([]string{"htop"}, []string{"curl"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(packagesFile); string(b) != "htop\njq\n" {
+		t.Errorf("packages file = %q", b)
+	}
+	if validNames([]string{"curl", "-rf"}) == nil || validNames([]string{"../x"}) == nil {
+		t.Error("invalid package names accepted")
 	}
 }

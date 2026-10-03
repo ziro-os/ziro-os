@@ -576,7 +576,10 @@ func sanitizeLabel(s string, max int) string {
 var clusterCmd = &cobra.Command{
 	Use:     "cluster",
 	Aliases: []string{"mesh", "swarm"},
-	Short:   "Multi-node container cluster: join nodes, deploy and schedule replicas",
+	Short:   "Run containers across several hosts",
+	Example: `  ziroctl cluster init
+  ziroctl cluster deploy -n web -i nginx:1.27 -p 80:80 -r 3
+  ziroctl cluster services`,
 }
 
 var (
@@ -601,7 +604,9 @@ func tokenExpiry(ttl time.Duration) string {
 
 var clusterInitCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize this host as the cluster master (it also runs workloads)",
+	Short: "Make this host a cluster master",
+	Example: `  ziroctl cluster init
+  ziroctl cluster init --advertise 172.26.1.108`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := loadClusterConfig(); err == nil {
 			return fmt.Errorf("already part of a cluster; run 'ziroctl cluster leave' first")
@@ -793,8 +798,10 @@ func joinToken() (string, error) {
 
 var clusterJoinCmd = &cobra.Command{
 	Use:   "join <master-ip:port>",
-	Short: "Join this host to a cluster as a worker, or as another master with --control-plane",
-	Args:  cobra.ExactArgs(1),
+	Short: "Join a cluster as a worker or another master",
+	Example: `  ziroctl cluster join 172.26.1.108:7443 --token-file /root/join-token --ca-hash sha256:4f1c...
+  ziroctl cluster join 172.26.1.108:7443 --token-file /root/join-token --ca-hash sha256:4f1c... --control-plane`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		token, err := joinToken()
 		if err != nil {
@@ -891,8 +898,9 @@ type clusterStatusView struct {
 }
 
 var clusterStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show this node's cluster role and cluster health",
+	Use:     "status",
+	Short:   "Show this node's role and the cluster's health",
+	Example: `  ziroctl cluster status`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadClusterConfig()
 		if err != nil {
@@ -942,8 +950,9 @@ var clusterStatusCmd = &cobra.Command{
 }
 
 var clusterNodesCmd = &cobra.Command{
-	Use:   "nodes",
-	Short: "List cluster nodes (master only)",
+	Use:     "nodes",
+	Short:   "List cluster nodes",
+	Example: `  ziroctl cluster nodes`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1039,7 +1048,10 @@ func deployApp(mutate func(st *ClusterState) (*ClusteredApp, error)) error {
 
 var clusterDeployCmd = &cobra.Command{
 	Use:   "deploy",
-	Short: "Deploy an app, or update only the flags given on an existing one (master only)",
+	Short: "Deploy an app, or change flags on an existing one",
+	Example: `  ziroctl cluster deploy -n web -i nginx:1.27 -p 80:80 -r 3
+  ziroctl cluster deploy -n api -i ghcr.io/acme/api:2.1 --memory 512Mi --secret api-env
+  ziroctl cluster deploy -n web -r 5`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1140,8 +1152,9 @@ var clusterDeployCmd = &cobra.Command{
 }
 
 var clusterApplyCmd = &cobra.Command{
-	Use:   "apply -f <app.json>",
-	Short: "Declaratively create or replace apps from a JSON manifest (one app or a list)",
+	Use:     "apply -f <app.json>",
+	Short:   "Create or replace apps from a JSON manifest",
+	Example: `  ziroctl cluster apply -f web.json`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1169,8 +1182,10 @@ var clusterApplyCmd = &cobra.Command{
 
 var clusterScaleCmd = &cobra.Command{
 	Use:   "scale <app> <replicas>",
-	Short: "Change an app's replica count (master only)",
-	Args:  cobra.ExactArgs(2),
+	Short: "Change an app's replica count",
+	Example: `  ziroctl cluster scale web 5
+  ziroctl cluster scale web 0`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1184,9 +1199,10 @@ var clusterScaleCmd = &cobra.Command{
 }
 
 var clusterRollbackCmd = &cobra.Command{
-	Use:   "rollback <app>",
-	Short: "Roll an app back to its previous revision (rolling, master only)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "rollback <app>",
+	Short:   "Roll an app back to its previous revision",
+	Example: `  ziroctl cluster rollback web`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1196,9 +1212,10 @@ var clusterRollbackCmd = &cobra.Command{
 }
 
 var clusterRemoveCmd = &cobra.Command{
-	Use:   "remove <app>",
-	Short: "Remove an app and all its replicas from the cluster (master only)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <app>",
+	Short:   "Remove an app and all its replicas",
+	Example: `  ziroctl cluster remove web`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1219,7 +1236,8 @@ type appView struct {
 var clusterServicesCmd = &cobra.Command{
 	Use:     "services",
 	Aliases: []string{"apps", "ps"},
-	Short:   "List cluster apps and replica health (master only)",
+	Short:   "List cluster apps and replica health",
+	Example: `  ziroctl cluster services`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1252,8 +1270,10 @@ var clusterServicesCmd = &cobra.Command{
 
 var clusterEndpointsCmd = &cobra.Command{
 	Use:   "endpoints [app]",
-	Short: "Show where each app is reachable on the mesh (<app>.cluster.ziro)",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Show where each app is reachable on the mesh",
+	Example: `  ziroctl cluster endpoints
+  ziroctl cluster endpoints web`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1316,24 +1336,24 @@ func nodeOp(id string, fn func(st *ClusterState, n *ClusterNode) error) error {
 	})
 }
 
-var clusterNodeCmd = &cobra.Command{Use: "node", Short: "Cordon, drain or remove cluster nodes (master only)"}
+var clusterNodeCmd = &cobra.Command{Use: "node", Short: "Cordon, drain or remove nodes", Example: "  ziroctl cluster node drain worker-2\n  ziroctl cluster node uncordon worker-2"}
 
 var clusterCordonCmd = &cobra.Command{
-	Use: "cordon <node>", Short: "Stop scheduling new replicas on a node", Args: cobra.ExactArgs(1),
+	Use: "cordon <node>", Short: "Stop scheduling new replicas on a node", Example: "  ziroctl cluster node cordon worker-2", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return clusterNodeAction(args[0], "cordon")
 	},
 }
 
 var clusterUncordonCmd = &cobra.Command{
-	Use: "uncordon <node>", Short: "Allow scheduling on a node again", Args: cobra.ExactArgs(1),
+	Use: "uncordon <node>", Short: "Allow scheduling on a node again", Example: "  ziroctl cluster node uncordon worker-2", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return clusterNodeAction(args[0], "uncordon")
 	},
 }
 
 var clusterDrainCmd = &cobra.Command{
-	Use: "drain <node>", Short: "Cordon a node and move its replicas to other nodes", Args: cobra.ExactArgs(1),
+	Use: "drain <node>", Short: "Cordon a node and move its replicas away", Example: "  ziroctl cluster node drain worker-2", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := clusterNodeAction(args[0], "drain"); err != nil {
 			return err
@@ -1344,7 +1364,7 @@ var clusterDrainCmd = &cobra.Command{
 }
 
 var clusterNodeRmCmd = &cobra.Command{
-	Use: "rm <node>", Short: "Remove a (dead) worker from the cluster and revoke its credentials", Args: cobra.ExactArgs(1),
+	Use: "rm <node>", Short: "Remove a dead worker and revoke its credentials", Example: "  ziroctl cluster node rm worker-2", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := clusterNodeAction(args[0], "remove"); err != nil {
 			return err
@@ -1367,7 +1387,9 @@ func removeNode(st *ClusterState, id string) {
 
 var clusterTokenCmd = &cobra.Command{
 	Use:   "token",
-	Short: "Print the worker join command (master only)",
+	Short: "Print the command that joins a worker",
+	Example: `  ziroctl cluster token
+  ziroctl cluster token rotate`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := requireMaster()
 		if err != nil {
@@ -1386,7 +1408,9 @@ var clusterTokenCmd = &cobra.Command{
 
 var clusterTokenRotateCmd = &cobra.Command{
 	Use:   "rotate",
-	Short: "Replace the join token (the old one stops working immediately)",
+	Short: "Replace the join token",
+	Example: `  ziroctl cluster token rotate
+  ziroctl cluster token rotate --ttl 1h`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := requireMaster()
 		if err != nil {
@@ -1415,12 +1439,13 @@ func joinTokenExpired(st *ClusterState, now time.Time) bool {
 
 // ---- secrets ----
 
-var clusterSecretCmd = &cobra.Command{Use: "secret", Short: "Manage cluster secrets (injected into apps as env files, never argv)"}
+var clusterSecretCmd = &cobra.Command{Use: "secret", Short: "Manage secrets injected into apps", Example: "  ziroctl cluster secret set api-env DB_PASSWORD=s3cret\n  ziroctl cluster secret ls"}
 
 var clusterSecretSetCmd = &cobra.Command{
-	Use:   "set <name> KEY=VALUE...",
-	Short: "Create or replace a secret",
-	Args:  cobra.MinimumNArgs(2),
+	Use:     "set <name> KEY=VALUE...",
+	Short:   "Create or replace a secret",
+	Example: `  ziroctl cluster secret set api-env DB_PASSWORD=s3cret API_KEY=abc123`,
+	Args:    cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1442,7 +1467,7 @@ var clusterSecretSetCmd = &cobra.Command{
 }
 
 var clusterSecretRmCmd = &cobra.Command{
-	Use: "rm <name>", Short: "Delete a secret (refused while an app uses it)", Args: cobra.ExactArgs(1),
+	Use: "rm <name>", Short: "Delete a secret no app uses", Example: "  ziroctl cluster secret rm api-env", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1452,7 +1477,7 @@ var clusterSecretRmCmd = &cobra.Command{
 }
 
 var clusterSecretLsCmd = &cobra.Command{
-	Use: "ls", Short: "List secret names and keys (never values)",
+	Use: "ls", Short: "List secret names and keys without values", Example: "  ziroctl cluster secret ls",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1483,7 +1508,9 @@ var clusterSecretLsCmd = &cobra.Command{
 
 var clusterLeaveCmd = &cobra.Command{
 	Use:   "leave",
-	Short: "Leave the cluster and remove this node's cluster containers",
+	Short: "Leave the cluster and remove its containers here",
+	Example: `  ziroctl cluster leave
+  ziroctl cluster leave --force`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadClusterConfig()
 		if err != nil {

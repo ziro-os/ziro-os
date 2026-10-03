@@ -63,12 +63,14 @@ var (
 	peerOut      string
 )
 
-var gatewayPeerCmd = &cobra.Command{Use: "peer", Short: "WireGuard remote access to the mesh through the gateway (master only)"}
+var gatewayPeerCmd = &cobra.Command{Use: "peer", Short: "Give remote clients WireGuard access to the mesh", Example: "  ziroctl gateway peer add laptop --output laptop.conf\n  ziroctl gateway peer ls"}
 
 var gatewayPeerAddCmd = &cobra.Command{
 	Use:   "add <name>",
-	Short: "Admit a remote WireGuard client (again with the same name rotates its key) and print its config",
-	Args:  cobra.ExactArgs(1),
+	Short: "Admit a remote client and print its config",
+	Example: `  ziroctl gateway peer add laptop --output laptop.conf
+  ziroctl gateway peer add laptop --endpoint vpn.example.com:51820`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := requireMaster()
 		if err != nil {
@@ -154,7 +156,7 @@ var gatewayPeerAddCmd = &cobra.Command{
 }
 
 var gatewayPeerRmCmd = &cobra.Command{
-	Use: "rm <name>", Short: "Revoke a remote peer (its key stops working on the next heartbeat)", Args: cobra.ExactArgs(1),
+	Use: "rm <name>", Short: "Revoke a remote client", Example: "  ziroctl gateway peer rm laptop", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -173,7 +175,7 @@ var gatewayPeerRmCmd = &cobra.Command{
 }
 
 var gatewayPeerLsCmd = &cobra.Command{
-	Use: "ls", Short: "List remote peers",
+	Use: "ls", Short: "List remote clients", Example: "  ziroctl gateway peer ls",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err

@@ -13,12 +13,15 @@ import (
 
 var diskCmd = &cobra.Command{
 	Use:   "disk",
-	Short: "Disk storage and partition management",
+	Short: "Add, grow and inspect disks",
+	Example: `  ziroctl disk list
+  ziroctl disk add /dev/vdb --mount /data`,
 }
 
 var diskListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List storage disks, partitions, models, and sizes",
+	Use:     "list",
+	Short:   "List disks and partitions",
+	Example: `  ziroctl disk list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		disks := blockDevices()
 		return printResult(disks, func() {
@@ -75,8 +78,9 @@ func blockDevices() []BlockDevice {
 }
 
 var diskUsageCmd = &cobra.Command{
-	Use:   "usage",
-	Short: "Show filesystem disk space and inode utilization",
+	Use:     "usage",
+	Short:   "Show filesystem space and inode use",
+	Example: `  ziroctl disk usage`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		out, err := exec.Command("df", "-h").CombinedOutput()
 		if err == nil {

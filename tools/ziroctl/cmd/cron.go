@@ -25,12 +25,15 @@ type CronJob struct {
 var cronCmd = &cobra.Command{
 	Use:     "cron",
 	Aliases: []string{"cronjob", "schedule"},
-	Short:   "Manage scheduled jobs and cron tasks in Ziro-OS",
+	Short:   "Manage scheduled jobs",
+	Example: `  ziroctl cron add -s '0 2 * * *' -c 'ziroctl backup create' -m nightly-backup
+  ziroctl cron list`,
 }
 
 var cronListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all scheduled cron jobs",
+	Use:     "list",
+	Short:   "List scheduled jobs",
+	Example: `  ziroctl cron list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		jobs, err := readCronJobs()
 		if err != nil {
@@ -59,7 +62,9 @@ var (
 
 var cronAddCmd = &cobra.Command{
 	Use:   "add",
-	Short: "Add a new scheduled cron job",
+	Short: "Schedule a command",
+	Example: `  ziroctl cron add -s '*/5 * * * *' -c '/usr/local/bin/healthcheck.sh'
+  ziroctl cron add -s '0 2 * * *' -c 'ziroctl backup create' -m nightly-backup`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if cronSchedule == "" || cronCommand == "" {
 			return fmt.Errorf("both --schedule and --command are required")
@@ -84,9 +89,10 @@ var cronAddCmd = &cobra.Command{
 }
 
 var cronRemoveCmd = &cobra.Command{
-	Use:   "remove <id>",
-	Short: "Remove a scheduled cron job by its ID",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <id>",
+	Short:   "Remove a scheduled job",
+	Example: `  ziroctl cron remove 3`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := strconv.Atoi(args[0])
 		if err != nil {
@@ -103,9 +109,10 @@ var cronRemoveCmd = &cobra.Command{
 }
 
 var cronRunCmd = &cobra.Command{
-	Use:   "run <id>",
-	Short: "Execute a scheduled cron job immediately",
-	Args:  cobra.ExactArgs(1),
+	Use:     "run <id>",
+	Short:   "Run a scheduled job now",
+	Example: `  ziroctl cron run 3`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := strconv.Atoi(args[0])
 		if err != nil {

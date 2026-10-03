@@ -31,7 +31,10 @@ var (
 var moduleCmd = &cobra.Command{
 	Use:     "module",
 	Aliases: []string{"plugin", "plugins", "modules"},
-	Short:   "Plugins and modules (built in, or from signed catalogs): search, enable, upgrade, disable",
+	Short:   "Enable and manage plugins",
+	Example: `  ziroctl module search
+  ziroctl module enable clamav
+  ziroctl module list`,
 }
 
 func listModules() ([]moduleInfo, error) {
@@ -104,8 +107,9 @@ func printModules(mods []moduleInfo) {
 }
 
 var moduleListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List available and enabled modules",
+	Use:     "list",
+	Short:   "List available and enabled plugins",
+	Example: `  ziroctl module list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		mods, err := listModules()
 		if err != nil {
@@ -122,8 +126,10 @@ var moduleListCmd = &cobra.Command{
 
 var moduleSearchCmd = &cobra.Command{
 	Use:   "search [query]",
-	Short: "Search built-in and catalog modules by name or description",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Search plugins by name or description",
+	Example: `  ziroctl module search
+  ziroctl module search antivirus`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		refreshStaleCatalogs("module")
 		q := ""
@@ -170,8 +176,9 @@ func searchModules(q string) ([]moduleInfo, error) {
 }
 
 var moduleUpdateCmd = &cobra.Command{
-	Use:   "update",
-	Short: "Refresh the signed catalogs (plugins and apps)",
+	Use:     "update",
+	Short:   "Refresh the signed catalogs",
+	Example: `  ziroctl module update`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repos, err := catalogRepos("")
 		if err != nil {
@@ -195,9 +202,10 @@ var moduleUpdateCmd = &cobra.Command{
 }
 
 var moduleInfoCmd = &cobra.Command{
-	Use:   "info <name>",
-	Short: "Show what a module installs and configures",
-	Args:  cobra.ExactArgs(1),
+	Use:     "info <name>",
+	Short:   "Show what a plugin installs and configures",
+	Example: `  ziroctl module info clamav`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		all, err := loadManifests()
 		if err != nil {
@@ -245,7 +253,7 @@ var moduleInfoCmd = &cobra.Command{
 
 var moduleEnableCmd = &cobra.Command{
 	Use:   "enable <name>",
-	Short: "Install and configure a module (and its dependencies)",
+	Short: "Install and configure a plugin",
 	Example: `  ziroctl plugin enable clamav                     # antivirus: clamd + signature updates + daily scans
   ziroctl plugin enable security                   # the full security pack
   ziroctl plugin enable s3-ziro --set capacity=50G # S3-compatible storage (from ziro-os/pkgs)`,
@@ -278,8 +286,9 @@ func setArgs(sets []string) []string {
 }
 
 var moduleInstallCmd = &cobra.Command{
-	Use:   "install -f <manifest.json>",
-	Short: "Enable a module from a local manifest (plugin development; unsigned)",
+	Use:     "install -f <manifest.json>",
+	Short:   "Enable an unsigned plugin from a local manifest",
+	Example: `  ziroctl module install -f ./redis-exporter/manifest.json`,
 	Long: `Enables a module from a manifest file on this host. It is validated like catalog modules but
 not signed: use it to develop and test a plugin before publishing it to a catalog.`,
 	Args: cobra.NoArgs,
@@ -317,7 +326,9 @@ not signed: use it to develop and test a plugin before publishing it to a catalo
 
 var moduleUpgradeCmd = &cobra.Command{
 	Use:   "upgrade [name...]",
-	Short: "Upgrade enabled modules to the catalog version (all when no name is given)",
+	Short: "Upgrade enabled plugins to the catalog version",
+	Example: `  ziroctl module upgrade
+  ziroctl module upgrade clamav`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		refreshStaleCatalogs("module")
 		if len(args) == 0 {
@@ -341,17 +352,20 @@ var moduleUpgradeCmd = &cobra.Command{
 
 var moduleDisableCmd = &cobra.Command{
 	Use:   "disable <name>",
-	Short: "Stop a module and remove exactly what enabling it added (data directories are kept unless --purge)",
-	Args:  cobra.ExactArgs(1),
+	Short: "Disable a plugin and undo what it added",
+	Example: `  ziroctl module disable clamav
+  ziroctl module disable clamav --purge`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDisable(args[0], modulePurge)
 	},
 }
 
 var modulePurgeCmd = &cobra.Command{
-	Use:   "purge <name>",
-	Short: "Disable a module and delete its data (directories it created, its logs, its secrets)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "purge <name>",
+	Short:   "Disable a plugin and delete its data",
+	Example: `  ziroctl module purge clamav`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDisable(args[0], true)
 	},
@@ -370,16 +384,18 @@ func runDisable(name string, purge bool) error {
 
 // moduleValidateCmd is `dev validate` (schema + lints) under its older name.
 var moduleValidateCmd = &cobra.Command{
-	Use:   "validate <manifest.json...>",
-	Short: "Check plugin manifests against the schema and security rules (same as `dev validate`)",
-	Args:  cobra.MinimumNArgs(1),
-	RunE:  func(cmd *cobra.Command, args []string) error { return devValidateCmd.RunE(cmd, args) },
+	Use:     "validate <manifest.json...>",
+	Short:   "Check plugin manifests against the schema",
+	Example: `  ziroctl module validate ./redis-exporter/manifest.json`,
+	Args:    cobra.MinimumNArgs(1),
+	RunE:    func(cmd *cobra.Command, args []string) error { return devValidateCmd.RunE(cmd, args) },
 }
 
 var moduleNewCmd = &cobra.Command{
-	Use:   "new <name>",
-	Short: "Scaffold a plugin manifest in ./<name>/manifest.json",
-	Args:  cobra.ExactArgs(1),
+	Use:     "new <name>",
+	Short:   "Scaffold a plugin manifest",
+	Example: `  ziroctl module new redis-exporter`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := validName(name); err != nil {
@@ -414,11 +430,12 @@ var moduleReconcileCmd = &cobra.Command{
 
 // ---- catalog repositories ----
 
-var moduleRepoCmd = &cobra.Command{Use: "repo", Short: "Manage catalog repositories (third-party plugins and apps)"}
+var moduleRepoCmd = &cobra.Command{Use: "repo", Short: "Manage third-party catalogs", Example: "  ziroctl module repo add acme https://acme.github.io/ziro-catalog --key acme.pub\n  ziroctl module repo list"}
 
 var moduleRepoListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List catalog repositories",
+	Use:     "list",
+	Short:   "List catalogs",
+	Example: `  ziroctl module repo list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repos, err := catalogRepos("")
 		if err != nil {
@@ -446,7 +463,9 @@ var moduleRepoListCmd = &cobra.Command{
 
 var moduleRepoAddCmd = &cobra.Command{
 	Use:   "add <name> <https-url> --key <ed25519-public.pem>",
-	Short: "Trust a third-party catalog signed with the given key",
+	Short: "Trust a third-party catalog signed with a key",
+	Example: `  ziroctl module repo add acme https://acme.github.io/ziro-catalog --key acme.pub
+  ziroctl module repo add acme-apps https://acme.github.io/ziro-apps --key acme.pub --kind app`,
 	Long: `Adds a catalog repository. Its index must be signed with the ed25519 key given here. A module
 from it runs as root when enabled, so add only publishers you trust. It can't replace built-in or
 official modules and apps.`,
@@ -486,9 +505,10 @@ official modules and apps.`,
 }
 
 var moduleRepoRmCmd = &cobra.Command{
-	Use:   "rm <name>",
-	Short: "Stop trusting a catalog (enabled modules from it keep working until disabled)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "rm <name>",
+	Short:   "Stop trusting a catalog",
+	Example: `  ziroctl module repo rm acme`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repos, err := loadExtraRepos()
 		if err != nil {
@@ -530,12 +550,14 @@ var catalogCheckers = map[string]func([]byte) (CatalogEntry, error){
 	},
 }
 
-var catalogCmd = &cobra.Command{Use: "catalog", Short: "Build, sign and verify catalogs (for catalog repositories' CI)"}
+var catalogCmd = &cobra.Command{Use: "catalog", Short: "Build, sign and verify catalogs in CI", Example: "  ziroctl catalog build . --kind app --repo acme --out public\n  ziroctl catalog sign public"}
 
 var catalogBuildCmd = &cobra.Command{
 	Use:   "build <src-dir>",
-	Short: "Validate <src>/<kind>s/*/ and write index.json plus the definitions to --out",
-	Args:  cobra.ExactArgs(1),
+	Short: "Validate definitions and write a catalog index",
+	Example: `  ziroctl catalog build . --repo acme --out public
+  ziroctl catalog build . --kind app --repo acme --out public`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		check := catalogCheckers[catalogKind]
 		if check == nil {
@@ -551,9 +573,10 @@ var catalogBuildCmd = &cobra.Command{
 }
 
 var catalogSignCmd = &cobra.Command{
-	Use:   "sign <out-dir>",
-	Short: "Sign <out>/index.json with the ed25519 key in $ZIRO_CATALOG_KEY (PKCS#8 PEM)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "sign <out-dir>",
+	Short:   "Sign a built catalog with $ZIRO_CATALOG_KEY",
+	Example: `  ZIRO_CATALOG_KEY="$(cat acme.key)" ziroctl catalog sign public`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := os.Getenv("ZIRO_CATALOG_KEY")
 		if key == "" {
@@ -564,9 +587,10 @@ var catalogSignCmd = &cobra.Command{
 }
 
 var catalogVerifyCmd = &cobra.Command{
-	Use:   "verify <out-dir>",
-	Short: "Verify a built catalog's signature and hashes against --key",
-	Args:  cobra.ExactArgs(1),
+	Use:     "verify <out-dir>",
+	Short:   "Verify a built catalog against a public key",
+	Example: `  ziroctl catalog verify public --key acme.pub --repo acme`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key, err := os.ReadFile(catalogKey)
 		if err != nil {

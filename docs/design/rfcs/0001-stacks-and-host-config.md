@@ -84,8 +84,8 @@ script. `docker-compose` files are converted with `ziroctl stack import`, which 
 ## Alternatives
 
 - **Run docker-compose files directly as the deployment format:** rejected. Compose allows privileged containers,
-  bind mounts and credentials in the file, and has no signed catalog or pinned images. `ziroctl compose` stays for
-  development; `stack import` converts.
+  bind mounts and credentials in the file, and has no signed catalog or pinned images. `ziroctl compose` (nerdctl compose
+  behind a security preflight) stays for development; `stack import` converts.
 - **Pass link values as plain environment variables:** rejected. They often hold passwords, and plain env is visible
   in `inspect`.
 - **A `kind:` field:** unnecessary. The shapes don't overlap, and files stay shorter.

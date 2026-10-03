@@ -375,7 +375,10 @@ var (
 
 var stackCmd = &cobra.Command{
 	Use:   "stack",
-	Short: "Deploy several apps together from one YAML/JSON file (plan, apply, status, down)",
+	Short: "Deploy several apps together from one file",
+	Example: `  ziroctl stack up -f shop.yaml --dry-run
+  ziroctl stack up -f shop.yaml
+  ziroctl stack status shop`,
 	Long: `A stack deploys apps in dependency order and keeps them as described:
 
   stack: shop
@@ -389,7 +392,10 @@ ziroctl stack up -f shop.yaml shows the plan and applies it; running it again ch
 
 var stackUpCmd = &cobra.Command{
 	Use:   "up <catalog-stack> | -f <stack.yaml>",
-	Short: "Plan and apply a stack from a file or the signed catalog (create, update and remove apps to match)",
+	Short: "Create, update or remove apps to match a stack",
+	Example: `  ziroctl stack up -f shop.yaml --dry-run
+  ziroctl stack up -f shop.yaml
+  ziroctl stack up analytics`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if (stackFile == "") == (len(args) == 0) || len(args) > 1 {
 			return errors.New("give a catalog stack name or -f <file>")
@@ -448,8 +454,10 @@ var stackUpCmd = &cobra.Command{
 
 var stackSearchCmd = &cobra.Command{
 	Use:   "search [query]",
-	Short: "Search the stacks published in the signed app catalogs",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Search stacks in the app catalogs",
+	Example: `  ziroctl stack search
+  ziroctl stack search analytics`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		refreshStaleCatalogs("app")
 		q := ""
@@ -478,8 +486,9 @@ var stackSearchCmd = &cobra.Command{
 }
 
 var stackLsCmd = &cobra.Command{
-	Use:   "ls",
-	Short: "List stacks",
+	Use:     "ls",
+	Short:   "List stacks",
+	Example: `  ziroctl stack ls`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		stacks := listStacks()
 		return printResult(stacks, func() {
@@ -512,9 +521,10 @@ func stackStatus(name string) (map[string]any, error) {
 }
 
 var stackStatusCmd = &cobra.Command{
-	Use:   "status <stack>",
-	Short: "Show a stack's apps and their status",
-	Args:  cobra.ExactArgs(1),
+	Use:     "status <stack>",
+	Short:   "Show a stack's apps and their state",
+	Example: `  ziroctl stack status shop`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := stackStatus(args[0])
 		if err != nil {
@@ -532,8 +542,10 @@ var stackStatusCmd = &cobra.Command{
 
 var stackDownCmd = &cobra.Command{
 	Use:   "down <stack>",
-	Short: "Remove a stack's apps (--purge also deletes their data and credentials)",
-	Args:  cobra.ExactArgs(1),
+	Short: "Remove a stack's apps",
+	Example: `  ziroctl stack down shop
+  ziroctl stack down shop --purge`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := stackDown(args[0], stackPurge); err != nil {
 			return err

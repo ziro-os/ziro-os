@@ -18,12 +18,16 @@ import (
 
 var cloudCmd = &cobra.Command{
 	Use:   "cloud",
-	Short: "Cloud environment, hypervisor, and instance metadata tools",
+	Short: "Inspect the cloud platform and run user-data",
+	Example: `  ziroctl cloud inspect
+  ziroctl cloud userdata`,
 }
 
 var cloudInspectCmd = &cobra.Command{
 	Use:   "inspect",
-	Short: "Inspect host virtualization, hypervisor, cloud platform, and hardware",
+	Short: "Show the hypervisor, cloud platform and hardware",
+	Example: `  ziroctl cloud inspect
+  ziroctl cloud inspect --json`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("==================================================")
 		fmt.Println(" ☁️  Ziro-OS Cloud Environment & Platform")
@@ -255,8 +259,10 @@ func applyStagedProvisioning() error {
 
 var cloudUserDataCmd = &cobra.Command{
 	Use:   "userdata [URL]",
-	Short: "Install metadata SSH keys and run the cloud user-data script (once per instance)",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Install metadata SSH keys and run user-data once",
+	Example: `  ziroctl cloud userdata
+  ziroctl cloud userdata https://example.com/user-data.sh`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			// Explicit URL: code is executed as root, so it must be authenticated by TLS.

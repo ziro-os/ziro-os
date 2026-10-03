@@ -47,12 +47,16 @@ var (
 var firewallCmd = &cobra.Command{
 	Use:     "firewall",
 	Aliases: []string{"fw", "nftables"},
-	Short:   "Manage Ziro-OS host and container network firewall rules (nftables/iptables)",
+	Short:   "Manage inbound firewall rules",
+	Example: `  ziroctl firewall enable
+  ziroctl firewall allow 443/tcp
+  ziroctl firewall status`,
 }
 
 var fwStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Display firewall status and summary of active protections",
+	Use:     "status",
+	Short:   "Show whether the firewall is on and what it allows",
+	Example: `  ziroctl firewall status`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
 		statusStr := "\033[1;31mINACTIVE (Disabled)\033[0m"
@@ -174,8 +178,9 @@ func firewallUnblock(target string) (string, error) {
 // ---- commands ----
 
 var fwEnableCmd = &cobra.Command{
-	Use:   "enable",
-	Short: "Enable cloud firewall and apply hardened security rules",
+	Use:     "enable",
+	Short:   "Turn the firewall on with the default rules",
+	Example: `  ziroctl firewall enable`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := setFirewallEnabled(true); err != nil {
 			return err
@@ -186,8 +191,9 @@ var fwEnableCmd = &cobra.Command{
 }
 
 var fwDisableCmd = &cobra.Command{
-	Use:   "disable",
-	Short: "Disable firewall and permit all incoming traffic",
+	Use:     "disable",
+	Short:   "Turn the firewall off and accept all traffic",
+	Example: `  ziroctl firewall disable`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := setFirewallEnabled(false); err != nil {
 			return err
@@ -199,8 +205,10 @@ var fwDisableCmd = &cobra.Command{
 
 var fwAllowCmd = &cobra.Command{
 	Use:   "allow <port[/proto]>",
-	Short: "Allow inbound network traffic on a port (e.g. 8443, 80/tcp, 51820/udp)",
-	Args:  cobra.ExactArgs(1),
+	Short: "Allow inbound traffic to a port",
+	Example: `  ziroctl firewall allow 443
+  ziroctl firewall allow 51820/udp --comment wireguard`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		added, err := firewallAllow(args[0], fwComment)
 		if err != nil {
@@ -216,9 +224,10 @@ var fwAllowCmd = &cobra.Command{
 }
 
 var fwDenyCmd = &cobra.Command{
-	Use:   "deny <port[/proto]>",
-	Short: "Deny and remove inbound allowance for a port",
-	Args:  cobra.ExactArgs(1),
+	Use:     "deny <port[/proto]>",
+	Short:   "Close a port opened with allow",
+	Example: `  ziroctl firewall deny 8080/tcp`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := firewallDeny(args[0]); err != nil {
 			return err
@@ -230,8 +239,10 @@ var fwDenyCmd = &cobra.Command{
 
 var fwBlockIPCmd = &cobra.Command{
 	Use:   "block-ip <ip-or-cidr>",
-	Short: "Quarantine incoming traffic from an IP address or CIDR (loopback is trusted)",
-	Args:  cobra.ExactArgs(1),
+	Short: "Block all inbound traffic from an IP or network",
+	Example: `  ziroctl firewall block-ip 203.0.113.9
+  ziroctl firewall block-ip 198.51.100.0/24 --comment scanner`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ip, err := firewallBlock(args[0], fwComment)
 		if err != nil {
@@ -243,9 +254,10 @@ var fwBlockIPCmd = &cobra.Command{
 }
 
 var fwUnblockIPCmd = &cobra.Command{
-	Use:   "unblock-ip <ip-or-cidr>",
-	Short: "Remove IP quarantine and allow communication",
-	Args:  cobra.ExactArgs(1),
+	Use:     "unblock-ip <ip-or-cidr>",
+	Short:   "Unblock an IP or network",
+	Example: `  ziroctl firewall unblock-ip 203.0.113.9`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ip, err := firewallUnblock(args[0])
 		if err != nil {
@@ -257,8 +269,9 @@ var fwUnblockIPCmd = &cobra.Command{
 }
 
 var fwListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all active firewall rules, allowed ports, and blocked IPs",
+	Use:     "list",
+	Short:   "List allowed ports and blocked addresses",
+	Example: `  ziroctl firewall list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := loadFirewallConfig()
 		if jsonOutput {

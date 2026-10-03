@@ -152,11 +152,13 @@ func podEndpoints(st *ClusterState) map[string][]string {
 	return out
 }
 
-var clusterNetworkCmd = &cobra.Command{Use: "network", Short: "Cluster pod network (routed container IPs + DNS)"}
+var clusterNetworkCmd = &cobra.Command{Use: "network", Short: "Manage the routed pod network", Example: "  ziroctl cluster network status\n  ziroctl cluster network enable"}
 
 var clusterNetworkEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Move an existing cluster to the pod network (apps roll over one replica at a time)",
+	Short: "Move an existing cluster to the pod network",
+	Example: `  ziroctl cluster network enable
+  ziroctl cluster network enable --pod-cidr 10.201.0.0/16`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := requireMaster()
 		if err != nil {
@@ -195,7 +197,7 @@ func withPodNetwork(st *ClusterState, a ClusteredApp) ClusteredApp {
 }
 
 var clusterNetworkStatusCmd = &cobra.Command{
-	Use: "status", Short: "Show the pod network, node subnets and replica IPs",
+	Use: "status", Short: "Show the pod network, node subnets and replica IPs", Example: "  ziroctl cluster network status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err

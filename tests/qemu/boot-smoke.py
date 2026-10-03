@@ -363,7 +363,7 @@ def main():
         # Login summary: each address once (no container veths), nothing hardcoded.
         rc, out = con.run("ziroctl motd; echo JSONADDR=$(ziroctl motd --json | grep -c '\"addresses\"')")
         addrs = re.findall(r"\b\d+\.\d+\.\d+\.\d+\b", out.split("Network", 1)[-1].split("\n")[0]) if "Network" in out else []
-        check("motd: summary with each address once", rc == 0 and "Resources" in out and len(addrs) == len(set(addrs)) > 0
+        check("motd: summary with each address once", rc == 0 and "Memory" in out and len(addrs) == len(set(addrs)) > 0
               and "AI Threat" not in out and "JSONADDR=1" in out, out)
         rc, out = con.run("echo TOP=$(ziroctl system top --once --json | grep -c '\"processes\"') DF=$(ziroctl system df --json | grep -c logs); "
                           "ziroctl system prune --dry-run --only logs,tmp >/dev/null && echo PRUNEOK")

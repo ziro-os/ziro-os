@@ -499,7 +499,7 @@ func tpmUnseal(tpm transport.TPM, blob []byte) ([]byte, error) {
 
 // ---- CLI ----
 
-var clusterKeysCmd = &cobra.Command{Use: "keys", Short: "Encryption of cluster secrets at rest (per-master key provider)"}
+var clusterKeysCmd = &cobra.Command{Use: "keys", Short: "Manage encryption of cluster secrets at rest", Example: "  ziroctl cluster keys status\n  ziroctl cluster keys rotate"}
 
 type keysStatusView struct {
 	Provider   string   `json:"provider"`
@@ -512,7 +512,7 @@ type keysStatusView struct {
 }
 
 var clusterKeysStatusCmd = &cobra.Command{
-	Use: "status", Short: "Show this master's key provider and whether it holds the cluster data key",
+	Use: "status", Short: "Show this master's key provider", Example: "  ziroctl cluster keys status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -555,7 +555,9 @@ var keysWrap, keysUnwrap string
 
 var clusterKeysProviderCmd = &cobra.Command{
 	Use:   "provider file|tpm|command",
-	Short: "Re-wrap this master's copy of the cluster data key with another provider",
+	Short: "Re-wrap this master's data key with another provider",
+	Example: `  ziroctl cluster keys provider tpm
+  ziroctl cluster keys provider command --wrap /usr/local/bin/kms-wrap --unwrap /usr/local/bin/kms-unwrap`,
 	Long: `Each master chooses its own provider:
 
   ziroctl cluster keys provider tpm
@@ -602,8 +604,9 @@ KMS, Vault or HSM CLI. The new wrapping is verified before the old one is replac
 }
 
 var clusterKeysRotateCmd = &cobra.Command{
-	Use:   "rotate",
-	Short: "Replace the cluster data key and re-seal every secret with the new one",
+	Use:     "rotate",
+	Short:   "Replace the data key and re-seal every secret",
+	Example: `  ziroctl cluster keys rotate`,
 	Long: `The leader creates a new data key, every master fetches it (mutual TLS) and wraps it with its
 own provider, and only when every master holds it are the secrets re-sealed with it. Each master
 then drops the old key and compacts its Raft log, so nothing sealed with the old key remains.

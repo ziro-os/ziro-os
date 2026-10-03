@@ -26,7 +26,9 @@ type VersionInfo struct {
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Show Ziro-OS and ziroctl version information",
+	Short: "Show the Ziro OS and ziroctl versions",
+	Example: `  ziroctl version
+  ziroctl version --json`,
 	Run: func(cmd *cobra.Command, args []string) {
 		commit := GitCommit
 		if commit == "dev" || commit == "" {

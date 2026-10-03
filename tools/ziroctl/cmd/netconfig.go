@@ -643,7 +643,9 @@ func editNetConfig(edit func(*NetConfig) error) error {
 
 var networkApplyCmd = &cobra.Command{
 	Use:   "apply",
-	Short: "Apply /etc/ziro/network.json (use --confirm-timeout for remote changes)",
+	Short: "Apply the pending network configuration",
+	Example: `  ziroctl network apply
+  ziroctl network apply --confirm-timeout 2m`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if netBoot {
 			return netApplyBoot()
@@ -675,8 +677,9 @@ func netApplyBoot() error {
 }
 
 var networkConfirmCmd = &cobra.Command{
-	Use:   "confirm",
-	Short: "Keep the configuration applied with --confirm-timeout (cancels the rollback)",
+	Use:     "confirm",
+	Short:   "Keep a configuration applied with --confirm-timeout",
+	Example: `  ziroctl network confirm`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := os.Remove(netRollbackPath); err != nil {
 			return errors.New("nothing to confirm")
@@ -709,8 +712,9 @@ var networkRollbackWatchCmd = &cobra.Command{
 }
 
 var networkShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show the pending network configuration (and what differs from the running one)",
+	Use:     "show",
+	Short:   "Show the pending configuration and what changes",
+	Example: `  ziroctl network show`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, err := loadNetConfig(netConfigPath)
 		if err != nil {
@@ -733,7 +737,7 @@ var networkShowCmd = &cobra.Command{
 
 var networkSetCmd = &cobra.Command{
 	Use:   "set <iface>",
-	Short: "Configure an interface in the pending config (then: network apply)",
+	Short: "Configure an interface in the pending config",
 	Example: `  ziroctl network set eth0 --mode static --address 10.0.0.5/24 --gateway 10.0.0.1
   ziroctl network set eth0 --mode dhcp --mtu 9000 --ipv6 auto
   ziroctl network set eth1 --mode off`,
@@ -772,7 +776,7 @@ var networkSetCmd = &cobra.Command{
 	},
 }
 
-var networkRouteCmd = &cobra.Command{Use: "route", Short: "Static routes (pending config)"}
+var networkRouteCmd = &cobra.Command{Use: "route", Short: "Configure static routes", Example: "  ziroctl network route add 10.50.0.0/16 --via 192.168.1.254\n  ziroctl network route del 10.50.0.0/16"}
 
 var networkRouteAddCmd = &cobra.Command{
 	Use:     "add <cidr>",
@@ -788,9 +792,10 @@ var networkRouteAddCmd = &cobra.Command{
 }
 
 var networkRouteDelCmd = &cobra.Command{
-	Use:   "del <cidr>",
-	Short: "Remove a static route",
-	Args:  cobra.ExactArgs(1),
+	Use:     "del <cidr>",
+	Short:   "Remove a static route",
+	Example: `  ziroctl network route del 10.50.0.0/16`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return editNetConfig(func(c *NetConfig) error {
 			kept := c.Routes[:0]
@@ -808,11 +813,11 @@ var networkRouteDelCmd = &cobra.Command{
 	},
 }
 
-var networkVLANCmd = &cobra.Command{Use: "vlan", Short: "802.1Q VLAN interfaces (pending config)"}
+var networkVLANCmd = &cobra.Command{Use: "vlan", Short: "Configure 802.1Q VLANs", Example: "  ziroctl network vlan add eth0 20"}
 
 var networkVLANAddCmd = &cobra.Command{
 	Use:     "add <parent> <id>",
-	Short:   "Add VLAN <parent>.<id> (configure it with network set)",
+	Short:   "Add a VLAN interface",
 	Example: `  ziroctl network vlan add eth0 100 && ziroctl network set eth0.100 --mode static --address 172.16.100.5/24`,
 	Args:    cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -831,11 +836,11 @@ var networkVLANAddCmd = &cobra.Command{
 	},
 }
 
-var networkBondCmd = &cobra.Command{Use: "bond", Short: "Bonded interfaces (pending config)"}
+var networkBondCmd = &cobra.Command{Use: "bond", Short: "Configure bonded interfaces", Example: "  ziroctl network bond add bond0 eth0 eth1 --mode 802.3ad"}
 
 var networkBondAddCmd = &cobra.Command{
 	Use:     "add <name> <slave>...",
-	Short:   "Bond slaves into <name> (slaves become manual)",
+	Short:   "Bond interfaces together",
 	Example: `  ziroctl network bond add bond0 eth1 eth2 --mode active-backup`,
 	Args:    cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -857,9 +862,10 @@ var networkBondAddCmd = &cobra.Command{
 }
 
 var networkIfaceDelCmd = &cobra.Command{
-	Use:   "remove <iface>",
-	Short: "Remove an interface (VLAN, bond or physical) from the pending config",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <iface>",
+	Short:   "Remove an interface from the pending config",
+	Example: `  ziroctl network remove eth0.20`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return editNetConfig(func(c *NetConfig) error {
 			kept := c.Interfaces[:0]
@@ -879,8 +885,10 @@ var networkIfaceDelCmd = &cobra.Command{
 
 var networkHostnameCmd = &cobra.Command{
 	Use:   "hostname [new-name]",
-	Short: "Show or set the hostname (applied immediately and persisted)",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Show or set the hostname",
+	Example: `  ziroctl network hostname
+  ziroctl network hostname web-1`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			h, err := os.Hostname()
@@ -897,7 +905,7 @@ var networkHostnameCmd = &cobra.Command{
 
 var networkDNSCmd = &cobra.Command{
 	Use:   "dns [auto | <nameserver>...]",
-	Short: "Show or set DNS resolvers (auto = from DHCP)",
+	Short: "Show or set the DNS resolvers",
 	Example: `  ziroctl network dns 1.1.1.1 9.9.9.9 --search corp.example
   ziroctl network dns auto`,
 	RunE: func(cmd *cobra.Command, args []string) error {

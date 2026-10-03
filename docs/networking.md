@@ -4,6 +4,25 @@ Without configuration, Ziro-OS runs DHCP on every Ethernet interface. To set sta
 MTUs and routes, describe them once in `/etc/ziro/network.json`. ziro-init applies that file at every boot
 instead of the blanket DHCP.
 
+## Status
+
+```sh
+ziroctl network status          # interfaces, IPv4 addresses, MTU, traffic, role; gateway and DNS
+ziroctl network status --all    # also container interfaces, IPv6, MACs, errors/drops, routes, CNI, connectivity
+ziroctl network status --json
+```
+
+```
+INTERFACE  STATE  ADDRESS          MTU   RX       TX       ROLE
+eth0       up     172.26.1.108/24  1500  1.2 GiB  310 MiB  primary
+ziro0      up     10.200.0.1/16    1420  88 MiB   92 MiB   mesh
+
+Gateway   172.26.1.1 via eth0
+DNS       127.0.0.53 (smart DNS: ziroctl dns status)
+```
+
+For live traffic and connections, use `ziroctl system top --pane network`.
+
 ## Hostname and DNS resolvers
 
 These take effect immediately and persist:
