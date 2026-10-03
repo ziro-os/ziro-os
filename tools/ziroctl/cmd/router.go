@@ -31,7 +31,6 @@ the peers its ACL allows, directly or through relays. It runs on the cluster mas
 }
 
 var (
-	rtEndpoints     []string
 	rtCIDR          string
 	rtPolicy        string
 	rtClientVersion string
