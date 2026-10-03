@@ -155,8 +155,9 @@ func dataDir(app string, replica int, path string) string {
 	return filepath.Join(appDataRoot, app, strconv.Itoa(replica), strings.ReplaceAll(strings.Trim(path, "/"), "/", "_"))
 }
 
-// ensureDataDirs creates a replica's data dirs (root-only; the image's entrypoint chowns its
-// own). The agent re-validates the paths: they come from the master.
+// ensureDataDirs creates a replica's data dirs: 0700, owned by root (the image's entrypoint
+// chowns its own) or by data_uid for images that don't run as root. The agent re-validates the
+// paths: they come from the master.
 func ensureDataDirs(a Assignment) error {
 	if err := validName(a.App); err != nil {
 		return err
@@ -164,9 +165,19 @@ func ensureDataDirs(a Assignment) error {
 	if err := validateDataPaths(a.Data); err != nil {
 		return err
 	}
+	if a.DataUID < 0 || a.DataUID > 65534 {
+		return fmt.Errorf("data_uid %d out of range", a.DataUID)
+	}
 	for _, d := range a.Data {
-		if err := os.MkdirAll(dataDir(a.App, a.Replica, d), 0700); err != nil {
+		p := dataDir(a.App, a.Replica, d)
+		if err := os.MkdirAll(p, 0700); err != nil {
 			return err
+		}
+		// A non-root image owns its data dir (only the dir itself: files in it are the app's).
+		if a.DataUID > 0 {
+			if err := os.Lchown(p, a.DataUID, a.DataUID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

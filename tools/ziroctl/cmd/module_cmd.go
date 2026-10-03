@@ -628,7 +628,11 @@ func startModuleJob(args ...string) error {
 
 // startJob runs `ziroctl <args>` in its own session (it outlives an API request or a closed
 // terminal), appending its output to logPath. args are argv, never a shell string.
-func startJob(args []string, logPath string) error {
+func startJob(args []string, logPath string) error { return startJobEnv(args, nil, logPath) }
+
+// startJobEnv runs a detached ziroctl job; env is added to its environment (secrets for the job,
+// never on its command line).
+func startJobEnv(args, env []string, logPath string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -639,6 +643,7 @@ func startJob(args []string, logPath string) error {
 	}
 	defer log.Close()
 	c := exec.Command(self, args...)
+	c.Env = append(os.Environ(), env...)
 	c.Stdout, c.Stderr = log, log
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {

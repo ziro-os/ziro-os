@@ -104,6 +104,7 @@ type ClusteredApp struct {
 	// They follow the replica index, not the node: a replica that moves starts empty and must
 	// recover through the app's own replication or a backup.
 	Data      []string   `json:"data,omitempty"`
+	DataUID   int        `json:"data_uid,omitempty"`  // owner of the data dirs (non-root images)
 	Resources *Resources `json:"resources,omitempty"` // per replica
 	Revision  int        `json:"revision,omitempty"`
 	CreatedAt string     `json:"created_at,omitempty"`

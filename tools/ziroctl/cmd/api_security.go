@@ -324,6 +324,38 @@ func validAppRef(ref string) error {
 // deployJobArgs turns a request into `ziroctl apps deploy` argv. Every value goes in a
 // --flag=value form after validation, and the app ref after "--", so nothing can become a flag.
 func deployJobArgs(req AppDeployRequest) ([]string, error) {
+	args, _, err := deployJob(req)
+	return args, err
+}
+
+// deployJob is deployJobArgs plus the environment carrying input secrets (--secret KEY reads
+// $ZIRO_SECRET_KEY), so a secret never appears in the job's argv.
+func deployJob(req AppDeployRequest) (args, env []string, err error) {
+	args, err = deployJobArgv(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	keys := make([]string, 0, len(req.Secrets))
+	for k := range req.Secrets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var flags []string
+	for _, k := range keys {
+		if !envKeyRe.MatchString(k) || strings.HasPrefix(k, "ZIRO_") {
+			return nil, nil, fmt.Errorf("invalid secret name %q", k)
+		}
+		if err := schema.ValidSecretValue(req.Secrets[k]); err != nil {
+			return nil, nil, fmt.Errorf("secret %s: %w", k, err)
+		}
+		flags = append(flags, "--secret="+k)
+		env = append(env, secretEnvPrefix+k+"="+req.Secrets[k])
+	}
+	n := len(args) - 2 // before "--", app
+	return append(append(args[:n:n], flags...), args[n:]...), env, nil
+}
+
+func deployJobArgv(req AppDeployRequest) ([]string, error) {
 	if err := validAppRef(req.App); err != nil {
 		return nil, err
 	}
@@ -402,9 +434,9 @@ func registerAppRoutes(a *apiRouter) {
 			apiReply(w, err, nil)
 			return
 		}
-		args, err := deployJobArgs(req)
+		args, env, err := deployJob(req)
 		if err == nil {
-			err = startJob(args, "/var/log/ziro-apps.log")
+			err = startJobEnv(args, env, "/var/log/ziro-apps.log")
 		}
 		if err != nil {
 			apiReply(w, err, nil)

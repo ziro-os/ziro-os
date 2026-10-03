@@ -21,6 +21,7 @@ type AppDeployRequest struct {
 	AllowFrom []string          `json:"allow_from,omitempty"`
 	Expose    string            `json:"expose,omitempty"`     // publish through the gateway on this hostname
 	ExposeTLS string            `json:"expose_tls,omitempty"` // auto, internal, off or cert:<name>
+	Secrets   map[string]string `json:"secrets,omitempty"`    // input secrets (API keys); never logged
 }
 
 type AppCatalogEntry struct {

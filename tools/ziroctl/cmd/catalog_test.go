@@ -142,7 +142,7 @@ func TestPluginInstallSecretsSettingsArtifactsUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, _ := os.ReadFile(filepath.Join(root, "etc/garage.toml"))
-	secrets, _ := loadOrCreateSecrets(moduleSecretsPath("s3"), v1.Secrets)
+	secrets, _ := loadOrCreateSecrets(moduleSecretsPath("s3"), v1.Secrets, nil)
 	if !strings.Contains(string(cfg), secrets["rpc"]) || !strings.Contains(string(cfg), "cap = 50G") {
 		t.Fatalf("config %s", cfg)
 	}
@@ -202,5 +202,60 @@ func TestOfficialReposValid(t *testing.T) {
 		if err := r.Validate(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestInputSecrets(t *testing.T) {
+	specs := map[string]string{"DB_PASSWORD": "alnum:24", "API_KEY": "input", "EXTRA": "input?"}
+	if _, _, err := fillSecrets(nil, specs, nil); err == nil || !strings.Contains(err.Error(), "API_KEY is required") {
+		t.Fatalf("missing required input: %v", err)
+	}
+	got, changed, err := fillSecrets(nil, specs, map[string]string{"API_KEY": "sk-1"})
+	if err != nil || !changed || got["API_KEY"] != "sk-1" || len(got["DB_PASSWORD"]) != 24 || got["EXTRA"] != "" {
+		t.Fatalf("first fill %v %v %v", got, changed, err)
+	}
+	// Redeploy without --secret keeps both; a new value replaces only the input.
+	again, changed, _ := fillSecrets(got, specs, nil)
+	if changed || again["API_KEY"] != "sk-1" || again["DB_PASSWORD"] != got["DB_PASSWORD"] {
+		t.Errorf("redeploy changed secrets: %v", again)
+	}
+	rot, changed, _ := fillSecrets(got, specs, map[string]string{"API_KEY": "sk-2"})
+	if !changed || rot["API_KEY"] != "sk-2" || rot["DB_PASSWORD"] != got["DB_PASSWORD"] {
+		t.Errorf("rotation: %v", rot)
+	}
+	for _, bad := range []map[string]string{{"DB_PASSWORD": "x"}, {"NOPE": "x"}, {"API_KEY": "a\nB=c"}} {
+		if _, _, err := fillSecrets(got, specs, bad); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "key"), []byte("sk-file\n"), 0600)
+	t.Setenv("API_KEY", "sk-env")
+	vals, err := parseSecretFlags([]string{"A=" + "@" + filepath.Join(dir, "key"), "API_KEY", "C=lit=eral"})
+	if err != nil || vals["A"] != "sk-file" || vals["API_KEY"] != "sk-env" || vals["C"] != "lit=eral" {
+		t.Fatalf("parseSecretFlags %v %v", vals, err)
+	}
+	if _, err := parseSecretFlags([]string{"bad-key=x"}); err == nil {
+		t.Error("bad key accepted")
+	}
+}
+
+func TestDataDirOwner(t *testing.T) {
+	old := appDataRoot
+	appDataRoot = t.TempDir()
+	defer func() { appDataRoot = old }()
+	a := Assignment{App: "claw", Data: []string{"/home/node/.openclaw"}, DataUID: os.Getuid()}
+	if os.Getuid() != 0 {
+		a.DataUID = 0 // chown to another uid needs root; the ownership itself is checked on hosts
+	}
+	if err := ensureDataDirs(a); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(dataDir("claw", 0, "/home/node/.openclaw")); err != nil || fi.Mode().Perm() != 0700 {
+		t.Fatalf("data dir %v %v", fi, err)
+	}
+	if ensureDataDirs(Assignment{App: "claw", Data: []string{"/x"}, DataUID: 70000}) == nil {
+		t.Error("out-of-range data_uid accepted")
 	}
 }

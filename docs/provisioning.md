@@ -53,6 +53,9 @@ ziroctl stack down shop [--purge]
   `apps credentials` and the gateway work on it as usual.
 - Apps deploy in dependency order, and each waits until it's healthy before its dependents start.
 - A dependency cycle is an error.
+- **Ports:** an app that others depend on (a database, a cache) serves only the stack. On a single host it gets
+  no host port unless it sets `publish` or `expose`, so two stacks never fight over 127.0.0.1:3306. On a cluster,
+  the app network policy admits exactly the apps that depend on it.
 - An app removed from the file is removed from the host, after the rest is up. Its data is kept unless you run
   `stack down --purge`.
 
@@ -67,8 +70,11 @@ only catalog apps are accepted.
 signed and pinned in the same index, and may only use catalog apps.
 
 ```sh
-ziroctl stack search            # stacks in the signed catalogs
-ziroctl stack up wordpress      # deploy one by name
+ziroctl stack search                       # stacks in the signed catalogs
+ziroctl stack up wordpress                 # deploy one by name
+ziroctl stack init wordpress -o blog       # or write it to blog/stack.yaml, edit it, then:
+ziroctl stack up -f blog/stack.yaml
+ziroctl stack up openclaw --secret openclaw.ANTHROPIC_API_KEY=@anthropic.key
 ```
 
 To publish your own, add `stacks/<name>/stack.yaml` to your catalog repository. `ziroctl dev new stack <name>`
