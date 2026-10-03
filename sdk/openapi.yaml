@@ -967,6 +967,17 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/hooks/deploy/{app}:
+    post:
+      x-ziro-role: public
+      tags: [deploy]
+      summary: Git push webhook (GitHub X-Hub-Signature-256 or GitLab X-Gitlab-Token, from ziroctl deploy hook); a push to the deployment's branch builds and releases it
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/App"
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "202": { $ref: "#/components/responses/Message" }
   /api/v1/deployments/{app}/builds/{id}/log:
     get:
       x-ziro-role: viewer

@@ -502,7 +502,7 @@ func (rs *raftStore) propose(version uint64, st *ClusterState) error {
 	// Defense in depth: every changed image passes the network-free part of the image policy here,
 	// whoever proposed the change.
 	for _, a := range st.Apps {
-		if cur := rs.cur.app(a.Name); cur == nil || cur.Image != a.Image {
+		if cur := rs.cur.app(a.Name); (cur == nil || cur.Image != a.Image) && !builtInCluster(st, a.Image) {
 			if err := checkImage(st.ImagePolicy, a.Image); err != nil {
 				return err
 			}

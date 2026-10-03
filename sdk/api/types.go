@@ -139,3 +139,21 @@ type Token struct {
 	Expires string `json:"expires,omitempty"`
 	Secret  string `json:"token,omitempty"`
 }
+
+// DeployRequest is the body of POST /api/v1/deployments: build and run an app from git.
+type DeployRequest struct {
+	Name         string            `json:"name"`
+	Repo         string            `json:"repo"`           // https URL, no credentials
+	Ref          string            `json:"ref,omitempty"`  // branch or tag
+	Path         string            `json:"path,omitempty"` // subdirectory to build
+	Port         int               `json:"port,omitempty"`
+	Publish      int               `json:"publish,omitempty"`
+	Replicas     int               `json:"replicas,omitempty"` // cluster
+	Arch         string            `json:"arch,omitempty"`     // cluster: amd64, arm64
+	Env          map[string]string `json:"env,omitempty"`
+	Secrets      []string          `json:"secrets,omitempty"`
+	SecretValues map[string]string `json:"secret_values,omitempty"`
+	GitToken     string            `json:"git_token,omitempty"`
+	Expose       string            `json:"expose,omitempty"`
+	ExposeTLS    string            `json:"expose_tls,omitempty"`
+}

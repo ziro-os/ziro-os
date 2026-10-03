@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -299,6 +300,10 @@ type agent struct {
 	desired []Assignment
 	synced  bool              // at least one successful heartbeat
 	failed  map[string]string // container -> last start error
+	builds  agentBuilds       // builds the master assigned to this node
+	images  imageServer       // serves this node's ziro.local images over the mesh
+	token   string            // image token from the master (fetching images from other nodes)
+	meshNet netip.Prefix      // the cluster mesh: the only place images are fetched from
 }
 
 func (ag *agent) setFailed(name string, err error) {
@@ -348,9 +353,17 @@ func (ag *agent) reconcile(desired []Assignment) error {
 	for _, name := range restart {
 		ag.setFailed(name, nerdctl(context.Background(), "start", name))
 	}
+	ag.mu.Lock()
+	token, meshNet := ag.token, ag.meshNet
+	ag.mu.Unlock()
 	for _, a := range start {
 		ctx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
-		err := nerdctl(ctx, "pull", "-q", a.Image)
+		var err error
+		if strings.HasPrefix(a.Image, "ziro.local/") { // built in the cluster: fetched over the mesh, never pulled
+			a.Image, err = fetchClusterImage(ctx, a, token, meshNet)
+		} else {
+			err = nerdctl(ctx, "pull", "-q", a.Image)
+		}
 		cancel()
 		if err == nil {
 			err = writeSecretEnv(a)
@@ -431,7 +444,7 @@ var clusterAgentCmd = &cobra.Command{
 
 			var resp heartbeatResponse
 			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh,
-				Caps: nodeCaps, Keys: storedKeyIDs()}
+				Caps: builderCaps(nodeCaps), Keys: storedKeyIDs(), Arch: runtime.GOARCH, Builds: ag.builds.report()}
 			pending := ""
 			if wantRotate { // the new token is generated here and sent once, authenticated by the old one
 				pending = randomHex(32)
@@ -451,6 +464,16 @@ var clusterAgentCmd = &cobra.Command{
 				}
 				wantRotate = resp.RotateToken
 				adoptClusterCA(cfg, resp.CA, resp.Masters)
+				ag.builds.start(resp.Builds)
+				ag.images.ensure(resp.MeshIP, resp.ImageToken)
+				ag.mu.Lock()
+				ag.token = resp.ImageToken
+				if ip, err := netip.ParseAddr(resp.MeshIP); err == nil && resp.MeshPrefix > 0 {
+					if p, err := ip.Prefix(resp.MeshPrefix); err == nil {
+						ag.meshNet = p
+					}
+				}
+				ag.mu.Unlock()
 			}
 			// On heartbeat failure the master is unreachable: keep workloads running as they are,
 			// never tear down on a network blip.

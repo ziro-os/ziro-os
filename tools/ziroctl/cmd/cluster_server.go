@@ -68,6 +68,8 @@ type heartbeatRequest struct {
 	Caps        []string          `json:"caps,omitempty"`         // features this node's ziroctl supports
 	RotateToken string            `json:"rotate_token,omitempty"` // a new node token (64 hex), replacing the one this request uses
 	Keys        []string          `json:"keys,omitempty"`         // data key IDs held by this node's master
+	Arch        string            `json:"arch,omitempty"`         // runtime.GOARCH of the node
+	Builds      []BuildResult     `json:"builds,omitempty"`       // results of builds the node ran
 }
 
 // Assignment is one container the master wants running on a node.
@@ -87,6 +89,7 @@ type Assignment struct {
 	Replica   int               `json:"replica"`              // replica index (ZIRO_REPLICA in the container)
 	Data      []string          `json:"data,omitempty"`       // container paths backed by node-local dirs
 	DataUID   int               `json:"data_uid,omitempty"`   // owner of those dirs (non-root images)
+	ImageFrom string            `json:"image_from,omitempty"` // mesh address serving a ziro.local image
 	Resources *Resources        `json:"resources,omitempty"`  // memory/CPU/PID limits
 	Network   string            `json:"network,omitempty"`    // local apps: a named network (stacks)
 }
@@ -120,6 +123,8 @@ type heartbeatResponse struct {
 	NFSExports  []clusterExport     `json:"nfs_exports,omitempty"`  // shares this node serves
 	NFSMounts   []clusterMount      `json:"nfs_mounts,omitempty"`   // shares its replicas use
 	PurgeData   []string            `json:"purge_data,omitempty"`   // apps whose local data to delete
+	Builds      []ClusterBuild      `json:"builds,omitempty"`       // builds for this node to run (builder nodes)
+	ImageToken  string              `json:"image_token,omitempty"`  // bearer token for the mesh image server
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -154,6 +159,9 @@ func specHash(a ClusteredApp) string {
 	}
 	if a.DataUID > 0 { // only when set, so existing apps keep their hash
 		fmt.Fprintf(h, "\x00datauid=%d", a.DataUID)
+	}
+	if a.Arch != "" {
+		fmt.Fprintf(h, "\x00arch=%s", a.Arch)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }
@@ -252,7 +260,7 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 		if r.Fails >= maxReplicaFails && r.Node != "" {
 			r.Avoid, r.Node, r.Fails = r.Node, "", 0
 		}
-		if r.Node != "" && (!ready[r.Node] || !free(r.Node, portOf(r))) {
+		if r.Node != "" && (!ready[r.Node] || !free(r.Node, portOf(r)) || !st.fits(r, r.Node)) {
 			r.Node = ""
 		}
 		if r.Node != "" {
@@ -276,7 +284,7 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 	pick := func(r Replica, exclude string) string {
 		best, fallback := "", ""
 		for _, n := range st.Nodes {
-			if !eligible[n.ID] || n.ID == exclude || !free(n.ID, portOf(r)) {
+			if !eligible[n.ID] || n.ID == exclude || !free(n.ID, portOf(r)) || !st.fits(r, n.ID) {
 				continue
 			}
 			if n.ID == r.Avoid {
@@ -433,6 +441,7 @@ func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[stri
 		if spec.Network == "pod" && r.IP != "" && n != nil && n.PodCIDR != "" {
 			as.IP, as.DNS, as.Hosts = r.IP, podGateway(n.PodCIDR), nil // discovery via DNS instead
 		}
+		as.ImageFrom = imageSource(st, spec, nodeID)
 		out = append(out, as)
 	}
 	return out
@@ -809,6 +818,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 			}
 		}
 		scheduleReplicas(st, time.Now())
+		resp.Builds, resp.ImageToken = heartbeatBuilds(st, n, req)
 		resp.Assignments = assignmentsFor(st, n.ID, st.Secrets)
 		resp.MeshIP, resp.MeshPrefix, resp.Peers = meshView(st, n, meshCIDR(cfg))
 		resp.Endpoints = appEndpoints(st)

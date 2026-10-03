@@ -41,8 +41,10 @@ type Deployment struct {
 	Expose    string            `json:"expose,omitempty"`  // gateway hostname
 	ExposeTLS string            `json:"expose_tls,omitempty"`
 	Resources *Resources        `json:"resources,omitempty"`
-	Live      string            `json:"live,omitempty"` // build serving traffic
-	Next      int               `json:"next"`           // next build number
+	Replicas  int               `json:"replicas,omitempty"` // cluster: replicas (default 1)
+	Arch      string            `json:"arch,omitempty"`     // cluster: build for this architecture (amd64, arm64)
+	Live      string            `json:"live,omitempty"`     // build serving traffic
+	Next      int               `json:"next"`               // next build number
 	Created   time.Time         `json:"created"`
 	Updated   time.Time         `json:"updated"`
 }
@@ -58,6 +60,8 @@ type Build struct {
 	Status   string    `json:"status"`          // queued, building, releasing, live, failed, superseded
 	Error    string    `json:"error,omitempty"`
 	Rollback bool      `json:"rollback,omitempty"` // a release of an earlier build's image
+	Node     string    `json:"node,omitempty"`     // cluster: the node that built it
+	Arch     string    `json:"arch,omitempty"`     // cluster: the image's architecture
 	Queued   time.Time `json:"queued"`
 	Started  time.Time `json:"started,omitzero"`
 	Finished time.Time `json:"finished,omitzero"`
@@ -106,6 +110,9 @@ func validateDeployment(d *Deployment) error {
 		if !envKeyRe.MatchString(k) || strings.HasPrefix(k, "ZIRO_") {
 			return fmt.Errorf("secret %q: bad name", k)
 		}
+	}
+	if d.Replicas < 0 || d.Replicas > 64 || (d.Arch != "" && !archRe.MatchString(d.Arch)) {
+		return errors.New("replicas 0..64, arch amd64 or arm64")
 	}
 	if d.Expose != "" && (!validHost(d.Expose) || strings.HasPrefix(d.Expose, "*.")) {
 		return fmt.Errorf("invalid expose host %q", d.Expose)

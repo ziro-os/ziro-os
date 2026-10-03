@@ -78,6 +78,8 @@ type ClusterNode struct {
 	Keys        []string          `json:"keys,omitempty"`         // data key IDs this node's master holds (rotation gating)
 	Gateway     bool              `json:"gateway,omitempty"`      // runs zirogate for the cluster's routes
 	PodCIDR     string            `json:"pod_cidr,omitempty"`     // this node's /24 of the cluster pod network
+	Arch        string            `json:"arch,omitempty"`         // amd64, arm64 (reported by the agent)
+	Labels      map[string]string `json:"labels,omitempty"`       // ziroctl cluster node label (builder=true, ...)
 	LastSeen    time.Time         `json:"last_seen"`
 }
 
@@ -106,8 +108,12 @@ type ClusteredApp struct {
 	Data      []string   `json:"data,omitempty"`
 	DataUID   int        `json:"data_uid,omitempty"`  // owner of the data dirs (non-root images)
 	Resources *Resources `json:"resources,omitempty"` // per replica
-	Revision  int        `json:"revision,omitempty"`
-	CreatedAt string     `json:"created_at,omitempty"`
+	// Arch pins replicas to nodes of one architecture (an image built here is single-arch);
+	// ImageNode is the node that holds a ziro.local image, which other nodes fetch over the mesh.
+	Arch      string `json:"arch,omitempty"`
+	ImageNode string `json:"image_node,omitempty"`
+	Revision  int    `json:"revision,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // Replica is one placed (or pending, Node == "") instance of an app.
@@ -147,9 +153,10 @@ type ClusterState struct {
 	RotateTokensBefore time.Time                `json:"rotate_tokens_before,omitempty"`
 	RotateCertsBefore  time.Time                `json:"rotate_certs_before,omitempty"`
 	// Data key rotation: requested -> NextDEKID distributed to every master -> DEKID switched.
-	DEKRotateRequested time.Time   `json:"dek_rotate_requested,omitempty"`
-	NextDEKID          string      `json:"next_dek_id,omitempty"`
-	ImagePolicy        ImagePolicy `json:"image_policy,omitempty"`
+	DEKRotateRequested time.Time      `json:"dek_rotate_requested,omitempty"`
+	NextDEKID          string         `json:"next_dek_id,omitempty"`
+	ImagePolicy        ImagePolicy    `json:"image_policy,omitempty"`
+	Builds             []ClusterBuild `json:"builds,omitempty"` // builds ziroctld runs on builder nodes
 	// Join credentials and the cluster CA are replicated so any master can admit nodes.
 	JoinToken        string `json:"join_token,omitempty"`
 	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never
@@ -1020,7 +1027,7 @@ func deployApp(mutate func(st *ClusterState) (*ClusteredApp, error)) error {
 		delete(st.PurgeData, app.Name)  // a new app of a purged name keeps its new data
 		// A new image passes the image policy here (verified and pinned by digest when signatures are
 		// required); an unchanged one was checked when it was set.
-		if cur := st.app(app.Name); cur == nil || cur.Image != app.Image {
+		if cur := st.app(app.Name); (cur == nil || cur.Image != app.Image) && !builtInCluster(st, app.Image) {
 			img, err := enforceImagePolicy(st.ImagePolicy, app.Image)
 			if err != nil {
 				return err

@@ -33,4 +33,6 @@ func registerDeployRoutes(a *apiRouter) {
 	a.post("/api/v1/deployments/{app}/redeploy", "operator", fwd)
 	a.post("/api/v1/deployments/{app}/rollback", "operator", fwd)
 	a.get("/api/v1/deployments/{app}/builds/{id}/log", "viewer", fwd)
+	// Git push webhooks: public, authenticated by the deployment's hook secret (in ziroctld).
+	a.post("/api/v1/hooks/deploy/{app}", "public", fwd)
 }

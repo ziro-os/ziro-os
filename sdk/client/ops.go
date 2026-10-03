@@ -424,3 +424,51 @@ func (c *Client) ApplyHost(ctx context.Context, cfg schema.HostConfig, dryRun bo
 	var out map[string]any
 	return out, c.Do(ctx, http.MethodPost, "/api/v1/apply"+q, cfg, &out)
 }
+
+// ---- deployments (ziroctl deploy) ----
+
+// Deployments lists the apps deployed from git with their URL and latest build.
+func (c *Client) Deployments(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/deployments", &out)
+}
+
+// Deployment returns a deployment and its builds, newest first.
+func (c *Client) Deployment(ctx context.Context, app string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/deployments/"+esc(app), &out)
+}
+
+// Deploy creates or updates a deployment and queues its build; it returns the queued build.
+func (c *Client) Deploy(ctx context.Context, req api.DeployRequest) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/deployments", req, &out)
+}
+
+// Redeploy builds the latest commit again (ref switches the branch when set).
+func (c *Client) Redeploy(ctx context.Context, app, ref string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/deployments/"+esc(app)+"/redeploy", map[string]string{"ref": ref}, &out)
+}
+
+// RollbackDeployment releases an earlier build again (build "" = the previous one).
+func (c *Client) RollbackDeployment(ctx context.Context, app, build string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/deployments/"+esc(app)+"/rollback", map[string]string{"build": build}, &out)
+}
+
+// BuildLog returns a build's log.
+func (c *Client) BuildLog(ctx context.Context, app, build string) (string, error) {
+	var b []byte
+	err := c.Get(ctx, "/api/v1/deployments/"+esc(app)+"/builds/"+esc(build)+"/log", &b)
+	return string(b), err
+}
+
+// RemoveDeployment removes a deployment, its builds and its app; purge deletes its data too.
+func (c *Client) RemoveDeployment(ctx context.Context, app string, purge bool) error {
+	q := ""
+	if purge {
+		q = "?purge=true"
+	}
+	return c.Do(ctx, http.MethodDelete, "/api/v1/deployments/"+esc(app)+q, nil, nil)
+}
