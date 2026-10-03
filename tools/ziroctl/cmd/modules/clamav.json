@@ -1,13 +1,13 @@
 {
   "name": "clamav",
-  "version": "1.1",
+  "version": "1.2",
   "description": "ClamAV antivirus: clamd (local socket), signature updates, daily scans",
   "packages": [
     "clamav-daemon",
     "clamav-clamdscan",
     "freshclam"
   ],
-  "min_memory_mb": 1536,
+  "min_memory_mb": 2048,
   "dirs": [
     {
       "path": "/run/clamav",
@@ -34,12 +34,12 @@
     {
       "path": "/etc/clamav/clamd.conf",
       "mode": "0644",
-      "content": "# Managed by `ziroctl module enable clamav` (local socket only: no network listener).\nLogFile /var/log/clamav/clamd.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/clamd.pid\nLocalSocket /run/clamav/clamd.sock\nLocalSocketGroup clamav\nLocalSocketMode 660\nFixStaleSocket yes\nUser clamav\nForeground yes\nDatabaseDirectory /var/lib/clamav\n# Temp files outside /tmp, so clamav-onaccess can watch /tmp\nTemporaryDirectory /var/lib/clamav/tmp\nMaxThreads 4\nMaxScanSize 400M\nMaxFileSize 100M\nMaxRecursion 16\nMaxFiles 10000\nExcludePath ^/proc/\nExcludePath ^/sys/\nExcludePath ^/dev/\nExcludePath ^/run/\nExtendedDetectionInfo yes\n"
+      "content": "# Managed by `ziroctl module enable clamav` (local socket only: no network listener).\nLogFile /var/log/clamav/clamd.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/clamd.pid\nLocalSocket /run/clamav/clamd.sock\nLocalSocketGroup clamav\nLocalSocketMode 660\nFixStaleSocket yes\nUser clamav\nForeground yes\nDatabaseDirectory /var/lib/clamav\n# Temp files outside /tmp, so clamav-onaccess can watch /tmp\nTemporaryDirectory /var/lib/clamav/tmp\n# Memory: one signature database in RAM (~1 GB). The default concurrent reload loads a second\n# copy during every update; reload in place instead (scans wait ~20 s).\nConcurrentDatabaseReload no\nMaxThreads 2\nMaxQueue 50\nIdleTimeout 30\nMaxScanSize 150M\nMaxFileSize 50M\nStreamMaxLength 50M\nMaxRecursion 16\nMaxFiles 10000\nExcludePath ^/proc/\nExcludePath ^/sys/\nExcludePath ^/dev/\nExcludePath ^/run/\nExtendedDetectionInfo yes\n"
     },
     {
       "path": "/etc/clamav/freshclam.conf",
       "mode": "0644",
-      "content": "# Managed by `ziroctl module enable clamav`.\nDatabaseDirectory /var/lib/clamav\nUpdateLogFile /var/log/clamav/freshclam.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/freshclam.pid\nDatabaseOwner clamav\nDatabaseMirror database.clamav.net\nScriptedUpdates yes\nNotifyClamd /etc/clamav/clamd.conf\nChecks 12\nForeground yes\nConnectTimeout 30\nReceiveTimeout 600\n"
+      "content": "# Managed by `ziroctl module enable clamav`.\nDatabaseDirectory /var/lib/clamav\nUpdateLogFile /var/log/clamav/freshclam.log\nLogTime yes\nLogFileMaxSize 20M\nLogRotate yes\nPidFile /run/clamav/freshclam.pid\nDatabaseOwner clamav\nDatabaseMirror database.clamav.net\nScriptedUpdates yes\nNotifyClamd /etc/clamav/clamd.conf\nChecks 4\n# Don't load a test copy of the new database in freshclam (clamd validates it on reload).\nTestDatabases no\nForeground yes\nConnectTimeout 30\nReceiveTimeout 600\n"
     }
   ],
   "cron": [
@@ -63,7 +63,12 @@
       "exec": "/usr/sbin/clamd",
       "args": "--config-file=/etc/clamav/clamd.conf",
       "pidfile": "/run/ziro-clamd.pid",
-      "logfile": "/var/log/clamd.log"
+      "logfile": "/var/log/clamd.log",
+      "resources": {
+        "memory": "1536Mi",
+        "cpus": 1,
+        "pids": 64
+      }
     },
     {
       "name": "freshclam",
@@ -71,7 +76,11 @@
       "exec": "/usr/bin/freshclam",
       "args": "-d --config-file=/etc/clamav/freshclam.conf",
       "pidfile": "/run/ziro-freshclam.pid",
-      "logfile": "/var/log/freshclam.log"
+      "logfile": "/var/log/freshclam.log",
+      "resources": {
+        "memory": "256Mi",
+        "cpus": 0.5
+      }
     }
   ],
   "health": {

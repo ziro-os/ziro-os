@@ -65,7 +65,8 @@ in the [design standard](design/README.md); design decisions are recorded as [RF
   same operation functions as the CLI commands, never the CLI binary or copied logic, and the OpenAPI spec is
   checked against the table.
 - **Tools releases:** `ziroctl`/`ziropkg` ship on their own signed stream (`tools/vX.Y.Z`); `ziroctl update` swaps
-  them atomically and updates the integrity baselines. OS releases sign their `SHA256SUMS` with the same key.
+  them atomically and updates the integrity baselines. Each OS tag `vX.Y.Z` also publishes `tools/vX.Y.Z`;
+  hosts find the newest one from the tag refs, so OS releases never push it off a page of releases. OS releases sign their `SHA256SUMS` with the same key.
 - **SDK:** the formats and their validators, catalog signing, the API types and a typed client live in the
   `sdk/` Go module; `ziroctl` imports it, so tools built on the SDK validate with the host's exact rules.
   `sdk/openapi.yaml` describes the API, kept complete by a test ([SDK guide](sdk.md)).

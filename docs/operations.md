@@ -116,7 +116,8 @@ handles it in layers.
 ## Keeping `ziroctl` current: `ziroctl update`
 
 `ziroctl` and `ziropkg` ship on their own release stream (`tools/vX.Y.Z`), so fixes reach hosts without an OS
-upgrade.
+upgrade. Every OS release tag also publishes the matching tools release, and hotfixes can ship as their own
+`tools/vX.Y.Z` tag.
 
 ```sh
 ziroctl update --check     # also runs daily from cron; the login summary shows the result

@@ -1,6 +1,6 @@
 {
   "name": "clamav-onaccess",
-  "version": "1.0",
+  "version": "1.1",
   "description": "ClamAV on-access scanning: opening an infected file is blocked (fanotify; edit /etc/clamav/onaccess-paths)",
   "requires": [
     "clamav"
@@ -12,7 +12,7 @@
     {
       "path": "/etc/clamav/clamonacc.conf",
       "mode": "0644",
-      "content": "# Managed by `ziroctl plugin enable clamav-onaccess`. clamonacc asks clamd (local socket) about every\n# open in the watched paths and denies the open when the file is infected.\nLocalSocket /run/clamav/clamd.sock\n# Must match clamd.conf: clamonacc never watches clamd's own temp directory\nTemporaryDirectory /var/lib/clamav/tmp\nOnAccessPrevention yes\nOnAccessExcludeUname clamav\nOnAccessMaxFileSize 25M\nOnAccessMaxThreads 4\nOnAccessCurlTimeout 10000\nOnAccessDenyOnError no\n"
+      "content": "# Managed by `ziroctl plugin enable clamav-onaccess`. clamonacc asks clamd (local socket) about every\n# open in the watched paths and denies the open when the file is infected.\nLocalSocket /run/clamav/clamd.sock\n# Must match clamd.conf: clamonacc never watches clamd's own temp directory\nTemporaryDirectory /var/lib/clamav/tmp\nOnAccessPrevention yes\nOnAccessExcludeUname clamav\nOnAccessMaxFileSize 25M\nOnAccessMaxThreads 2\nOnAccessCurlTimeout 10000\nOnAccessDenyOnError no\n"
     },
     {
       "path": "/etc/clamav/onaccess-paths",
@@ -27,7 +27,10 @@
       "exec": "/usr/sbin/clamonacc",
       "args": "--foreground --fdpass --wait --config-file=/etc/clamav/clamonacc.conf --watch-list=/etc/clamav/onaccess-paths --log=/var/log/clamav/clamonacc.log",
       "pidfile": "/run/ziro-clamonacc.pid",
-      "logfile": "/var/log/clamonacc.log"
+      "logfile": "/var/log/clamonacc.log",
+      "resources": {
+        "memory": "256Mi"
+      }
     }
   ],
   "health": {

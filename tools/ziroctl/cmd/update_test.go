@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,5 +59,26 @@ func TestInstallTool(t *testing.T) {
 	}
 	if !(UpdateCheck{Current: "1.0.16", Latest: "1.1.0"}).Available() || (UpdateCheck{Current: "v1.1.0", Latest: "1.1.0"}).Available() {
 		t.Error("Available")
+	}
+}
+
+func TestLatestToolsRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/" + upgradeRepo + "/git/matching-refs/tags/tools/v":
+			fmt.Fprint(w, `[{"ref":"refs/tags/tools/v1.0.9"},{"ref":"refs/tags/tools/v1.0.17"},{"ref":"refs/tags/tools/vbad"}]`)
+		case "/repos/" + upgradeRepo + "/releases/tags/tools/v1.0.17":
+			fmt.Fprint(w, `{"tag_name":"tools/v1.0.17","assets":[{"name":"SHA256SUMS"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	old := githubAPI
+	githubAPI = srv.URL
+	defer func() { githubAPI = old }()
+	rel, v, err := latestToolsRelease(context.Background())
+	if err != nil || v != "1.0.17" || rel.TagName != "tools/v1.0.17" || rel.asset("SHA256SUMS") == nil {
+		t.Fatalf("got %v %q %v", rel, v, err)
 	}
 }

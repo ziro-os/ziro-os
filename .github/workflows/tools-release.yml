@@ -4,10 +4,12 @@ name: Tools Release (ziroctl & ziropkg)
 # OS releases. Hosts install them with `ziroctl update`, which accepts a release only if
 # SHA256SUMS carries a valid signature from the Ziro release key (secret ZIRO_RELEASE_KEY,
 # ed25519; public half in tools/ziroctl/cmd/update.go) and every binary matches it.
+# Every OS release tag (vX.Y.Z) also publishes tools/vX.Y.Z, so the stream never falls behind.
 on:
   push:
     tags:
       - 'tools/v*'
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:

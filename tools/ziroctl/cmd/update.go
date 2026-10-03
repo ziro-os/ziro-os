@@ -10,8 +10,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,47 +83,33 @@ func readUpdateCheck() UpdateCheck {
 	return u
 }
 
-// toolsRelease is the newest tools release this OS can run.
+// latestToolsRelease finds the newest tools/vX.Y.Z tag (from the tag refs, so OS releases never
+// crowd it out of a page of releases) and fetches its release.
 func latestToolsRelease(ctx context.Context) (*ghRelease, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPI+"/repos/"+upgradeRepo+"/releases?per_page=50", nil)
-	if err != nil {
+	var refs []struct {
+		Ref string `json:"ref"`
+	}
+	if err := getGitHubJSON(ctx, githubAPI+"/repos/"+upgradeRepo+"/git/matching-refs/tags/tools/v", 4<<20, &refs); err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "ziroctl/"+Version)
-	resp, err := upgradeHTTP.Do(req)
+	tag, best := "", ""
+	for _, r := range refs {
+		t := strings.TrimPrefix(r.Ref, "refs/tags/")
+		if m := toolsTagRe.FindStringSubmatch(t); m != nil && (best == "" || compareSemver(m[1], best) > 0) {
+			tag, best = t, m[1]
+		}
+	}
+	if tag == "" {
+		return nil, "", fmt.Errorf("no signed tools release found for %s; ziroctl upgrade brings newer tools with the OS", upgradeRepo)
+	}
+	rel, err := getRelease(ctx, githubAPI+"/repos/"+upgradeRepo+"/releases/tags/"+tag)
 	if err != nil {
-		return nil, "", fmt.Errorf("query releases: %w", err)
+		return nil, "", fmt.Errorf("%s: %w", tag, err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("query releases: HTTP %d", resp.StatusCode)
+	if rel.TagName != tag || rel.Prerelease {
+		return nil, "", fmt.Errorf("%s is not a published release", tag)
 	}
-	var rels []struct {
-		ghRelease
-		Draft      bool `json:"draft"`
-		Prerelease bool `json:"prerelease"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&rels); err != nil {
-		return nil, "", fmt.Errorf("decode releases: %w", err)
-	}
-	var best *ghRelease
-	bestV := ""
-	for i := range rels {
-		m := toolsTagRe.FindStringSubmatch(rels[i].TagName)
-		if m == nil || rels[i].Draft || rels[i].Prerelease {
-			continue
-		}
-		if bestV == "" || compareSemver(m[1], bestV) > 0 {
-			best, bestV = &rels[i].ghRelease, m[1]
-		}
-	}
-	if best == nil {
-		return nil, "", errors.New("no tools release published yet")
-	}
-	return best, bestV, nil
+	return rel, best, nil
 }
 
 // fetchToolsRelease returns the release's binaries for this host, downloaded and verified into

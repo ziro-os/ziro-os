@@ -32,6 +32,24 @@ func TestEmbeddedManifestsValid(t *testing.T) {
 			t.Fatalf("%s opens a TCP listener", f.Path)
 		}
 	}
+	// The signature database is ~1 GB: every ClamAV daemon is memory-capped, and neither
+	// clamd's reload nor freshclam may load a second copy.
+	for _, n := range []string{"clamav", "clamav-onaccess"} {
+		for _, s := range all[n].Services {
+			if s.Resources.MemoryBytes() <= 0 {
+				t.Errorf("%s: service %s has no memory limit", n, s.Name)
+			}
+		}
+	}
+	conf := ""
+	for _, f := range all["clamav"].Files {
+		conf += f.Content
+	}
+	for _, want := range []string{"ConcurrentDatabaseReload no", "TestDatabases no"} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("clamav config lacks %q", want)
+		}
+	}
 }
 
 func TestManifestValidationRejectsUnsafe(t *testing.T) {
