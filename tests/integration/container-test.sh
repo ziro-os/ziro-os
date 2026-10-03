@@ -53,7 +53,7 @@ echo "✓ Container ran successfully"
 echo "Testing ziroctl..."
 if command -v ziroctl > /dev/null; then
     echo "✓ ziroctl available"
-    ziroctl system status
+    ziroctl motd
     ziroctl container images
 else
     echo "⚠️  ziroctl not in PATH"

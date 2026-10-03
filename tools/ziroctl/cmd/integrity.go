@@ -268,8 +268,9 @@ func runIntegrityCheck() (integrityReport, error) {
 var integrityQuiet bool
 
 var securityIntegrityCmd = &cobra.Command{
-	Use:   "integrity",
-	Short: "Check that everything the host ran matches the OS image or a signed package (IMA)",
+	Use:     "integrity",
+	Short:   "Check that everything run matches a signed hash",
+	Example: `  ziroctl security integrity`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		rep, err := runIntegrityCheck()
 		if err != nil {

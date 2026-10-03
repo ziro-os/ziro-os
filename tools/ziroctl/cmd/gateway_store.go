@@ -638,7 +638,10 @@ func gatewayStatus(s routeStore) (any, error) {
 var gatewayCmd = &cobra.Command{
 	Use:     "gateway",
 	Aliases: []string{"zirogate"},
-	Short:   "zirogate: L4/L7 gateway (TLS, HTTP/2+3, routing, load balancing) for apps and services",
+	Short:   "Route HTTPS and TCP traffic to apps and services",
+	Example: `  ziroctl gateway expose web --host shop.example.com
+  ziroctl gateway route ls
+  ziroctl gateway status`,
 	Long: `Expose apps and services through the gateway. On a cluster master, routes are served by the
 gateway nodes; on a standalone host, by this host.
 
@@ -777,13 +780,16 @@ func routeFromFlags(name string, f routeFlags) (GatewayRoute, error) {
 	return r, nil
 }
 
-var gatewayRouteCmd = &cobra.Command{Use: "route", Short: "Manage gateway routes"}
+var gatewayRouteCmd = &cobra.Command{Use: "route", Short: "Manage gateway routes", Example: "  ziroctl gateway route add shop --host shop.example.com --app web\n  ziroctl gateway route ls"}
 
 var gatewayRouteAddCmd = &cobra.Command{
 	Use:     "add <name>",
 	Aliases: []string{"set"},
 	Short:   "Create or replace a route",
-	Args:    cobra.ExactArgs(1),
+	Example: `  ziroctl gateway route add shop --host shop.example.com --app web
+  ziroctl gateway route add api --host example.com --path /api --strip-prefix /api --app api --rate 50
+  ziroctl gateway route add pg --tcp --listen 5432 --to 10.201.0.12:5432 --allow-cidr 10.0.0.0/8`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := gatewayStore()
 		if err != nil {
@@ -822,7 +828,7 @@ var (
 
 var gatewayExposeCmd = &cobra.Command{
 	Use:   "expose <app|ip:port> --host <host>",
-	Short: "Publish an app or a service on a hostname in one command (HTTPS by default)",
+	Short: "Publish an app on a hostname over HTTPS",
 	Example: `  ziroctl gateway expose web --host www.example.com
   ziroctl gateway expose 10.0.0.7:8080 --host grafana.internal --tls internal`,
 	Args: cobra.ExactArgs(1),
@@ -869,7 +875,7 @@ func exposeRoute(target, host, path, tlsMode, name string) (GatewayRoute, error)
 }
 
 var gatewayRouteRmCmd = &cobra.Command{
-	Use: "rm <name>", Short: "Remove a route", Args: cobra.ExactArgs(1),
+	Use: "rm <name>", Short: "Remove a route", Example: "  ziroctl gateway route rm shop", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := gatewayStore()
 		if err != nil {
@@ -884,7 +890,7 @@ var gatewayRouteRmCmd = &cobra.Command{
 }
 
 var gatewayRouteLsCmd = &cobra.Command{
-	Use: "ls", Aliases: []string{"list"}, Short: "List routes with their resolved upstreams",
+	Use: "ls", Aliases: []string{"list"}, Short: "List routes and their upstreams", Example: "  ziroctl gateway route ls",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := gatewayStore()
 		if err != nil {
@@ -913,8 +919,9 @@ var gatewayRouteLsCmd = &cobra.Command{
 }
 
 var gatewayStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Upstream health, active connections and requests per route",
+	Use:     "status",
+	Short:   "Show upstream health and traffic per route",
+	Example: `  ziroctl gateway status`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := gatewayStore()
 		if err != nil {
@@ -949,12 +956,12 @@ var gatewayStatusCmd = &cobra.Command{
 	},
 }
 
-var gatewayCertCmd = &cobra.Command{Use: "cert", Short: "Uploaded TLS certificates (for --tls cert:<name>)"}
+var gatewayCertCmd = &cobra.Command{Use: "cert", Short: "Manage uploaded TLS certificates", Example: "  ziroctl gateway cert add wildcard --cert fullchain.pem --key privkey.pem\n  ziroctl gateway cert ls"}
 
 var certFile, keyFile string
 
 var gatewayCertAddCmd = &cobra.Command{
-	Use: "add <name> --cert chain.pem --key key.pem", Short: "Upload a certificate (wildcards, private CAs)", Args: cobra.ExactArgs(1),
+	Use: "add <name> --cert chain.pem --key key.pem", Short: "Upload a certificate and its key", Example: "  ziroctl gateway cert add wildcard --cert fullchain.pem --key privkey.pem", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validName(args[0]); err != nil {
 			return err
@@ -984,7 +991,7 @@ var gatewayCertAddCmd = &cobra.Command{
 }
 
 var gatewayCertRmCmd = &cobra.Command{
-	Use: "rm <name>", Short: "Remove a certificate (refused while a route uses it)", Args: cobra.ExactArgs(1),
+	Use: "rm <name>", Short: "Remove a certificate no route uses", Example: "  ziroctl gateway cert rm wildcard", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := gatewayStore()
 		if err != nil {
@@ -995,7 +1002,7 @@ var gatewayCertRmCmd = &cobra.Command{
 }
 
 var gatewayCertLsCmd = &cobra.Command{
-	Use: "ls", Short: "List uploaded certificates",
+	Use: "ls", Short: "List uploaded certificates", Example: "  ziroctl gateway cert ls",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := gatewayStore()
 		if err != nil {
@@ -1014,8 +1021,9 @@ var gatewayCertLsCmd = &cobra.Command{
 }
 
 var gatewayCACmd = &cobra.Command{
-	Use:   "ca",
-	Short: "Print the internal CA certificate (trust it on clients of --tls internal routes)",
+	Use:     "ca",
+	Short:   "Print the internal CA certificate",
+	Example: `  ziroctl gateway ca > ziro-gateway-ca.pem`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := gatewayStore()
 		if err != nil {
@@ -1030,14 +1038,14 @@ var gatewayCACmd = &cobra.Command{
 	},
 }
 
-var gatewayNodeCmd = &cobra.Command{Use: "node", Short: "Choose which cluster nodes run the gateway (master only)"}
+var gatewayNodeCmd = &cobra.Command{Use: "node", Short: "Choose which nodes run the gateway", Example: "  ziroctl gateway node enable worker-1\n  ziroctl gateway node disable worker-2"}
 
 func gatewayNodeSet(on bool) *cobra.Command {
-	use, verb := "disable <node>", "Stop running the gateway on a node"
+	use, verb, ex := "disable <node>", "Stop running the gateway on a node", "  ziroctl gateway node disable worker-2"
 	if on {
-		use, verb = "enable <node>", "Run the gateway on a node (serves tcp/80 and tcp+udp/443)"
+		use, verb, ex = "enable <node>", "Run the gateway on a node, serving ports 80 and 443", "  ziroctl gateway node enable worker-1"
 	}
-	return &cobra.Command{Use: use, Short: verb, Args: cobra.ExactArgs(1),
+	return &cobra.Command{Use: use, Short: verb, Example: ex, Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return nodeOp(args[0], func(st *ClusterState, n *ClusterNode) error {
 				n.Gateway = on
@@ -1060,8 +1068,9 @@ func validateACME(a GatewayACME) error {
 }
 
 var gatewayACMECmd = &cobra.Command{
-	Use:   "acme",
-	Short: "Set the ACME account email and optional directory URL (default Let's Encrypt)",
+	Use:     "acme",
+	Short:   "Set the ACME account email and directory",
+	Example: `  ziroctl gateway acme --email ops@example.com`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateACME(gwACMEFlag); err != nil {
 			return err

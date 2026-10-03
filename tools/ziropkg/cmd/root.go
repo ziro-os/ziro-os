@@ -14,10 +14,9 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "ziropkg",
-	Short: "ziropkg - Ziro-OS Package Manager",
-	Long: `ziropkg is the official package management utility for Ziro-OS.
-It installs, updates, and manages additional packages and utilities (e.g., curl, git, htop)
-with minimal dependencies and fast verification.`,
+	Short: "Install extra packages on Ziro OS",
+	Long: `ziropkg installs packages from the Alpine repositories on top of the Ziro OS image.
+Installed packages are reinstalled after an OS upgrade.`,
 }
 
 func Execute() {

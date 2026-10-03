@@ -700,7 +700,10 @@ var (
 var appsCmd = &cobra.Command{
 	Use:     "apps",
 	Aliases: []string{"app"},
-	Short:   "One-command app deployments from signed catalogs (postgres, mysql, mysql-cluster, ...)",
+	Short:   "Deploy apps from signed catalogs",
+	Example: `  ziroctl apps search postgres
+  ziroctl apps deploy postgres:17
+  ziroctl apps credentials postgres`,
 }
 
 func appCatalogList(q string) []appCatalogInfo {
@@ -723,7 +726,9 @@ func appCatalogList(q string) []appCatalogInfo {
 var appsSearchCmd = &cobra.Command{
 	Use:   "search [query]",
 	Short: "Search the app catalogs",
-	Args:  cobra.MaximumNArgs(1),
+	Example: `  ziroctl apps search
+  ziroctl apps search mysql`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		refreshStaleCatalogs("app")
 		q := ""
@@ -746,9 +751,10 @@ var appsSearchCmd = &cobra.Command{
 }
 
 var appsInfoCmd = &cobra.Command{
-	Use:   "info <app>",
-	Short: "Show an app definition: versions, images, settings, what it keeps",
-	Args:  cobra.ExactArgs(1),
+	Use:     "info <app>",
+	Short:   "Show an app's versions, images and settings",
+	Example: `  ziroctl apps info postgres`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		d, ok := loadAppDefs()[args[0]]
 		if !ok {
@@ -785,7 +791,7 @@ var appsFile string
 
 var appsDeployCmd = &cobra.Command{
 	Use:   "deploy <app>[:<version>] | -f app.json [version]",
-	Short: "Deploy an app with generated credentials and persistent data (redeploy updates it)",
+	Short: "Deploy or update an app with its data and credentials",
 	Example: `  ziroctl apps deploy postgres                 # latest pinned version, on 127.0.0.1:5432
   ziroctl apps deploy postgres:16 --name db2 --publish 5433
   ziroctl apps deploy mysql:8.4
@@ -874,6 +880,7 @@ var appsListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls", "status"},
 	Short:   "List deployed apps and whether they run",
+	Example: `  ziroctl apps list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		apps := appsStatus()
 		return printResult(apps, func() {
@@ -890,9 +897,10 @@ var appsListCmd = &cobra.Command{
 }
 
 var appsCredentialsCmd = &cobra.Command{
-	Use:   "credentials <name>",
-	Short: "Show how to connect (includes generated passwords)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "credentials <name>",
+	Short:   "Show connection details and generated passwords",
+	Example: `  ziroctl apps credentials postgres`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		in, err := loadAppInstance(args[0])
 		if err != nil {
@@ -916,9 +924,10 @@ var appsCredentialsCmd = &cobra.Command{
 }
 
 var appsPurgeCmd = &cobra.Command{
-	Use:   "purge <name>",
-	Short: "Remove an app with its data and credentials, or delete what a removed app left behind",
-	Args:  cobra.ExactArgs(1),
+	Use:     "purge <name>",
+	Short:   "Remove an app with its data and credentials",
+	Example: `  ziroctl apps purge postgres`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return purgeLeftovers(args[0])
 	},
@@ -926,8 +935,10 @@ var appsPurgeCmd = &cobra.Command{
 
 var appsRmCmd = &cobra.Command{
 	Use:   "rm <name>",
-	Short: "Remove a deployed app (data and credentials are kept unless --purge)",
-	Args:  cobra.ExactArgs(1),
+	Short: "Remove an app, keeping its data unless --purge",
+	Example: `  ziroctl apps rm postgres
+  ziroctl apps rm postgres --purge`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return removeAppInstance(args[0], appsPurge)
 	},

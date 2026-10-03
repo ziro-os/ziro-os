@@ -143,12 +143,16 @@ var defaultServices = []ServiceDef{
 var serviceCmd = &cobra.Command{
 	Use:     "service",
 	Aliases: []string{"systemctl", "svc"},
-	Short:   "Manage Ziro-OS system services and background daemons",
+	Short:   "Manage system services",
+	Example: `  ziroctl service list
+  ziroctl service restart sshd
+  ziroctl service logs containerd`,
 }
 
 var serviceListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all system services, state, and enabled status",
+	Use:     "list",
+	Short:   "List services and their state",
+	Example: `  ziroctl service list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		services := listAllServices()
 		if jsonOutput {
@@ -172,9 +176,10 @@ var serviceListCmd = &cobra.Command{
 }
 
 var serviceStatusCmd = &cobra.Command{
-	Use:   "status <service>",
-	Short: "Show detailed status and recent logs for a service",
-	Args:  cobra.ExactArgs(1),
+	Use:     "status <service>",
+	Short:   "Show a service's state and recent log",
+	Example: `  ziroctl service status containerd`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		s, err := getServiceStatus(name)
@@ -200,9 +205,10 @@ var serviceStatusCmd = &cobra.Command{
 }
 
 var serviceStartCmd = &cobra.Command{
-	Use:   "start <service>",
-	Short: "Start a system service",
-	Args:  cobra.ExactArgs(1),
+	Use:     "start <service>",
+	Short:   "Start a service",
+	Example: `  ziroctl service start ziro-api`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := startService(name); err != nil {
@@ -214,9 +220,10 @@ var serviceStartCmd = &cobra.Command{
 }
 
 var serviceStopCmd = &cobra.Command{
-	Use:   "stop <service>",
-	Short: "Stop a running system service",
-	Args:  cobra.ExactArgs(1),
+	Use:     "stop <service>",
+	Short:   "Stop a service",
+	Example: `  ziroctl service stop ziro-api`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := stopService(name); err != nil {
@@ -228,9 +235,10 @@ var serviceStopCmd = &cobra.Command{
 }
 
 var serviceRestartCmd = &cobra.Command{
-	Use:   "restart <service>",
-	Short: "Restart a system service",
-	Args:  cobra.ExactArgs(1),
+	Use:     "restart <service>",
+	Short:   "Restart a service",
+	Example: `  ziroctl service restart sshd`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := restartService(name); err != nil {
@@ -242,9 +250,10 @@ var serviceRestartCmd = &cobra.Command{
 }
 
 var serviceEnableCmd = &cobra.Command{
-	Use:   "enable <service>",
-	Short: "Enable a system service to start automatically on boot",
-	Args:  cobra.ExactArgs(1),
+	Use:     "enable <service>",
+	Short:   "Start a service at boot",
+	Example: `  ziroctl service enable ziro-api`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := enableService(name); err != nil {
@@ -256,9 +265,10 @@ var serviceEnableCmd = &cobra.Command{
 }
 
 var serviceDisableCmd = &cobra.Command{
-	Use:   "disable <service>",
-	Short: "Disable a system service from starting on boot",
-	Args:  cobra.ExactArgs(1),
+	Use:     "disable <service>",
+	Short:   "Stop a service from starting at boot",
+	Example: `  ziroctl service disable ziro-api`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := disableService(name); err != nil {
@@ -270,9 +280,10 @@ var serviceDisableCmd = &cobra.Command{
 }
 
 var serviceLogsCmd = &cobra.Command{
-	Use:   "logs <service>",
-	Short: "View recent log output from a system service",
-	Args:  cobra.ExactArgs(1),
+	Use:     "logs <service>",
+	Short:   "Show a service's recent log",
+	Example: `  ziroctl service logs sshd`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		s, err := getServiceStatus(name)

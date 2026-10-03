@@ -1,6 +1,6 @@
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/opt/cni/bin
 export HOME=/root
-export TERM=linux
+export TERM="${TERM:-linux}" # keep the ssh client's terminal type (colors, glyphs)
 export PS1='\u@\h:\w\$ '
 
 # Display dynamic cloud status banner once per login session

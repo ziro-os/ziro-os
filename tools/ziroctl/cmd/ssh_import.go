@@ -206,7 +206,7 @@ var sshImportSync bool
 
 var sshKeyImportCmd = &cobra.Command{
 	Use:   "import <gh:user|gl:user|lp:user>...",
-	Short: "Import a user's public SSH keys from GitHub, GitLab or Launchpad",
+	Short: "Import public keys from GitHub, GitLab or Launchpad",
 	Example: `  ziroctl ssh key import gh:octocat
   ziroctl ssh key import gh:alice gl:bob
   ziroctl ssh key import --sync gh:alice      # also drop keys alice removed upstream`,
@@ -235,8 +235,9 @@ var sshKeyImportCmd = &cobra.Command{
 var sshKeyRemoveSource string
 
 var sshKeyRemoveCmd = &cobra.Command{
-	Use:   "remove --source <gh:user>",
-	Short: "Remove every key imported from a source",
+	Use:     "remove --source <gh:user>",
+	Short:   "Remove the keys imported from a source",
+	Example: `  ziroctl ssh key remove --source gh:octocat`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if sshKeyRemoveSource == "" {
 			return errors.New("--source is required (e.g. --source gh:alice)")

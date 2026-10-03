@@ -289,11 +289,11 @@ var (
 	storageNode, storageStandby, storageTo, storageOwner string
 )
 
-var clusterStorageCmd = &cobra.Command{Use: "storage", Short: "Cluster NFS shares (served over the WireGuard mesh)"}
+var clusterStorageCmd = &cobra.Command{Use: "storage", Short: "Manage NFS shares served over the mesh", Example: "  ziroctl cluster storage add uploads --node worker-1\n  ziroctl cluster storage ls"}
 
 var clusterStorageAddCmd = &cobra.Command{
 	Use:     "add <share>",
-	Short:   "Create a share on a node (apps use it with --volume <share>:/path)",
+	Short:   "Create a share on a node",
 	Example: `  ziroctl cluster storage add media --node storage-1 --standby storage-2`,
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -328,9 +328,10 @@ var clusterStorageAddCmd = &cobra.Command{
 }
 
 var clusterStorageRmCmd = &cobra.Command{
-	Use:   "rm <share>",
-	Short: "Remove a share (refused while an app uses it; the data stays on the node)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "rm <share>",
+	Short:   "Remove a share no app uses",
+	Example: `  ziroctl cluster storage rm uploads`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -353,7 +354,7 @@ var clusterStorageRmCmd = &cobra.Command{
 }
 
 var clusterStorageLsCmd = &cobra.Command{
-	Use: "ls", Short: "List shares, their node and consumers",
+	Use: "ls", Short: "List shares, their node and consumers", Example: "  ziroctl cluster storage ls",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -387,9 +388,10 @@ var clusterStorageLsCmd = &cobra.Command{
 }
 
 var clusterStorageFailoverCmd = &cobra.Command{
-	Use:   "failover <share>",
-	Short: "Serve a share from another node (its data must be there) and restart its consumers",
-	Args:  cobra.ExactArgs(1),
+	Use:     "failover <share>",
+	Short:   "Serve a share from another node",
+	Example: `  ziroctl cluster storage failover uploads --to worker-2`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err

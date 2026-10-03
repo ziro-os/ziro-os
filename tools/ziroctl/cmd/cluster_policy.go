@@ -267,7 +267,9 @@ func removeClusterPolicy() {
 
 var clusterPolicyCmd = &cobra.Command{
 	Use:   "policy",
-	Short: "App network policy: who may reach each app over the mesh (master only)",
+	Short: "Control which apps may reach each other",
+	Example: `  ziroctl cluster policy ls
+  ziroctl cluster policy default deny`,
 	Long: `With the default "deny" (new clusters), an app's port is reachable over the mesh only from
 nodes running an app listed in its allow_from:
 
@@ -279,8 +281,10 @@ Public (non --mesh-only) ports stay governed by the host firewall.`,
 }
 
 var clusterPolicyDefaultCmd = &cobra.Command{
-	Use:       "default deny|allow",
-	Short:     "Set the cluster-wide default for mesh traffic to app ports",
+	Use:   "default deny|allow",
+	Short: "Set the default for mesh traffic to app ports",
+	Example: `  ziroctl cluster policy default deny
+  ziroctl cluster policy default allow`,
 	Args:      cobra.ExactArgs(1),
 	ValidArgs: []string{"deny", "allow"},
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -311,8 +315,9 @@ type appPolicyView struct {
 }
 
 var clusterPolicyLsCmd = &cobra.Command{
-	Use:   "ls",
-	Short: "Show the effective policy: each app, who may reach it, and the admitted node IPs",
+	Use:     "ls",
+	Short:   "Show who may reach each app",
+	Example: `  ziroctl cluster policy ls`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err

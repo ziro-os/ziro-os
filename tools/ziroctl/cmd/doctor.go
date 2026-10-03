@@ -23,7 +23,9 @@ type doctorCheck struct {
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Run comprehensive system and cloud-native health diagnostics",
+	Short: "Check the host for problems",
+	Example: `  ziroctl doctor
+  ziroctl doctor --json`,
 	Long: `ziroctl doctor runs an end-to-end audit of kernel modules, storage drivers,
 containerd runtime sockets, cgroups v2, networking, and cloud metadata.`,
 	RunE: func(cmd *cobra.Command, args []string) error {

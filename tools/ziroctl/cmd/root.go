@@ -15,10 +15,13 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "ziroctl",
-	Short: "ziroctl - Ziro-OS Container Host Management CLI",
-	Long: `ziroctl is the official control utility for Ziro-OS.
-It manages container workloads, inspects system and cgroup health,
-monitors containerd status, and enforces security configurations.`,
+	Short: "Manage a Ziro OS host",
+	Long: `ziroctl manages a Ziro OS host: containers and apps, networking, security, clusters
+and upgrades. Add --json to any command for machine-readable output.`,
+	Example: `  ziroctl motd
+  ziroctl system top
+  ziroctl apps deploy postgres:17
+  ziroctl firewall allow 443/tcp`,
 	// Errors are printed once by Execute (not twice, and without the usage dump).
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -50,6 +53,6 @@ func printResult(v interface{}, text func()) error {
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output format as JSON")
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Print machine-readable JSON")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 }

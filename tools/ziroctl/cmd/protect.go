@@ -606,12 +606,15 @@ var banFor time.Duration
 
 var securityBansCmd = &cobra.Command{
 	Use:   "bans",
-	Short: "Show and manage banned IPs (SSH brute force, port scans, manual)",
+	Short: "Show and manage banned IPs",
+	Example: `  ziroctl security bans list
+  ziroctl security bans ban 203.0.113.9 --for 24h`,
 }
 
 var bansListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List banned IPs and their remaining time",
+	Use:     "list",
+	Short:   "List banned IPs and their remaining time",
+	Example: `  ziroctl security bans list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		bans, err := listBans()
 		if err != nil {
@@ -643,7 +646,9 @@ func parseBanIP(s string) (netip.Addr, error) {
 var bansBanCmd = &cobra.Command{
 	Use:   "ban <ip>",
 	Short: "Ban an IP now",
-	Args:  cobra.ExactArgs(1),
+	Example: `  ziroctl security bans ban 203.0.113.9
+  ziroctl security bans ban 203.0.113.9 --for 24h`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ip, err := parseBanIP(args[0])
 		if err != nil {
@@ -662,9 +667,10 @@ var bansBanCmd = &cobra.Command{
 }
 
 var bansUnbanCmd = &cobra.Command{
-	Use:   "unban <ip>",
-	Short: "Lift a ban",
-	Args:  cobra.ExactArgs(1),
+	Use:     "unban <ip>",
+	Short:   "Lift a ban",
+	Example: `  ziroctl security bans unban 203.0.113.9`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ip, err := parseBanIP(args[0])
 		if err != nil {
@@ -680,12 +686,15 @@ var bansUnbanCmd = &cobra.Command{
 
 var securityProtectCmd = &cobra.Command{
 	Use:   "protect",
-	Short: "Flood, port-scan and SSH brute-force protection (Ziro Guard)",
+	Short: "Configure flood, port-scan and SSH brute-force guard",
+	Example: `  ziroctl security protect status
+  ziroctl security protect allow 198.51.100.0/24`,
 }
 
 var protectStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show protection settings and state",
+	Use:     "status",
+	Short:   "Show guard settings and state",
+	Example: `  ziroctl security protect status`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fw := loadFirewallConfig()
 		g := fw.Guard.withDefaults()
@@ -710,7 +719,7 @@ var guardSet GuardConfig
 
 var protectSetCmd = &cobra.Command{
 	Use:   "set",
-	Short: "Tune protection thresholds",
+	Short: "Tune guard thresholds",
 	Example: `  ziroctl security protect set --ssh-max-failures 3 --ssh-ban 2h
   ziroctl security protect set --syn-rate 500 --conn-limit 1024`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -764,9 +773,10 @@ func updateGuard(edit func(*GuardConfig)) error {
 }
 
 var protectAllowCmd = &cobra.Command{
-	Use:   "allow <cidr>",
-	Short: "Never ban or rate-limit a network (e.g. your office or monitoring)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "allow <cidr>",
+	Short:   "Never ban or rate-limit a network",
+	Example: `  ziroctl security protect allow 198.51.100.0/24`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := netip.ParsePrefix(args[0])
 		if err != nil {
@@ -789,9 +799,10 @@ var protectAllowCmd = &cobra.Command{
 }
 
 var protectDisallowCmd = &cobra.Command{
-	Use:   "disallow <cidr>",
-	Short: "Remove a network from the protection allowlist",
-	Args:  cobra.ExactArgs(1),
+	Use:     "disallow <cidr>",
+	Short:   "Remove a network from the guard allowlist",
+	Example: `  ziroctl security protect disallow 198.51.100.0/24`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return updateGuard(func(g *GuardConfig) {
 			kept := g.Allow[:0]
@@ -806,16 +817,18 @@ var protectDisallowCmd = &cobra.Command{
 }
 
 var protectEnableCmd = &cobra.Command{
-	Use:   "enable",
-	Short: "Enable Ziro Guard (default)",
+	Use:     "enable",
+	Short:   "Turn the guard on",
+	Example: `  ziroctl security protect enable`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return updateGuard(func(g *GuardConfig) { g.Disabled = false })
 	},
 }
 
 var protectDisableCmd = &cobra.Command{
-	Use:   "disable",
-	Short: "Disable Ziro Guard (removes bans and flood limits)",
+	Use:     "disable",
+	Short:   "Turn the guard off and lift its bans",
+	Example: `  ziroctl security protect disable`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return updateGuard(func(g *GuardConfig) { g.Disabled = true })
 	},

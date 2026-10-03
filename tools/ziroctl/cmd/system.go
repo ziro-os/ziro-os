@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -24,38 +23,10 @@ type SystemStatus struct {
 
 var systemCmd = &cobra.Command{
 	Use:   "system",
-	Short: "System inspection and diagnostics",
-}
-
-var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Display Ziro-OS host status and services",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		status := inspectSystem()
-		if jsonOutput {
-			data, _ := json.MarshalIndent(status, "", "  ")
-			fmt.Println(string(data))
-			return nil
-		}
-
-		fmt.Println("=== Ziro-OS Host Status ===")
-		fmt.Printf("OS:               %s (%s)\n", status.OSName, status.OSVersion)
-		fmt.Printf("Kernel:           %s\n", status.KernelVersion)
-		if status.ContainerdOK {
-			fmt.Println("containerd:       [RUNNING] (/run/containerd/containerd.sock)")
-		} else {
-			fmt.Println("containerd:       [STOPPED] (socket not reachable)")
-		}
-		if status.CgroupsV2 {
-			fmt.Println("cgroups:          [ENABLED] (cgroup2 mounted)")
-		} else {
-			fmt.Println("cgroups:          [DISABLED / LEGACY]")
-		}
-		if status.TotalMemMB > 0 {
-			fmt.Printf("Memory:           %d MB used / %d MB total\n", status.TotalMemMB-status.FreeMemMB, status.TotalMemMB)
-		}
-		return nil
-	},
+	Short: "Inspect and maintain the host",
+	Example: `  ziroctl system top
+  ziroctl system df
+  ziroctl system prune --dry-run`,
 }
 
 func inspectSystem() SystemStatus {
@@ -103,8 +74,9 @@ func inspectSystem() SystemStatus {
 }
 
 var rebootCmd = &cobra.Command{
-	Use:   "reboot",
-	Short: "Cleanly sync filesystems and reboot the host system",
+	Use:     "reboot",
+	Short:   "Sync filesystems and reboot",
+	Example: `  ziroctl system reboot`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Syncing filesystems and rebooting Ziro-OS host...")
 		_ = exec.Command("sync").Run()
@@ -120,7 +92,8 @@ var rebootCmd = &cobra.Command{
 var poweroffCmd = &cobra.Command{
 	Use:     "poweroff",
 	Aliases: []string{"shutdown", "halt"},
-	Short:   "Cleanly sync filesystems and power off the host system",
+	Short:   "Sync filesystems and power off",
+	Example: `  ziroctl system poweroff`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Syncing filesystems and powering off Ziro-OS host...")
 		_ = exec.Command("sync").Run()
@@ -134,7 +107,6 @@ var poweroffCmd = &cobra.Command{
 }
 
 func init() {
-	systemCmd.AddCommand(statusCmd)
 	systemCmd.AddCommand(rebootCmd)
 	systemCmd.AddCommand(poweroffCmd)
 	rootCmd.AddCommand(systemCmd)

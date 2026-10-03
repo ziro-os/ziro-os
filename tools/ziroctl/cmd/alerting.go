@@ -423,12 +423,14 @@ var (
 
 var securityAlertingCmd = &cobra.Command{
 	Use:   "alerting",
-	Short: "Push security alerts to webhooks (signed with HMAC-SHA256)",
+	Short: "Send security alerts to webhooks",
+	Example: `  ziroctl security alerting add ops --url https://hooks.slack.com/services/T000/B000/XXX --format slack
+  ziroctl security alerting test`,
 }
 
 var alertingAddCmd = &cobra.Command{
 	Use:   "add <name>",
-	Short: "Add a webhook endpoint (prints its signing secret once)",
+	Short: "Add a signed webhook endpoint",
 	Example: `  ziroctl security alerting add soc --url https://hooks.example.com/ziro --min-severity high
   ziroctl security alerting add chat --url https://hooks.slack.com/services/... --format slack --events ban,threat`,
 	Args: cobra.ExactArgs(1),
@@ -511,8 +513,9 @@ func publicEndpoints(cfg AlertConfig) []AlertEndpoint {
 }
 
 var alertingListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List alert endpoints and the delivery queue",
+	Use:     "list",
+	Short:   "List alert endpoints and queued deliveries",
+	Example: `  ziroctl security alerting list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadAlertConfig()
 		if err != nil {
@@ -535,9 +538,10 @@ var alertingListCmd = &cobra.Command{
 }
 
 var alertingRemoveCmd = &cobra.Command{
-	Use:   "remove <name>",
-	Short: "Remove an alert endpoint",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <name>",
+	Short:   "Remove an alert endpoint",
+	Example: `  ziroctl security alerting remove ops`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := removeAlertEndpoint(args[0]); err != nil {
 			return err
@@ -549,8 +553,10 @@ var alertingRemoveCmd = &cobra.Command{
 
 var alertingTestCmd = &cobra.Command{
 	Use:   "test [name]",
-	Short: "Send a signed test alert now and report the result",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Send a test alert and show the result",
+	Example: `  ziroctl security alerting test
+  ziroctl security alerting test ops`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return testAlertEndpoints(args, os.Stdout)
 	},

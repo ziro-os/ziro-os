@@ -113,12 +113,17 @@ var (
 var backupCmd = &cobra.Command{
 	Use:     "backup",
 	Aliases: []string{"snapshot"},
-	Short:   "Create and restore Ziro-OS host and cluster configuration backups",
+	Short:   "Back up and restore host and cluster configuration",
+	Example: `  ziroctl backup create
+  ziroctl backup restore /var/backups/ziro/ziro-backup-20261003.tar.gz`,
 }
 
 var backupCreateCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create a compressed (unencrypted, root-only) backup of system configurations and cluster state",
+	Short: "Back up host configuration and cluster state",
+	Example: `  ziroctl backup create
+  ziroctl backup create --output /data/ziro.tar.gz
+  ziroctl backup create --remote ziro_s3:ziro-backups`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if backupRemote != "" {
 			if err := checkRemote(backupRemote); err != nil {
@@ -297,8 +302,9 @@ func validateBackupStaging(f *os.File) error {
 }
 
 var backupListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List existing system backup archives",
+	Use:     "list",
+	Short:   "List backup archives",
+	Example: `  ziroctl backup list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backups := listBackups()
 		return printResult(backups, func() {
@@ -316,8 +322,10 @@ var backupListCmd = &cobra.Command{
 
 var backupRestoreCmd = &cobra.Command{
 	Use:   "restore <backup-file | remote:path/file>",
-	Short: "Restore system configurations from a backup archive",
-	Args:  cobra.ExactArgs(1),
+	Short: "Restore configuration from a backup archive",
+	Example: `  ziroctl backup restore /var/backups/ziro/ziro-backup-20261003.tar.gz
+  ziroctl backup restore ziro_s3:ziro-backups/ziro-backup-20261003.tar.gz`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		archivePath := args[0]
 		if isRemoteRef(archivePath) {

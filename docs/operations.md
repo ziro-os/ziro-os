@@ -8,16 +8,28 @@ reclaiming disk, how it protects itself from running out of memory, and keeping 
 Every login (and the boot console) shows a short summary, from `ziroctl motd`:
 
 ```
- Ziro OS 1.0.17  web-1  installed  Proxmox VE  x86_64  kernel 6.18.54-ziro
- Resources  2 vCPU  load 0.42  memory 2.5 GiB/3.9 GiB (64%)  disk / 41%
- Network    172.26.1.108 (eth0)  mesh 10.200.0.1  pods 10.201.0.1
- Workloads  5 containers  cluster master 3/3 nodes ready  api off
- Attention  memory pressure 12%  ·  clamav killed 2x for memory  ·  ziroctl 1.1.0 available
+  ▀▀█ █ █▀█ █▀█  █▀█ █▀▀   1.0.17
+  █▄▄ █ █▀▄ █▄█  █▄█ ▄▄█   web-1 · Proxmox VE / QEMU KVM · x86_64 · 6.18.54-ziro · up 3d 4h
+
+  CPU       2 vCPU  load 0.42 0.38 0.31
+  Memory    █████████░░░░░  2.5 GiB / 3.9 GiB     64%
+  Disk /    ██████░░░░░░░░  8.1 GiB / 19.0 GiB    41%
+  Network   172.26.1.108 eth0 · mesh 10.200.0.1 · pods 10.201.0.1
+  Workload  5 containers · cluster master 3/3 nodes ready · api off
+
+  ! clamd killed 2x for memory    ziroctl service status clamd
+  ! ziroctl 1.0.18 available      ziroctl update
 ```
 
+- **Terminals:** colors and glyphs follow the terminal. You get brand colors in 24-bit (`COLORTERM=truecolor`),
+  256 or 16 colors, and plain ASCII on serial consoles (`TERM=vt100`/`vt220`/`dumb`) and non-UTF-8 locales.
+  `NO_COLOR` turns colors off.
+- **Live media** shows a `LIVE` tag and points at `ziroctl install`. Installed hosts show no mode label.
+- **Cost:** it starts no processes. The container count comes from the cgroups.
 - **Network** lists each address once. The default-route interface comes first, then other NICs, the cluster mesh
   (`mesh`) and the pod gateway (`pods`). Container interfaces aren't shown.
-- **Attention** appears only when something needs you. It flags:
+- **Attention** (`!` lines) appears only when something needs you, each with the command that deals with it. It
+  flags:
   - memory pressure, or memory almost exhausted
   - a disk 85% or more full
   - a service killed for exceeding its memory limit
@@ -35,19 +47,27 @@ ziroctl system top --once            # one snapshot
 ziroctl system top --json            # for scripts; also GET /api/v1/system/top
 ```
 
-There are two panes:
+There are three panes:
 - **Containers** (`c`): CPU, memory against its limit, network and block I/O rates, and PIDs. It's read straight
   from each container's cgroup, like `docker stats`.
 - **Processes** (`p`): PID, user, CPU, RSS, state, and the service or container each one belongs to.
+- **Network** (`n`, or `--pane network`):
+  - Interface rates (bytes and packets, errors, drops), with a 60-sample rx/tx graph for the primary interface.
+  - Every connection the kernel tracks, with its direction (`in` when the remote end opened it), state and
+    traffic per second. The source is conntrack, so container traffic behind NAT is included.
+    `net.netfilter.nf_conntrack_acct` (set at boot) supplies the byte counters.
+  - The busiest remote peers, and the listening ports with the process behind each.
+  - Without conntrack it lists sockets and their states, with no byte counts.
 
 Keys:
-- `s` cycles the sort (CPU, memory, name).
-- `/` filters.
-- `k` stops the top row, after asking.
+- `tab`, `c`, `p` and `n` switch panes.
+- `s` cycles the sort: CPU, memory or name; in the network pane, rate, total or remote.
+- `/` filters (a name, an IP or a port).
+- `k` stops the top row of the containers or processes pane, after asking.
 - `q` quits.
 
-It reads `/proc` and cgroup files directly; the only subprocess is an occasional name lookup. That keeps it light
-on a busy host.
+It reads `/proc` and cgroup files directly, and only for the pane on screen. One read buffer is reused, and the
+heap is capped at 24 MiB, so it stays light on a busy host.
 
 ## Disk: `system df` and `system prune`
 
@@ -144,8 +164,8 @@ Completions for `ziroctl` are installed in `/usr/share/bash-completion/completio
 programmable completion. Install bash or zsh to use them:
 
 ```sh
-ziroctl pkg install bash bash-completion   # then run bash
+ziropkg install bash bash-completion   # then run bash
 ```
 
-Packages installed with `ziroctl pkg install` are recorded in `/etc/ziro/packages` and reinstalled at boot after
+Packages installed with `ziropkg install` are recorded in `/etc/ziro/packages` and reinstalled at boot after
 an OS upgrade.

@@ -331,14 +331,16 @@ var (
 
 var nfsCmd = &cobra.Command{
 	Use:   "nfs",
-	Short: "NFSv4.2 shares: export directories, mount remote shares",
+	Short: "Share directories and mount shares over NFSv4",
+	Example: `  ziroctl nfs export add /srv/media --clients 192.168.1.0/24
+  ziroctl nfs mount 192.168.1.20:/srv/media /mnt/media`,
 }
 
-var nfsExportCmd = &cobra.Command{Use: "export", Short: "Directories this host shares"}
+var nfsExportCmd = &cobra.Command{Use: "export", Short: "Manage directories this host shares", Example: "  ziroctl nfs export add /srv/media --clients 192.168.1.0/24 --ro\n  ziroctl nfs export remove /srv/media"}
 
 var nfsExportAddCmd = &cobra.Command{
 	Use:     "add <path>",
-	Short:   "Share a directory with client networks (installs the NFS server on first use)",
+	Short:   "Share a directory with client networks",
 	Example: `  ziroctl nfs export add /srv/media --clients 10.0.0.0/24 --ro`,
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -395,9 +397,10 @@ var nfsExportAddCmd = &cobra.Command{
 }
 
 var nfsExportRmCmd = &cobra.Command{
-	Use:   "remove <path>",
-	Short: "Stop sharing a directory (its files stay)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "remove <path>",
+	Short:   "Stop sharing a directory",
+	Example: `  ziroctl nfs export remove /srv/media`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, err := loadNFSConfig()
 		if err != nil {
@@ -424,8 +427,9 @@ var nfsExportRmCmd = &cobra.Command{
 }
 
 var nfsListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List exports and mounts",
+	Use:     "list",
+	Short:   "List exports and mounts",
+	Example: `  ziroctl nfs list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, _ := loadNFSConfig()
 		if jsonOutput {
@@ -522,8 +526,9 @@ func nfsAllExports() []NFSExport {
 }
 
 var nfsClientsCmd = &cobra.Command{
-	Use:   "clients",
-	Short: "Show NFS clients connected to this server, and the exports they may use",
+	Use:     "clients",
+	Short:   "Show connected NFS clients and their exports",
+	Example: `  ziroctl nfs clients`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		clients, err := listNFSClients(nfsAllExports())
 		if err != nil {
@@ -544,7 +549,7 @@ var nfsClientsCmd = &cobra.Command{
 
 var nfsMountCmd = &cobra.Command{
 	Use:     "mount <server>:<path> <target>",
-	Short:   "Mount a remote NFSv4 share (persistent across reboots)",
+	Short:   "Mount a remote share, kept across reboots",
 	Example: `  ziroctl nfs mount 10.0.0.5:/srv/media /mnt/media --ro`,
 	Args:    cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -579,9 +584,10 @@ var nfsMountCmd = &cobra.Command{
 }
 
 var nfsUmountCmd = &cobra.Command{
-	Use:   "umount <target>",
-	Short: "Unmount a share and forget it",
-	Args:  cobra.ExactArgs(1),
+	Use:     "umount <target>",
+	Short:   "Unmount a share and forget it",
+	Example: `  ziroctl nfs umount /mnt/media`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := umountNFS(args[0]); err != nil {
 			return err

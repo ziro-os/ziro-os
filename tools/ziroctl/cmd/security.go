@@ -41,12 +41,17 @@ type SecurityScanReport struct {
 
 var securityCmd = &cobra.Command{
 	Use:   "security",
-	Short: "Security audit, malware/ransomware detection, and cloud hardening controls",
+	Short: "Audit, harden and monitor the host",
+	Example: `  ziroctl security audit
+  ziroctl security scan --av /srv
+  ziroctl security bans list`,
 }
 
 var securityAuditCmd = &cobra.Command{
 	Use:   "audit",
-	Short: "Score the host against CIS-mapped hardening checks",
+	Short: "Score the host against CIS hardening checks",
+	Example: `  ziroctl security audit
+  ziroctl security audit --json`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		checks := hostAudit("")
 		score := auditScore(checks)
@@ -188,7 +193,7 @@ var (
 
 var securityScanCmd = &cobra.Command{
 	Use:   "scan [paths...]",
-	Short: "Perform AI heuristic malware, ransomware, and reverse shell detection (--av: antivirus scan)",
+	Short: "Scan for malware, ransomware and reverse shells",
 	Example: `  ziroctl security scan                 # Sentinel heuristics (processes, canary, file integrity)
   ziroctl security scan --av            # ClamAV scan of /root /home /tmp /var/tmp and volumes
   ziroctl security scan --av /srv/data  # ClamAV scan of specific paths`,
@@ -254,7 +259,9 @@ var sentinelEnforce bool
 
 var securityMonitorCmd = &cobra.Command{
 	Use:   "monitor",
-	Short: "Start continuous Sentinel background threat monitoring daemon",
+	Short: "Run the Sentinel threat monitor in the foreground",
+	Example: `  ziroctl security monitor
+  ziroctl security monitor --enforce`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("🛡️  Ziro Sentinel Continuous Protection Monitor started.")
 		ensureCanary()
@@ -297,8 +304,9 @@ var securityMonitorCmd = &cobra.Command{
 }
 
 var securityHardenCmd = &cobra.Command{
-	Use:   "harden",
-	Short: "Apply cloud security hardening (sysctl, SSH, and file permissions)",
+	Use:     "harden",
+	Short:   "Apply the sysctl, SSH and permission hardening",
+	Example: `  ziroctl security harden`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("==================================================")
 		fmt.Println(" 🛡️  Applying Ziro-OS Cloud Security Hardening")

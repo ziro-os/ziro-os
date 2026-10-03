@@ -165,8 +165,10 @@ var (
 
 var apiTokenCreateCmd = &cobra.Command{
 	Use:   "create <name>",
-	Short: "Create a scoped API token (printed once; only its hash is stored)",
-	Args:  cobra.ExactArgs(1),
+	Short: "Create a scoped API token, printed once",
+	Example: `  ziroctl api token create ci --role operator
+  ziroctl api token create grafana --role viewer --ttl 720h`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		tok, t, err := createAPIToken(args[0], apiTokenRole, apiTokenTTL)
 		if err != nil {
@@ -181,7 +183,7 @@ var apiTokenCreateCmd = &cobra.Command{
 }
 
 var apiTokenLsCmd = &cobra.Command{
-	Use: "ls", Short: "List API tokens (never the tokens themselves)",
+	Use: "ls", Short: "List API tokens without their secrets", Example: "  ziroctl api token ls",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := loadAPITokens(); err != nil {
 			return err
@@ -204,7 +206,7 @@ var apiTokenLsCmd = &cobra.Command{
 }
 
 var apiTokenRevokeCmd = &cobra.Command{
-	Use: "revoke <name>", Short: "Revoke an API token immediately", Args: cobra.ExactArgs(1),
+	Use: "revoke <name>", Short: "Revoke an API token now", Example: "  ziroctl api token revoke ci", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := revokeAPIToken(args[0]); err != nil {
 			return err

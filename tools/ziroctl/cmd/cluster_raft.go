@@ -925,8 +925,9 @@ func socketMutate(fn func(st *ClusterState) error) error {
 // ---- CLI ----
 
 var clusterMembersCmd = &cobra.Command{
-	Use:   "members",
-	Short: "List the control-plane masters (Raft members) and the leader",
+	Use:     "members",
+	Short:   "List the masters and the current leader",
+	Example: `  ziroctl cluster members`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -962,12 +963,13 @@ var clusterMembersCmd = &cobra.Command{
 	},
 }
 
-var clusterMemberCmd = &cobra.Command{Use: "member", Short: "Manage control-plane masters"}
+var clusterMemberCmd = &cobra.Command{Use: "member", Short: "Manage control-plane masters", Example: "  ziroctl cluster member rm master-3"}
 
 var clusterMemberRmCmd = &cobra.Command{
-	Use:   "rm <member>",
-	Short: "Remove a (dead) master from the control plane and revoke its node token",
-	Args:  cobra.ExactArgs(1),
+	Use:     "rm <member>",
+	Short:   "Remove a dead master and revoke its token",
+	Example: `  ziroctl cluster member rm master-3`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -1069,7 +1071,9 @@ func fetchDEK(rs *raftStore, cfg *ClusterConfig, id string) error {
 
 var clusterRotateCmd = &cobra.Command{
 	Use:   "rotate tokens|certs",
-	Short: "Rotate every node token or every master certificate now",
+	Short: "Rotate every node token or master certificate",
+	Example: `  ziroctl cluster rotate tokens
+  ziroctl cluster rotate certs`,
 	Long: `Credentials also rotate on their own: node tokens after 30 days, master certificates 30 days
 before they expire.
 

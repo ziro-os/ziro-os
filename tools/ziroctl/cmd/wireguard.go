@@ -35,12 +35,17 @@ var (
 var wireguardCmd = &cobra.Command{
 	Use:     "wireguard",
 	Aliases: []string{"wg", "vpn"},
-	Short:   "Manage WireGuard cloud mesh VPN, peer networking, and routing",
+	Short:   "Manage the WireGuard VPN",
+	Example: `  ziroctl wireguard init
+  ziroctl wireguard peer add --name laptop --qr
+  ziroctl wireguard status`,
 }
 
 var wgInitCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize WireGuard server and cloud VPN mesh hub on this node",
+	Short: "Set up a WireGuard server on this host",
+	Example: `  ziroctl wireguard init
+  ziroctl wireguard init --cidr 10.100.0.0/24 --port 51820`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validName(wgIface); err != nil {
 			return err
@@ -96,8 +101,9 @@ PostDown = iptables -D FORWARD -i %s -j ACCEPT; iptables -t nat -D POSTROUTING -
 }
 
 var wgUpCmd = &cobra.Command{
-	Use:   "up",
-	Short: "Bring up the WireGuard network interface (idempotent)",
+	Use:     "up",
+	Short:   "Bring the WireGuard interface up",
+	Example: `  ziroctl wireguard up`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validName(wgIface); err != nil {
 			return err
@@ -185,8 +191,9 @@ func runWgHooks(hooks []string, iface string) {
 }
 
 var wgDownCmd = &cobra.Command{
-	Use:   "down",
-	Short: "Bring down the WireGuard network interface",
+	Use:     "down",
+	Short:   "Bring the WireGuard interface down",
+	Example: `  ziroctl wireguard down`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validName(wgIface); err != nil {
 			return err
@@ -209,8 +216,9 @@ var wgDownCmd = &cobra.Command{
 }
 
 var wgStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Display WireGuard interface status, peer transfers, and handshakes",
+	Use:     "status",
+	Short:   "Show peers, handshakes and transfer",
+	Example: `  ziroctl wireguard status`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if jsonOutput {
 			_ = printResult(wireguardStatus(), nil)
@@ -229,7 +237,9 @@ var wgStatusCmd = &cobra.Command{
 
 var wgPeerAddCmd = &cobra.Command{
 	Use:   "add",
-	Short: "Add a client or node peer to the WireGuard mesh",
+	Short: "Add a peer and print its config",
+	Example: `  ziroctl wireguard peer add --name laptop --qr
+  ziroctl wireguard peer add --name office --ip 10.100.0.20`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if peerName == "" {
 			return fmt.Errorf("--name is required")
@@ -344,7 +354,8 @@ PersistentKeepalive = 25
 var wgPeerRemoveCmd = &cobra.Command{
 	Use:     "remove <name>",
 	Aliases: []string{"rm"},
-	Short:   "Remove a peer from the WireGuard mesh",
+	Short:   "Remove a peer",
+	Example: `  ziroctl wireguard peer remove laptop`,
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -376,8 +387,9 @@ var wgPeerRemoveCmd = &cobra.Command{
 }
 
 var wgPeerListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List configured WireGuard peers",
+	Use:     "list",
+	Short:   "List peers",
+	Example: `  ziroctl wireguard peer list`,
 	Run: func(cmd *cobra.Command, args []string) {
 		entries, err := os.ReadDir(defaultWgPeers)
 		if err != nil || len(entries) == 0 {
@@ -613,7 +625,9 @@ func init() {
 
 	peerCmd := &cobra.Command{
 		Use:   "peer",
-		Short: "Manage WireGuard mesh peers and clients",
+		Short: "Manage WireGuard peers",
+		Example: `  ziroctl wireguard peer add --name laptop --qr
+  ziroctl wireguard peer list`,
 	}
 	peerCmd.AddCommand(wgPeerAddCmd)
 	peerCmd.AddCommand(wgPeerRemoveCmd)

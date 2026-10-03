@@ -359,7 +359,10 @@ var (
 
 var clusterPolicyImagesCmd = &cobra.Command{
 	Use:   "images",
-	Short: "Show or set which images apps may run (registry allowlist, cosign signatures)",
+	Short: "Show or set which images apps may run",
+	Example: `  ziroctl cluster policy images
+  ziroctl cluster policy images --allow-registry ghcr.io/acme --require-signed --cosign-key cosign.pub
+  ziroctl cluster policy images --clear`,
 	Long: `  ziroctl cluster policy images --allow-registry ghcr.io/acme --allow-registry docker.io/library
   ziroctl cluster policy images --require-signed --cosign-key cosign.pub
   ziroctl cluster policy images --clear

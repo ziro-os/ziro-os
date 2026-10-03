@@ -389,7 +389,11 @@ var (
 
 var updateCmd = &cobra.Command{
 	Use:   "update",
-	Short: "Update ziroctl and ziropkg to the newest signed tools release (no OS upgrade)",
+	Short: "Update ziroctl and ziropkg",
+	Example: `  ziroctl update --check
+  ziroctl update
+  ziroctl update --version v1.0.17
+  ziroctl update --rollback`,
 	Long: `Installs the newest ziroctl and ziropkg from the tools release stream (tags tools/vX.Y.Z),
 independently of OS upgrades (ziroctl upgrade). The release's SHA256SUMS must carry a valid Ziro
 release signature and every binary must match it. The binaries are swapped atomically, the

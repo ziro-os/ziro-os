@@ -15,13 +15,16 @@ var sshAuthorizedKeysPath = rootAuthorizedKeys
 
 var sshCmd = &cobra.Command{
 	Use:   "ssh",
-	Short: "Secure Shell (SSH) service and key management",
-	Long:  `Inspect SSH remote management status and manage authorized public keys for hardened, passwordless remote access.`,
+	Short: "Manage SSH access",
+	Example: `  ziroctl ssh key import gh:octocat
+  ziroctl ssh status`,
+	Long: `Inspect SSH remote management status and manage authorized public keys for hardened, passwordless remote access.`,
 }
 
 var sshStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Display SSH service status and host key fingerprints",
+	Use:     "status",
+	Short:   "Show sshd state and host key fingerprints",
+	Example: `  ziroctl ssh status`,
 	Run: func(cmd *cobra.Command, args []string) {
 		cmd.Println("=== Ziro-OS SSH Remote Management ===")
 
@@ -67,12 +70,14 @@ var sshStatusCmd = &cobra.Command{
 
 var sshKeyCmd = &cobra.Command{
 	Use:   "key",
-	Short: "Manage SSH authorized keys for remote access",
+	Short: "Manage authorized SSH keys",
+	Example: `  ziroctl ssh key import gh:octocat
+  ziroctl ssh key list`,
 }
 
 var sshKeyAddCmd = &cobra.Command{
 	Use:     "add <public-key-string>",
-	Short:   "Add an authorized public key for root login",
+	Short:   "Authorize a public key for root",
 	Example: `  ziroctl ssh key add "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@example.com"`,
 	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -105,8 +110,9 @@ var sshKeyAddCmd = &cobra.Command{
 }
 
 var sshKeyListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all configured authorized public keys",
+	Use:     "list",
+	Short:   "List authorized keys",
+	Example: `  ziroctl ssh key list`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		authKeysPath := sshAuthorizedKeysPath
 		data, err := os.ReadFile(authKeysPath)
@@ -143,8 +149,9 @@ var sshKeyListCmd = &cobra.Command{
 }
 
 var sshKeyClearCmd = &cobra.Command{
-	Use:   "clear",
-	Short: "Clear all authorized SSH keys",
+	Use:     "clear",
+	Short:   "Remove every authorized key",
+	Example: `  ziroctl ssh key clear`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		authKeysPath := sshAuthorizedKeysPath
 		if err := os.Remove(authKeysPath); err != nil && !os.IsNotExist(err) {

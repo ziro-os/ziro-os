@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"github.com/spf13/cobra"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -59,7 +62,7 @@ func TestSystemCommands(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, sub := range []string{"status", "reboot", "poweroff"} {
+	for _, sub := range []string{"top", "df", "prune", "reboot", "poweroff"} {
 		if !strings.Contains(out, sub) {
 			t.Errorf("expected system help to list '%s', got: %s", sub, out)
 		}
@@ -144,7 +147,7 @@ func TestMotdCommand(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"Ziro OS", "Resources", "Network", "Workloads"} {
+	for _, want := range []string{"CPU", "Network", "Workload"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("motd output lacks %q: %s", want, out)
 		}
@@ -152,14 +155,29 @@ func TestMotdCommand(t *testing.T) {
 }
 
 func TestMOTDAddresses(t *testing.T) {
+	sum := HostSummary{Version: "1.0", Hostname: "h", Mode: "installed", MemTotal: 4 << 30, MemUsed: 1 << 30,
+		Addresses: []HostAddress{{"172.26.1.108", "eth0", "primary"}, {"10.200.0.1", "ziro0", "mesh"}, {"10.201.0.1", "ziro-dns0", "pods"}},
+		Attention: []Attention{{"memory pressure 12%", "ziroctl system top"}, {"firewall disabled", "ziroctl firewall enable"}}}
 	var buf bytes.Buffer
-	renderMOTD(&buf, HostSummary{Version: "1.0", Hostname: "h", Mode: "installed", Addresses: []HostAddress{
-		{"172.26.1.108", "eth0", "primary"}, {"10.200.0.1", "ziro0", "mesh"}, {"10.201.0.1", "ziro-dns0", "pods"}},
-		Attention: []string{"memory pressure 12%"}}, false)
+	renderMOTD(&buf, sum, termStyle{unicode: true})
 	out := buf.String()
-	if !strings.Contains(out, "172.26.1.108 (eth0)  mesh 10.200.0.1  pods 10.201.0.1") || strings.Count(out, "10.201.0.1") != 1 ||
-		!strings.Contains(out, "Attention  memory pressure 12%") || strings.Contains(out, "\033") {
+	if !strings.Contains(out, "172.26.1.108 eth0 · mesh 10.200.0.1 · pods 10.201.0.1") || strings.Count(out, "10.201.0.1") != 1 ||
+		!strings.Contains(out, "! memory pressure 12%  ziroctl system top") || !strings.Contains(out, "! firewall disabled    ziroctl firewall enable") ||
+		!strings.Contains(out, "████░░░░░░░░░░  1.0 GiB / 4.0 GiB     25%") || strings.Contains(out, "\033") || strings.Contains(out, "LIVE") {
 		t.Errorf("motd:\n%s", out)
+	}
+	// Live media is called out; serial-style terminals get ASCII only.
+	buf.Reset()
+	sum.Mode = "live"
+	renderMOTD(&buf, sum, termStyle{})
+	out = buf.String()
+	if !strings.Contains(out, "Ziro OS 1.0  LIVE") || !strings.Contains(out, "ziroctl install") || !strings.Contains(out, "####----------") {
+		t.Errorf("live/ascii motd:\n%s", out)
+	}
+	for _, r := range out {
+		if r > 127 {
+			t.Fatalf("ascii motd has %q:\n%s", r, out)
+		}
 	}
 	for name, want := range map[string]string{"eth0": "primary", "ens3": "nic", "ziro0": "mesh", "ziro-dns0": "pods",
 		"veth1a2b": "", "nerdctl0": "", "cni0": "", "docker0": "", "lo": ""} {
@@ -167,4 +185,47 @@ func TestMOTDAddresses(t *testing.T) {
 			t.Errorf("ifaceRole(%s) = %q, want %q", name, got, want)
 		}
 	}
+}
+
+func TestReadRoutes(t *testing.T) {
+	old := procRoot
+	procRoot = t.TempDir()
+	defer func() { procRoot = old }()
+	os.MkdirAll(filepath.Join(procRoot, "net"), 0755)
+	os.WriteFile(filepath.Join(procRoot, "net", "route"), []byte("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"+
+		"eth0\t00000000\t01011AAC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"+
+		"eth0\t00011AAC\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"), 0644)
+	r := readRoutes()
+	if len(r) != 2 || r[0] != (RouteStatus{"0.0.0.0/0", "172.26.1.1", "eth0", 0}) || r[1] != (RouteStatus{"172.26.1.0/24", "", "eth0", 0}) {
+		t.Errorf("routes = %+v", r)
+	}
+}
+
+// TestHelpText keeps the help readable: every command has a short, plain description (a verb,
+// no parenthetical asides, no trailing period) and every command an operator runs has an
+// example.
+func TestHelpText(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		for _, sub := range c.Commands() {
+			if sub.Hidden || sub.Name() == "help" || sub.Name() == "completion" || sub.Parent().Name() == "completion" {
+				continue
+			}
+			path := sub.CommandPath()
+			s := sub.Short
+			switch {
+			case s == "":
+				t.Errorf("%s: no Short", path)
+			case len(s) > 60:
+				t.Errorf("%s: Short is %d chars (max 60): %q", path, len(s), s)
+			case strings.ContainsAny(s, "()") || strings.HasSuffix(s, ".") || strings.Contains(s, "Ziro-OS"):
+				t.Errorf("%s: Short has asides, a period or the old name: %q", path, s)
+			}
+			if sub.Example == "" {
+				t.Errorf("%s: no Example", path)
+			}
+			walk(sub)
+		}
+	}
+	walk(rootCmd)
 }

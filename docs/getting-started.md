@@ -52,7 +52,7 @@ make run-qemu
 
 Once booted, you are greeted with the Ziro-OS PID 1 console where `containerd` is running:
 ```bash
-ziroctl system status
+ziroctl motd
 ziroctl security audit
 ```
 

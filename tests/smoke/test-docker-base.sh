@@ -56,10 +56,10 @@ else
 fi
 
 # Test 6: Package Manager CLI
-echo -n "Test 6: ziropkg and ziroctl pkg CLI... "
+echo -n "Test 6: ziropkg CLI... "
 OUTPUT_PKG=$(docker run --rm "$IMAGE" ziropkg version 2>&1)
-OUTPUT_CTL=$(docker run --rm "$IMAGE" ziroctl pkg --help 2>&1)
-if [[ "$OUTPUT_PKG" == *"ziropkg version"* ]] && [[ "$OUTPUT_CTL" == *"ziroctl pkg"* ]]; then
+OUTPUT_CTL=$(docker run --rm "$IMAGE" ziropkg install --help 2>&1)
+if [[ "$OUTPUT_PKG" == *"ziropkg version"* ]] && [[ "$OUTPUT_CTL" == *"ziropkg install"* ]]; then
     echo "✅ PASSED"
 else
     echo "❌ FAILED: Package manager CLI missing or broken"

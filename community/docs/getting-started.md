@@ -11,7 +11,7 @@ Ziro-OS is an ultra-lightweight, container-native operating system built from sc
 - **Minimal Base**: ≈16 MB Docker base image (`ziro-os:latest`) and a complete container host OS under 300 MB with `containerd`, `runc`, and CNI plugins.
 - **Stateless & Immutable**: Hardened read-only rootfs with minimal writeable paths.
 - **C99 PID 1 Supervisor**: Statically linked `ziro-init` providing sub-second boot, cgroups v2 hierarchy, loopback networking, and automated zombie process reaping.
-- **Integrated Package Management**: Fast, signed package installation via `ziropkg` and `ziroctl pkg`.
+- **Integrated Package Management**: Fast, signed package installation via `ziropkg`.
 - **Multi-Architecture**: Native support for `x86_64` and `arm64` (Apple Silicon & cloud ARM64).
 
 ---
@@ -97,13 +97,13 @@ Package management is also integrated directly into the `ziroctl` unified CLI:
 
 ```bash
 # Install via ziroctl
-ziroctl pkg install curl jq
+ziropkg install curl jq
 
 # List installed packages
-ziroctl pkg list
+ziropkg list
 
 # Search packages
-ziroctl pkg search nginx
+ziropkg search nginx
 ```
 
 ---
@@ -148,7 +148,7 @@ Upon boot, `ziro-init` initializes the cgroup v2 hierarchy, loopback networking,
   🌀 Ziro-OS Container System (arm64 / x86_64)
   Init: ziro-init v1.0.0 (C99 Supervisor)
 ==================================================
-[ziro-os]# ziroctl system status
+[ziro-os]# ziroctl motd
 [ziro-os]# ziroctl security audit
 ```
 

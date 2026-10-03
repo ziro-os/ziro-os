@@ -22,7 +22,10 @@ import (
 
 var devCmd = &cobra.Command{
 	Use:   "dev",
-	Short: "Developer toolchain: scaffold, validate and run plugins and apps; build catalogs, kernel modules, eBPF",
+	Short: "Build, test and publish plugins, apps and kernel code",
+	Example: `  ziroctl dev new plugin redis-exporter
+  ziroctl dev validate plugins/redis-exporter
+  ziroctl dev run plugins/redis-exporter --check 'ziroctl service status redis-exporter'`,
 	Long: `Build on Ziro OS:
 
   ziroctl dev new plugin hello                 # a catalog repo with a plugin, README and CI workflow
@@ -149,8 +152,11 @@ func writeNew(path string, data []byte, keepExisting bool) error {
 
 var devNewCmd = &cobra.Command{
 	Use:   "new plugin|app|stack <name>",
-	Short: "Scaffold a plugin, app or stack (YAML by default) in a catalog repository with README and signing CI",
-	Args:  cobra.ExactArgs(2),
+	Short: "Scaffold a plugin, app or stack with signing CI",
+	Example: `  ziroctl dev new plugin redis-exporter
+  ziroctl dev new app umami --format json
+  ziroctl dev new stack analytics --dir ~/acme-catalog`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		kind, name := args[0], args[1]
 		if err := validName(name); err != nil {
@@ -328,8 +334,10 @@ var devStrict bool
 
 var devValidateCmd = &cobra.Command{
 	Use:   "validate <file|catalog-dir...>",
-	Short: "Validate plugin manifests and app definitions (the host's rules) and lint them",
-	Args:  cobra.MinimumNArgs(1),
+	Short: "Validate and lint plugin and app definitions",
+	Example: `  ziroctl dev validate plugins/redis-exporter/manifest.json
+  ziroctl dev validate . --strict`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		files, err := definitionFiles(args)
 		if err != nil {
@@ -369,12 +377,13 @@ var devValidateCmd = &cobra.Command{
 
 // ---- dev catalog ----
 
-var devCatalogCmd = &cobra.Command{Use: "catalog", Short: "Your own catalog's signing key (build, sign and verify with `ziroctl catalog`)"}
+var devCatalogCmd = &cobra.Command{Use: "catalog", Short: "Create your own catalog signing key", Example: "  ziroctl dev catalog keygen acme"}
 
 var devKeygenCmd = &cobra.Command{
-	Use:   "keygen <name>",
-	Short: "Create an ed25519 catalog signing key: <name>.key (keep secret) and <name>.pub (commit it)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "keygen <name>",
+	Short:   "Create an ed25519 catalog signing key pair",
+	Example: `  ziroctl dev catalog keygen acme`,
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validName(args[0]); err != nil {
 			return err

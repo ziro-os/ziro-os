@@ -1,16 +1,17 @@
 package cmd
 
 import (
-	"sort"
-
+	"errors"
 	"fmt"
-	"go.yaml.in/yaml/v3"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
+	"go.yaml.in/yaml/v3"
 )
 
 type ComposeService struct {
@@ -24,126 +25,122 @@ type ComposeService struct {
 	DependsOn   []string
 	Health      []string // from healthcheck.test
 	Unsupported []string // keys with no Ziro equivalent (build, privileged, ...)
+	Build       bool     // has build:
+	Risks       []string // settings that weaken isolation (privileged: true, network_mode: host, ...)
 }
 
-var composeFile string
-var composeDetach bool
+// `ziroctl compose` is `nerdctl compose` (built into the nerdctl binary the OS ships; no
+// docker-compose) behind a security preflight: before anything is created, the compose file
+// is checked for settings that hand a container the host (privileged, host namespaces, added
+// capabilities, devices, unconfined profiles, sensitive bind mounts) and for images the
+// cluster image policy refuses. Then ziroctl execs nerdctl, so it isn't left in memory.
 
 var composeCmd = &cobra.Command{
-	Use:     "compose",
+	Use:     "compose [flags] <command>",
 	Aliases: []string{"docker-compose"},
-	Short:   "Declarative multi-container application management (Docker Compose)",
-}
+	Short:   "Run multi-container apps from a compose file",
+	Long: `Run a Compose project with nerdctl compose. Every compose command and flag works (up, down,
+ps, logs, pull, restart, config, ...).
 
-var composeUpCmd = &cobra.Command{
-	Use:   "up",
-	Short: "Create and start multi-container services defined in docker-compose.yml",
+Before up, create and run, the file is checked. These are refused unless --allow-privileged
+is given: privileged, host network/pid/ipc, cap_add, devices, unconfined security_opt, and
+bind mounts of /, /etc, /proc, /sys, /dev, /run/containerd, /var/lib/ziro or a socket.
+build: is refused (no image builder on the host): build elsewhere and push.`,
+	Example: `  ziroctl compose up -d
+  ziroctl compose -f shop/compose.yaml ps
+  ziroctl compose logs -f web
+  ziroctl compose down`,
+	DisableFlagParsing: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		services, err := parseComposeFile(composeFile)
+		if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+			return cmd.Help()
+		}
+		allow := false
+		pass := args[:0:0]
+		for _, a := range args {
+			if a == "--allow-privileged" {
+				allow = true
+				continue
+			}
+			pass = append(pass, a)
+		}
+		files, sub := composeArgs(pass)
+		if sub == "up" || sub == "create" || sub == "run" {
+			if len(files) == 0 {
+				for _, f := range []string{"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"} {
+					if fileExists(f) {
+						files = []string{f}
+						break
+					}
+				}
+			}
+			for _, f := range files {
+				svcs, err := parseComposeFile(f)
+				if err != nil {
+					return fmt.Errorf("%s: %w", f, err)
+				}
+				if problems := composePreflight(svcs, allow); len(problems) > 0 {
+					return fmt.Errorf("%s:\n  %s", f, strings.Join(problems, "\n  "))
+				}
+			}
+		}
+		nerdctl, err := exec.LookPath("nerdctl")
 		if err != nil {
-			return fmt.Errorf("reading %s: %w", composeFile, err)
+			return errors.New("nerdctl not found")
 		}
-		if len(services) == 0 {
-			fmt.Println("No services found in compose file.")
-			return nil
-		}
-
-		projectName := getProjectName(composeFile)
-		fmt.Printf("🚀 Starting Ziro Compose project: %s (%d services)\n", projectName, len(services))
-
-		for _, s := range services {
-			containerName := fmt.Sprintf("%s_%s_1", projectName, s.Name)
-			fmt.Printf("Creating and starting service '%s' (container: %s)...\n", s.Name, containerName)
-
-			var runArgs []string
-			runArgs = append(runArgs, "run")
-			if composeDetach {
-				runArgs = append(runArgs, "-d")
-			}
-			runArgs = append(runArgs, "--name", containerName)
-			if s.Restart != "" {
-				runArgs = append(runArgs, "--restart", s.Restart)
-			}
-			for _, p := range s.Ports {
-				runArgs = append(runArgs, "-p", p)
-			}
-			for _, e := range s.Environment {
-				runArgs = append(runArgs, "-e", e)
-			}
-			for _, v := range s.Volumes {
-				runArgs = append(runArgs, "-v", v)
-			}
-			runArgs = append(runArgs, "--", s.Image) // "--": an image can never be read as a flag
-			runArgs = append(runArgs, s.Command...)
-
-			// Execute using nerdctl or ctr
-			runner := exec.Command("nerdctl", runArgs...)
-			runner.Stdout = os.Stdout
-			runner.Stderr = os.Stderr
-			if err := runner.Run(); err != nil {
-				fmt.Printf("⚠️  Service %s launch failed: %v\n", s.Name, err)
-			} else {
-				fmt.Printf("✓ Service '%s' started successfully.\n", s.Name)
-			}
-		}
-		return nil
+		return syscall.Exec(nerdctl, append([]string{"nerdctl", "compose"}, pass...), os.Environ())
 	},
 }
 
-var composeDownCmd = &cobra.Command{
-	Use:   "down",
-	Short: "Stop and remove containers defined in docker-compose.yml",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		services, err := parseComposeFile(composeFile)
-		if err != nil {
-			return fmt.Errorf("reading %s: %w", composeFile, err)
+// composeArgs finds the compose files (-f/--file, repeatable) and the subcommand in args.
+func composeArgs(args []string) (files []string, sub string) {
+	withValue := map[string]bool{"-f": true, "--file": true, "-p": true, "--project-name": true,
+		"--project-directory": true, "--env-file": true, "--profile": true}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if v, ok := strings.CutPrefix(a, "--file="); ok {
+			files = append(files, v)
+		} else if withValue[a] && i+1 < len(args) {
+			if a == "-f" || a == "--file" {
+				files = append(files, args[i+1])
+			}
+			i++
+		} else if sub == "" && !strings.HasPrefix(a, "-") {
+			sub = a
 		}
-
-		projectName := getProjectName(composeFile)
-		fmt.Printf("Stopping Ziro Compose project: %s\n", projectName)
-
-		for _, s := range services {
-			containerName := fmt.Sprintf("%s_%s_1", projectName, s.Name)
-			fmt.Printf("Stopping container %s...\n", containerName)
-			_ = exec.Command("nerdctl", "stop", containerName).Run()
-			_ = exec.Command("nerdctl", "rm", "-f", containerName).Run()
-		}
-		fmt.Println("✓ All compose services stopped and removed.")
-		return nil
-	},
+	}
+	return files, sub
 }
 
-var composePsCmd = &cobra.Command{
-	Use:   "ps",
-	Short: "List containers for the current compose project",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		projectName := getProjectName(composeFile)
-		out, err := exec.Command("nerdctl", "ps", "-a", "--filter", fmt.Sprintf("name=%s_", projectName)).Output()
-		if err != nil || len(out) == 0 {
-			// Fallback standard listing
-			_ = exec.Command("nerdctl", "ps").Run()
-			return nil
-		}
-		fmt.Print(string(out))
-		return nil
-	},
-}
+// composeSensitive are host paths a container must not bind-mount without --allow-privileged.
+var composeSensitive = []string{"/etc", "/proc", "/sys", "/dev", "/boot", "/run/containerd", "/var/run/containerd",
+	"/var/lib/containerd", "/var/lib/ziro", "/run/ziro", "/var/run/docker.sock"}
 
-var composeLogsCmd = &cobra.Command{
-	Use:   "logs [service]",
-	Short: "View output from containers",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		projectName := getProjectName(composeFile)
-		if len(args) == 0 {
-			return fmt.Errorf("specify a service: ziroctl compose logs <service>")
+// composePreflight lists what in svcs breaks out of the container sandbox, and images the
+// cluster image policy refuses.
+func composePreflight(svcs []ComposeService, allowPrivileged bool) []string {
+	var out []string
+	var policy ImagePolicy
+	if st, err := readState(); err == nil {
+		policy = st.ImagePolicy
+	}
+	for _, s := range svcs {
+		if s.Build {
+			out = append(out, s.Name+": build is not supported on the host: build the image elsewhere, push it and set image:")
 		}
-		target := fmt.Sprintf("%s_%s_1", projectName, args[0])
-		cmdRun := exec.Command("nerdctl", "logs", target)
-		cmdRun.Stdout = os.Stdout
-		cmdRun.Stderr = os.Stderr
-		_ = cmdRun.Run()
-		return nil
-	},
+		if s.Image != "" {
+			if err := checkImage(policy, s.Image); err != nil {
+				out = append(out, s.Name+": "+err.Error())
+			}
+		}
+		if allowPrivileged {
+			continue
+		}
+		for _, r := range s.Risks {
+			out = append(out, s.Name+": "+r+" (gives the container the host; --allow-privileged to permit)")
+		}
+	}
+	return out
 }
 
 func getProjectName(file string) string {
@@ -218,9 +215,68 @@ func parseComposeFile(path string) ([]ComposeService, error) {
 				svc.Unsupported = append(svc.Unsupported, k)
 			}
 		}
+		_, svc.Build = raw["build"]
+		svc.Risks = composeRisks(raw)
 		out = append(out, svc)
 	}
 	return out, nil
+}
+
+// composeRisks lists the settings in one service that weaken container isolation.
+func composeRisks(raw map[string]any) []string {
+	var out []string
+	if b, _ := raw["privileged"].(bool); b {
+		out = append(out, "privileged: true")
+	}
+	for _, k := range []string{"network_mode", "pid", "ipc", "userns_mode", "uts"} {
+		if v := str(raw[k]); v == "host" {
+			out = append(out, k+": host")
+		}
+	}
+	for _, k := range []string{"cap_add", "devices"} {
+		if l := strList(raw[k]); len(l) > 0 {
+			out = append(out, k+": "+strings.Join(l, ", "))
+		}
+	}
+	for _, o := range strList(raw["security_opt"]) {
+		if strings.Contains(o, "unconfined") {
+			out = append(out, "security_opt: "+o)
+		}
+	}
+	vols, _ := raw["volumes"].([]any)
+	for _, v := range vols {
+		src := ""
+		switch x := v.(type) {
+		case string:
+			src, _, _ = strings.Cut(x, ":")
+		case map[string]any:
+			if str(x["type"]) == "bind" {
+				src = str(x["source"])
+			}
+		}
+		if src == "" || !strings.HasPrefix(src, "/") {
+			continue // named volume or relative path (inside the project)
+		}
+		if p := filepath.Clean(src); composeSensitivePath(p) {
+			out = append(out, "bind mount of "+p)
+		}
+	}
+	return out
+}
+
+func composeSensitivePath(p string) bool {
+	if p == "/" || strings.HasSuffix(p, ".sock") {
+		return true
+	}
+	if p == "/var/lib/ziro/volumes" || strings.HasPrefix(p, "/var/lib/ziro/volumes/") {
+		return false // where volumes are meant to live
+	}
+	for _, s := range composeSensitive {
+		if p == s || strings.HasPrefix(p, s+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func str(v any) string {
@@ -252,12 +308,5 @@ func keysOrList(v any) []string {
 }
 
 func init() {
-	composeCmd.PersistentFlags().StringVarP(&composeFile, "file", "f", "docker-compose.yml", "Path to docker-compose file")
-	composeUpCmd.Flags().BoolVarP(&composeDetach, "detach", "d", true, "Run containers in the background")
-
-	composeCmd.AddCommand(composeUpCmd)
-	composeCmd.AddCommand(composeDownCmd)
-	composeCmd.AddCommand(composePsCmd)
-	composeCmd.AddCommand(composeLogsCmd)
 	rootCmd.AddCommand(composeCmd)
 }

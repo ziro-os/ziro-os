@@ -984,7 +984,10 @@ var (
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
-	Short: "Upgrade the Ziro-OS host to a newer release (keeps all data)",
+	Short: "Upgrade Ziro OS to a newer release",
+	Example: `  ziroctl upgrade --check
+  ziroctl upgrade
+  ziroctl upgrade --version v1.0.18 --reboot --yes`,
 	Long: `ziroctl upgrade checks the public GitHub releases for a newer Ziro-OS version,
 runs doctor and configuration validation, snapshots the configuration,
 downloads the OS image, verifies it against the release SHA256SUMS and swaps
@@ -998,9 +1001,10 @@ images manually.`,
 }
 
 var upgradeRollbackCmd = &cobra.Command{
-	Use:   "rollback",
-	Short: "Restore the OS files and kernel from before the last upgrade",
-	Args:  cobra.NoArgs,
+	Use:     "rollback",
+	Short:   "Restore the OS and kernel from before the last upgrade",
+	Example: `  ziroctl upgrade rollback`,
+	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if os.Geteuid() != 0 {
 			return errors.New("rollback must run as root")

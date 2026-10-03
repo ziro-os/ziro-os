@@ -236,14 +236,18 @@ func auditCommand(c *cobra.Command, err error) {
 
 var auditCmd = &cobra.Command{
 	Use:   "audit",
-	Short: "Tamper-evident audit log of administrative actions",
+	Short: "Read and verify the tamper-evident audit log",
+	Example: `  ziroctl audit log --since 24h
+  ziroctl audit verify`,
 }
 
 var auditSince time.Duration
 
 var auditLogCmd = &cobra.Command{
 	Use:   "log",
-	Short: "Show audit records (newest last)",
+	Short: "Show audit records, newest last",
+	Example: `  ziroctl audit log
+  ziroctl audit log --since 2h`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var recs []auditRecord
 		cutoff := time.Time{}
@@ -285,8 +289,9 @@ var auditLogCmd = &cobra.Command{
 }
 
 var auditVerifyCmd = &cobra.Command{
-	Use:   "verify",
-	Short: "Check the audit hash chain; exits non-zero if any record was changed or removed",
+	Use:     "verify",
+	Short:   "Check the audit hash chain for changed records",
+	Example: `  ziroctl audit verify`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		n, head, err := verifyAudit(auditFiles())
 		if err != nil {
