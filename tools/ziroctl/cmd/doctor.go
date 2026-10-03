@@ -79,8 +79,16 @@ func applyDoctorFixes(checks []doctorCheck, recheck func() []doctorCheck) []doct
 	}
 	time.Sleep(doctorSettle) // let restarted daemons settle
 	after := recheck()
+	seen := map[string]bool{}
 	for i := range after {
+		seen[after[i].Name] = true
 		after[i].Fixed = after[i].Passed && failed[after[i].Name]
+	}
+	// A repaired row can fold into a summary ("Services: all running"): still say what was fixed.
+	for _, c := range checks {
+		if failed[c.Name] && !seen[c.Name] {
+			after = append(after, doctorCheck{Name: c.Name, Passed: true, Fixed: true, Details: c.Fix})
+		}
 	}
 	return after
 }

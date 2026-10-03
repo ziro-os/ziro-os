@@ -724,8 +724,10 @@ func startService(name string) error {
 	if err != nil {
 		return err
 	}
-	// deepcode ignore CommandInjection: argv to our own binary; name passed validName in loadServiceDef
-	out, err := exec.Command(self, "service", "spawn", name).Output()
+	// The helper reads the service name from stdin: nothing from a definition reaches argv.
+	spawn := exec.Command(self, "service", "spawn")
+	spawn.Stdin = strings.NewReader(def.Name)
+	out, err := spawn.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return errors.New(strings.TrimSpace(string(ee.Stderr)))
@@ -834,12 +836,16 @@ func runForeground(def *ServiceDef) error {
 }
 
 var serviceSpawnCmd = &cobra.Command{
-	Use:    "spawn <service>",
-	Short:  "Start a supervised daemon and exit, leaving it to ziro-init",
+	Use:    "spawn",
+	Short:  "Start a supervised daemon (name on stdin) and exit, leaving it to ziro-init",
 	Hidden: true,
-	Args:   cobra.ExactArgs(1),
+	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		def, err := loadServiceDef(args[0])
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 128))
+		if err != nil {
+			return err
+		}
+		def, err := loadServiceDef(strings.TrimSpace(string(b))) // validates the name
 		if err != nil {
 			return err
 		}

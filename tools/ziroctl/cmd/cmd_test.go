@@ -257,6 +257,12 @@ func TestDoctorFix(t *testing.T) {
 	if ran != 1 || !out[1].Passed || !out[1].Fixed || out[0].Fixed || out[2].Passed || out[2].Fixed {
 		t.Fatalf("ran %d, checks %+v", ran, out)
 	}
+	// A fixed row that folds into a summary on the re-check is still reported.
+	folded := applyDoctorFixes([]doctorCheck{{Name: "Service crond", fix: func() error { return nil }, Fix: "start crond"}},
+		func() []doctorCheck { return []doctorCheck{{Name: "Services", Passed: true}} })
+	if len(folded) != 2 || !folded[1].Fixed || folded[1].Name != "Service crond" {
+		t.Errorf("folded fix not reported: %+v", folded)
+	}
 	if again := applyDoctorFixes(out, checks); len(again) != 3 || ran != 1 {
 		t.Errorf("a passing check was fixed again (ran %d)", ran)
 	}
