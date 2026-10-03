@@ -36,6 +36,7 @@ type AppComponent struct {
 	Env         map[string]string `json:"env,omitempty"`          // placeholders: settings, app, peers, replicas
 	Secrets     []string          `json:"secrets,omitempty"`      // app secrets passed as env (env file, never argv)
 	Data        []string          `json:"data,omitempty"`         // container paths kept on the host
+	DataUID     int               `json:"data_uid,omitempty"`     // owner (uid and gid) of the data dirs, for images that don't run as root
 	Args        []string          `json:"args,omitempty"`
 	Health      []string          `json:"health,omitempty"` // run in the container; exit 0 = ready
 	Resources   *Resources        `json:"resources,omitempty"`
@@ -91,6 +92,9 @@ func (d AppDef) Validate() error {
 		}
 		if err := c.Resources.Validate(); err != nil {
 			return fmt.Errorf("component %s: %w", c.Name, err)
+		}
+		if c.DataUID < 0 || c.DataUID > 65534 {
+			return fmt.Errorf("component %s: data_uid must be 0..65534", c.Name)
 		}
 		if err := ValidateDataPaths(c.Data); err != nil {
 			return fmt.Errorf("component %s: %w", c.Name, err)

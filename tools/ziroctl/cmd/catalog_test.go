@@ -240,3 +240,22 @@ func TestInputSecrets(t *testing.T) {
 		t.Error("bad key accepted")
 	}
 }
+
+func TestDataDirOwner(t *testing.T) {
+	old := appDataRoot
+	appDataRoot = t.TempDir()
+	defer func() { appDataRoot = old }()
+	a := Assignment{App: "claw", Data: []string{"/home/node/.openclaw"}, DataUID: os.Getuid()}
+	if os.Getuid() != 0 {
+		a.DataUID = 0 // chown to another uid needs root; the ownership itself is checked on hosts
+	}
+	if err := ensureDataDirs(a); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(dataDir("claw", 0, "/home/node/.openclaw")); err != nil || fi.Mode().Perm() != 0700 {
+		t.Fatalf("data dir %v %v", fi, err)
+	}
+	if ensureDataDirs(Assignment{App: "claw", Data: []string{"/x"}, DataUID: 70000}) == nil {
+		t.Error("out-of-range data_uid accepted")
+	}
+}

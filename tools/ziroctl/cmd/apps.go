@@ -399,7 +399,7 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 		}
 		name := componentApp(in.Name, d, c)
 		app := ClusteredApp{Name: name, Image: d.Versions[in.Version].Images[c.Name], Replicas: n, Env: env, Args: args,
-			Data: c.Data, Resources: c.Resources, AllowFrom: uniq(append([]string{name}, o.AllowFrom...))} // replicas reach each other
+			Data: c.Data, DataUID: c.DataUID, Resources: c.Resources, AllowFrom: uniq(append([]string{name}, o.AllowFrom...))} // replicas reach each other
 		for _, other := range d.Components { // components of one app reach each other
 			app.AllowFrom = uniq(append(app.AllowFrom, componentApp(in.Name, d, other)))
 		}
@@ -458,7 +458,7 @@ func deployAppLocal(in *AppInstance, o appDeployOpts) error {
 		}
 		name := componentApp(in.Name, d, c)
 		a := Assignment{Name: "ziro-app-" + name, App: name, Image: d.Versions[in.Version].Images[c.Name], Args: args, Env: env,
-			Data: c.Data, Resources: c.Resources, Network: o.Network}
+			Data: c.Data, DataUID: c.DataUID, Resources: c.Resources, Network: o.Network}
 		for _, s := range c.Secrets {
 			if a.SecretEnv == nil {
 				a.SecretEnv = map[string]string{}

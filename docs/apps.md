@@ -147,6 +147,8 @@ Rules, enforced when a definition is loaded (catalog CI and every host):
   only.
 - **Containers:** each container gets `ZIRO_APP`, `ZIRO_REPLICA` (0, 1, ...) and, for `"cluster": true` apps,
   `ZIRO_PEERS`.
+- **Data owner:** `data` dirs are 0700 and owned by root; an image that starts as root chowns its own. For an
+  image that runs as a fixed user (OpenClaw, Ghost, n8n: uid 1000), set `"data_uid": 1000` on the component.
 - **Replicas:** several replicas need `"cluster": true`. `max_replicas` allows `--replicas`.
 - **Privileges:** run the process as the image's own user, not root. If the command is wrapped in a shell, drop
   privileges yourself (the `valkey` definition uses `setpriv`). Never put a password in the command line; pass it
