@@ -75,6 +75,11 @@ For unattended use, pass `ziro.autoinstall ziro.upgrade` on the kernel command l
 An unattended install **never wipes** a disk that already holds Ziro-OS. It exits
 unless you pass `--upgrade` to keep the data, or `--erase` (`ziro.erase`) to reinstall.
 
+## Tools-only versions
+
+Some versions change only `ziroctl` and `ziropkg`. They are published as `tools/vX.Y.Z` only, with no new OS
+image or kernel. `ziroctl upgrade` keeps reporting the last OS release; `ziroctl update` installs the new tools.
+
 ## Rollback
 
 ```sh

@@ -67,6 +67,9 @@ in the [design standard](design/README.md); design decisions are recorded as [RF
 - **Tools releases:** `ziroctl`/`ziropkg` ship on their own signed stream (`tools/vX.Y.Z`); `ziroctl update` swaps
   them atomically and updates the integrity baselines. Each OS tag `vX.Y.Z` also publishes `tools/vX.Y.Z`;
   hosts find the newest one from the tag refs, so OS releases never push it off a page of releases. OS releases sign their `SHA256SUMS` with the same key.
+  A version whose changes since the last OS release touch only the tools stream (`tools/`, `sdk/`, docs) is
+  released as `tools/vX.Y.Z` alone. `release.yml` skips the kernels and images, decided by
+  `scripts/release/os-changed.sh`; `force_os` on a manual run overrides that.
 - **Deploy from git (ziroctld):** `ziroctl` run as `/usr/bin/ziroctld` (one binary, so `ziroctl update` keeps it
   current) is the deploy daemon. It clones over https, detects the build or uses the repo's Dockerfile, builds with
   BuildKit's containerd worker (images stay on the host as `ziro.local/<app>:b<N>`, pinned by digest), and releases
