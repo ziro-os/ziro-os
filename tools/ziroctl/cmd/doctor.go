@@ -106,7 +106,7 @@ func hostChecks() []doctorCheck {
 		down++
 		name := svc.Name
 		out = append(out, doctorCheck{Name: "Service " + name, Details: "not running; " + lastLogLine(svc.LogFile),
-			Fix: "start " + name, fix: func() error { return startService(name) }})
+			Fix: "start " + name, fix: func() error { return restartDown(name) }})
 	}
 	if down == 0 {
 		out = append(out, doctorCheck{Name: "Services", Passed: true, Details: fmt.Sprintf("%d enabled, all running", countEnabled(svcs))})
@@ -233,7 +233,7 @@ func runDoctor() []doctorCheck {
 	check("cgroup v2", cgErr == nil, "/sys/fs/cgroup", false)
 
 	// 5. containerd answers on its socket
-	c := doctorCheck{Name: "containerd responds", Fix: "start containerd", fix: func() error { return startService("containerd") }}
+	c := doctorCheck{Name: "containerd responds", Fix: "start containerd", fix: func() error { return restartDown("containerd") }}
 	if conn, err := net.DialTimeout("unix", "/run/containerd/containerd.sock", 2*time.Second); err == nil {
 		conn.Close()
 		c.Passed, c.Details = true, "/run/containerd/containerd.sock"

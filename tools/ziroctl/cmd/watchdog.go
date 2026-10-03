@@ -94,7 +94,7 @@ func runResourceWatchdog() {
 			action := "none"
 			if c.RestartWorkloads && len(top) > 0 && top[0].Bytes > 0 {
 				action = "restarted " + top[0].Name
-				if err := restartService(top[0].Name); err != nil {
+				if err := restartSupervised(top[0].Name); err != nil {
 					action = fmt.Sprintf("restart %s failed: %v", top[0].Name, err)
 				}
 			}

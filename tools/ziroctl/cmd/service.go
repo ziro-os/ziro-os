@@ -691,7 +691,7 @@ func healServices(force bool) []ServiceFix {
 		}
 		healLast[svc.Name] = time.Now()
 		fix := ServiceFix{Name: svc.Name}
-		if err := startService(svc.Name); err != nil && !strings.Contains(err.Error(), "already running") {
+		if err := restartDown(svc.Name); err != nil {
 			fix.Error = err.Error()
 		}
 		out = append(out, fix)
@@ -714,7 +714,42 @@ func startService(name string) error {
 	if def.Restart == "" { // one-shot (firewall, cloud-init): run it here and report its exit
 		return runForeground(def)
 	}
+	return spawnSupervised(def)
+}
 
+// restartDown starts a daemon that should be running and isn't: an init-managed one (released
+// to ziro-init) or a supervised one (through the spawn helper). It never runs a one-shot
+// service, so the long-running callers (the sentinel's self-heal, doctor --fix) never execute a
+// service definition's command themselves.
+func restartDown(name string) error {
+	def, err := loadServiceDef(name)
+	if err != nil {
+		return err
+	}
+	if getServicePID(def) > 0 {
+		return nil
+	}
+	if initManaged[name] {
+		return releaseToInit(def)
+	}
+	if def.Restart == "" {
+		return fmt.Errorf("%s is a one-shot service: run ziroctl service start %s", name, name)
+	}
+	return spawnSupervised(def)
+}
+
+// restartSupervised restarts a running daemon the same way (stop, then restartDown): for the
+// sentinel's memory watchdog, which restarts plugin services by their cgroup name.
+func restartSupervised(name string) error {
+	if err := stopService(name); err != nil {
+		return err
+	}
+	return restartDown(name)
+}
+
+// spawnSupervised starts a supervised daemon through the spawn helper and checks it survives
+// its first second.
+func spawnSupervised(def *ServiceDef) error {
 	// A supervised daemon must be a child of PID 1, never of this process: whoever reaps a
 	// daemon is the only one that sees it exit, and only ziro-init restarts it. So it is started
 	// by a short-lived helper ("service spawn") that exits at once, and the daemon is re-parented
@@ -734,9 +769,9 @@ func startService(name string) error {
 		}
 		return err
 	}
-	pid, err = strconv.Atoi(strings.TrimSpace(string(out)))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
-		return fmt.Errorf("spawn %s: unexpected output %q", name, out)
+		return fmt.Errorf("spawn %s: unexpected output %q", def.Name, out)
 	}
 	// Report a daemon that dies on startup (bad config, port in use) instead of claiming
 	// success; init has already scheduled its restart.
