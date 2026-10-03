@@ -10,6 +10,10 @@ on:
         description: 'Release version tag (e.g. v1.0.1)'
         required: true
         default: 'v1.0.1'
+      force_os:
+        description: 'Build the OS and kernels even if only tools changed'
+        type: boolean
+        default: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -21,14 +25,52 @@ permissions:
   id-token: write
 
 jobs:
+  # A version that changes only the tools stream (ziroctl, ziropkg, sdk, docs) is published by
+  # tools-release.yml alone (tools/vX on the same tag); the kernels and OS images are rebuilt
+  # only when something that ships in them changed since the last OS release.
+  changes:
+    name: Decide what to release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      os: ${{ steps.diff.outputs.os }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compare with the last OS release
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_OS: ${{ github.event.inputs.force_os }}
+        run: |
+          prev=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)
+          if [ "$FORCE_OS" = "true" ] || [ -z "$prev" ] || ! git rev-parse -q --verify "refs/tags/$prev" >/dev/null; then
+            os=true
+          else
+            echo "Changes since $prev:"; git diff --name-only "$prev" HEAD
+            os=$(scripts/release/os-changed.sh "$prev" HEAD)
+          fi
+          echo "os=$os" >> "$GITHUB_OUTPUT"
+          if [ "$os" = "true" ]; then echo "::notice::OS release: kernels and images will be built"
+          else echo "::notice::Tools-only release: tools-release.yml publishes tools/${GITHUB_REF_NAME}; no OS build"; fi
+
   custom-kernel:
     name: Custom kernel flavor
+    needs: changes
+    if: needs.changes.outputs.os == 'true'
     uses: ./.github/workflows/kernel-custom.yml
     secrets: inherit # ZIRO_MODULE_SIGNING_KEY signs the release kernel's modules
 
   # Runs in parallel with the custom-kernel jobs; only 'publish' waits for both.
   build:
     name: Build alpine flavor & tools
+    needs: changes
+    if: needs.changes.outputs.os == 'true'
     runs-on: ubuntu-latest
     env:
       KERNEL_FLAVOR: alpine
@@ -103,7 +145,8 @@ jobs:
 
   publish:
     name: Publish Release
-    needs: [build, custom-kernel]
+    needs: [changes, build, custom-kernel]
+    if: needs.changes.outputs.os == 'true'
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ needs.build.outputs.tag }}
