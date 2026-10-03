@@ -90,17 +90,23 @@ func planPrune(cats map[string]bool, now time.Time) []PruneItem {
 					items = append(items, PruneItem{"containers", f[1] + " (" + f[0] + ")", 0})
 					continue // its image becomes unused
 				}
-				used[f[3]] = true
+				for _, k := range imageKeys(f[3]) {
+					used[k] = true
+				}
 			}
 		}
 		if cats["images"] {
-			if out, err := runNerdctl("images", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}"); err == nil {
+			if out, err := runNerdctl("images", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Digest}}\t{{.Size}}"); err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 					f := strings.Split(line, "\t")
-					if len(f) < 3 || used[f[0]] || used[strings.TrimSuffix(f[0], ":latest")] || used[f[1]] {
+					if len(f) < 4 || imageInUse(used, f[0], f[1], f[2]) {
 						continue
 					}
-					items = append(items, PruneItem{"images", f[0], parseHumanSize(f[2])})
+					target := f[0]
+					if strings.Contains(target, "<none>") {
+						target = f[1] // dangling: only the ID names it
+					}
+					items = append(items, PruneItem{"images", target, parseHumanSize(f[3])})
 				}
 			}
 		}
@@ -145,6 +151,57 @@ func planPrune(cats map[string]bool, now time.Time) []PruneItem {
 	return items
 }
 
+// imageKeys are the names an image reference matches: the normalized name:tag
+// (docker.io/library/mysql:8.4 for "mysql:8.4") and its digest. Containers record the full
+// reference they were created from, `nerdctl images` lists the short one; both normalize alike.
+func imageKeys(ref string) []string {
+	r, err := parseImageRef(ref)
+	if err != nil {
+		return []string{ref}
+	}
+	var keys []string
+	if r.Tag != "" {
+		keys = append(keys, r.name()+":"+r.Tag)
+	}
+	if r.Digest != "" {
+		keys = append(keys, r.Digest)
+	}
+	return keys
+}
+
+// imageInUse reports whether an image row (repo:tag, ID, digest) is what some container uses.
+func imageInUse(used map[string]bool, ref, id, digest string) bool {
+	if used[id] || used[digest] {
+		return true
+	}
+	if strings.Contains(ref, "<none>") {
+		return false
+	}
+	for _, k := range imageKeys(ref) {
+		if used[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// errPruneInUse marks an item the runtime refused because it is in use now (a container
+// started since the plan): kept, not an error.
+var errPruneInUse = errors.New("in use")
+
+// nerdctlError adds the runtime's own message to a failed nerdctl command.
+func nerdctlError(err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		msg := strings.TrimSpace(string(ee.Stderr))
+		if strings.Contains(msg, "in use") || strings.Contains(msg, "being used") || strings.Contains(msg, "is running") {
+			return fmt.Errorf("%w: %s", errPruneInUse, lastLines(msg, 1))
+		}
+		return fmt.Errorf("%v: %s", err, lastLines(msg, 2))
+	}
+	return err
+}
+
 // parseHumanSize reads runtime sizes like "45.2 MiB", "1.1GB" or "800kB" (best effort, 0 if not).
 func parseHumanSize(s string) int64 {
 	s = strings.ReplaceAll(strings.TrimSpace(s), " ", "")
@@ -171,9 +228,13 @@ func applyPrune(items []PruneItem) (freed int64, errs []error) {
 		switch it.Category {
 		case "containers":
 			id := it.Target[strings.LastIndex(it.Target, "(")+1 : len(it.Target)-1]
-			_, err = runNerdctl("rm", id) // refuses a running container
+			if _, err = runNerdctl("rm", id); err != nil { // refuses a running container
+				err = nerdctlError(err)
+			}
 		case "images":
-			_, err = runNerdctl("rmi", it.Target) // refuses an image in use
+			if _, err = runNerdctl("rmi", it.Target); err != nil { // refuses an image in use
+				err = nerdctlError(err)
+			}
 		case "logs", "tmp":
 			if it.Category == "tmp" && openFiles()[it.Target] {
 				continue
@@ -189,6 +250,9 @@ func applyPrune(items []PruneItem) (freed int64, errs []error) {
 			}
 		default:
 			err = fmt.Errorf("unknown category %q", it.Category)
+		}
+		if errors.Is(err, errPruneInUse) {
+			continue
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s %s: %w", it.Category, it.Target, err))
@@ -283,7 +347,9 @@ App data, volumes, secrets, /etc and anything a process has open are never remov
 		}
 		freed, errs := applyPrune(items)
 		if err := printResult(map[string]any{"items": items, "bytes": freed, "applied": true}, func() {
-			fmt.Printf("✓ reclaimed %s\n", humanBytes(uint64(freed)))
+			if freed > 0 || len(errs) == 0 {
+				fmt.Printf("Reclaimed %s\n", humanBytes(uint64(freed)))
+			}
 		}); err != nil {
 			return err
 		}

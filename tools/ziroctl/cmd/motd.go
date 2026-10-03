@@ -70,9 +70,6 @@ type DiskUse struct {
 
 func (d DiskUse) Percent() int { return int(d.Used * 100 / max(d.Total, 1)) }
 
-// oneShotServices run to completion at boot; stopped is their normal state.
-var oneShotServices = map[string]bool{"firewall": true, "cloud-init": true, "wireguard": true}
-
 // collectHostSummary gathers the summary from /proc, /sys and local state only (no
 // subprocesses), so it is cheap enough for every login and the boot console.
 func collectHostSummary() HostSummary {
@@ -145,7 +142,7 @@ func hostAttention(mi map[string]uint64, disks []DiskUse) []Attention {
 	}
 	for _, svc := range listAllServices() {
 		if svc.Enabled && svc.Status != "RUNNING" && !oneShotServices[svc.Name] {
-			out = append(out, Attention{"service " + svc.Name + " not running", "ziroctl service status " + svc.Name})
+			out = append(out, Attention{"service " + svc.Name + " not running", "ziroctl doctor --fix"})
 		}
 	}
 	if !loadFirewallConfig().Enabled {

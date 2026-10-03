@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -481,6 +482,8 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 								def.Resources.PIDs = -1
 							}
 						}
+					case "restart":
+						def.Restart = v
 					case "autostart":
 						def.Autostart = (v == "true" || v == "1" || v == "yes")
 					}
@@ -637,13 +640,63 @@ func getServiceStatus(name string) (*ServiceStatusInfo, error) {
 	}, nil
 }
 
+// getPIDUptime is how long the process has run: its start time (field 22 of /proc/<pid>/stat,
+// in clock ticks since boot) against the system uptime.
 func getPIDUptime(pid int) string {
-	statPath := fmt.Sprintf("/proc/%d/stat", pid)
-	if fi, err := os.Stat(statPath); err == nil {
-		dur := time.Since(fi.ModTime()).Round(time.Second)
-		return dur.String()
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	up, uerr := os.ReadFile("/proc/uptime")
+	i := bytes.LastIndexByte(b, ')')
+	if err != nil || uerr != nil || i < 0 {
+		return "unknown"
 	}
-	return "unknown"
+	f := strings.Fields(string(b[i+1:]))
+	var sysUp float64
+	fmt.Sscanf(string(up), "%f", &sysUp)
+	if len(f) < 20 {
+		return "unknown"
+	}
+	start, _ := strconv.ParseFloat(f[19], 64) // field 22 overall; fields after ")" start at 3
+	return (time.Duration((sysUp - start/100) * float64(time.Second))).Round(time.Second).String()
+}
+
+// oneShotServices run to completion at boot; stopped is their normal state.
+var oneShotServices = map[string]bool{"firewall": true, "cloud-init": true, "wireguard": true}
+
+// ServiceFix is one service healServices found down and what it did about it.
+type ServiceFix struct {
+	Name  string `json:"name"`
+	Error string `json:"error,omitempty"` // empty: restarted
+}
+
+const healCooldown = 5 * time.Minute
+
+var (
+	healMu   sync.Mutex
+	healLast = map[string]time.Time{}
+)
+
+// healServices starts every enabled long-running service that is down. ziro-init restarts a
+// crashed daemon by itself; this is the second line (a daemon that never started, or one
+// stopped outside its supervision). force skips the per-service cooldown (doctor --fix).
+func healServices(force bool) []ServiceFix {
+	healMu.Lock()
+	defer healMu.Unlock()
+	var out []ServiceFix
+	for _, svc := range listAllServices() {
+		if !svc.Enabled || svc.Status == "RUNNING" || oneShotServices[svc.Name] {
+			continue
+		}
+		if !force && time.Since(healLast[svc.Name]) < healCooldown {
+			continue
+		}
+		healLast[svc.Name] = time.Now()
+		fix := ServiceFix{Name: svc.Name}
+		if err := startService(svc.Name); err != nil && !strings.Contains(err.Error(), "already running") {
+			fix.Error = err.Error()
+		}
+		out = append(out, fix)
+	}
+	return out
 }
 
 func startService(name string) error {
@@ -658,9 +711,58 @@ func startService(name string) error {
 	if initManaged[name] {
 		return releaseToInit(def)
 	}
+	if def.Restart == "" { // one-shot (firewall, cloud-init): run it here and report its exit
+		return runForeground(def)
+	}
 
-	if err := trustedExecutable(def.Exec); err != nil {
+	// A supervised daemon must be a child of PID 1, never of this process: whoever reaps a
+	// daemon is the only one that sees it exit, and only ziro-init restarts it. So it is started
+	// by a short-lived helper ("service spawn") that exits at once, and the daemon is re-parented
+	// to init. Started directly, a daemon that died under a long-lived parent (service boot,
+	// sentinel, ziro-api, cluster-agent) was reaped there and never restarted.
+	self, err := os.Executable()
+	if err != nil {
 		return err
+	}
+	// deepcode ignore CommandInjection: argv to our own binary; name passed validName in loadServiceDef
+	out, err := exec.Command(self, "service", "spawn", name).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return errors.New(strings.TrimSpace(string(ee.Stderr)))
+		}
+		return err
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return fmt.Errorf("spawn %s: unexpected output %q", name, out)
+	}
+	// Report a daemon that dies on startup (bad config, port in use) instead of claiming
+	// success; init has already scheduled its restart.
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if !processAlive(pid) {
+			return fmt.Errorf("exited during startup; see %s (ziro-init retries it)", def.LogFile)
+		}
+	}
+	return nil
+}
+
+// processAlive is false for a process that is gone or a zombie waiting for its parent.
+func processAlive(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	if i := bytes.LastIndexByte(b, ')'); i >= 0 && i+2 < len(b) {
+		return b[i+2] != 'Z' && b[i+2] != 'X'
+	}
+	return true
+}
+
+// spawnDaemon starts def's process in its cgroup, identity and log, writes the pidfile and
+// returns without waiting for it.
+func spawnDaemon(def *ServiceDef) (*exec.Cmd, *os.File, error) {
+	if err := trustedExecutable(def.Exec); err != nil {
+		return nil, nil, err
 	}
 	_ = os.MkdirAll(filepath.Dir(def.PIDFile), 0755)
 	_ = os.MkdirAll(filepath.Dir(def.LogFile), 0755)
@@ -675,38 +777,41 @@ func startService(name string) error {
 		cmd.Stdout = logF
 		cmd.Stderr = logF
 	}
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := applyServiceIdentity(cmd, def); err != nil {
 		if logF != nil {
 			logF.Close()
 		}
-		return err
+		return nil, nil, err
 	}
 	closeCg := func() {}
 	if cg, err := serviceCgroup(def); err == nil {
 		closeCg = startInCgroup(cmd.SysProcAttr, cg)
 	} else if !errors.Is(err, errNoCgroup) {
-		fmt.Fprintf(os.Stderr, "warning: %s: cgroup: %v\n", name, err)
+		fmt.Fprintf(os.Stderr, "warning: %s: cgroup: %v\n", def.Name, err)
 	}
-
 	err = cmd.Start()
 	closeCg()
 	if err != nil {
 		if logF != nil {
 			logF.Close()
 		}
-		return fmt.Errorf("failed to start process: %w", err)
+		return nil, nil, fmt.Errorf("failed to start process: %w", err)
 	}
-
-	newPID := cmd.Process.Pid
-	setOOMScoreAdj(newPID, serviceClass(name))
+	setOOMScoreAdj(cmd.Process.Pid, serviceClass(def.Name))
 	if def.PIDFile != "" {
-		_ = os.WriteFile(def.PIDFile, []byte(strconv.Itoa(newPID)), 0644)
+		_ = os.WriteFile(def.PIDFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
 	}
+	return cmd, logF, nil
+}
 
+// runForeground runs a one-shot service and reports how it ended within a second; a
+// longer-running one keeps going in the background.
+func runForeground(def *ServiceDef) error {
+	cmd, logF, err := spawnDaemon(def)
+	if err != nil {
+		return err
+	}
 	done := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
@@ -718,9 +823,6 @@ func startService(name string) error {
 		}
 		done <- err
 	}()
-
-	// Report a daemon that dies on startup (bad config, port in use) instead of claiming
-	// success. A clean exit is fine: firewall/cloud-init are one-shot.
 	select {
 	case err := <-done:
 		if err != nil {
@@ -729,6 +831,25 @@ func startService(name string) error {
 	case <-time.After(time.Second):
 	}
 	return nil
+}
+
+var serviceSpawnCmd = &cobra.Command{
+	Use:    "spawn <service>",
+	Short:  "Start a supervised daemon and exit, leaving it to ziro-init",
+	Hidden: true,
+	Args:   cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		def, err := loadServiceDef(args[0])
+		if err != nil {
+			return err
+		}
+		c, _, err := spawnDaemon(def)
+		if err != nil {
+			return err
+		}
+		fmt.Println(c.Process.Pid) // exiting now re-parents the daemon to PID 1
+		return nil
+	},
 }
 
 // releaseToInit starts an init-supervised daemon: remove the stop marker and wait for
@@ -817,7 +938,7 @@ func stopService(name string) error {
 func waitGone(pid int, d time.Duration) bool {
 	for deadline := time.Now().Add(d); time.Now().Before(deadline); {
 		time.Sleep(100 * time.Millisecond)
-		if !isPIDRunning(pid) {
+		if !processAlive(pid) { // a zombie is gone: ziro-init reaps it
 			return true
 		}
 	}
@@ -873,6 +994,7 @@ func init() {
 	serviceCmd.AddCommand(serviceStartCmd)
 	serviceCmd.AddCommand(serviceStopCmd)
 	serviceCmd.AddCommand(serviceRestartCmd)
+	serviceCmd.AddCommand(serviceSpawnCmd)
 	serviceCmd.AddCommand(serviceEnableCmd)
 	serviceCmd.AddCommand(serviceDisableCmd)
 	serviceCmd.AddCommand(serviceLogsCmd)

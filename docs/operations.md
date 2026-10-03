@@ -81,7 +81,9 @@ ziroctl system prune --all               # also drop the upgrade rollback genera
 
 Prune removes only what nothing uses:
 - stopped containers that no app or cluster owns
-- images no container uses
+- images no container uses. A container counts as using an image by its full name (`mysql:8.4` and
+  `docker.io/library/mysql:8.4` are the same image) or by digest. An image that a container starts using between
+  the plan and the removal is kept.
 - rotated logs
 - temp files in `/tmp` and `/var/tmp` older than 7 days that no process has open
 - the package cache
@@ -94,6 +96,24 @@ Logs over 10 MB are rotated hourly, keeping 3 gzip-compressed generations (`<log
 When `/var` reaches 90%, the sentinel prunes images, rotated logs, stale temp files and caches on its own, and
 sends a `disk` alert saying what it freed. The threshold is `disk_prune_percent` in `/etc/ziro/sentinel.json`; `0`
 turns this off.
+
+## Services that stay up: `doctor`
+
+Every long-running service (sentinel, crond, cluster-agent, cluster-master, ziro-api, gateway, plugin daemons) is
+supervised by ziro-init:
+- **Restart:** a daemon that exits is restarted with a crash-loop backoff of 1 s doubling to 60 s, with no limit.
+- **Ownership:** daemons are always children of PID 1, whoever started them, so no exit goes unseen.
+- **Second line:** once a minute, the sentinel starts any enabled service that is down, for example one stopped
+  by hand, and sends a `service` alert.
+
+```sh
+ziroctl doctor          # kernel, storage, containerd, network, every enabled service, cluster link, disk, firewall
+ziroctl doctor --fix    # start services that are down, restart the cluster agent, prune logs and temp files; check again
+ziroctl doctor --json
+```
+
+Rows are `ok`, `warn` or `fail`, plus `fixed` after `--fix`. A failing row shows what `--fix` does, or the command
+to run. The exit status is non-zero only when a critical check fails (`ziroctl upgrade` gates on those).
 
 ## Memory: how a host protects itself
 

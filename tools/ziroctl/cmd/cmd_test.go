@@ -229,3 +229,35 @@ func TestHelpText(t *testing.T) {
 	}
 	walk(rootCmd)
 }
+
+func TestProcessAlive(t *testing.T) {
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("needs /proc")
+	}
+	if !processAlive(os.Getpid()) || processAlive(1<<22) {
+		t.Error("processAlive wrong for self or a missing PID")
+	}
+	if up := getPIDUptime(os.Getpid()); up == "unknown" || strings.HasPrefix(up, "-") {
+		t.Errorf("uptime of self = %q", up)
+	}
+}
+
+func TestDoctorFix(t *testing.T) {
+	doctorSettle = 0
+	ran := 0
+	healthy := false
+	checks := func() []doctorCheck {
+		return []doctorCheck{
+			{Name: "ok", Passed: true},
+			{Name: "svc", Passed: healthy, fix: func() error { ran++; healthy = true; return nil }},
+			{Name: "advice", Passed: false, Fix: "ziroctl firewall enable"},
+		}
+	}
+	out := applyDoctorFixes(checks(), checks)
+	if ran != 1 || !out[1].Passed || !out[1].Fixed || out[0].Fixed || out[2].Passed || out[2].Fixed {
+		t.Fatalf("ran %d, checks %+v", ran, out)
+	}
+	if again := applyDoctorFixes(out, checks); len(again) != 3 || ran != 1 {
+		t.Errorf("a passing check was fixed again (ran %d)", ran)
+	}
+}

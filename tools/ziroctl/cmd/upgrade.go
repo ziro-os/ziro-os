@@ -1124,8 +1124,8 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	checks := runDoctor()
 	need := uint64(asset.Size) * 4
 	free := freeBytes("/")
-	checks = append(checks, doctorCheck{"Free space on ZIRO_ROOT", free >= need,
-		fmt.Sprintf("%d MB free, %d MB needed", free>>20, need>>20), true})
+	checks = append(checks, doctorCheck{Name: "Free space on ZIRO_ROOT", Passed: free >= need,
+		Details: fmt.Sprintf("%d MB free, %d MB needed", free>>20, need>>20), Critical: true})
 	printDoctor(checks)
 	var blocking []string
 	for _, c := range checks {
