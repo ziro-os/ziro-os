@@ -479,9 +479,15 @@ func deployAppLocal(in *AppInstance, o appDeployOpts) error {
 			a.Port, published = fmt.Sprintf("%s:%d:%d", bind, host, c.Port), true
 			in.Publish = bind + ":" + strconv.Itoa(host)
 		}
-		fmt.Printf("  pulling %s\n", a.Image)
-		if err := appNerdctl("pull", "-q", a.Image); err != nil {
-			return err
+		if strings.HasPrefix(a.Image, "ziro.local/") { // built here by ziroctld: never pulled
+			if a.Image, err = localBuildImage(a.Image); err != nil {
+				return err
+			}
+		} else {
+			fmt.Printf("  pulling %s\n", a.Image)
+			if err := appNerdctl("pull", "-q", a.Image); err != nil {
+				return err
+			}
 		}
 		if err := ensureDataDirs(a); err != nil {
 			return err

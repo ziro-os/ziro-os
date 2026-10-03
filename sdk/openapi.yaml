@@ -911,12 +911,84 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Object" }
         "202": { $ref: "#/components/responses/Message" }
+  /api/v1/deployments:
+    get:
+      x-ziro-role: viewer
+      tags: [deploy]
+      summary: Apps deployed from git, each with its URL and latest build
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      x-ziro-role: admin
+      tags: [deploy]
+      summary: Create or update a deployment from a git repository and queue its build (needs the builder plugin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeployRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/deployments/{app}:
+    get:
+      x-ziro-role: viewer
+      tags: [deploy]
+      summary: A deployment and its builds, newest first
+      parameters:
+        - $ref: "#/components/parameters/App"
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    delete:
+      x-ziro-role: admin
+      tags: [deploy]
+      summary: Remove a deployment, its builds and its app (?purge=true also deletes the app's data and secrets)
+      parameters:
+        - $ref: "#/components/parameters/App"
+        - { name: purge, in: query, schema: { type: boolean } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/deployments/{app}/redeploy:
+    post:
+      x-ziro-role: operator
+      tags: [deploy]
+      summary: Build the latest commit again ({"ref":"<branch>"} switches the branch) and release it
+      parameters:
+        - $ref: "#/components/parameters/App"
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/deployments/{app}/rollback:
+    post:
+      x-ziro-role: operator
+      tags: [deploy]
+      summary: Release an earlier build's image again ({"build":"b3"}, default the previous one), without rebuilding
+      parameters:
+        - $ref: "#/components/parameters/App"
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/deployments/{app}/builds/{id}/log:
+    get:
+      x-ziro-role: viewer
+      tags: [deploy]
+      summary: A build's log as text; ?follow=true streams it until the build finishes
+      parameters:
+        - $ref: "#/components/parameters/App"
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^b[0-9]{1,9}$" } }
+        - { name: follow, in: query, schema: { type: boolean } }
+      responses:
+        "200": { description: The log, content: { text/plain: { schema: { type: string } } } }
 components:
   securitySchemes:
     bearer:
       type: http
       scheme: bearer
   parameters:
+    App:
+      name: app
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z0-9][a-z0-9_.-]{0,62}$" }
     Name:
       name: name
       in: path
@@ -949,6 +1021,24 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Message" }
   schemas:
+    DeployRequest:
+      type: object
+      required: [name, repo]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        repo: { type: string, description: https URL without credentials }
+        ref: { type: string, description: branch or tag }
+        path: { type: string, description: subdirectory to build }
+        port: { type: integer }
+        publish: { type: integer, description: host port on 127.0.0.1 }
+        env: { type: object, additionalProperties: { type: string } }
+        secrets: { type: array, items: { type: string }, description: names of input secrets the app receives }
+        secret_values: { type: object, additionalProperties: { type: string }, description: values for those secrets (kept by the app) }
+        git_token: { type: string, description: access token for a private repository (stored 0600) }
+        expose: { type: string }
+        expose_tls: { type: string }
+        resources: { type: object }
     Stack:
       type: object
       required: [stack, version, apps]

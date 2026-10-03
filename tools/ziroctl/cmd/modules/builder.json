@@ -1,0 +1,85 @@
+{
+  "name": "builder",
+  "version": "1.0",
+  "description": "Build and deploy apps from git: BuildKit (containerd worker) and ziroctld, the deploy daemon behind `ziroctl deploy`",
+  "packages": [
+    "buildkit",
+    "buildctl",
+    "git"
+  ],
+  "min_memory_mb": 2048,
+  "dirs": [
+    {
+      "path": "/var/lib/buildkit",
+      "mode": "0700"
+    },
+    {
+      "path": "/var/lib/ziro/deploy",
+      "mode": "0700"
+    },
+    {
+      "path": "/etc/ziro/deploy",
+      "mode": "0700"
+    },
+    {
+      "path": "/run/buildkit",
+      "mode": "0700"
+    }
+  ],
+  "files": [
+    {
+      "path": "/etc/buildkit/buildkitd.toml",
+      "mode": "0644",
+      "content": "# Managed by `ziroctl module enable builder`. Images go straight into containerd's default namespace,\n# where `ziroctl deploy` runs them; the OCI worker (its own image store) is off.\nroot = \"/var/lib/buildkit\"\n[grpc]\n  address = [\"unix:///run/buildkit/buildkitd.sock\"]\n[worker.oci]\n  enabled = false\n[worker.containerd]\n  enabled = true\n  address = \"/run/containerd/containerd.sock\"\n  namespace = \"default\"\n  gc = true\n  # Build cache kept on disk (MB): older layers are collected first\n  gckeepstorage = 10000\n"
+    }
+  ],
+  "prepare": [
+    {
+      "exec": "/bin/ln",
+      "args": [
+        "-sfn",
+        "/usr/bin/ziroctl",
+        "/usr/bin/ziroctld"
+      ],
+      "creates": "/usr/bin/ziroctld"
+    }
+  ],
+  "services": [
+    {
+      "name": "buildkitd",
+      "description": "BuildKit image builder (local socket only)",
+      "exec": "/usr/bin/buildkitd",
+      "args": "--config /etc/buildkit/buildkitd.toml",
+      "pidfile": "/run/ziro-buildkitd.pid",
+      "logfile": "/var/log/buildkitd.log",
+      "resources": {
+        "memory": "3Gi",
+        "cpus": 2,
+        "pids": 4096
+      }
+    },
+    {
+      "name": "ziroctld",
+      "description": "Ziro deploy daemon: builds and releases apps from git",
+      "exec": "/usr/bin/ziroctld",
+      "args": "",
+      "pidfile": "/run/ziro-ziroctld.pid",
+      "logfile": "/var/log/ziroctld.log",
+      "resources": {
+        "memory": "256Mi",
+        "pids": 512
+      }
+    }
+  ],
+  "health": {
+    "exec": "/usr/bin/buildctl",
+    "args": [
+      "--addr",
+      "unix:///run/buildkit/buildkitd.sock",
+      "debug",
+      "workers"
+    ],
+    "timeout": "1m",
+    "expect": "linux/"
+  }
+}

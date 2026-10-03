@@ -70,6 +70,12 @@ in the [design standard](design/README.md); design decisions are recorded as [RF
   A version whose changes since the last OS release touch only the tools stream (`tools/`, `sdk/`, docs) is
   released as `tools/vX.Y.Z` alone. `release.yml` skips the kernels and images, decided by
   `scripts/release/os-changed.sh`; `force_os` on a manual run overrides that.
+- **Deploy from git (ziroctld):** `ziroctl` run as `/usr/bin/ziroctld` (one binary, so `ziroctl update` keeps it
+  current) is the deploy daemon. It clones over https, detects the build or uses the repo's Dockerfile, builds with
+  BuildKit's containerd worker (images stay on the host as `ziro.local/<app>:b<N>`, pinned by digest), and releases
+  through the same app machinery as the catalog, with a health check and automatic fallback to the previous build.
+  Clients use the root-only socket `/run/ziro/ziroctld.sock`; the REST API proxies `/api/v1/deployments` to it.
+  See `docs/deploy.md`.
 - **SDK:** the formats and their validators, catalog signing, the API types and a typed client live in the
   `sdk/` Go module; `ziroctl` imports it, so tools built on the SDK validate with the host's exact rules.
   `sdk/openapi.yaml` describes the API, kept complete by a test ([SDK guide](sdk.md)).
