@@ -24,7 +24,11 @@ ziroctl apps deploy valkey
 ziroctl apps deploy grafana --expose grafana.example.com   # also publish it through the gateway (HTTPS)
 ziroctl apps deploy mysql-cluster                      # on a cluster master
 ziroctl apps deploy mysql-cluster --replicas 5 --allow-from api
+ziroctl apps deploy openclaw --secret ANTHROPIC_API_KEY=@anthropic.key   # an input secret (see apps info)
 ```
+
+Coolify isn't in the catalog. It needs the host's Docker socket, which is root on the host and outside what an app
+may do. Deploying your own code from git comes with `ziroctl deploy`.
 
 ## Where apps run
 
@@ -132,6 +136,12 @@ Rules, enforced when a definition is loaded (catalog CI and every host):
 - **Images:** every image is pinned by digest (`name:tag@sha256:...`). The tag only documents the version.
 - **Secrets:** secrets are generated on the host and reach containers only as env files. Env values and args can't
   reference `{{secret.*}}`, because argv and plain env are visible in `inspect`. Only `outputs` can use them.
+- **Input secrets:** a value only the operator has, such as an API key, is declared as `"input"` (required) or
+  `"input?"` (optional) instead of a generator spec. It is given at deploy time and kept across redeploys. It is
+  stored and delivered exactly like a generated secret, never as a setting.
+  - CLI: `--secret KEY=@file`; or `--secret KEY`, which reads `$KEY`. `KEY=value` also works, but leaves the
+    value in your shell history.
+  - API: the `secrets` field. The deploy job gets the value through its environment, not its argv.
 - **Placeholders:** `{{setting.x}}`, `{{app}}` (the component's name), `{{peers}}` (every replica's DNS name,
   comma-separated), `{{replicas}}`, and in outputs `{{host}}`, `{{port}}` and `{{secret.x}}`. They substitute values
   only.

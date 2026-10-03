@@ -70,7 +70,7 @@ func (d AppDef) Validate() error {
 		if !EnvKeyRe.MatchString(k) {
 			return fmt.Errorf("secret %q: must be an env name", k)
 		}
-		if err := ValidSecretSpec(spec); err != nil {
+		if err := ValidAppSecretSpec(spec); err != nil {
 			return err
 		}
 	}

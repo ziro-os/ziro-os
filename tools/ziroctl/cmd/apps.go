@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ziro-os/ziro-os/sdk/schema"
 )
 
 // Apps: one-command deployments of pinned app definitions from signed catalogs
@@ -153,9 +155,15 @@ type appDeployOpts struct {
 	// Expose publishes the app's entry point through the gateway on this hostname (HTTPS).
 	Expose    string
 	ExposeTLS string
+	// Secrets are values for the app's input secrets (API keys), stored and delivered like
+	// generated ones.
+	Secrets map[string]string
 	// Links are extra environment variables (values from another app's outputs, which can hold
 	// credentials): delivered like generated secrets, through env files, never argv.
 	Links map[string]string
+	// Internal (local only): don't publish a host port; the app serves only the containers on
+	// its network (a stack's database).
+	Internal bool
 	// Network (local only) attaches the containers to a named network, where the apps of one
 	// stack find each other by container name.
 	Network string
@@ -358,18 +366,14 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 	secret := appClusterSecret(in.Name)
 	if len(d.Secrets) > 0 || len(o.Links) > 0 {
 		if err := withState(func(st *ClusterState) error {
-			cur := st.Secrets[secret]
-			next := map[string]string{}
-			for k, spec := range d.Secrets {
-				if v := cur[k]; v != "" {
-					next[k] = v
-					continue
+			next, _, err := fillSecrets(st.Secrets[secret], d.Secrets, o.Secrets)
+			if err != nil {
+				return err
+			}
+			for k := range next { // only this version's secrets (fillSecrets keeps older keys)
+				if _, ok := d.Secrets[k]; !ok {
+					delete(next, k)
 				}
-				v, err := genSecret(spec)
-				if err != nil {
-					return err
-				}
-				next[k] = v
 			}
 			for k, v := range o.Links {
 				next[k] = v
@@ -435,7 +439,7 @@ var (
 
 func deployAppLocal(in *AppInstance, o appDeployOpts) error {
 	d := in.Def
-	secrets, err := loadOrCreateSecrets(appSecretsPath(in.Name), d.Secrets)
+	secrets, err := loadOrCreateSecrets(appSecretsPath(in.Name), d.Secrets, o.Secrets)
 	if err != nil {
 		return err
 	}
@@ -467,7 +471,7 @@ func deployAppLocal(in *AppInstance, o appDeployOpts) error {
 			}
 			a.SecretEnv[k] = v
 		}
-		if c.Port > 0 && !published { // the app's entry point is reachable from this host by default
+		if c.Port > 0 && !published && !o.Internal { // the app's entry point is reachable from this host by default
 			host := o.Publish
 			if host == 0 {
 				host = c.Port
@@ -544,7 +548,7 @@ func appOutputsFor(in *AppInstance, internal bool) (map[string]string, error) {
 	if in.Mode == "local" && in.Publish != "" && !internal {
 		_, vars["port"], _ = strings.Cut(in.Publish, ":")
 	}
-	if in.Mode == "local" && internal {
+	if in.Mode == "local" && (internal || in.Publish == "") { // unpublished: only its network reaches it
 		for _, c := range in.Def.Components {
 			if c.Port > 0 {
 				vars["host"] = "ziro-app-" + componentApp(in.Name, in.Def, c)
@@ -555,7 +559,7 @@ func appOutputsFor(in *AppInstance, internal bool) (map[string]string, error) {
 	secrets := map[string]string{}
 	if in.Mode == "local" {
 		var err error
-		if secrets, err = loadOrCreateSecrets(appSecretsPath(in.Name), nil); err != nil {
+		if secrets, err = loadOrCreateSecrets(appSecretsPath(in.Name), nil, nil); err != nil {
 			return nil, err
 		}
 	} else if st, err := readState(); err == nil {
@@ -686,6 +690,7 @@ func purgeLeftovers(name string) error {
 var (
 	appsName       string
 	appsSets       []string
+	appsSecrets    []string
 	appsReplicas   int
 	appsPublish    int
 	appsBind       string
@@ -783,6 +788,21 @@ var appsInfoCmd = &cobra.Command{
 			for _, s := range d.Settings {
 				fmt.Printf("  setting %s=%s  %s\n", s.Name, s.Default, s.Description)
 			}
+			var keys []string
+			for k := range d.Secrets {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				switch d.Secrets[k] {
+				case schema.SecretInput:
+					fmt.Printf("  secret %s  required: --secret %s=@file\n", k, k)
+				case schema.SecretInputOptional:
+					fmt.Printf("  secret %s  optional: --secret %s=@file\n", k, k)
+				default:
+					fmt.Printf("  secret %s  generated (%s)\n", k, d.Secrets[k])
+				}
+			}
 		})
 	},
 }
@@ -796,6 +816,7 @@ var appsDeployCmd = &cobra.Command{
   ziroctl apps deploy postgres:16 --name db2 --publish 5433
   ziroctl apps deploy mysql:8.4
   ziroctl apps deploy mysql-cluster             # on a cluster master: 3-node Group Replication
+  ziroctl apps deploy openclaw --secret ANTHROPIC_API_KEY=@anthropic.key
   ziroctl apps credentials postgres`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if appsFile != "" {
@@ -805,6 +826,10 @@ var appsDeployCmd = &cobra.Command{
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		set, err := parseSetFlags(appsSets)
+		if err != nil {
+			return err
+		}
+		secrets, err := parseSecretFlags(appsSecrets)
 		if err != nil {
 			return err
 		}
@@ -823,7 +848,7 @@ var appsDeployCmd = &cobra.Command{
 		}
 		o := appDeployOpts{Name: appsName, Set: set, Replicas: appsReplicas, Publish: appsPublish,
 			Bind: appsBind, AllowFrom: appsAllowFrom, Local: appsLocal, NewVersion: appsNewVersion,
-			Expose: appsExpose, ExposeTLS: appsExposeTLS}
+			Expose: appsExpose, ExposeTLS: appsExposeTLS, Secrets: secrets}
 		if appsFile != "" {
 			version := ""
 			if len(args) == 1 {
@@ -949,6 +974,7 @@ func init() {
 	f.StringVar(&appsName, "name", "", "Instance name (default: the app name)")
 	f.StringVarP(&appsFile, "file", "f", "", "Deploy a local app.json (development; unsigned, CLI only)")
 	f.StringArrayVar(&appsSets, "set", nil, "Set an app setting (name=value; see `apps info`)")
+	f.StringArrayVar(&appsSecrets, "secret", nil, "Set an input secret: KEY=@file, KEY (from $KEY) or KEY=value (see `apps info`)")
 	f.IntVar(&appsReplicas, "replicas", 0, "Replicas, for apps that allow scaling")
 	f.IntVar(&appsPublish, "publish", 0, "Host port (local default: the app's port on 127.0.0.1; cluster default: none)")
 	f.StringVar(&appsBind, "bind", "", "Local publish address (default 127.0.0.1; 0.0.0.0 exposes it, the firewall still applies)")

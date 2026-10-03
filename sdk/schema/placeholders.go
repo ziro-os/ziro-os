@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"regexp"
@@ -117,6 +118,37 @@ func ValidSecretSpec(spec string) error {
 	}
 	if n, _ := strconv.Atoi(m[2]); n < 12 || n > 64 {
 		return fmt.Errorf("secret spec %q: N must be 12..64", spec)
+	}
+	return nil
+}
+
+// Input secrets are supplied by the operator at deploy time (an API key, a licence) instead of
+// generated: "input" must be given on the first deploy, "input?" may stay empty. They are stored
+// and delivered like generated secrets (secret env files, sealed cluster secrets), never as
+// plain settings.
+const (
+	SecretInput         = "input"
+	SecretInputOptional = "input?"
+)
+
+func IsInputSecret(spec string) bool { return spec == SecretInput || spec == SecretInputOptional }
+
+// ValidAppSecretSpec accepts a generated spec or an input spec.
+func ValidAppSecretSpec(spec string) error {
+	if IsInputSecret(spec) {
+		return nil
+	}
+	return ValidSecretSpec(spec)
+}
+
+// ValidSecretValue checks an operator-supplied secret: it is written as one KEY=value line of an
+// env file, so it can't span lines or hold NUL, and it is bounded.
+func ValidSecretValue(v string) error {
+	if strings.ContainsAny(v, "\r\n\x00") {
+		return errors.New("a secret value can't contain newlines or NUL")
+	}
+	if len(v) > 4096 {
+		return errors.New("a secret value is limited to 4096 bytes")
 	}
 	return nil
 }

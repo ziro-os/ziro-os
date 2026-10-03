@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -77,6 +78,7 @@ type resolvedApp struct {
 	schema.StackApp
 	Def     AppDef
 	Version string
+	Secrets map[string]string // input secrets given now (--secret app.KEY=...); never stored or hashed
 }
 
 // resolveStackApps loads every app definition: catalog apps from the signed catalogs, local
@@ -173,7 +175,7 @@ func planStack(s Stack, apps map[string]resolvedApp, prev *stackState) ([]StackC
 			c.Action = "create"
 		case in.App != apps[key].Def.Name:
 			return nil, fmt.Errorf("app %s: instance %s already runs %s, not %s", key, c.Instance, in.App, apps[key].Def.Name)
-		case prev == nil || prev.Hashes[key] != apps[key].specHash():
+		case prev == nil || prev.Hashes[key] != apps[key].specHash() || len(apps[key].Secrets) > 0:
 			c.Action = "update"
 		default:
 			c.Action = "unchanged"
@@ -229,8 +231,10 @@ func applyStack(s Stack, apps map[string]resolvedApp, plan []StackChange, prev *
 				_ = save()
 				return fmt.Errorf("%s: %w", c.Key, err)
 			}
+			allow, internal := stackDependents(s, apps, c.Key)
 			err = deployAppDef(a.Def, a.Version, appDeployOpts{Name: c.Instance, Set: a.Set, Replicas: a.Replicas,
-				Publish: a.Publish, Expose: a.Expose, ExposeTLS: a.ExposeTLS, Links: links, Network: network})
+				Publish: a.Publish, Expose: a.Expose, ExposeTLS: a.ExposeTLS, Links: links, Network: network,
+				AllowFrom: allow, Internal: internal && a.Publish == 0 && a.Expose == "", Secrets: a.Secrets})
 			if err != nil {
 				_ = save()
 				return fmt.Errorf("%s (%s): %w", c.Key, c.Instance, err)
@@ -243,6 +247,48 @@ func applyStack(s Stack, apps map[string]resolvedApp, plan []StackChange, prev *
 		}
 	}
 	return save()
+}
+
+// stackDependents are the cluster apps of every stack app that depends on key (allowed through
+// the app network policy, so links work in a cluster) and whether any app depends on it at all
+// (then, unless it publishes or exposes, it isn't given a host port on a single host).
+func stackDependents(s Stack, apps map[string]resolvedApp, key string) (allow []string, depended bool) {
+	keys := make([]string, 0, len(s.Apps))
+	for k := range s.Apps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !slices.Contains(s.Apps[k].DependsOn, key) {
+			continue
+		}
+		depended = true
+		for _, c := range apps[k].Def.Components {
+			allow = append(allow, componentApp(s.Instance(k), apps[k].Def, c))
+		}
+	}
+	return allow, depended
+}
+
+// setStackSecrets assigns --secret app.KEY=... values to the stack's apps.
+func setStackSecrets(apps map[string]resolvedApp, flags []string) error {
+	for _, f := range flags {
+		key, rest, ok := strings.Cut(f, ".")
+		a, known := apps[key]
+		if !ok || !known {
+			return fmt.Errorf("--secret %q: want <app>.KEY=..., where <app> is one of the stack's apps", f)
+		}
+		vals, err := parseSecretFlags([]string{rest})
+		if err != nil {
+			return err
+		}
+		if a.Secrets == nil {
+			a.Secrets = map[string]string{}
+		}
+		maps.Copy(a.Secrets, vals)
+		apps[key] = a
+	}
+	return nil
 }
 
 // stackNetwork is the local network a stack's containers share (they reach each other by name).
@@ -368,9 +414,10 @@ func printPlan(plan []StackChange) {
 }
 
 var (
-	stackFile   string
-	stackDryRun bool
-	stackPurge  bool
+	stackFile        string
+	stackDryRun      bool
+	stackSecretFlags []string
+	stackPurge       bool
 )
 
 var stackCmd = &cobra.Command{
@@ -395,7 +442,8 @@ var stackUpCmd = &cobra.Command{
 	Short: "Create, update or remove apps to match a stack",
 	Example: `  ziroctl stack up -f shop.yaml --dry-run
   ziroctl stack up -f shop.yaml
-  ziroctl stack up analytics`,
+  ziroctl stack up analytics
+  ziroctl stack up openclaw --secret openclaw.ANTHROPIC_API_KEY=@anthropic.key`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if (stackFile == "") == (len(args) == 0) || len(args) > 1 {
 			return errors.New("give a catalog stack name or -f <file>")
@@ -420,6 +468,9 @@ var stackUpCmd = &cobra.Command{
 			apps, err = resolveStackApps(s, "")
 		}
 		if err != nil {
+			return err
+		}
+		if err := setStackSecrets(apps, stackSecretFlags); err != nil {
 			return err
 		}
 		prev, err := loadStackState(s.Stack)
@@ -448,6 +499,41 @@ var stackUpCmd = &cobra.Command{
 		if !jsonOutput {
 			fmt.Printf("✓ stack %s is up\n", s.Stack)
 		}
+		return nil
+	},
+}
+
+var stackInitOut string
+
+var stackInitCmd = &cobra.Command{
+	Use:   "init <catalog-stack>",
+	Short: "Write a catalog stack to a file you can edit",
+	Long: `Write a stack from the signed catalog to <dir>/stack.yaml (default: ./<stack>/), to change
+hostnames, versions, settings or resources before deploying it with stack up -f.`,
+	Example: `  ziroctl stack init wordpress
+  ziroctl stack init wordpress -o blog && ziroctl stack up -f blog/stack.yaml --dry-run`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cs, ok := loadCatalogStacks()[args[0]]
+		if !ok {
+			refreshStaleCatalogs("app")
+			if cs, ok = loadCatalogStacks()[args[0]]; !ok {
+				return fmt.Errorf("unknown stack %q (see: ziroctl stack search)", args[0])
+			}
+		}
+		out := stackInitOut
+		if out == "" {
+			out = cs.Stack
+		}
+		b, err := schema.ToYAML(cs)
+		if err != nil {
+			return err
+		}
+		p := filepath.Join(out, "stack.yaml")
+		if err := writeNew(p, b, false); err != nil {
+			return err
+		}
+		fmt.Printf("Wrote %s\n  next: ziroctl stack up -f %s --dry-run\n", p, p)
 		return nil
 	},
 }
@@ -558,7 +644,9 @@ var stackDownCmd = &cobra.Command{
 func init() {
 	stackUpCmd.Flags().StringVarP(&stackFile, "file", "f", "", "Stack file (YAML or JSON)")
 	stackUpCmd.Flags().BoolVar(&stackDryRun, "dry-run", false, "Only show the plan")
+	stackUpCmd.Flags().StringArrayVar(&stackSecretFlags, "secret", nil, "Input secret for one app: <app>.KEY=@file, <app>.KEY (from $KEY) or <app>.KEY=value")
 	stackDownCmd.Flags().BoolVar(&stackPurge, "purge", false, "Also delete the apps' data and credentials")
-	stackCmd.AddCommand(stackUpCmd, stackSearchCmd, stackLsCmd, stackStatusCmd, stackDownCmd)
+	stackInitCmd.Flags().StringVarP(&stackInitOut, "output", "o", "", "Directory to write (default: the stack name)")
+	stackCmd.AddCommand(stackUpCmd, stackInitCmd, stackSearchCmd, stackLsCmd, stackStatusCmd, stackDownCmd)
 	rootCmd.AddCommand(stackCmd)
 }

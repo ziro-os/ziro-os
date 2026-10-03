@@ -1012,6 +1012,7 @@ components:
         allow_from: { type: array, items: { type: string } }
         expose: { type: string, description: publish through the gateway on this hostname }
         expose_tls: { type: string, examples: [auto, internal, off, "cert:name"] }
+        secrets: { type: object, additionalProperties: { type: string }, description: values for the app's input secrets (see apps info) }
     NFSExport:
       type: object
       properties:

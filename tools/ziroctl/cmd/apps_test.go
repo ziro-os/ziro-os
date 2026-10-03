@@ -63,7 +63,7 @@ func TestAppDeployLocal(t *testing.T) {
 			run = c
 		}
 	}
-	secrets, _ := loadOrCreateSecrets(appSecretsPath("db"), nil)
+	secrets, _ := loadOrCreateSecrets(appSecretsPath("db"), nil, nil)
 	pw := secrets["POSTGRES_PASSWORD"]
 	joined := strings.Join(run, " ")
 	for _, want := range []string{"--name ziro-app-db", "--security-opt no-new-privileges", "--cap-drop NET_RAW", "-p 127.0.0.1:5432:5432",
@@ -96,7 +96,7 @@ func TestAppDeployLocal(t *testing.T) {
 	if err := deployAppLocal(in2, appDeployOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	if s, _ := loadOrCreateSecrets(appSecretsPath("db"), nil); s["POSTGRES_PASSWORD"] != pw {
+	if s, _ := loadOrCreateSecrets(appSecretsPath("db"), nil, nil); s["POSTGRES_PASSWORD"] != pw {
 		t.Fatal("redeploy changed the password")
 	}
 
@@ -267,5 +267,22 @@ func TestAppRoutesRBAC(t *testing.T) {
 	role = "admin"
 	if code := do("POST", "/api/v1/apps/deploy", `{"app":"--privileged"}`); code == http.StatusAccepted {
 		t.Error("flag-like app ref accepted")
+	}
+}
+
+// Input secrets reach the deploy job through its environment, never its argv.
+func TestAppDeploySecretsNotInArgv(t *testing.T) {
+	args, env, err := deployJob(AppDeployRequest{App: "openclaw", Secrets: map[string]string{"ANTHROPIC_API_KEY": "sk-secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(args, " "), "sk-secret") || !slices.Contains(args, "--secret=ANTHROPIC_API_KEY") ||
+		args[len(args)-2] != "--" || !slices.Equal(env, []string{"ZIRO_SECRET_ANTHROPIC_API_KEY=sk-secret"}) {
+		t.Fatalf("args %v env %v", args, env)
+	}
+	for _, bad := range []map[string]string{{"ZIRO_X": "y"}, {"bad-name": "y"}, {"K": "a\nb"}} {
+		if _, _, err := deployJob(AppDeployRequest{App: "x", Secrets: bad}); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
 	}
 }

@@ -55,6 +55,21 @@ apps:
 	if !slices.Contains(webRun, "134217728") {
 		t.Errorf("web run args lack the memory limit: %v", webRun)
 	}
+	// The database only serves the stack: no host port; the web entry point keeps its own.
+	for _, c := range *calls {
+		if c[0] == "run" && slices.Contains(c, "ziro-app-shop-db") && slices.ContainsFunc(c, func(a string) bool { return strings.HasSuffix(a, ":5432") }) {
+			t.Errorf("stack-internal db published a host port: %v", c)
+		}
+	}
+	if !slices.ContainsFunc(webRun, func(a string) bool { return a == "127.0.0.1:8080:8080" }) {
+		t.Errorf("web not published: %v", webRun)
+	}
+	if allow, dep := stackDependents(s, apps, "db"); !dep || !slices.Equal(allow, []string{"shop-web"}) {
+		t.Errorf("db dependents = %v %v", allow, dep)
+	}
+	if _, dep := stackDependents(s, apps, "web"); dep {
+		t.Error("web has no dependents")
+	}
 
 	// Same file again: nothing to do.
 	prev, _ := loadStackState("shop")

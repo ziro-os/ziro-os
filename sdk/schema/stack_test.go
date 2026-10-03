@@ -87,3 +87,17 @@ func TestStackLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestInputSecretSpecs(t *testing.T) {
+	for _, ok := range []string{"input", "input?", "alnum:24"} {
+		if ValidAppSecretSpec(ok) != nil {
+			t.Errorf("%s rejected", ok)
+		}
+	}
+	if ValidAppSecretSpec("input!") == nil || ValidSecretSpec("input") == nil {
+		t.Error("bad specs accepted (modules keep generated secrets only)")
+	}
+	if ValidSecretValue("a\nb") == nil || ValidSecretValue(strings.Repeat("x", 4097)) == nil || ValidSecretValue("sk-1") != nil {
+		t.Error("secret value checks")
+	}
+}

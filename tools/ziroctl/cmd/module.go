@@ -505,7 +505,7 @@ func installModule(m ModuleManifest, opts moduleOpts) error {
 		}
 		st.Packages = uniq(append(st.Packages, missing...)) // only what this module added
 	}
-	secrets, err := loadOrCreateSecrets(moduleSecretsPath(m.Name), m.Secrets)
+	secrets, err := loadOrCreateSecrets(moduleSecretsPath(m.Name), m.Secrets, nil)
 	if err != nil {
 		return fail(err)
 	}
@@ -847,7 +847,7 @@ func renderInstalled(m ModuleManifest, st *ModuleState) (ModuleManifest, error) 
 		vars["setting."+k] = v
 	}
 	if len(m.Secrets) > 0 {
-		secrets, err := loadOrCreateSecrets(moduleSecretsPath(m.Name), m.Secrets)
+		secrets, err := loadOrCreateSecrets(moduleSecretsPath(m.Name), m.Secrets, nil)
 		if err != nil {
 			return m, err
 		}
