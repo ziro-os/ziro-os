@@ -155,6 +155,9 @@ func policyFor(st *ClusterState, nodeID string) *MeshPolicy {
 	if r := storagePolicyRule(st, nodeID); r != nil {
 		p.Rules = append(p.Rules, *r)
 	}
+	if r := imagePolicyRule(st, nodeID); r != nil {
+		p.Rules = append(p.Rules, *r)
+	}
 	sort.Slice(p.Rules, func(i, j int) bool {
 		if p.Rules[i].Port != p.Rules[j].Port {
 			return p.Rules[i].Port < p.Rules[j].Port

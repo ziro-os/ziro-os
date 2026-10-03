@@ -74,7 +74,11 @@ func runBuild(ctx context.Context, d *Deployment, b *Build, secrets map[string]s
 	set("building", "")
 	var plan BuildPlan
 	if !b.Rollback {
-		if plan, err = fetchAndBuild(ctx, d, b, logF, logf); err != nil {
+		build := fetchAndBuild
+		if clusterNodeID() != "" { // a master: build on a builder node, run on the cluster
+			build = buildOnCluster
+		}
+		if plan, err = build(ctx, d, b, logF, logf); err != nil {
 			return fail(err)
 		}
 	}
@@ -232,6 +236,13 @@ func releaseBuild(d *Deployment, b *Build, plan BuildPlan, secrets map[string]st
 	}
 	if err := def.Validate(); err != nil {
 		return err
+	}
+	if clusterNodeID() != "" { // cluster: replicas on nodes of the image's arch, checked by the rollout
+		if err := deployAppDef(def, b.ID, appDeployOpts{Name: d.Name, NewVersion: true, Replicas: d.Replicas, Publish: d.Publish,
+			Expose: d.Expose, ExposeTLS: d.ExposeTLS, Secrets: secrets, Arch: b.Arch, ImageNode: b.Node}); err != nil {
+			return err
+		}
+		return waitRollout(d.Name, 2*deployCheckLimit)
 	}
 	if d.Publish == 0 {
 		p, err := freeLocalPort()

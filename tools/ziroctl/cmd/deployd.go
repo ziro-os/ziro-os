@@ -41,6 +41,7 @@ type buildJob struct {
 
 type deployDaemon struct {
 	queue chan buildJob
+	hooks hookDeliveries
 }
 
 func runDeployDaemon(ctx context.Context) error {
@@ -188,6 +189,24 @@ func (dd *deployDaemon) routes() *http.ServeMux {
 	})
 	mux.HandleFunc("GET /v1/deployments/{app}/builds/{id}/log", func(w http.ResponseWriter, r *http.Request) {
 		streamBuildLog(w, r, r.PathValue("app"), r.PathValue("id"), r.URL.Query().Get("follow") == "true")
+	})
+	mux.HandleFunc("POST /v1/hooks/deploy/{app}", dd.handleHook)
+	mux.HandleFunc("GET /v1/deployments/{app}/hook", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := loadDeployment(r.PathValue("app")); err != nil {
+			reply(w, err, nil)
+			return
+		}
+		s, err := hookSecret(r.PathValue("app"), r.URL.Query().Get("rotate") == "true")
+		reply(w, err, map[string]string{"path": "/api/v1/hooks/deploy/" + r.PathValue("app"), "secret": s})
+	})
+	// A builder node's agent asks for the build the master assigned to it (no release here).
+	mux.HandleFunc("POST /v1/build-task", func(w http.ResponseWriter, r *http.Request) {
+		var t ClusterBuild
+		if err := decodeStrict(w, r, &t, 64<<10); err != nil {
+			reply(w, err, nil)
+			return
+		}
+		reply(w, nil, buildTask(r.Context(), t))
 	})
 	mux.HandleFunc("DELETE /v1/deployments/{app}", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, removeDeployment(r.PathValue("app"), r.URL.Query().Get("purge") == "true"), map[string]string{"removed": r.PathValue("app")})
@@ -355,7 +374,18 @@ var deployHTTP = &http.Client{Transport: &http.Transport{
 
 // deployCall sends a request to ziroctld and decodes the JSON reply into out.
 func deployCall(method, path string, body, out any) error {
-	resp, err := deployRaw(method, path, body)
+	return deployCallTimeout(method, path, body, out, 0)
+}
+
+// deployCallTimeout is deployCall bounded by timeout (0 = none).
+func deployCallTimeout(method, path string, body, out any, timeout time.Duration) error {
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	resp, err := deployRawCtx(ctx, method, path, body)
 	if err != nil {
 		return err
 	}
@@ -377,6 +407,10 @@ func deployCall(method, path string, body, out any) error {
 }
 
 func deployRaw(method, path string, body any) (*http.Response, error) {
+	return deployRawCtx(context.Background(), method, path, body)
+}
+
+func deployRawCtx(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -385,7 +419,7 @@ func deployRaw(method, path string, body any) (*http.Response, error) {
 		}
 		rd = strings.NewReader(string(b))
 	}
-	req, err := http.NewRequest(method, "http://ziroctld"+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, "http://ziroctld"+path, rd)
 	if err != nil {
 		return nil, err
 	}

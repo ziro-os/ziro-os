@@ -161,6 +161,9 @@ type appDeployOpts struct {
 	// Links are extra environment variables (values from another app's outputs, which can hold
 	// credentials): delivered like generated secrets, through env files, never argv.
 	Links map[string]string
+	// Arch and ImageNode (cluster): an image built in the cluster runs on nodes of its arch,
+	// fetched from the node that built it.
+	Arch, ImageNode string
 	// Internal (local only): don't publish a host port; the app serves only the containers on
 	// its network (a stack's database).
 	Internal bool
@@ -399,7 +402,8 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 		}
 		name := componentApp(in.Name, d, c)
 		app := ClusteredApp{Name: name, Image: d.Versions[in.Version].Images[c.Name], Replicas: n, Env: env, Args: args,
-			Data: c.Data, DataUID: c.DataUID, Resources: c.Resources, AllowFrom: uniq(append([]string{name}, o.AllowFrom...))} // replicas reach each other
+			Data: c.Data, DataUID: c.DataUID, Resources: c.Resources, AllowFrom: uniq(append([]string{name}, o.AllowFrom...)), // replicas reach each other
+			Arch: o.Arch, ImageNode: o.ImageNode}
 		for _, other := range d.Components { // components of one app reach each other
 			app.AllowFrom = uniq(append(app.AllowFrom, componentApp(in.Name, d, other)))
 		}

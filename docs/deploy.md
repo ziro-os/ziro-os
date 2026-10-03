@@ -75,6 +75,50 @@ env:
 stored with the app's other secrets (0600, delivered through an env file) and kept across builds; give a new value
 to rotate it.
 
+## On a cluster
+
+Deploy on a master; the build and the replicas spread over the cluster.
+
+```sh
+ziroctl module enable builder                 # on each node that may build (and on the master, for ziroctld)
+ziroctl cluster node label worker-1 builder=true
+ziroctl cluster node label master-1 builder=false   # keep builds off the control plane
+ziroctl deploy https://github.com/acme/web --replicas 3 --expose web.example.com
+ziroctl deploy https://github.com/acme/api --arch amd64       # build on (and run on) amd64 nodes
+```
+
+- **Build.** The master's ziroctld picks a builder: a Ready node with the plugin. Nodes labelled `builder=true`
+  come first, then the least busy; `builder=false` is never picked. The build is recorded in the cluster state.
+  The builder's agent sees it in its heartbeat and builds through its own ziroctld, then reports the image digest
+  and the end of the log back. A private repository's token travels as a sealed cluster secret, only to that
+  builder.
+- **Run.** The app's replicas are scheduled only on nodes of the builder's architecture (single-arch image), with
+  the usual rolling update and revision history.
+- **Image flow.** A node that doesn't have the image fetches it from the builder's agent over the WireGuard mesh
+  (port 7444, a cluster bearer token). It loads the image and runs it only if its digest matches the pin; a
+  mismatch is deleted. With the `deny` policy, only nodes that run replicas of the app may reach that port.
+- **Check.** A release is live when every replica runs it. Otherwise the previous build is released again.
+
+## Git webhooks
+
+A push to the deployment's branch builds and releases it.
+
+```sh
+ziroctl deploy hook web            # URL path and secret (--rotate replaces the secret)
+```
+
+- **GitHub:** Settings > Webhooks.
+  - Payload URL: `https://<host>/api/v1/hooks/deploy/web` (the REST API, or a gateway route to it).
+  - Content type: `application/json`; push events; the secret from `deploy hook`.
+- **GitLab:** Settings > Webhooks, the same URL, the secret as the secret token.
+
+The route is public, and the secret decides everything:
+- **Signature:** GitHub's `X-Hub-Signature-256` HMAC or GitLab's `X-Gitlab-Token`, compared in constant time.
+  An unknown app answers exactly like a bad signature.
+- **Branch:** pushes to other branches are ignored.
+- **Replays:** a delivery ID seen before is ignored.
+- **Bursts:** a push while a build is still queued doesn't queue another.
+
 ## API
 
 `ziroctl deploy` talks to ziroctld on a root-only socket, `/run/ziro/ziroctld.sock`. The REST API exposes the same
@@ -87,7 +131,8 @@ See `sdk/openapi.yaml`.
 
 ## Limits
 
-- Single host for now. Building on cluster builders and running replicas on workers comes next.
+- Images built on a node stay on it as long as an app uses them. `system prune` there may remove older ones, so a
+  rollback to a pruned build means a redeploy of that commit.
 - Repositories over `https://` only (no SSH).
-- A release replaces the running container, so there are a few seconds without the app. A zero-downtime swap
-  comes with cluster rolling updates.
+- On a single host a release replaces the running container: a few seconds without the app. On a cluster,
+  replicas roll one at a time.
