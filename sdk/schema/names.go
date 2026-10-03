@@ -24,6 +24,7 @@ type ServiceDef struct {
 	User        string     `json:"user,omitempty"`      // run as this user (and its primary group) instead of root
 	EnvFile     string     `json:"env_file,omitempty"`  // KEY=VALUE lines added to the environment (root-owned, not world-readable)
 	Resources   *Resources `json:"resources,omitempty"` // cgroup limits for the service
+	Restart     string     `json:"restart,omitempty"`   // always, on-failure: ziro-init restarts it (with backoff)
 	Autostart   bool       `json:"autostart"`
 }
 

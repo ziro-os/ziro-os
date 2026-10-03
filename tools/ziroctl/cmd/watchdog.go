@@ -16,6 +16,8 @@ import (
 //     letting the kernel thrash the page cache until the global OOM killer picks a victim;
 //   - disk: when /var fills up, it prunes what nothing uses (images, rotated logs, stale temp
 //     files, caches) and alerts with what it freed.
+//   - services: every minute, an enabled service that is down is started again (ziro-init
+//     restarts crashed daemons; this catches one that never came up).
 // Thresholds: /etc/ziro/sentinel.json, e.g. {"memory_full_percent": 10, "disk_prune_percent": 90}.
 
 var sentinelConfFile = "/etc/ziro/sentinel.json"
@@ -92,13 +94,23 @@ func runResourceWatchdog() {
 			action := "none"
 			if c.RestartWorkloads && len(top) > 0 && top[0].Bytes > 0 {
 				action = "restarted " + top[0].Name
-				if err := restartService(top[0].Name); err != nil {
+				if err := restartSupervised(top[0].Name); err != nil {
 					action = fmt.Sprintf("restart %s failed: %v", top[0].Name, err)
 				}
 			}
 			details["action"] = action
 			fmt.Printf("[%s] memory pressure %.0f%%: %s\n", time.Now().Format("15:04:05"), full, action)
 			alertf("high", "memory", "Host is stalling on memory", details)
+		}
+		if n%12 == 6 { // every minute: start enabled services that are down (cooldown per service)
+			for _, f := range healServices(false) {
+				msg := "restarted " + f.Name
+				if f.Error != "" {
+					msg = "restart " + f.Name + " failed: " + f.Error
+				}
+				fmt.Printf("[%s] service %s was down: %s\n", time.Now().Format("15:04:05"), f.Name, msg)
+				alertf("medium", "service", "Service "+f.Name+" was down", map[string]any{"service": f.Name, "action": msg})
+			}
 		}
 		if n%12 == 0 && c.DiskPrunePercent > 0 && time.Since(st.lastDiskAct) > diskCooloff { // every minute
 			used, total, ok := diskUsage("/var")
