@@ -789,6 +789,17 @@ func (rs *raftStore) localHandler(cfg *ClusterConfig, forward func(path string, 
 		}
 		clusterAudit("master:"+rs.id, "cluster member remove", req.ID, nil)
 	})
+	mux.HandleFunc("/router/online", func(w http.ResponseWriter, r *http.Request) {
+		if !rs.isLeader() {
+			fwd(w, r, "/router/online")
+			return
+		}
+		if localRouterHub == nil {
+			http.Error(w, "router not running", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(localRouterHub.online())
+	})
 	mux.HandleFunc("/promote", func(w http.ResponseWriter, r *http.Request) {
 		if !rs.isLeader() {
 			fwd(w, r, "/promote")

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	zr "github.com/ziro-os/ziro-os/sdk/router"
 )
 
 // clusterDir is a var so tests can point it at a temp dir.
@@ -158,9 +159,10 @@ type ClusterState struct {
 	ImagePolicy        ImagePolicy    `json:"image_policy,omitempty"`
 	Builds             []ClusterBuild `json:"builds,omitempty"` // builds ziroctld runs on builder nodes
 	// Join credentials and the cluster CA are replicated so any master can admit nodes.
-	JoinToken        string `json:"join_token,omitempty"`
-	JoinTokenExpires string `json:"join_token_expires,omitempty"` // RFC3339; empty = never
-	CACert           string `json:"ca_cert,omitempty"`            // PEM
+	JoinToken        string    `json:"join_token,omitempty"`
+	JoinTokenExpires string    `json:"join_token_expires,omitempty"` // RFC3339; empty = never
+	CACert           string    `json:"ca_cert,omitempty"`            // PEM
+	Router           *zr.State `json:"router,omitempty"`             // global networks (ziroctl router)
 	// Kept out of state.json (own 0600 files, excluded from backups) and out of every view.
 	Secrets map[string]map[string]string `json:"-"` // name -> KEY -> value
 	CAKey   string                       `json:"-"` // PEM
