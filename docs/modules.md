@@ -62,7 +62,7 @@ ziroctl plugin repo rm acme
 
 | Module | What it does |
 |---|---|
-| `clamav` | ClamAV antivirus. `clamd` listens on a local socket only (`/run/clamav/clamd.sock`, `clamav:clamav 0660`), never on TCP. `freshclam` updates signatures every 2 hours. A daily scan runs at 03:30. Needs 1.5 GB RAM (`--force` to override). |
+| `clamav` | ClamAV antivirus. `clamd` listens on a local socket only (`/run/clamav/clamd.sock`, `clamav:clamav 0660`), never on TCP. `freshclam` updates signatures every 2 hours. A daily scan runs at 03:30. Needs 2 GB RAM (`--force` to override). Memory is capped: `clamd` 1.5 GiB, `freshclam` 256 MiB (cgroup limits, no swap), and the signature database is never loaded twice (`ConcurrentDatabaseReload no`, `TestDatabases no`), so a signature update can't push the host into OOM. |
 | `auditd` | Linux audit with CIS-aligned rules: identity files, sudoers, root's SSH keys, `sshd_config`, `/etc/ziro`, `ziroctl` runs, kernel module loads, time and hostname changes, mounts. Rules are reloaded at every boot. |
 | `nfs` | NFSv4.2 server: v2/v3 and UDP off, 30s grace, `rpc.mountd` supervised. Enabled automatically by the first `ziroctl nfs export` or cluster share. See [storage.md](storage.md). |
 | `clamav-onaccess` | Blocks opening infected files: `clamonacc` (fanotify permission events) asks `clamd` about every open under the paths in `/etc/clamav/onaccess-paths` (your edits are kept). Needs `clamav`. |

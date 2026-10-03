@@ -707,8 +707,9 @@ type ghAsset struct {
 }
 
 type ghRelease struct {
-	TagName string    `json:"tag_name"`
-	Assets  []ghAsset `json:"assets"`
+	TagName    string    `json:"tag_name"`
+	Prerelease bool      `json:"prerelease"`
+	Assets     []ghAsset `json:"assets"`
 }
 
 func (r *ghRelease) asset(name string) *ghAsset {
@@ -766,27 +767,35 @@ func fetchRelease(ctx context.Context, tag string) (*ghRelease, error) {
 
 // getRelease fetches one release from the GitHub API.
 func getRelease(ctx context.Context, endpoint string) (*ghRelease, error) {
+	var rel ghRelease
+	if err := getGitHubJSON(ctx, endpoint, 4<<20, &rel); err != nil {
+		return nil, err
+	}
+	return &rel, nil
+}
+
+// getGitHubJSON decodes one GitHub API response (at most limit bytes) into v.
+func getGitHubJSON(ctx context.Context, endpoint string, limit int64, v any) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "ziroctl/"+Version)
 	resp, err := upgradeHTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("query releases: %w", err)
+		return fmt.Errorf("query releases: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("query releases: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("query releases: HTTP %d", resp.StatusCode)
 	}
-	var rel ghRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("decode release: %w", err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, limit)).Decode(v); err != nil {
+		return fmt.Errorf("decode release: %w", err)
 	}
-	return &rel, nil
+	return nil
 }
 
 // download streams url to dst (via dst.part), hashing while writing, and
