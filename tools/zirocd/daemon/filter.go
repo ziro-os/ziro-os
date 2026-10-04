@@ -207,15 +207,11 @@ func (f *Filter) Expire() {
 	f.flowMu.Unlock()
 }
 
-func (f *Filter) allowed(pk *packet, now int64) bool {
-	f.flowMu.Lock()
-	exp, ok := f.flows[flowKey{pk.proto, pk.dst, pk.src, pk.dport, pk.sport}]
-	f.flowMu.Unlock()
-	if ok && exp >= now {
+// allowedLocked: callers hold flowMu and mu (read).
+func (f *Filter) allowedLocked(pk *packet, now int64) bool {
+	if exp, ok := f.flows[flowKey{pk.proto, pk.dst, pk.src, pk.dport, pk.sport}]; ok && exp >= now {
 		return true
 	}
-	f.mu.RLock()
-	defer f.mu.RUnlock()
 	for i := range f.rules {
 		if f.rules[i].match(pk) {
 			return true
@@ -229,9 +225,11 @@ func (f *Filter) allowed(pk *packet, now int64) bool {
 func (f *Filter) Write(bufs [][]byte, offset int) (int, error) {
 	now := time.Now().UnixNano()
 	var keep [][]byte
+	f.mu.RLock() // both locks once per batch, not per packet
+	f.flowMu.Lock()
 	for i, b := range bufs {
 		pk, ok := parsePacket(b[offset:])
-		if ok && f.allowed(&pk, now) {
+		if ok && f.allowedLocked(&pk, now) {
 			if keep != nil {
 				keep = append(keep, b)
 			}
@@ -242,6 +240,8 @@ func (f *Filter) Write(bufs [][]byte, offset int) (int, error) {
 			keep = append(make([][]byte, 0, len(bufs)), bufs[:i]...)
 		}
 	}
+	f.flowMu.Unlock()
+	f.mu.RUnlock()
 	if keep == nil {
 		keep = bufs
 	}

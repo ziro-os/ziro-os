@@ -7,7 +7,7 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 | Control plane | `ziroctl router`, served by `cluster-master` on every master (`/router/v1/*` on the cluster port, 7443) | shipped (R1) |
 | Client | `zirocd` for Linux, macOS and Windows (amd64, arm64), signed releases with self-update | shipped (R2) |
 | Relays + NAT traversal | `ziroctl router relay enable` (TLS relay + STUN), disco hole punching, `zirocd netcheck` | shipped (R3) |
-| Kernel fast path, subnet routing on Ziro OS | `zirocd --dataplane kernel`, `ziroctl router join` | R4 |
+| Ziro OS hosts, subnet routers | `ziroctl router join` (zirocd ships in the full image), routed LANs and cluster meshes | shipped (R4) |
 | SSO | OIDC device-code login (`zirocd up --sso`) | R5 |
 
 ## Operator quick start
@@ -54,7 +54,10 @@ sudo zirocd down                                 # disconnect, keep the identity
 sudo zirocd logout                               # disconnect and delete the keys
 ```
 
-- **Data plane.** Userspace WireGuard (wireguard-go) with MTU 1280, over zirocd's own socket layer (below). Peers are configured one by one from netmap deltas, so a change never resets sessions it doesn't touch. On a 2-container Docker test on an M2 it carries about 2.7 Gbit/s. Linux hosts get a kernel fast path in R4.
+- **Data plane.** Userspace WireGuard (wireguard-go: batched UDP with GSO/GRO, TUN offload) with MTU 1280, over zirocd's own socket layer (below).
+  - On the same host, this path measured faster than kernel WireGuard: 2.4–2.6 Gbit/s through two NATs with the ACL filter on, against 1.7–1.8 Gbit/s for a plain kernel tunnel in Docker on an M2. CI runners reach 6.6 Gbit/s.
+  - A kernel mode would also lose hole punching and relay fallback, so there isn't one.
+  - The ACL filter costs about 47 ns per packet with no allocations (`BenchmarkFilterWrite`). Peers are configured one by one from netmap deltas, so a change never resets sessions it doesn't touch.
 - **Inbound filter.** The router's rules for this device are enforced on every packet. Replies to connections the device opened are let back in; anything else unsolicited is dropped (`zirocd status` counts drops).
 - **Names.** `<device>.<network>.ziro` resolve through a tiny resolver on the device's own tunnel address. Only that domain is sent to it, so other DNS is untouched.
 - **Keys and state.** The WireGuard, disco and TLS private keys are generated on the device. They live in `/var/lib/zirocd` (Linux), `/Library/Application Support/zirocd` (macOS) or `%ProgramData%\zirocd` (Windows, ACL'd to SYSTEM and Administrators). The join key is deleted once used. The CLI talks to the daemon over a root-only socket (an Administrators-only named pipe on Windows).
@@ -68,6 +71,47 @@ zirocd follows the tools release stream (`tools/vX.Y.Z`), which is built for all
 - It installs only if `SHA256SUMS` carries the Ziro release signature (ed25519) and the binary matches. The swap is atomic, and the previous binary is kept.
 - If the new binary fails to reach "connected" in two starts, it is rolled back automatically.
 - `--auto-update notify` only reports in `zirocd status`; `off` disables checks. `sudo zirocd update` installs now.
+
+## Ziro OS hosts
+
+The full Ziro OS image ships zirocd. `ziroctl router` runs it as the `zirocd` ziro-init service:
+
+```sh
+ziroctl router join --key-file /root/office.key        # or ZIROCD_KEY=zr1_... ziroctl router join
+ziroctl router join --key-file k --name gw-1 --advertise-routes 10.200.0.0/16
+ziroctl router status
+ziroctl router leave                                    # logout + stop the service
+```
+
+- `join` allows WireGuard (udp/41641) and trusts `zr0` in the host firewall. That's safe because zirocd's filter has already applied the network's ACL to every packet that reaches `zr0`.
+- The key never appears in argv: it travels through the environment, and the audit log redacts any `zr1_` string or `--key` value.
+- `<device>.<network>.ziro` names go through Ziro DNS as a forward rule (`ziroctl dns forward`), added and removed by zirocd.
+- **Updates:** on Ziro OS, `ziroctl update` installs zirocd with the other tools and records its hash in the integrity baselines (FIM and IMA). zirocd's own self-update stands down there, so the baselines always know its binary. Elsewhere zirocd updates itself.
+
+## Subnet routers
+
+A Linux device can carry a whole subnet into the network: a LAN, a VPC, or a Ziro cluster's mesh and pod networks. Devices that aren't running zirocd are reachable through it.
+
+```sh
+# on the router device (Linux; Ziro OS: ziroctl router join ... --advertise-routes)
+sudo zirocd up --advertise-routes 10.200.0.0/16,10.201.0.0/16     # re-advertises without re-joining
+# on a master
+ziroctl router route approve office gw-1 10.200.0.0/16
+ziroctl router route approve office gw-1 10.201.0.0/16
+```
+
+Write the ACL rules with the subnet as the destination, for example `dst: ["10.200.0.0/16:443"]`.
+
+- **On approval:**
+  - Every device the ACL allows routes the subnet into its tunnel.
+  - The router device turns on IP forwarding and masquerades the network's traffic out of its LAN interfaces (nft table `inet zirocd`, or iptables), so LAN hosts need no route back.
+- **On revocation, or when the route is withdrawn:** the NAT rules are removed.
+
+**Bridging two Ziro clusters:**
+1. Join a gateway node of each cluster.
+2. Advertise each cluster's mesh (`10.200.0.0/16` by default) and pod network (`10.201.0.0/16`). Give the clusters different CIDRs if both use the defaults.
+3. Approve both sides.
+4. Allow them in the ACL.
 
 ## Relays and NAT traversal
 
@@ -123,7 +167,7 @@ Selectors are `*`, `tag:<t>`, `group:<g>`, `member:<name>` or a CIDR. Destinatio
 - **Least visibility:** a device's netmap holds only the peers it may talk to (in either direction). Every other member's existence, keys and addresses stay hidden from it.
 - Rules are enforced by the **receiving** device. WireGuard's cryptokey routing already guarantees that a packet's source address belongs to the peer that sent it.
 
-**Subnet routes.** A device advertises subnets (`zirocd up --advertise-routes 10.200.0.0/16`). Nothing is routed until an admin runs `ziroctl router route approve office gw-1 10.200.0.0/16`. This is how a cluster mesh or a VPC joins a router network.
+**Subnet routes.** See [Subnet routers](#subnet-routers).
 
 **Client version.** `ziroctl router network set office --client-version 1.0.21` pins the fleet's zirocd version (`latest` unpins it). Devices update to it through the signed release stream.
 

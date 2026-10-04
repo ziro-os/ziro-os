@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,7 +107,21 @@ func (d *Daemon) Up(ctx context.Context, req UpRequest) (Status, error) {
 			return d.Status(), errors.New("not registered: zirocd up --key <zr1_...>")
 		}
 		d.mu.Lock()
+		before := cur.Prefs
 		applyPrefs(&cur.Prefs, req)
+		st := *cur
+		d.mu.Unlock()
+		// New name or routes: re-register (the device's TLS key identifies it; no key needed).
+		if st.Status == "authorized" || st.Status == "down" {
+			if before.Name != st.Prefs.Name || strings.Join(before.Routes, ",") != strings.Join(st.Prefs.Routes, ",") {
+				if err := d.register(ctx, &st); err != nil {
+					return d.Status(), err
+				}
+			}
+			st.Status = "authorized"
+		}
+		d.mu.Lock()
+		*cur = st
 		err := SaveState(d.Dir, cur)
 		d.stopLocked()
 		d.startLocked()

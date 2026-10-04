@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,4 +82,65 @@ func TestLatestToolsRelease(t *testing.T) {
 	if err != nil || v != "1.0.17" || rel.TagName != "tools/v1.0.17" || rel.asset("SHA256SUMS") == nil {
 		t.Fatalf("got %v %q %v", rel, v, err)
 	}
+}
+
+// zirocd is optional: installed by `ziroctl update` only where the image has it and the release
+// carries it, so older releases and images keep updating.
+func TestToolsReleaseOptionalZirocd(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	der, _ := x509.MarshalPKIXPublicKey(pub)
+	oldKey, oldBin := releasePublicKey, toolsBinDir
+	releasePublicKey = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+	toolsBinDir = t.TempDir()
+	defer func() { releasePublicKey, toolsBinDir = oldKey, oldBin }()
+
+	serve := func(withZirocd bool) *ghRelease {
+		files := map[string][]byte{"ziroctl-" + hostArch(): []byte("ctl"), "ziropkg-" + hostArch(): []byte("pkg"),
+			"tools.json": []byte(`{"version":"1.0.30"}`)}
+		if withZirocd {
+			files[toolAsset("zirocd")] = []byte("cd")
+		}
+		sums := ""
+		for n, b := range files {
+			sums += sha256Hex(b) + "  " + n + "\n"
+		}
+		files["SHA256SUMS"] = []byte(sums)
+		files["SHA256SUMS.sig"] = []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(sums))))
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write(files[filepath.Base(r.URL.Path)])
+		}))
+		t.Cleanup(srv.Close)
+		trustHTTPS(t, srv)
+		rel := &ghRelease{TagName: "tools/v1.0.30"}
+		for n := range files {
+			rel.Assets = append(rel.Assets, ghAsset{Name: n, URL: srv.URL + "/" + n})
+		}
+		return rel
+	}
+	get := func(rel *ghRelease) map[string]string {
+		bins, err := fetchToolsRelease(rel, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bins
+	}
+	if bins := get(serve(true)); bins["zirocd"] != "" || len(installedTools(bins)) != 2 {
+		t.Fatal("zirocd installed on a host without it")
+	}
+	os.WriteFile(filepath.Join(toolsBinDir, "zirocd"), []byte("old"), 0755)
+	if bins := get(serve(true)); bins["zirocd"] == "" || len(installedTools(bins)) != 3 {
+		t.Fatal("zirocd not updated on a host that has it")
+	}
+	if bins := get(serve(false)); bins["zirocd"] != "" { // a release from before zirocd
+		t.Fatal("missing optional asset must be skipped")
+	}
+}
+
+// trustHTTPS lets download() reach a test TLS server.
+func trustHTTPS(t *testing.T, srv *httptest.Server) {
+	u, _ := url.Parse(srv.URL)
+	oldHosts, oldClient := trustedHosts, upgradeHTTP
+	trustedHosts = append([]string{u.Hostname()}, trustedHosts...)
+	upgradeHTTP = &http.Client{Transport: srv.Client().Transport, CheckRedirect: checkUpgradeRedirect}
+	t.Cleanup(func() { trustedHosts, upgradeHTTP = oldHosts, oldClient })
 }

@@ -341,7 +341,11 @@ func serveDaemon(ctx context.Context) error {
 		d.Close()
 		os.Exit(3) // the service manager starts the new binary
 	}
+	ziroOS := fileExists("/etc/ziro-release") // there `ziroctl update` installs zirocd (integrity baselines)
 	updateNow := func(ctx context.Context) (string, error) {
+		if ziroOS {
+			return "", errors.New("on Ziro OS zirocd updates with the other tools: ziroctl update")
+		}
 		v, err := upd.Target(ctx, d.PinnedVersion())
 		if err != nil || v == "" {
 			return "", err
@@ -354,9 +358,16 @@ func serveDaemon(ctx context.Context) error {
 	}
 	srv := &http.Server{Handler: d.Handler(updateNow), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	go upd.Loop(ctx, d.AutoUpdate, d.PinnedVersion, d.SetUpdateAvailable, restart)
+	if !ziroOS {
+		go upd.Loop(ctx, d.AutoUpdate, d.PinnedVersion, d.SetUpdateAvailable, restart)
+	}
 	fmt.Fprintf(os.Stderr, "zirocd %s running (state %s)\n", Version, stateDir)
 	<-ctx.Done()
 	_ = srv.Close()
 	return nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

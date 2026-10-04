@@ -27,6 +27,7 @@ func TestRouterServeE2E(t *testing.T) {
 	st, n := routerTestState(t, zr.ACL{Rules: []zr.Rule{
 		{Src: []string{"*"}, Dst: []string{"*:*"}, Proto: "icmp"},
 		{Src: []string{"*"}, Dst: []string{"tag:web:8080"}, Proto: "tcp"},
+		{Src: []string{"*"}, Dst: []string{"172.31.2.0/24:*"}, Proto: "icmp"}, // web's LAN, routed by web
 	}})
 	n.Name = "e2e"
 	if err := ensureMasterCert(st, "router", []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
@@ -70,6 +71,24 @@ func TestRouterServeE2E(t *testing.T) {
 		})
 		go func() { t.Log(runRelay(context.Background(), rs, ":8443", ":3478", tc)) }()
 	}
+	// Stand-in for `ziroctl router route approve`: approve every advertised route.
+	go func() {
+		for range time.Tick(time.Second) {
+			changed := false
+			_ = withState(func(cur *ClusterState) error {
+				for i := range routerOf(cur).Members {
+					m := &routerOf(cur).Members[i]
+					if len(m.Routes) > 0 && len(m.Approved) != len(m.Routes) {
+						m.Approved, changed = append([]string(nil), m.Routes...), true
+					}
+				}
+				return nil
+			})
+			if changed {
+				rt.sync()
+			}
+		}
+	}()
 	pool, _ := caPool(st.CACert)
 	srv := &http.Server{Addr: listen, Handler: rt, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool,

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -68,4 +69,12 @@ func clearDNS(name, domain string) {
 	if domainRe.MatchString(domain) {
 		_ = os.Remove(filepath.Join("/etc/resolver", domain))
 	}
+}
+
+// setSubnetRouter: routing a LAN into the network needs a Linux host.
+func setSubnetRouter(name string, networks []netip.Prefix, on bool) error {
+	if on {
+		return errors.New("subnet routing is supported on Linux hosts only")
+	}
+	return nil
 }

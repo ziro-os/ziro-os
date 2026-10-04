@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"testing"
+	"time"
 
 	zr "github.com/ziro-os/ziro-os/sdk/router"
 	"golang.zx2c4.com/wireguard/tun"
@@ -127,4 +128,32 @@ func TestFilter(t *testing.T) {
 	if deliver(frag2) {
 		t.Fatal("fragment from a disallowed source delivered")
 	}
+}
+
+type nullTUN struct{ fakeTUN }
+
+func (n *nullTUN) Write(bufs [][]byte, off int) (int, error) { return len(bufs), nil }
+
+// BenchmarkFilterWrite: one inbound batch of 128 packets (a GRO-sized burst), half admitted by
+// a rule, half as replies to outbound flows. Reported per packet.
+func BenchmarkFilterWrite(b *testing.B) {
+	f := NewFilter(&nullTUN{})
+	f.SetRules([]zr.FilterRule{{Src: []string{"100.64.0.0/16"}, Dst: []string{"100.64.0.1/32"}, Proto: "tcp", Ports: []zr.PortRange{{First: 443, Last: 443}}}})
+	bufs := make([][]byte, 128)
+	for i := range bufs {
+		if i%2 == 0 {
+			bufs[i] = ipv4(protoTCP, "100.64.0.9", "100.64.0.1", uint16(40000+i), 443)
+		} else {
+			out := ipv4(protoTCP, "100.64.0.1", "100.64.0.9", uint16(50000+i), 8080)
+			f.flows[flowKey{protoTCP, netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("100.64.0.9"), uint16(50000 + i), 8080}] = time.Now().Add(time.Hour).UnixNano()
+			_ = out
+			bufs[i] = ipv4(protoTCP, "100.64.0.9", "100.64.0.1", 8080, uint16(50000+i))
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = f.Write(bufs, 0)
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(bufs)), "ns/pkt")
 }
