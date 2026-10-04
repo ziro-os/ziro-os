@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,19 +36,49 @@ type Engine struct {
 	netMu       sync.Mutex
 	onNetChange func() // the daemon's reaction to a network change (fresh control connections)
 
-	mu        sync.Mutex
-	peers     map[string]zr.Peer // by member ID
-	self      *zr.Peer
-	networks  []netip.Prefix
-	routes    map[netip.Prefix]bool
-	domain    string
-	dnsUp     bool
-	addrsSet  bool
-	routing   bool // this device routes approved subnets into the network
-	acceptDNS bool
+	mu              sync.Mutex
+	peers           map[string]zr.Peer // by member ID
+	self            *zr.Peer
+	networks        []netip.Prefix
+	routes          map[netip.Prefix]bool
+	domain          string
+	dnsUp           bool
+	addrsSet        bool
+	routing         bool // this device routes approved subnets into the network
+	port            int
+	noSubnetRouting bool
+	acceptDNS       bool
+}
+
+// Options configure an engine. zirocd uses the defaults; the cluster agent runs the cluster mesh
+// on the same engine (interface ziro0, no packet filter: the node's nft policy enforces app
+// policy; no subnet routing or DNS of its own).
+type Options struct {
+	WGKey, DiscoKey string // base64 private keys
+	Port            int
+	Iface           string // "" = the platform default (zr0, utunN, Ziro)
+	MTU             int    // 0 = MTU
+	AcceptDNS       bool
+	NoFilter        bool
+	NoSubnetRouting bool
+	NoPortMapping   bool
+	Auth            RelayAuth
+	OnChange        func() // endpoints, NAT type or relays changed: report them
 }
 
 func NewEngine(wgPriv, discoPriv string, port int, acceptDNS bool, auth RelayAuth, onChange func()) (*Engine, error) {
+	return NewEngineWith(Options{WGKey: wgPriv, DiscoKey: discoPriv, Port: port, AcceptDNS: acceptDNS, Auth: auth, OnChange: onChange})
+}
+
+func NewEngineWith(o Options) (*Engine, error) {
+	wgPriv, discoPriv, port, acceptDNS, auth, onChange := o.WGKey, o.DiscoKey, o.Port, o.AcceptDNS, o.Auth, o.OnChange
+	iface, mtu := o.Iface, o.MTU
+	if iface == "" {
+		iface = ifaceName
+	}
+	if mtu == 0 {
+		mtu = MTU
+	}
 	k, err := base64.StdEncoding.DecodeString(wgPriv)
 	if err != nil || len(k) != 32 {
 		return nil, fmt.Errorf("invalid WireGuard key")
@@ -56,7 +87,7 @@ func NewEngine(wgPriv, discoPriv string, port int, acceptDNS bool, auth RelayAut
 	if err != nil {
 		return nil, err
 	}
-	t, err := tun.CreateTUN(ifaceName, MTU)
+	t, err := tun.CreateTUN(iface, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("create tunnel: %w", err)
 	}
@@ -65,9 +96,14 @@ func NewEngine(wgPriv, discoPriv string, port int, acceptDNS bool, auth RelayAut
 		t.Close()
 		return nil, err
 	}
-	e := &Engine{name: name, tun: t, filter: NewFilter(t), bind: bind, peers: map[string]zr.Peer{}, routes: map[netip.Prefix]bool{}, acceptDNS: acceptDNS}
+	e := &Engine{name: name, tun: t, filter: NewFilter(t), bind: bind, peers: map[string]zr.Peer{}, routes: map[netip.Prefix]bool{},
+		acceptDNS: acceptDNS, port: port, noSubnetRouting: o.NoSubnetRouting}
+	var dev tun.Device = e.filter
+	if o.NoFilter {
+		dev = t
+	}
 	logger := &device.Logger{Verbosef: device.DiscardLogf, Errorf: func(f string, a ...any) { log.Printf("wireguard: "+f, a...) }}
-	e.dev = device.NewDevice(e.filter, bind, logger)
+	e.dev = device.NewDevice(dev, bind, logger)
 	// The socket layer chooses every packet's path (direct, relayed, probed). WireGuard must not
 	// "roam" a peer to whatever address a packet came from: that would bypass path selection,
 	// failover and status. Peers are configured with an endpoint, which pins them.
@@ -91,7 +127,9 @@ func NewEngine(wgPriv, discoPriv string, port int, acceptDNS bool, auth RelayAut
 			f()
 		}
 	})
-	go runPortMapper(ctx, bind, uint16(port)) // PCP / NAT-PMP / UPnP on the home router
+	if !o.NoPortMapping {
+		go runPortMapper(ctx, bind, uint16(port)) // PCP / NAT-PMP / UPnP on the home router
+	}
 	return e, nil
 }
 
@@ -159,6 +197,18 @@ func (e *Engine) OnNetworkChange(f func()) {
 	e.netMu.Unlock()
 }
 
+// Report is this device's soft state for the control plane: its local and public endpoints, the
+// relays it is registered with, and its NAT type.
+func (e *Engine) Report(version string) zr.MapRequest {
+	eps := localEndpoints(e.port, e.name)
+	for _, p := range e.bind.PublicEndpoints() {
+		if !slices.Contains(eps, p) && len(eps) < zr.MaxEndpoints {
+			eps = append(eps, p)
+		}
+	}
+	return zr.MapRequest{Endpoints: eps, Version: version, HomeRelay: e.bind.Home(), Relays: e.bind.Relays(), NAT: e.bind.NATType()}
+}
+
 // Bind is the socket layer (endpoints, home relay, paths, netcheck).
 func (e *Engine) Bind() *MagicBind { return e.bind }
 
@@ -213,9 +263,11 @@ func (e *Engine) Apply(m zr.MapMessage) error {
 		}
 		k, _ := keyHex(p.NodeKey)
 		ep := ""
-		if !had || old.NodeKey != p.NodeKey {
+		if _, ok := keyHex(p.DiscoKey); ok && (!had || old.NodeKey != p.NodeKey) {
 			ep = "zrpeer:" + k // the socket layer picks the path (direct or relay) per packet
 		}
+		// A peer without a disco key is a plain WireGuard client (e.g. a gateway remote peer): no
+		// endpoint, so WireGuard learns its address from its own packets.
 		pp := p
 		peerUAPI(&b, k, &pp, ep)
 	}
@@ -303,7 +355,7 @@ func (e *Engine) converge() error {
 			approved = true
 		}
 	}
-	if approved != e.routing {
+	if approved != e.routing && !e.noSubnetRouting {
 		if err := setSubnetRouter(e.name, e.networks, approved); err != nil {
 			errs = append(errs, "subnet routing: "+err.Error())
 		} else {

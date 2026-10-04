@@ -208,7 +208,7 @@ func TestPodDNS(t *testing.T) {
 }
 
 func TestPodPlumbing(t *testing.T) {
-	b, err := podConflist("10.201.3.0/24")
+	b, err := podConflist("10.201.3.0/24", podMTU)
 	var conf struct {
 		Name    string           `json:"name"`
 		Plugins []map[string]any `json:"plugins"`

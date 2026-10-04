@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	zr "github.com/ziro-os/ziro-os/sdk/router"
 	"io"
 	"net"
 	"net/http"
@@ -70,6 +71,13 @@ type heartbeatRequest struct {
 	Keys        []string          `json:"keys,omitempty"`         // data key IDs held by this node's master
 	Arch        string            `json:"arch,omitempty"`         // runtime.GOARCH of the node
 	Builds      []BuildResult     `json:"builds,omitempty"`       // results of builds the node ran
+	// Mesh "anywhere": path discovery key, underlay endpoints, relays and NAT type (soft), and a
+	// CSR when the node needs a (renewed) node certificate for the relays.
+	DiscoKey string        `json:"disco_key,omitempty"`
+	MeshEPs  []string      `json:"mesh_endpoints,omitempty"`
+	Relays   []zr.RelayRTT `json:"relays,omitempty"`
+	NAT      string        `json:"nat,omitempty"`
+	NodeCSR  string        `json:"node_csr,omitempty"`
 }
 
 // Assignment is one container the master wants running on a node.
@@ -102,6 +110,11 @@ type MeshPeer struct {
 	MeshIP   string   `json:"mesh_ip"`
 	Routes   []string `json:"routes,omitempty"` // extra /32s reached through this peer (remote clients behind the hub)
 	PodCIDR  string   `json:"pod_cidr,omitempty"`
+	// Mesh "anywhere": what the peer's engine needs to find a path (direct, probed or relayed).
+	DiscoKey  string        `json:"disco_key,omitempty"`
+	Endpoints []string      `json:"endpoints,omitempty"`
+	Relays    []zr.RelayRTT `json:"relays,omitempty"`
+	NAT       string        `json:"nat,omitempty"`
 }
 
 type heartbeatResponse struct {
@@ -125,6 +138,9 @@ type heartbeatResponse struct {
 	PurgeData   []string            `json:"purge_data,omitempty"`   // apps whose local data to delete
 	Builds      []ClusterBuild      `json:"builds,omitempty"`       // builds for this node to run (builder nodes)
 	ImageToken  string              `json:"image_token,omitempty"`  // bearer token for the mesh image server
+	MeshMode    string              `json:"mesh_mode,omitempty"`    // "anywhere": run the mesh on the zirocd engine
+	Relays      []zr.Relay          `json:"relays,omitempty"`       // relays for the mesh (anywhere mode)
+	NodeCert    string              `json:"node_cert,omitempty"`    // signed node certificate (answer to NodeCSR)
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -147,6 +163,9 @@ func specHash(a ClusteredApp) string {
 	}
 	if a.AllowPrivilegeEscalation { // only when set, so existing apps keep their hash
 		h.Write([]byte("\x00privesc"))
+	}
+	if a.NetEpoch > 0 { // a mesh mode change (pod MTU): containers are recreated, one at a time
+		fmt.Fprintf(h, "\x00netepoch=%d", a.NetEpoch)
 	}
 	if len(a.Volumes) > 0 || a.VolumeEpoch > 0 {
 		fmt.Fprintf(h, "\x00volumes=%q\x00epoch=%d", a.Volumes, a.VolumeEpoch)
@@ -467,7 +486,8 @@ func meshView(st *ClusterState, self *ClusterNode, cidr string) (string, int, []
 		if port == 0 {
 			port = meshPort
 		}
-		mp := MeshPeer{Node: n.ID, PubKey: n.WGPubKey, MeshIP: n.MeshIP, Endpoint: net.JoinHostPort(n.IP, strconv.Itoa(port))}
+		mp := MeshPeer{Node: n.ID, PubKey: n.WGPubKey, MeshIP: n.MeshIP, Endpoint: net.JoinHostPort(n.IP, strconv.Itoa(port)),
+			DiscoKey: n.DiscoKey, Endpoints: n.MeshEPs, Relays: n.MeshRelays, NAT: n.MeshNAT}
 		if hub != nil && hub.ID == n.ID {
 			mp.Routes = remote // replies to remote clients go back through the hub
 		}
@@ -739,6 +759,22 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		req.Failed[k] = sanitizeLabel(v, 200)
 	}
 	req.MeshError = sanitizeLabel(req.MeshError, 300)
+	if (req.DiscoKey != "" && !validWGKey(req.DiscoKey)) || len(req.MeshEPs) > zr.MaxEndpoints || len(req.Relays) > zr.MaxRelays ||
+		(req.NAT != "" && req.NAT != "easy" && req.NAT != "hard") || len(req.NodeCSR) > 4096 {
+		return nil, httpError{http.StatusBadRequest, "invalid heartbeat"}
+	}
+	for i, e := range req.MeshEPs {
+		ap, err := netip.ParseAddrPort(e)
+		if err != nil || ap.Port() == 0 || !ap.Addr().IsGlobalUnicast() {
+			return nil, httpError{http.StatusBadRequest, "invalid mesh endpoint"}
+		}
+		req.MeshEPs[i] = ap.String()
+	}
+	for _, r := range req.Relays {
+		if validLabel(r.Name) != nil || r.RTT < 0 || r.RTT > 60000 {
+			return nil, httpError{http.StatusBadRequest, "invalid relay"}
+		}
+	}
 	if len(req.Caps) > 16 {
 		req.Caps = req.Caps[:16]
 	}
@@ -785,6 +821,18 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		}
 		if n.Role != "master" {
 			n.IP = ip
+		}
+		n.MeshEPs, n.MeshRelays, n.MeshNAT = req.MeshEPs, req.Relays, req.NAT
+		if req.DiscoKey != "" && n.DiscoKey != req.DiscoKey {
+			n.DiscoKey = req.DiscoKey
+		}
+		if req.NodeCSR != "" { // a node certificate for the relays (mesh anywhere)
+			crt, kh, err := signNodeCSR(st, req.NodeCSR, n.ID)
+			if err != nil {
+				return httpError{http.StatusBadRequest, err.Error()}
+			}
+			n.CertHash, resp.NodeCert = kh, crt
+			clusterAudit("node:"+n.ID, "cluster node certificate", n.ID, nil)
 		}
 		if req.WGPubKey != "" {
 			n.WGPubKey, n.WGPort = req.WGPubKey, req.WGPort
@@ -840,6 +888,9 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 			}
 		}
 		resp.CA, resp.Masters = st.CACert, masterAddrs(st, cfg)
+		if st.MeshMode == "anywhere" {
+			resp.MeshMode, resp.Relays = st.MeshMode, routerOf(st).Relays
+		}
 		if n.Gateway {
 			resp.Gateway = gatewayConfigFor(st)
 		}

@@ -173,6 +173,11 @@ func (s *relayServer) serveConn(conn *tls.Conn) {
 	_ = conn.SetDeadline(time.Time{})
 	cs := conn.ConnectionState()
 	id, kh, ok := deviceFromTLS(&cs)
+	if !ok { // a cluster node (mesh "anywhere"): its member entry is "node:<id>"
+		if nid, nkh, nok := nodeFromTLS(&cs); nok {
+			id, kh, ok = "node:"+nid, nkh, true
+		}
+	}
 	s.mu.RLock()
 	m, known := s.members[id]
 	s.mu.RUnlock()
@@ -469,7 +474,7 @@ var routerRelayServeCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			return routerOf(cur), nil
+			return relayMembers(cur), nil
 		})
 		if conf.Mbps > 0 {
 			s.rate = float64(conf.Mbps) * 1e6 / 8
@@ -498,4 +503,21 @@ func readJSONFile(path string, v any) error {
 		return err
 	}
 	return json.Unmarshal(b, v)
+}
+
+// relayMembers is who may use the relay: router devices, and (mesh "anywhere") the cluster's
+// nodes, as members "node:<id>" of their own network that only they share.
+func relayMembers(st *ClusterState) *zr.State {
+	r := *routerOf(st)
+	if st.MeshMode != "anywhere" {
+		return &r
+	}
+	r.Members = append([]zr.Member(nil), r.Members...)
+	for _, n := range st.Nodes {
+		if n.WGPubKey != "" && n.CertHash != "" {
+			r.Members = append(r.Members, zr.Member{ID: "node:" + n.ID, Network: "cluster-mesh", NodeKey: n.WGPubKey,
+				KeyHash: n.CertHash, Authorized: true})
+		}
+	}
+	return &r
 }

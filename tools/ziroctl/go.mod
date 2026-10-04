@@ -11,6 +11,7 @@ require (
 	github.com/quic-go/quic-go v0.63.0
 	github.com/spf13/cobra v1.10.2
 	github.com/ziro-os/ziro-os/sdk v0.0.0
+	github.com/ziro-os/zirocd v0.0.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
@@ -20,6 +21,8 @@ require (
 )
 
 require (
+	// Not built into ziroctl, but wireguard-go's go.mod pins a gVisor affected by CVE-2026-96812
+	// (fixed in 20260824.0): raise it in the module graph scanners read.
 	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -35,9 +38,12 @@ require (
 	go.etcd.io/bbolt v1.4.1 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 )
 
 replace github.com/ziro-os/ziro-os/sdk => ../../sdk
+
+replace github.com/ziro-os/zirocd => ../zirocd
 
 // wireguard-go's go.mod requires gVisor for its optional netstack TUN, which we never import.
 // Replacing it with an empty module keeps gVisor out of the build and the module graph: no gVisor

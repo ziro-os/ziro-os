@@ -247,6 +247,24 @@ ziroctl cluster network enable          # migrate an existing cluster (apps roll
   the pod IP and container port. On nodes, `<app>.cluster.ziro` in `/etc/hosts` also lists pod IPs.
 - WireGuard remote peers get the pod network in their `AllowedIPs`.
 
+## Nodes behind NAT (mesh "anywhere")
+
+By default (`direct`) the mesh is kernel WireGuard. Every node must be able to reach every other node: one network, a VPN, or public addresses.
+
+In **anywhere** mode, workers need only outbound internet, and **only the masters need a public address**.
+
+```sh
+ziroctl router relay enable eu-1 --public relay-eu.example.com:8443   # on a master (UDP 3478 + TLS 8443)
+ziroctl cluster mesh mode anywhere
+```
+
+- **Same name, new engine.** Each node runs the mesh on the zirocd engine embedded in `cluster-agent`. The interface is still `ziro0`, with the same addresses, so app policy (`ziro_cluster` nft), the pod network, cluster DNS and gateway peers are unchanged.
+- **Paths.** Nodes find each other the way router devices do: hole punching, PCP / NAT-PMP / UPnP port mapping, hard-NAT port probing, IPv6-first, roaming. Where no direct path exists, traffic goes through the relays, as UDP datagrams or over TLS where UDP is blocked. See [router.md](router.md#relays-and-nat-traversal).
+- **Node certificates.** Each node gets one (OU `ziro-node`) through its heartbeat, valid 90 days and renewed automatically. It opens relay sessions only for the cluster mesh: it can never act as a master or a router device, and a relay never forwards between a node and a router device.
+- **Soft state.** Endpoints, relays and NAT type travel in heartbeats as soft state. They never cause a Raft commit.
+- **MTU.** The mesh MTU becomes 1280, so pod MTUs follow. Switching modes recreates pod-network containers one replica at a time; switch back with `ziroctl cluster mesh mode direct`.
+- **Requirement.** Relays must be enabled first (the command refuses otherwise).
+
 ## Limits (by design, for now)
 
 - With one master, a master outage stops scheduling (running workloads continue). Run 3 or 5 masters for HA.
