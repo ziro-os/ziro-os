@@ -21,7 +21,7 @@ import (
 
 // relayBytesPerDeviceBudget bounds a connected device's cost, relay and test client together
 // (measured 29 KB: mostly the relay's two goroutine stacks and the client's).
-const relayBytesPerDeviceBudget = 40 << 10
+const relayBytesPerDeviceBudget int64 = 40 << 10
 
 // pki is a throwaway cluster CA for tests.
 type pki struct {
@@ -321,11 +321,14 @@ func TestRelayMemoryPerDevice(t *testing.T) {
 	planetCert, _ := p.issue(t, "m1", zr.MasterOU, []string{zr.ServerName}, x509.ExtKeyUsageServerAuth)
 	addr, _ := serve(t, ctx, p, s, planetCert)
 	r := zr.Relay{Name: "r1", Addr: addr}
-	measure := func() uint64 {
+	// Live heap plus goroutine stacks, as signed numbers: HeapInuse counts whole spans and can
+	// shrink below the baseline once setup garbage is swept, which wrapped the unsigned result.
+	measure := func() int64 {
+		runtime.GC()
 		runtime.GC()
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		return ms.HeapInuse + ms.StackInuse
+		return int64(ms.HeapAlloc + ms.StackInuse)
 	}
 	conns := make([]*zr.RelayConn, 0, n)
 	_ = dialRelay(t, ctx, r, p.ca, certs[0]) // warm up (TLS, UDP socket)
@@ -337,7 +340,8 @@ func TestRelayMemoryPerDevice(t *testing.T) {
 	for s.Stats().Connected < n && time.Now().Before(waitFor) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	per := (measure() - base) / uint64(len(conns))
+	per := (measure() - base) / int64(len(conns))
+	runtime.KeepAlive(conns)
 	// Both ends of every connection live in this process: the client side is about half of it.
 	t.Logf("%d devices: %d bytes per device (relay and test client together)", len(conns), per)
 	if per > relayBytesPerDeviceBudget {
