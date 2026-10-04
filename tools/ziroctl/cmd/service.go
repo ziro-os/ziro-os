@@ -839,6 +839,12 @@ func spawnDaemon(def *ServiceDef) (*exec.Cmd, *os.File, error) {
 		}
 		return nil, nil, err
 	}
+	if b := filepath.Base(def.Exec); b == "ziroctl" || b == "ziroctld" {
+		if cmd.Env == nil {
+			cmd.Env = os.Environ()
+		}
+		cmd.Env = goMemEnv(cmd.Env)
+	}
 	closeCg := func() {}
 	if cg, err := serviceCgroup(def); err == nil {
 		closeCg = startInCgroup(cmd.SysProcAttr, cg)
@@ -858,6 +864,25 @@ func spawnDaemon(def *ServiceDef) (*exec.Cmd, *os.File, error) {
 		_ = os.WriteFile(def.PIDFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
 	}
 	return cmd, logF, nil
+}
+
+// goMemEnv makes our own long-lived daemons collect garbage early: they sit idle almost all the
+// time, so a tighter GC target (and a soft heap ceiling) costs little CPU and keeps each one's
+// RSS near its live heap instead of up to twice it. An explicit GOGC/GOMEMLIMIT is respected.
+func goMemEnv(env []string) []string {
+	have := map[string]bool{}
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			have[k] = true
+		}
+	}
+	if !have["GOGC"] {
+		env = append(env, "GOGC=25")
+	}
+	if !have["GOMEMLIMIT"] {
+		env = append(env, "GOMEMLIMIT=128MiB")
+	}
+	return env
 }
 
 // runForeground runs a one-shot service and reports how it ended within a second; a
