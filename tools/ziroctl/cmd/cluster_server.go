@@ -966,6 +966,8 @@ var clusterServeCmd = &cobra.Command{
 				local.ServeHTTP(w, r)
 			})))
 
+		startRouter(mux, rs, cfg, caPEM)
+
 		// Leader-only duties: the periodic scheduling pass (dead nodes lose their replicas even
 		// without traffic). Every master: renew its certificate; a joined master asks to become a
 		// voter once it has caught up.

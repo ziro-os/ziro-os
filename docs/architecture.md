@@ -148,6 +148,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
 | HA control plane | Raft (hashicorp/raft + bbolt), cluster CA, mutual-TLS master links | masters | shipped |
+| Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices anywhere ([router.md](router.md)) | every master | control plane shipped; zirocd, relays next |
 | Enterprise controls | scoped API tokens, credential and data-key rotation, signed-image policy, `/api/v1/metrics`, [compliance mapping](compliance.md) | all | shipped |
 
 ```mermaid
@@ -205,6 +206,7 @@ flowchart LR
 | Secrets | `0600` on the master; sent only to nodes running the app; written to tmpfs env files, never argv; excluded from backups unless `--include-secrets`; never in audit records |
 | Operator actions | Every mutating `ziroctl` command, ziro-api service action and cluster join/leave is written to the audit chain, with `KEY=VALUE` values and credential flags redacted |
 | Admin API | Loopback only; bearer token; rate limited |
+| Device → router | TLS 1.3 to the pinned cluster CA; device client certificates (OU `ziro-device`, client-auth only, never accepted as a master); member bound to its TLS key hash; join keys hashed, expiring, single-use by default; followers relay with verified identity headers trusted only from master certificates; default-deny ACL with least-visibility netmaps ([router.md](router.md#security-model)) |
 | Plugin and app catalogs | ed25519-signed index (keys compiled into `ziroctl`, or added by an admin per third-party repo); every manifest and artifact pinned by sha256; index expiry (freeze) and serial (rollback) checks; cache re-verified on every read; no shadowing of built-in or official names; placeholders substitute values only, settings match anchored patterns, secrets never reach argv or backups |
 
 Known limits, each addressed by a later phase:
@@ -232,6 +234,10 @@ Known limits, each addressed by a later phase:
   - ziroctl proposes compare-and-swap updates through a root-only local socket. Followers forward them to the leader over mutual TLS, and agents follow HTTP 421 redirects to the leader and fail over across all masters.
   - A cluster CA replaces the single-certificate pin. Master certificates are issued from CSRs, and existing agents receive the CA over the already-pinned channel (the old certificate is still served to clients without SNI).
   - Deferred: secrets encryption at rest moves to Phase 5 (a key on the same disk protects little; it needs a KMS or TPM).
+- **Router** (control plane shipped; see [router.md](router.md)). Global networks for devices outside the cluster (zirocd), ZeroTier/Tailscale-style.
+  - Desired state (networks, members, key hashes, ACLs, routes) lives in `ClusterState.Router` and goes through Raft. Liveness and endpoints are soft state in the leader's hub.
+  - Each device gets an HTTP/2 netmap stream (full, then deltas). ACLs are compiled once per change, and each device sees only the peers it may talk to.
+  - Next: zirocd (userspace wireguard-go on Linux/macOS/Windows, signed self-update), relays with NAT traversal, a Linux kernel fast path, OIDC.
 - **Phase 5: enterprise.**
   - Secrets encrypted at rest: shipped (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
   - Scoped API tokens (viewer / operator / admin): shipped.
