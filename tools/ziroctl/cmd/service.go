@@ -792,6 +792,9 @@ func restartDown(name string) error {
 	if getServicePID(def) > 0 {
 		return nil
 	}
+	// A deliberate (re)start: restartSupervised's stop dropped a marker that would otherwise hold
+	// later restarts. The heal pass never gets here for a service stopped on purpose.
+	_ = os.Remove(filepath.Join(stopMarkerDir, name))
 	if initManaged[name] {
 		return releaseToInit(def)
 	}

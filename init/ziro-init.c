@@ -1366,6 +1366,9 @@ static void restart_due_services(void) {
     for (int i = 0; i < MAX_SUPERVISED; i++) {
         if (!supervised[i].restart_at || now < supervised[i].restart_at) continue;
         supervised[i].restart_at = 0;
+        /* Stopped on purpose while the restart was pending ('service start' would clear the
+         * marker and undo the stop): stay down until an explicit start. */
+        if (daemon_held(supervised[i].name)) continue;
         supervised[i].started = now;
         pid_t p = fork();
         if (p == 0) {
