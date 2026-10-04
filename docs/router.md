@@ -4,7 +4,7 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 
 | Piece | What it is | Status |
 |---|---|---|
-| Control plane | `ziroctl router`, served by `cluster-master` on every master (`/router/v1/*` on the cluster port, 7443) | shipped (R1) |
+| Control plane | `ziroctl router`, served by `cluster-master` on every master (`/router/v1/*` on the cluster port, 7443). Every master ("planet") serves netmaps; devices use the nearest one | shipped (R1; every planet serves since G1) |
 | Client | `zirocd` for Linux, macOS and Windows (amd64, arm64), signed releases with self-update | shipped (R2) |
 | Relays + NAT traversal | `ziroctl router relay enable` (TLS relay + STUN), disco hole punching, `zirocd netcheck` | shipped (R3) |
 | Ziro OS hosts, subnet routers | `ziroctl router join` (zirocd ships in the full image), routed LANs and cluster meshes | shipped (R4) |
@@ -229,26 +229,29 @@ Selectors are `*`, `tag:<t>`, `group:<g>`, `member:<name>`, `user:<email>` (devi
 ```mermaid
 sequenceDiagram
   participant D as zirocd
-  participant F as any master
-  participant L as leader (hub)
-  D->>F: TLS 1.3, verify cluster CA (pin from key)
-  D->>F: POST /register {join key, WG + disco keys, CSR}
-  F->>L: relay over master mTLS
+  participant P as nearest planet
+  participant L as leader
+  participant Q as other planets
+  D->>P: TLS 1.3, verify cluster CA (pin from key)
+  D->>P: POST /register {join key, WG + disco keys, CSR}
+  P->>L: relay over master mTLS (writes only)
   L->>L: Raft commit member; sign device cert (30 days)
   L-->>D: cert, addresses
-  D->>F: POST /map (device cert)
-  F->>L: relay, identity verified by F
-  L-->>D: full netmap, then deltas (peers, filter), keepalive 30s
+  D->>P: POST /map (device cert, session epoch)
+  P-->>D: full netmap from P's own replica, then deltas, keepalive 30s
+  P->>Q: this device's endpoints and liveness (planet mesh)
 ```
 
-- **State.** Networks, members, join-key hashes, ACLs and approved routes are part of the replicated cluster state (Raft). Liveness and endpoints are soft state in the leader's hub, so a device coming online never writes to the log. After a failover, devices reconnect to the new leader and re-report.
-- **Any endpoint works.** Followers verify the device certificate and relay the request to the leader over master mutual TLS, carrying the verified identity in headers. The leader trusts those headers only on connections that present a master certificate. Netmap streams pass through unbuffered.
-- **Netmap stream.** One HTTP/2 stream of JSON lines per device: a `full` message, then `delta` messages (upserted peers, removed peer IDs, the inbound filter when it changes), plus a keepalive every 30s. A device that is too slow to read is dropped and resyncs with a full map on reconnect, so the leader never buffers without bound.
+- **Planets.** Every master runs the netmap hub from its own Raft replica. Devices stream from the nearest one: zirocd times a TLS handshake to each planet at start, every 10 minutes and after a network change, and moves only when another planet is a quarter faster. Only writes (`register`, `renew`) go to the leader. A leader change moves no stream.
+- **State.** Networks, members, join-key hashes, ACLs and approved routes are part of the replicated cluster state (Raft). Liveness and endpoints are soft state: each planet keeps it for the devices streaming from it and streams it to every other planet over master mutual TLS. When a device moves to another planet it starts a newer session (an epoch from its own clock), and the newest session wins everywhere. Soft state never admits a device; membership comes only from Raft.
+- **Replica lag.** A device that registered a moment ago may reach a planet whose replica hasn't applied that write yet. That planet relays the request to the leader instead of answering "unauthorized", which zirocd would take for a revocation.
+- **Netmap stream.** One HTTP/2 stream of JSON lines per device: a `full` message, then `delta` messages (upserted peers, removed peer IDs, the inbound filter when it changes, the planet list when it changes), plus a keepalive every 30s. Each peer is encoded once per change and the same bytes go to every device that sees it. A device that is too slow to read is dropped and resyncs with a full map on reconnect, so a planet never buffers without bound.
 - **Scale.** Measured with 10,000 streaming devices in 100 team networks on an M2 (`BenchmarkRouterHub`):
-  - an endpoint change reaches every viewer in about 1 ms;
+  - an endpoint change reaches every viewer on a planet in about 1 ms;
   - a full state reload (ACL recompiled, every device re-diffed) takes about 0.4 s.
 
   Per-device memory is proportional to the number of peers it sees.
+- **Metrics.** `/api/v1/metrics` on each master adds `ziro_router_streams` (devices on this planet), `ziro_router_devices{state}` and `ziro_router_planet_up{planet}`.
 
 ## Security model
 
@@ -261,7 +264,8 @@ sequenceDiagram
 | Join keys | 256-bit secrets. Only their SHA-256 is stored, compared in constant time. They expire (default 24h, at most 1 year) and are single-use unless `--reusable`. A device whose reply was lost can retry with its own TLS key. |
 | Approval requests | By network ID only (16 random hex; names are guessable). At most 1000 pending per network, removed after 7 days. |
 | Abuse | Per-IP rate limit (600/min) and per-device limit (60/min). 64 KiB bodies. Endpoints and versions are validated. Rejected credentials are audited at most once per IP per 10 minutes. |
-| Revocation | `member rm`, network deletion or loss of authorization ends the device's stream within a quarter second and removes it from every peer's netmap. |
+| Revocation | `member rm`, network deletion or loss of authorization ends the device's stream within a quarter second of the planet applying the change, and removes it from every peer's netmap. |
+| Planet mesh | Planets exchange soft state only over master mutual TLS. Entries for devices that aren't authorized members are dropped, and endpoint and relay lists are capped, so a planet can't be flooded and soft state can't grant access. |
 | Data plane | WireGuard end to end. Relays forward ciphertext only, only within one network, and identify senders by certificate, never by what a frame claims. A device's own ACL filter still decides what it accepts. |
 | Underlay vs overlay | An address inside a prefix routed through the tunnel (the network, approved subnet routes) is never used as a WireGuard path, so packets can't loop into the tunnel |
 | Path discovery | Disco messages are NaCl-boxed between disco keys the router distributed: a forged or replayed ping from anyone else is dropped, and a relayed one must come from the key it claims. Ping rounds are rate-limited, so two peers cannot amplify each other |

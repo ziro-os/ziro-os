@@ -189,6 +189,10 @@ type MapRequest struct {
 	// NAT is "easy" (one public port whatever the destination), "hard" (the port varies by
 	// destination) or "" (unknown): an easy peer sprays probes at a hard one's likely ports.
 	NAT string `json:"nat,omitempty"`
+	// Epoch orders this device's sessions (its clock, microseconds, rising with every new
+	// stream): planets keep the soft state of the newest session when a device moves between
+	// them. Zero (older clients): the planet that receives the request stamps it.
+	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // RelayRTT is a relay a device is connected to, and how far away it is.
@@ -246,4 +250,5 @@ type MapMessage struct {
 	ClientVersion string       `json:"client_version,omitempty"`
 	Relays        []Relay      `json:"relays,omitempty"` // set when RelaysChanged (always in "full")
 	RelaysChanged bool         `json:"relays_changed,omitempty"`
+	Planets       []string     `json:"planets,omitempty"` // router endpoints, when they change (always in "full")
 }

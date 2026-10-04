@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -47,5 +48,16 @@ func TestStateAndKeys(t *testing.T) {
 	st.CA = "-----BEGIN CERTIFICATE-----\nMIIBAA==\n-----END CERTIFICATE-----\n"
 	if _, err := d.caCert(context.Background(), st); err == nil {
 		t.Fatal("CA not matching the pin accepted")
+	}
+}
+
+func TestPlanetCandidates(t *testing.T) {
+	st := &State{Endpoints: []string{"a:7443", "b:7443"}, Planets: []string{"b:7443", "c:7443"}}
+	got := planetCandidates(st)
+	if want := []string{"b:7443", "c:7443", "a:7443"}; !slices.Equal(got, want) {
+		t.Fatalf("candidates %v, want %v (announced planets first, no repeats)", got, want)
+	}
+	if !sameSet([]string{"c:7443", "a:7443", "b:7443"}, got) || sameSet([]string{"a:7443"}, got) {
+		t.Fatal("sameSet")
 	}
 }

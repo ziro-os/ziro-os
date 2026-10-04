@@ -78,7 +78,15 @@ type Daemon struct {
 	done     chan struct{}
 	pinnedCV string
 	update   string
+
+	epoch     uint64    // last netmap session epoch (MapRequest.Epoch)
+	nearest   []string  // router endpoints, nearest planet first
+	nearestAt time.Time // when they were measured (zero: measure again)
 }
+
+// planetReprobe: how often the planets are re-measured while connected; a planet a quarter
+// faster than the current one moves the stream there.
+const planetReprobe = 10 * time.Minute
 
 func New(dir, version string) *Daemon {
 	return &Daemon{Dir: dir, Version: version, status: Status{State: "needs-login"}}
@@ -247,7 +255,29 @@ func (d *Daemon) caCert(ctx context.Context, st *State) (*x509.Certificate, erro
 	return nil, fmt.Errorf("reach the router: %w", last)
 }
 
+// client returns a router client that tries the nearest planet first (measured at most every
+// planetReprobe, and again after a network change or a new planet list).
 func (d *Daemon) client(ctx context.Context, st *State) (*zr.Client, error) {
+	d.mu.Lock()
+	cands := planetCandidates(st) // under d.mu: the netmap callback updates st.Planets
+	order, fresh := d.nearest, time.Since(d.nearestAt) < planetReprobe && sameSet(d.nearest, cands)
+	d.mu.Unlock()
+	if !fresh && len(cands) > 1 {
+		if rtts, err := d.probe(ctx, st, cands); err == nil {
+			order = order[:0:0]
+			for _, p := range rtts {
+				order = append(order, p.Addr)
+			}
+			fresh = true
+		}
+	}
+	if !fresh {
+		order = cands
+	}
+	return d.newClient(ctx, st, order)
+}
+
+func (d *Daemon) newClient(ctx context.Context, st *State, eps []string) (*zr.Client, error) {
 	ca, err := d.caCert(ctx, st)
 	if err != nil {
 		return nil, err
@@ -260,7 +290,74 @@ func (d *Daemon) client(ctx context.Context, st *State) (*zr.Client, error) {
 		}
 		cert = &c
 	}
-	return zr.NewClient(st.Endpoints, ca, cert), nil
+	return zr.NewClient(eps, ca, cert), nil
+}
+
+// probe measures every planet and records the order, nearest first.
+func (d *Daemon) probe(ctx context.Context, st *State, cands []string) ([]zr.PlanetRTT, error) {
+	c, err := d.newClient(ctx, st, cands)
+	if err != nil {
+		return nil, err
+	}
+	rtts := c.Nearest(ctx)
+	order := make([]string, 0, len(rtts))
+	for _, p := range rtts {
+		order = append(order, p.Addr)
+	}
+	d.mu.Lock()
+	d.nearest, d.nearestAt = order, time.Now()
+	d.mu.Unlock()
+	return rtts, nil
+}
+
+// planetCandidates: the planets the netmap announced, then the key's endpoints, without repeats.
+func planetCandidates(st *State) []string {
+	var out []string
+	for _, e := range append(append([]string(nil), st.Planets...), st.Endpoints...) {
+		if !slices.Contains(out, e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			return false
+		}
+	}
+	return true
+}
+
+// watchNearest re-measures the planets while connected and moves the stream (restart) when
+// another planet is a quarter faster than the current one.
+func (d *Daemon) watchNearest(ctx context.Context, st *State, cur *zr.Client, restart func()) {
+	t := time.NewTicker(planetReprobe)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		d.mu.Lock()
+		cands := planetCandidates(st)
+		d.mu.Unlock()
+		rtts, err := d.probe(ctx, st, cands)
+		if err != nil || len(rtts) == 0 || rtts[0].RTT == 0 || rtts[0].Addr == cur.Current() {
+			continue
+		}
+		for _, p := range rtts {
+			if p.Addr == cur.Current() && (p.RTT == 0 || p.RTT > rtts[0].RTT*5/4) {
+				restart()
+				return
+			}
+		}
+	}
 }
 
 // register sends the device's keys to the router; a key admits it, otherwise it waits for approval.
@@ -447,6 +544,9 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 	// After a network change the router connections lead through a NAT that is gone: drop them
 	// and reopen the netmap stream at once (endpoints reach peers in a second, not a timeout).
 	eng.OnNetworkChange(func() {
+		d.mu.Lock()
+		d.nearestAt = time.Time{} // the nearest planet may have changed with the network
+		d.mu.Unlock()
 		cmu.Lock()
 		if cur != nil {
 			cur.Reset()
@@ -466,9 +566,16 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 			cmu.Lock()
 			cur, restartMap = c, cancelMap
 			cmu.Unlock()
+			d.mu.Lock()
+			d.epoch = max(d.epoch+1, uint64(time.Now().UnixMicro())) // a new session: newer than any before
+			epoch := d.epoch
+			d.mu.Unlock()
 			epCtx, stopEP := context.WithCancel(ctx)
-			go d.reportEndpoints(epCtx, c, eng, port, epChanged)
-			err = c.Map(mapCtx, d.mapRequest(eng, port), func(m zr.MapMessage) error {
+			go d.reportEndpoints(epCtx, c, eng, port, epoch, epChanged)
+			go d.watchNearest(epCtx, st, c, cancelMap)
+			req := d.mapRequest(eng, port)
+			req.Epoch = epoch
+			err = c.Map(mapCtx, req, func(m zr.MapMessage) error {
 				if err := eng.Apply(m); err != nil {
 					log.Printf("zirocd: apply netmap: %v", err)
 					d.setStatus(func(s *Status) { s.Error = err.Error() })
@@ -487,6 +594,15 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 				if m.Type == "full" || m.ClientVersion != "" {
 					d.mu.Lock()
 					d.pinnedCV = m.ClientVersion
+					d.mu.Unlock()
+				}
+				if m.Planets != nil && !slices.Equal(m.Planets, st.Planets) { // planets added or moved
+					d.mu.Lock()
+					st.Planets, d.nearestAt = m.Planets, time.Time{}
+					if d.st != nil {
+						d.st.Planets = m.Planets
+						_ = SaveState(d.Dir, d.st)
+					}
 					d.mu.Unlock()
 				}
 				if !healthy && d.OnHealthy != nil {
@@ -599,7 +715,7 @@ func (d *Daemon) mapRequest(eng *Engine, port int) zr.MapRequest { return eng.Re
 
 // reportEndpoints tells the router when this device's endpoints or home relay change (network
 // switch, new NAT mapping): peers then punch towards the new address at once.
-func (d *Daemon) reportEndpoints(ctx context.Context, c *zr.Client, eng *Engine, port int, changed <-chan struct{}) {
+func (d *Daemon) reportEndpoints(ctx context.Context, c *zr.Client, eng *Engine, port int, epoch uint64, changed <-chan struct{}) {
 	last := d.mapRequest(eng, port)
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
@@ -611,6 +727,7 @@ func (d *Daemon) reportEndpoints(ctx context.Context, c *zr.Client, eng *Engine,
 		case <-changed:
 		}
 		cur := d.mapRequest(eng, port)
+		cur.Epoch = epoch
 		if slices.Equal(cur.Endpoints, last.Endpoints) && cur.HomeRelay == last.HomeRelay && slices.Equal(cur.Relays, last.Relays) && cur.NAT == last.NAT {
 			continue
 		}

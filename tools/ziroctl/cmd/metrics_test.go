@@ -15,7 +15,8 @@ func TestRenderMetrics(t *testing.T) {
 		Apps:     []ClusteredApp{{Name: "web", Replicas: 2}},
 		Replicas: []Replica{{App: "web", Index: 1, Node: "m1"}, {App: "web", Index: 2, Node: "w\"1"}}}
 	st.Nodes[0].Running = []string{replicaName("web", 1, "")}
-	out := renderMetrics(hostMetrics{MemTotal: 1 << 30, Services: map[string]bool{"sshd": true, "gateway": false}}, st,
+	out := renderMetrics(hostMetrics{MemTotal: 1 << 30, Services: map[string]bool{"sshd": true, "gateway": false},
+		Router: &routerStats{Streams: 3, Online: 5, Devices: 9, Peers: map[string]bool{"m2": true, "m3": false}}}, st,
 		[]memberView{{ID: "m1", Suffrage: "Voter", Leader: true}}, "m1", now)
 
 	for _, want := range []string{
@@ -28,6 +29,9 @@ func TestRenderMetrics(t *testing.T) {
 		`ziro_cluster_security{control="secrets_sealed"} 1`,
 		`ziro_cluster_security{control="mesh_policy_deny"} 1`,
 		`ziro_cluster_node_token_age_seconds{node="m1"} 3600`,
+		"ziro_router_streams 3\n",
+		`ziro_router_devices{state="online"} 5`,
+		`ziro_router_planet_up{planet="m3"} 0`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q", want)
