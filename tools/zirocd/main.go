@@ -52,6 +52,14 @@ func defaultMemoryLimit() {
 
 func main() {
 	defaultMemoryLimit()
+	if err := newRoot().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "✗", err)
+		os.Exit(1)
+	}
+}
+
+// newRoot builds the command tree (tests check the documented commands against it).
+func newRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "zirocd",
 		Short:         "Ziro client: join devices to Ziro router networks",
@@ -267,10 +275,7 @@ func main() {
 	)
 
 	root.AddCommand(daemonCmd, upCmd, downCmd, logoutCmd, statusCmd, pingCmd, netcheckCmd, updateCmd, versionCmd, serviceCmd, moonCmd())
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "✗", err)
-		os.Exit(1)
-	}
+	return root
 }
 
 func orDash(s string) string {

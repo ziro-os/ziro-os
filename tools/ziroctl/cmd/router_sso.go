@@ -395,44 +395,57 @@ func applyNetworkSSO(cmd *cobra.Command, n *zr.Network) error {
 		s = *n.SSO
 	}
 	if f.Changed("sso-domains") {
-		s.Domains = nil
-		for _, d := range netSSODomains {
-			d = strings.ToLower(strings.TrimPrefix(d, "@"))
-			if !validHost(d) {
-				return fmt.Errorf("invalid domain %q", d)
-			}
-			s.Domains = append(s.Domains, d)
-		}
+		s.Domains = netSSODomains
 	}
 	if f.Changed("sso-groups") {
 		s.Groups = netSSOGroups
 	}
 	if f.Changed("sso-tags") {
-		if err := validTags(netSSOTags); err != nil {
-			return err
-		}
 		s.Tags = netSSOTags
 	}
 	if f.Changed("sso-group-tags") {
 		s.GroupTags = map[string][]string{}
 		for g, ts := range netSSOGroupTags {
-			tags := strings.Split(ts, "+")
-			if err := validTags(tags); err != nil {
-				return err
-			}
-			s.GroupTags[g] = tags
+			s.GroupTags[g] = strings.Split(ts, "+")
 		}
 	}
 	if f.Changed("key-expiry") {
-		if netKeyExpiry < time.Hour || netKeyExpiry > 5*365*24*time.Hour {
+		if netKeyExpiry < time.Hour {
 			return fmt.Errorf("--key-expiry must be between 1h and 5 years")
 		}
 		s.KeyExpiry = int(netKeyExpiry / time.Hour)
 	}
-	if len(s.Domains) == 0 && len(s.Groups) == 0 {
-		return fmt.Errorf("sign-in needs --sso-domains or --sso-groups: an open provider would admit anyone")
+	if err := validNetworkSSO(&s); err != nil {
+		return err
 	}
 	n.SSO = &s
+	return nil
+}
+
+// validNetworkSSO checks (and normalizes the domains of) a network's sign-in policy; the CLI and
+// `ziroctl apply` share it.
+func validNetworkSSO(s *zr.NetworkSSO) error {
+	for i, d := range s.Domains {
+		d = strings.ToLower(strings.TrimPrefix(d, "@"))
+		if !validHost(d) {
+			return fmt.Errorf("invalid domain %q", d)
+		}
+		s.Domains[i] = d
+	}
+	if err := validTags(s.Tags); err != nil {
+		return err
+	}
+	for _, tags := range s.GroupTags {
+		if err := validTags(tags); err != nil {
+			return err
+		}
+	}
+	if s.KeyExpiry != 0 && (s.KeyExpiry < 1 || s.KeyExpiry > 5*365*24) {
+		return fmt.Errorf("key expiry must be between 1h and 5 years")
+	}
+	if len(s.Domains) == 0 && len(s.Groups) == 0 {
+		return fmt.Errorf("sign-in needs domains or groups: an open provider would admit anyone")
+	}
 	return nil
 }
 

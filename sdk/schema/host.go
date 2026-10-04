@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/ziro-os/ziro-os/sdk/router"
 )
 
 // HostConfig describes a whole host declaratively; `ziroctl apply -f host.yaml` makes the host
@@ -36,6 +38,40 @@ type HostSpec struct {
 	Update   *HostUpdate     `json:"update,omitempty"`
 	Network  json.RawMessage `json:"network,omitempty"` // validated by ziroctl's network rules
 	Cluster  *HostCluster    `json:"cluster,omitempty"`
+	Router   *HostRouter     `json:"router,omitempty"` // masters only
+}
+
+// HostRouter is the router's configuration, applied on a master. Apply adds and changes networks
+// and moons; it never deletes them (that stays an explicit `ziroctl router network rm` or
+// `moon rm`). Secrets never go in the file: the SSO client secret is read from a file, and a new
+// moon's registration token is printed once.
+type HostRouter struct {
+	Endpoints []string            `json:"endpoints,omitempty"` // public host:port devices dial
+	SSO       *HostRouterSSO      `json:"sso,omitempty"`
+	Networks  []HostRouterNetwork `json:"networks,omitempty"`
+	Moons     []HostRouterMoon    `json:"moons,omitempty"`
+}
+
+type HostRouterSSO struct {
+	Issuer               string `json:"issuer"`
+	ClientID             string `json:"client_id"`
+	ClientSecretFile     string `json:"client_secret_file,omitempty"`
+	GroupsClaim          string `json:"groups_claim,omitempty"`
+	TrustUnverifiedEmail bool   `json:"trust_unverified_email,omitempty"`
+}
+
+type HostRouterNetwork struct {
+	Name          string             `json:"name"`
+	CIDR          string             `json:"cidr,omitempty"`           // at creation (default: a free /16 of 100.64.0.0/10)
+	ACL           *router.ACL        `json:"acl,omitempty"`            // omitted: unchanged (a new network denies all)
+	ClientVersion string             `json:"client_version,omitempty"` // X.Y.Z, or "latest" to unpin
+	SSO           *router.NetworkSSO `json:"sso,omitempty"`
+}
+
+type HostRouterMoon struct {
+	Name     string `json:"name"`
+	Public   string `json:"public"`              // host:port devices dial
+	STUNPort int    `json:"stun_port,omitempty"` // default 3478
 }
 
 type HostSSH struct {

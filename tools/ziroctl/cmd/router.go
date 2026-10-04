@@ -41,6 +41,15 @@ var (
 	rtACLFile       string
 )
 
+// validHostPort checks an address devices dial: a DNS name or IP, and a port.
+func validHostPort(a string) error {
+	h, p, err := net.SplitHostPort(a)
+	if err != nil || h == "" || !validPortNum(p) || !(validHost(h) || net.ParseIP(h) != nil) {
+		return fmt.Errorf("invalid address %q (want host:port)", a)
+	}
+	return nil
+}
+
 // routerEndpoints are the addresses clients dial: the configured public ones, else the masters.
 func routerEndpoints(st *ClusterState, cfg *ClusterConfig) []string {
 	if st.Router != nil && len(st.Router.Endpoints) > 0 {
@@ -104,9 +113,8 @@ var routerEndpointsSetCmd = &cobra.Command{
 			return err
 		}
 		for _, a := range args {
-			h, p, err := net.SplitHostPort(a)
-			if err != nil || h == "" || !validPortNum(p) || !(validHost(h) || net.ParseIP(h) != nil) {
-				return fmt.Errorf("invalid endpoint %q (want host:port)", a)
+			if err := validHostPort(a); err != nil {
+				return err
 			}
 		}
 		if err := withState(func(st *ClusterState) error { routerOf(st).Endpoints = args; return nil }); err != nil {
