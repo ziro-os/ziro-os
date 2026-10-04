@@ -436,6 +436,15 @@ func enableFrom(all map[string]ModuleManifest, name string, opts moduleOpts) err
 				s.Auto = false
 				_ = saveModuleState(s)
 			}
+			// Enabled once doesn't mean running now: a daemon that died, or never came up after a
+			// reboot, is started again by enabling the module again.
+			for _, svc := range s.Services {
+				if err := startModuleService(svc); err == nil {
+					fmt.Printf("  started service %s\n", svc)
+				} else if !strings.Contains(err.Error(), "already running") {
+					fmt.Printf("  ⚠ start %s: %v\n", svc, err)
+				}
+			}
 			continue
 		}
 		o := moduleOpts{Auto: opts.Auto || n != name, Force: opts.Force}

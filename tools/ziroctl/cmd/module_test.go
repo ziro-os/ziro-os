@@ -242,3 +242,22 @@ func TestSecurityPackAutoDependencies(t *testing.T) {
 		t.Fatalf("after disabling the pack: %+v installed=%v", en, installed)
 	}
 }
+
+// Enabling a module that is already enabled starts its services again (a daemon that died or
+// never came up after a reboot), without reinstalling anything.
+func TestEnableAlreadyEnabledStartsServices(t *testing.T) {
+	_, _, started := stubModules(t)
+	m := ModuleManifest{Name: "demo", Version: "1",
+		Services: []ModuleService{{Name: "demod", Exec: "/usr/sbin/demod", PIDFile: "/run/ziro-demod.pid", LogFile: "/var/log/demod.log"}}}
+	all := map[string]ModuleManifest{"demo": m}
+	if err := enableFrom(all, "demo", moduleOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	*started = nil
+	if err := enableFrom(all, "demo", moduleOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*started) != 1 || (*started)[0] != "demod" {
+		t.Fatalf("services started on re-enable: %v", *started)
+	}
+}
