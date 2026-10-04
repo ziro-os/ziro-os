@@ -75,6 +75,7 @@ func TestRouterServeE2E(t *testing.T) {
 			}
 			return routerOf(cur), nil
 		})
+		rs.rate = 10e9 / 8 // measure the relay, not the default per-device limit (1 Gbit/s)
 		go func() { t.Log(runRelay(context.Background(), rs, ":8443", ":3478", tc)) }()
 	}
 	// Stand-in for `ziroctl router route approve`: approve every advertised route.

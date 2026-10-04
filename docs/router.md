@@ -166,21 +166,24 @@ zirocd netcheck            # on a device: UDP, NAT type, public address, relay l
 | Mechanism | How |
 |---|---|
 | One socket | WireGuard, path discovery (disco) and STUN share the device's WireGuard UDP port, so the NAT mapping a relay observes is the one peers can use |
-| Public address | Every 20s, STUN to each relay; the lowest-latency relay becomes the device's **home relay**. Both go to the router, which pushes them to peers |
+| Public address | Every 20s, STUN to each relay. The device registers with its **two nearest relays** and reports them, with their round trips, to the router, which pushes them to peers |
 | Hole punching | Disco pings (NaCl box between the two devices' disco keys) go to every candidate address of the peer at once. A ping relayed through the home relay asks the peer to ping back now, so both NATs open together. The first pong picks the path; a faster one replaces it |
-| Path choice | Per packet: the direct address while its last pong is under 7s old (pings repeat every 2s on active peers), otherwise the peer's home relay. Path changes never interrupt the WireGuard session |
-| Relays | TLS 1.3 over TCP (works where UDP is blocked). The relay identifies each device by its certificate, forwards only within one network, rate-limits each device (`--rate-mbps`, default 200), and drops a device within a second of its removal. It only ever sees WireGuard ciphertext |
+| Path choice | Per packet: the direct address while its last pong is under 7s old (pings repeat every 2s on active peers), otherwise a relay. The relay is chosen per peer: of the relays the peer is registered with, the one with the lowest round trip *for the pair* (ours + the peer's), with instant failover to the other. Path changes never interrupt the WireGuard session |
+| Relays | **UDP first, TLS as the fallback.** Each relay connection is TLS 1.3, where the relay checks the device's certificate. Over it, the relay hands out a UDP session (ID + key). The device then binds the session to its WireGuard socket's address with an HMAC-authenticated, timestamped hello, so a replay can't move it. After that, relayed packets are plain UDP datagrams on the same port as STUN, forwarded with batched GRO/GSO I/O and no allocation per packet. Where UDP to the relay is blocked, or a hello goes unanswered for 3s, traffic moves to the TLS connection within seconds, and back once UDP answers again. The relay forwards only within one network, takes the sender's identity from its session (never from the packet), rate-limits each device (`--rate-mbps`, default 1000) and the relay as a whole (`--max-mbps`, default 10000), and drops a device within a second of its removal. It only ever sees WireGuard ciphertext |
 
-`zirocd status` shows each peer's path, `direct 203.0.113.9:41641 (12ms)` or `relay sg-1`.
+`zirocd status` shows each peer's path: `direct 203.0.113.9:41641 (12ms)`, `relay sg-1 udp`, or `relay sg-1 tls`.
 
 **What punches through:** home routers, cloud NAT gateways and most carrier NATs, which map endpoint-independently. Under "symmetric" NAT, where the mapping varies by destination (`zirocd netcheck` reports it), a direct path forms only if the peer is reachable; otherwise traffic stays on the relay.
 
 Measured in `tests/router/e2e.sh` (two devices, each behind its own firewalled NAT, in Docker on an M2):
-- hole punching gives a direct path at about 2.6 Gbit/s;
-- blocking UDP between the NATs moves traffic to the relay within seconds (at the 200 Mbit/s per-device limit);
-- unblocking returns to the direct path.
 
-The relay transport is TLS/TCP only, DERP-style. QUIC datagrams would serve relayed bulk traffic better; they are deferred because relays are the fallback path.
+| Path | Throughput |
+|---|---|
+| Direct (hole punched) | 2.5–3.2 Gbit/s |
+| UDP relay (UDP between the NATs blocked) | 0.9–1.4 Gbit/s |
+| TLS relay (UDP to the relay blocked too) | 0.6–0.7 Gbit/s |
+
+Each step down happens within seconds, and each recovers on its own when the blocked path returns.
 
 ## Access control
 

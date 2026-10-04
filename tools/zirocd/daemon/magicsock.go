@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -69,6 +70,7 @@ type mpeer struct {
 	key, disco [32]byte
 	shared     [32]byte
 	name, home string
+	relays     []zr.RelayRTT // relays the peer is registered with, and how far it is from each
 	cands      []netip.AddrPort
 	learned    []netip.AddrPort // sources of pings it sent us
 	best       netip.AddrPort
@@ -109,6 +111,8 @@ type MagicBind struct {
 	relays   []zr.Relay
 	links    map[string]*relayLink
 	home     string
+	homes    []string                      // the relays this device registers with, nearest first
+	relayUDP map[netip.AddrPort]*relayLink // relay UDP address -> link (relayed datagrams come from here)
 	stun     map[[12]byte]stunProbe
 	mapped   map[string]netip.AddrPort
 	stunRTT  map[string]time.Duration
@@ -147,7 +151,7 @@ func NewMagicBind(discoPrivB64 string, auth RelayAuth, onChange func()) (*MagicB
 	}
 	b := &MagicBind{std: conn.NewDefaultBind(), auth: auth, onChange: onChange,
 		peers: map[[32]byte]*mpeer{}, byDisco: map[[32]byte]*mpeer{}, byAddr: map[netip.AddrPort]*mpeer{},
-		stdEPs: map[netip.AddrPort]conn.Endpoint{}, links: map[string]*relayLink{}, stun: map[[12]byte]stunProbe{},
+		stdEPs: map[netip.AddrPort]conn.Endpoint{}, links: map[string]*relayLink{}, stun: map[[12]byte]stunProbe{}, relayUDP: map[netip.AddrPort]*relayLink{},
 		mapped: map[string]netip.AddrPort{}, stunRTT: map[string]time.Duration{}, kick: make(chan *mpeer, 256)}
 	copy(b.discoPriv[:], k)
 	pub, err := publicOf(discoPrivB64)
@@ -248,6 +252,35 @@ func (b *MagicBind) wrapRecv(fn conn.ReceiveFunc) conn.ReceiveFunc {
 					continue
 				case isDisco(pkt):
 					b.handleDisco(pkt, src, nil)
+					continue
+				case len(pkt) > 0 && (pkt[0] == zr.UDPAck || pkt[0] == zr.UDPRecv):
+					b.mu.RLock()
+					l := b.relayUDP[src]
+					b.mu.RUnlock()
+					if l == nil { // relay datagrams only from relays
+						continue
+					}
+					if pkt[0] == zr.UDPAck {
+						l.acked(pkt)
+						continue
+					}
+					if len(pkt) <= zr.UDPRecvHdr {
+						continue
+					}
+					from, payload := [32]byte(pkt[1:33]), pkt[zr.UDPRecvHdr:]
+					if isDisco(payload) {
+						b.handleDisco(payload, netip.AddrPort{}, &from)
+						continue
+					}
+					b.mu.RLock()
+					p := b.peers[from]
+					b.mu.RUnlock()
+					if p == nil {
+						continue
+					}
+					sizes[j] = copy(bufs[j], payload) // overlapping copies are fine
+					eps[j] = p.ep
+					j++
 					continue
 				}
 				b.mu.RLock()
@@ -351,7 +384,10 @@ func (b *MagicBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	}
 	best, valid := p.best, now.Before(p.bestUntil)
 	needPing := active && (!valid || p.bestUntil.Sub(now) < 3*time.Second) && now.Sub(p.lastPing) >= pingEvery
-	home := p.home
+	relay := ""
+	if !valid {
+		relay = b.relayForLocked(p)
+	}
 	b.mu.Unlock()
 	if needPing {
 		select {
@@ -366,13 +402,11 @@ func (b *MagicBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 		}
 		return b.std.Send(bufs, dst)
 	}
-	l := b.link(home)
+	l := b.link(relay)
 	if l == nil {
 		return nil // no path yet: WireGuard retransmits its handshake
 	}
-	for _, buf := range bufs {
-		l.send(p.key, buf)
-	}
+	l.sendBatch(p.key, bufs)
 	return nil
 }
 
@@ -407,13 +441,13 @@ func (b *MagicBind) sendPing(p *mpeer, to netip.AddrPort) {
 		return
 	}
 	p.pings[tx] = pingSent{to: to, at: time.Now(), viaRelay: !to.IsValid()}
-	home := p.home
+	relay := b.relayForLocked(p)
 	b.mu.Unlock()
 	b.pings.Add(1)
 	pkt := b.seal(p, append([]byte{pingPong}, tx[:]...))
 	if to.IsValid() {
 		_ = b.sendUDP(to, pkt)
-	} else if l := b.link(home); l != nil {
+	} else if l := b.link(relay); l != nil {
 		l.send(p.key, pkt)
 	}
 }
@@ -444,7 +478,10 @@ func (b *MagicBind) handleDisco(pkt []byte, src netip.AddrPort, from *[32]byte) 
 	case pingPong:
 		reply := b.seal(p, append(append([]byte{pongMsg}, tx[:]...), encodeAddrPort(src)...))
 		if from != nil { // relayed: "call me maybe", punch towards its endpoints now
-			if l := b.link(p.home); l != nil {
+			b.mu.RLock()
+			relay := b.relayForLocked(p)
+			b.mu.RUnlock()
+			if l := b.link(relay); l != nil {
 				l.send(p.key, reply)
 			}
 		} else {
@@ -571,32 +608,63 @@ func (b *MagicBind) handleSTUN(pkt []byte) {
 	}
 }
 
-// pickHomeLocked chooses the relay with the lowest STUN RTT (keeping the current one unless
-// another is clearly better), or the first relay when UDP gets no answers at all.
+// pickHomeLocked ranks the relays by STUN round trip (relays without an answer last, by name)
+// and registers with the nearest two: the first is the home relay, kept unless another is clearly
+// better (no flapping). Without any UDP answer, the first relays by name still work over TLS.
 func (b *MagicBind) pickHomeLocked() bool {
-	best, bestRTT := "", time.Duration(math.MaxInt64)
-	exists := false
+	ranked := make([]string, 0, len(b.relays))
 	for _, r := range b.relays {
-		if r.Name == b.home {
-			exists = true
+		ranked = append(ranked, r.Name)
+	}
+	rtt := func(n string) time.Duration {
+		if d, ok := b.stunRTT[n]; ok {
+			return d
 		}
-		if rtt, ok := b.stunRTT[r.Name]; ok && rtt < bestRTT {
-			best, bestRTT = r.Name, rtt
+		return time.Duration(math.MaxInt64)
+	}
+	sort.SliceStable(ranked, func(i, j int) bool { return rtt(ranked[i]) < rtt(ranked[j]) })
+	if b.home != "" && len(ranked) > 0 && ranked[0] != b.home && slices.Contains(ranked, b.home) {
+		if cur, ok := b.stunRTT[b.home]; ok && float64(cur) <= 1.5*float64(rtt(ranked[0])) {
+			ranked = append([]string{b.home}, slices.DeleteFunc(ranked, func(n string) bool { return n == b.home })...)
 		}
 	}
-	if best == "" && len(b.relays) > 0 {
-		best = b.relays[0].Name
+	homes := ranked[:min(2, len(ranked))]
+	home := ""
+	if len(homes) > 0 {
+		home = homes[0]
 	}
-	if exists && best != b.home {
-		if cur, ok := b.stunRTT[b.home]; ok && float64(cur) <= 1.5*float64(bestRTT) {
-			return false
+	changed := home != b.home || !slices.Equal(homes, b.homes)
+	b.home, b.homes = home, homes
+	return changed
+}
+
+// relayForLocked picks the relay for traffic to p: among the relays p is registered with, the one
+// with the lowest round trip for the pair (ours + p's), preferring relays we are connected to.
+func (b *MagicBind) relayForLocked(p *mpeer) string {
+	best, bestCost := "", math.MaxInt
+	for _, r := range p.relays {
+		if _, ok := b.relayByName(r.Name); !ok {
+			continue
+		}
+		mine := 500 // ms, when we have not measured it
+		if d, ok := b.stunRTT[r.Name]; ok {
+			mine = int(d.Milliseconds())
+		}
+		cost := mine + r.RTT
+		if l := b.links[r.Name]; l == nil || !l.up() {
+			cost += 1000 // connecting first costs a round trip or two
+		}
+		if cost < bestCost {
+			best, bestCost = r.Name, cost
 		}
 	}
-	if best == b.home {
-		return false
+	if best != "" {
+		return best
 	}
-	b.home = best
-	return true
+	if p.home != "" {
+		return p.home
+	}
+	return b.home
 }
 
 func (b *MagicBind) loop(ctx context.Context) {
@@ -627,12 +695,15 @@ func (b *MagicBind) loop(ctx context.Context) {
 					}
 				}
 			}
-			home := b.home
-			var idle []*relayLink
+			homes := append([]string(nil), b.homes...)
+			var idle, live []*relayLink
 			for name, l := range b.links {
-				if name != home && now.Sub(l.lastUsed()) > relayIdle {
+				if !slices.Contains(homes, name) && now.Sub(l.lastUsed()) > relayIdle {
 					idle = append(idle, l)
 					delete(b.links, name)
+					delete(b.relayUDP, l.udpAddr)
+				} else {
+					live = append(live, l)
 				}
 			}
 			b.mu.Unlock()
@@ -642,7 +713,12 @@ func (b *MagicBind) loop(ctx context.Context) {
 			for _, p := range due {
 				b.pingPeer(p)
 			}
-			_ = b.link(home) // stay reachable through the home relay
+			for _, l := range live {
+				l.maybeHello(now)
+			}
+			for _, h := range homes {
+				_ = b.link(h) // stay reachable through the nearest relays
+			}
 		}
 	}
 }
@@ -676,7 +752,7 @@ func (b *MagicBind) SetPeers(peers []zr.Peer) {
 			box.Precompute(&p.shared, &disco, &b.discoPriv)
 		}
 		b.byDisco[disco] = p
-		p.name, p.home = pp.Name, pp.HomeRelay
+		p.name, p.home, p.relays = pp.Name, pp.HomeRelay, pp.Relays
 		p.cands = p.cands[:0]
 		for _, e := range pp.Endpoints {
 			if a, err := netip.ParseAddrPort(e); err == nil && len(p.cands) < maxCandidates {
@@ -711,6 +787,7 @@ func (b *MagicBind) SetRelays(relays []zr.Relay) {
 		if !names[name] {
 			gone = append(gone, l)
 			delete(b.links, name)
+			delete(b.relayUDP, l.udpAddr)
 		}
 	}
 	for name := range b.mapped {
@@ -771,14 +848,31 @@ func (b *MagicBind) Path(k [32]byte) string {
 	if time.Now().Before(p.bestUntil) {
 		return fmt.Sprintf("direct %s (%s)", p.best, p.rtt.Round(100*time.Microsecond))
 	}
-	home := p.home
-	if home == "" {
-		home = b.home
-	}
-	if home == "" {
+	relay := b.relayForLocked(p)
+	if relay == "" {
 		return "no path"
 	}
-	return "relay " + home
+	transport := "tls"
+	if l := b.links[relay]; l != nil && l.udpUp() {
+		transport = "udp"
+	}
+	return "relay " + relay + " " + transport
+}
+
+// Relays are the relays this device is registered with and its round trip to each, for the
+// router to pass to peers.
+func (b *MagicBind) Relays() []zr.RelayRTT {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]zr.RelayRTT, 0, len(b.homes))
+	for _, h := range b.homes {
+		ms := 0
+		if d, ok := b.stunRTT[h]; ok {
+			ms = int(max(d.Milliseconds(), 1))
+		}
+		out = append(out, zr.RelayRTT{Name: h, RTT: ms})
+	}
+	return out
 }
 
 // ---- relay links ----
@@ -814,6 +908,9 @@ func (b *MagicBind) link(name string) *relayLink {
 	}
 	l := newRelayLink(r, b)
 	b.links[name] = l
+	if l.udpAddr.IsValid() {
+		b.relayUDP[l.udpAddr] = l
+	}
 	return l
 }
 
@@ -832,21 +929,119 @@ func (b *MagicBind) onRelayFrame(from [32]byte, data []byte) {
 	}
 }
 
+// relayLink is this device's connection to one relay: a TLS connection (session setup, and the
+// transport where UDP is blocked) and a UDP session on the WireGuard socket, used once the
+// relay acknowledges its hello.
 type relayLink struct {
-	r    zr.Relay
-	b    *MagicBind
-	out  chan []byte
-	done chan struct{}
-	once sync.Once
-	mu   sync.Mutex
-	used time.Time
-	rc   *zr.RelayConn
+	r       zr.Relay
+	b       *MagicBind
+	out     chan []byte
+	done    chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	used    time.Time
+	rc      *zr.RelayConn
+	udpAddr netip.AddrPort
+	session uint32
+	skey    [32]byte
+	helloAt time.Time
+	unacked time.Time    // first hello sent since the last ack (zero: none outstanding)
+	ackAt   atomic.Int64 // unix nanos of the last hello ack (the UDP session is live)
 }
 
 func newRelayLink(r zr.Relay, b *MagicBind) *relayLink {
 	l := &relayLink{r: r, b: b, out: make(chan []byte, 1024), done: make(chan struct{}), used: time.Now()}
+	if ua, err := net.ResolveUDPAddr("udp", r.STUN); err == nil {
+		ap := ua.AddrPort()
+		l.udpAddr = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	}
 	go l.run()
 	return l
+}
+
+// udpUp: the relay acknowledged a hello recently and no hello is overdue (UDP to the relay was
+// blocked or the NAT mapping changed: traffic falls back to TLS within seconds).
+func (l *relayLink) udpUp() bool {
+	ack := time.Unix(0, l.ackAt.Load())
+	if time.Since(ack) >= 60*time.Second {
+		return false
+	}
+	l.mu.Lock()
+	pending := l.unacked
+	l.mu.Unlock()
+	return pending.IsZero() || time.Since(pending) <= 3*time.Second
+}
+
+func (l *relayLink) up() bool {
+	l.mu.Lock()
+	tls := l.rc != nil
+	l.mu.Unlock()
+	return tls || l.udpUp()
+}
+
+// maybeHello (re)binds the UDP session: every 25s when idle, every 5s while it carries traffic
+// (a lost session is noticed within seconds), every 2s until acknowledged.
+func (l *relayLink) maybeHello(now time.Time) {
+	up := l.udpUp()
+	l.mu.Lock()
+	session, key := l.session, l.skey
+	every := 25 * time.Second
+	if now.Sub(l.used) < 10*time.Second {
+		every = 5 * time.Second
+	}
+	due := session != 0 && l.udpAddr.IsValid() && (now.Sub(l.helloAt) >= every || (!up && now.Sub(l.helloAt) >= 2*time.Second))
+	if due {
+		l.helloAt = now
+		if l.unacked.IsZero() {
+			l.unacked = now
+		}
+	}
+	l.mu.Unlock()
+	if due {
+		_ = l.b.sendUDP(l.udpAddr, zr.UDPHelloPacket(session, key, uint64(now.UnixMilli())))
+	}
+}
+
+func (l *relayLink) acked(pkt []byte) {
+	session, _, _, ok := zr.ParseUDPAck(pkt)
+	l.mu.Lock()
+	match := ok && session == l.session && session != 0
+	l.mu.Unlock()
+	if match {
+		l.ackAt.Store(time.Now().UnixNano())
+		l.mu.Lock()
+		l.unacked = time.Time{}
+		l.mu.Unlock()
+	}
+}
+
+// sendBatch relays WireGuard packets to key: as UDP datagrams in one batch when the session is
+// live, otherwise over TLS.
+func (l *relayLink) sendBatch(key [32]byte, bufs [][]byte) {
+	l.mu.Lock()
+	l.used = time.Now()
+	session := l.session
+	l.mu.Unlock()
+	if !l.udpUp() || session == 0 {
+		for _, buf := range bufs {
+			l.send(key, buf)
+		}
+		return
+	}
+	total := 0
+	for _, buf := range bufs {
+		total += zr.UDPSendHdr + len(buf)
+	}
+	slab := make([]byte, 0, total) // one allocation for the whole batch
+	frames := make([][]byte, len(bufs))
+	for i, buf := range bufs {
+		start := len(slab)
+		slab = zr.AppendUDPSend(slab, session, key, buf)
+		frames[i] = slab[start:len(slab):len(slab)]
+	}
+	if ep, err := l.b.stdEP(l.udpAddr); err == nil {
+		_ = l.b.std.Send(frames, ep)
+	}
 }
 
 func (l *relayLink) lastUsed() time.Time {
@@ -866,8 +1061,18 @@ func (l *relayLink) close() {
 	})
 }
 
-// send queues a frame for key (the packet is copied: WireGuard reuses its buffers).
+// send relays one packet to key (copied: WireGuard reuses its buffers): UDP when live, else TLS.
 func (l *relayLink) send(key [32]byte, pkt []byte) {
+	l.mu.Lock()
+	session := l.session
+	l.mu.Unlock()
+	if session != 0 && l.udpUp() {
+		l.mu.Lock()
+		l.used = time.Now()
+		l.mu.Unlock()
+		_ = l.b.sendUDP(l.udpAddr, zr.AppendUDPSend(nil, session, key, pkt))
+		return
+	}
 	n := 32 + len(pkt)
 	f := make([]byte, 4+n)
 	f[0], f[1], f[2], f[3] = zr.FrameSend, byte(n>>16), byte(n>>8), byte(n)
@@ -902,6 +1107,10 @@ func (l *relayLink) run() {
 				l.mu.Unlock()
 				l.serve(rc)
 				rc.Close()
+				l.mu.Lock()
+				l.rc, l.session = nil, 0 // the session dies with its TLS connection
+				l.mu.Unlock()
+				l.ackAt.Store(0)
 			}
 		}
 		select {
@@ -946,8 +1155,17 @@ func (l *relayLink) serve(rc *zr.RelayConn) {
 		if err != nil {
 			return
 		}
-		if typ == zr.FrameRecv {
+		switch typ {
+		case zr.FrameRecv:
 			l.b.onRelayFrame(from, payload)
+		case zr.FrameSession: // a new UDP session for this connection: bind it now
+			if session, key, ok := zr.ParseSessionFrame(payload); ok {
+				l.mu.Lock()
+				l.session, l.skey, l.helloAt, l.unacked = session, key, time.Time{}, time.Time{}
+				l.mu.Unlock()
+				l.ackAt.Store(0)
+				l.maybeHello(time.Now())
+			}
 		}
 	}
 }
@@ -958,6 +1176,7 @@ type RelayCheck struct {
 	Name    string `json:"name"`
 	STUNms  int64  `json:"stun_ms,omitempty"` // UDP round trip (0 = no answer)
 	TLSms   int64  `json:"tls_ms,omitempty"`  // TLS connect time (0 = unreachable)
+	UDP     bool   `json:"udp_relay"`         // relayed traffic flows as UDP datagrams (else TLS)
 	Mapped  string `json:"mapped,omitempty"`  // public address it saw
 	Error   string `json:"error,omitempty"`
 	Current bool   `json:"home"`
@@ -991,6 +1210,9 @@ func (b *MagicBind) Netcheck(ctx context.Context) Netcheck {
 	for _, r := range relays {
 		rc := RelayCheck{Name: r.Name}
 		b.mu.RLock()
+		if l := b.links[r.Name]; l != nil {
+			rc.UDP = l.udpUp()
+		}
 		if rtt, ok := b.stunRTT[r.Name]; ok {
 			rc.STUNms, rc.Mapped, nc.UDP = max(rtt.Milliseconds(), 1), b.mapped[r.Name].String(), true
 			ports[b.mapped[r.Name].Port()] = true

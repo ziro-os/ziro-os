@@ -283,11 +283,12 @@ func routerHousekeeping(st *ClusterState, lastSeen func(id string) time.Time, no
 // ---- the netmap hub (leader only) ----
 
 type routerSoft struct {
-	Endpoints []string  `json:"endpoints,omitempty"`
-	Version   string    `json:"version,omitempty"`
-	HomeRelay string    `json:"home_relay,omitempty"`
-	Seen      time.Time `json:"seen"`
-	Online    bool      `json:"online"`
+	Endpoints []string      `json:"endpoints,omitempty"`
+	Version   string        `json:"version,omitempty"`
+	HomeRelay string        `json:"home_relay,omitempty"`
+	Relays    []zr.RelayRTT `json:"relays,omitempty"`
+	Seen      time.Time     `json:"seen"`
+	Online    bool          `json:"online"`
 }
 
 type hubPeer struct {
@@ -349,7 +350,7 @@ func (h *routerHub) projectLocked(m *zr.Member) zr.Peer {
 		Addresses: memberAddrs(m), User: m.User, Expires: m.Expires}
 	p.AllowedIPs = append(append([]string(nil), p.Addresses...), m.Approved...)
 	if s := h.soft[m.ID]; s != nil {
-		p.Endpoints, p.HomeRelay = s.Endpoints, s.HomeRelay
+		p.Endpoints, p.HomeRelay, p.Relays = s.Endpoints, s.HomeRelay, s.Relays
 	}
 	_, p.Online = h.subs[m.ID]
 	return p
@@ -521,7 +522,7 @@ func (h *routerHub) updateSoft(id string, req zr.MapRequest) {
 		s = &routerSoft{}
 		h.soft[id] = s
 	}
-	s.Endpoints, s.Version, s.HomeRelay, s.Seen = req.Endpoints, req.Version, req.HomeRelay, time.Now()
+	s.Endpoints, s.Version, s.HomeRelay, s.Relays, s.Seen = req.Endpoints, req.Version, req.HomeRelay, req.Relays, time.Now()
 	h.peerChangedLocked(id, nil)
 }
 
@@ -735,6 +736,14 @@ func decodeMapRequest(r *http.Request) (zr.MapRequest, error) {
 	}
 	if req.HomeRelay != "" && validLabel(req.HomeRelay) != nil {
 		return req, httpError{http.StatusBadRequest, "invalid home relay"}
+	}
+	if len(req.Relays) > zr.MaxRelays {
+		return req, httpError{http.StatusBadRequest, "too many relays"}
+	}
+	for _, r := range req.Relays {
+		if validLabel(r.Name) != nil || r.RTT < 0 || r.RTT > 60000 {
+			return req, httpError{http.StatusBadRequest, "invalid relay"}
+		}
 	}
 	return req, nil
 }

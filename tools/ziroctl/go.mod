@@ -16,6 +16,7 @@ require (
 	golang.org/x/net v0.59.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/term v0.46.0
+	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 )
 
 require (
@@ -37,3 +38,8 @@ require (
 )
 
 replace github.com/ziro-os/ziro-os/sdk => ../../sdk
+
+// wireguard-go's go.mod requires gVisor for its optional netstack TUN, which we never import.
+// Replacing it with an empty module keeps gVisor out of the build and the module graph: no gVisor
+// code can be linked by accident, and scanners stop reporting advisories for code we don't ship.
+replace gvisor.dev/gvisor => ../gvisor-stub
