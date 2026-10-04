@@ -100,7 +100,7 @@ being authorized and audited.
 - **Every change is audited.** The audit log is hash-chained (`ziroctl audit verify` detects an edited or removed
   record), and API changes are recorded under the token's name with their result.
 - **Signed artifacts.** Catalogs (ed25519 index, sha256-pinned entries), `ziroctl` tools releases (ed25519-signed
-  `SHA256SUMS`, public key in `tools/ziroctl/cmd/release.pub`) and kernel modules
+  `SHA256SUMS`, public key in `sdk/release/release.pub`) and kernel modules
   (`kernel/certs/ziro-modules.crt`). Downloads are verified before use.
 - **Input is validated at every boundary** (CLI, API, catalog, host) by the same `sdk/schema` code.
 

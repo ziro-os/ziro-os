@@ -404,7 +404,7 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 	msg := zr.MapMessage{Type: "delta"}
 	if full {
 		s.seen, s.filter, s.selfVer, s.cv = map[string]uint64{}, "", 0, ""
-		msg = zr.MapMessage{Type: "full", Domain: n.Name + routerDomainS, FilterChanged: true, Filter: filter}
+		msg = zr.MapMessage{Type: "full", Domain: n.Name + routerDomainS, Networks: []string{n.IPv4, n.IPv6}, FilterChanged: true, Filter: filter}
 	}
 	if self := h.peers[m.ID]; self != nil && self.ver != s.selfVer {
 		s.selfVer, msg.Self = self.ver, &self.p

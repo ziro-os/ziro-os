@@ -148,7 +148,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
 | HA control plane | Raft (hashicorp/raft + bbolt), cluster CA, mutual-TLS master links | masters | shipped |
-| Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices anywhere ([router.md](router.md)) | every master | control plane shipped; zirocd, relays next |
+| Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices anywhere ([router.md](router.md)) | every master; `zirocd` on devices | control plane + zirocd (Linux/macOS/Windows) shipped; relays next |
 | Enterprise controls | scoped API tokens, credential and data-key rotation, signed-image policy, `/api/v1/metrics`, [compliance mapping](compliance.md) | all | shipped |
 
 ```mermaid
@@ -237,7 +237,8 @@ Known limits, each addressed by a later phase:
 - **Router** (control plane shipped; see [router.md](router.md)). Global networks for devices outside the cluster (zirocd), ZeroTier/Tailscale-style.
   - Desired state (networks, members, key hashes, ACLs, routes) lives in `ClusterState.Router` and goes through Raft. Liveness and endpoints are soft state in the leader's hub.
   - Each device gets an HTTP/2 netmap stream (full, then deltas). ACLs are compiled once per change, and each device sees only the peers it may talk to.
-  - Next: zirocd (userspace wireguard-go on Linux/macOS/Windows, signed self-update), relays with NAT traversal, a Linux kernel fast path, OIDC.
+  - zirocd (`tools/zirocd`): userspace wireguard-go on Linux, macOS and Windows; a stateful default-deny inbound filter; split DNS; signed self-update with crash-loop rollback. It ships on the tools release stream, and `sdk/release` holds the signature check it shares with `ziroctl update`.
+  - Next: relays with NAT traversal, a Linux kernel fast path, OIDC.
 - **Phase 5: enterprise.**
   - Secrets encrypted at rest: shipped (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
   - Scoped API tokens (viewer / operator / admin): shipped.

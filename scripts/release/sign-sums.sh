@@ -5,7 +5,7 @@
 set -eu
 dir=${1:?usage: sign-sums.sh <dir>}
 [ -n "${ZIRO_RELEASE_KEY:-}" ] || { echo "ZIRO_RELEASE_KEY is not set" >&2; exit 1; }
-pub="$(cd "$(dirname "$0")/../.." && pwd)/tools/ziroctl/cmd/release.pub"
+pub="$(cd "$(dirname "$0")/../.." && pwd)/sdk/release/release.pub"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 (umask 077; printf '%s\n' "$ZIRO_RELEASE_KEY" > "$tmp/key.pem")

@@ -12,7 +12,7 @@
 /tools/ziroctl/cmd/cluster_keys.go  @sombochea
 /tools/ziroctl/cmd/update.go        @sombochea
 /tools/ziroctl/cmd/upgrade.go       @sombochea
-/tools/ziroctl/cmd/release.pub      @sombochea
+/sdk/release/release.pub      @sombochea
 /init/                              @sombochea
 /security/                          @sombochea
 /scripts/release/                   @sombochea

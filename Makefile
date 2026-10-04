@@ -1,7 +1,7 @@
 # Ziro-OS Centralized Build Orchestrator
 # A cloud-native, ultra-lightweight operating system for container workloads.
 
-.PHONY: test-boot all rootfs rootfs-all tools tools-all docker-image docker-multiarch kernel image-iso run-qemu test test-smoke clean help
+.PHONY: test-boot all rootfs rootfs-all tools tools-all zirocd-all docker-image docker-multiarch kernel image-iso run-qemu test test-smoke clean help
 
 HOST_ARCH := $(shell uname -m)
 HOST_OS   := $(shell uname -s)
@@ -51,6 +51,17 @@ tools:
 	@cd tools/ziropkg && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="$(LDFLAGS_PKG)" -o ../../bin/ziropkg-$(ARCH_NORMALIZED) .
 	@cp bin/ziropkg-$(ARCH_NORMALIZED) bin/ziropkg
 	@echo "✅ ziroctl and ziropkg built at bin/"
+
+# zirocd: the cross-platform router client (released with the tools stream)
+ZIROCD_TARGETS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+zirocd-all:
+	@mkdir -p bin
+	@for t in $(ZIROCD_TARGETS); do \
+		os=$${t%/*}; arch=$${t#*/}; ext=; [ "$$os" = windows ] && ext=.exe; \
+		(cd tools/zirocd && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath \
+			-ldflags="-s -w -X main.Version=$(VERSION)" -o ../../bin/zirocd-$$os-$$arch$$ext .) || exit 1; \
+	done
+	@echo "✅ Built bin/zirocd-* for $(ZIROCD_TARGETS)"
 
 tools-all:
 	@echo "Building ziroctl and ziropkg for all architectures..."
