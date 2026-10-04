@@ -36,6 +36,7 @@ var (
 	upRoutes []string
 	upDNS    bool
 	upAuto   string
+	upSSO    bool
 )
 
 func main() {
@@ -58,9 +59,11 @@ func main() {
 		Short: "Join a network, or reconnect",
 		Example: `  sudo zirocd up --key zr1_...
   sudo zirocd up --key zr1_... --name build-01 --advertise-routes 10.0.0.0/16
-  sudo zirocd up                      # reconnect after zirocd down`,
+  sudo zirocd up                      # reconnect after zirocd down
+  sudo zirocd up --sso --key zr1_...  # sign in with your company account (network invite)
+  sudo zirocd up --sso                # sign in again when the device's key expires`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			req := daemon.UpRequest{Key: upKey, Name: upName, AutoUpdate: upAuto}
+			req := daemon.UpRequest{Key: upKey, Name: upName, AutoUpdate: upAuto, SSO: upSSO}
 			if cmd.Flags().Changed("advertise-routes") {
 				req.Routes = upRoutes
 			}
@@ -74,6 +77,19 @@ func main() {
 			if err := call(http.MethodPost, "/up", req, &s); err != nil {
 				return err
 			}
+			if s.SignIn != nil && !jsonOut {
+				fmt.Printf("To sign in, open %s\nand enter the code:  %s\n", s.SignIn.URL, s.SignIn.Code)
+				if s.SignIn.URLComplete != "" {
+					fmt.Printf("(or open %s)\n", s.SignIn.URLComplete)
+				}
+				fmt.Printf("Waiting until %s...\n", s.SignIn.Expires.Local().Format("15:04"))
+				for s.SignIn != nil && (s.State == "pending" || s.State == "connecting") && time.Now().Before(s.SignIn.Expires) {
+					time.Sleep(2 * time.Second)
+					if err := call(http.MethodGet, "/status", nil, &s); err != nil {
+						return err
+					}
+				}
+			}
 			for i := 0; i < 40 && s.State == "connecting"; i++ { // wait for the first netmap
 				time.Sleep(500 * time.Millisecond)
 				if err := call(http.MethodGet, "/status", nil, &s); err != nil {
@@ -83,9 +99,16 @@ func main() {
 			return show(s, func() {
 				switch s.State {
 				case "pending":
-					fmt.Println("⧗ waiting for an admin to approve this device: ziroctl router member approve <network> <name>")
+					if s.SignIn != nil {
+						fmt.Println("⧗ sign-in not finished yet; zirocd keeps waiting (zirocd status shows the code)")
+					} else {
+						fmt.Println("⧗ waiting for an admin to approve this device: ziroctl router member approve <network> <name>")
+					}
 				case "connected":
 					fmt.Printf("✓ connected: %s.%s  %s\n", s.Name, s.Domain, s.IPv4)
+					if !s.KeyExpires.IsZero() {
+						fmt.Printf("  signed in until %s (zirocd up --sso to renew)\n", s.KeyExpires.Local().Format("2006-01-02"))
+					}
 				default:
 					fmt.Printf("⚠ %s: %s (zirocd status)\n", s.State, orDash(s.Error))
 				}
@@ -97,6 +120,7 @@ func main() {
 	upCmd.Flags().StringSliceVar(&upRoutes, "advertise-routes", nil, "subnets to offer (an admin approves each)")
 	upCmd.Flags().BoolVar(&upDNS, "accept-dns", true, "resolve <device>.<network>.ziro")
 	upCmd.Flags().StringVar(&upAuto, "auto-update", "", "on, notify or off")
+	upCmd.Flags().BoolVar(&upSSO, "sso", false, "sign in with your identity provider (the network allows it)")
 
 	downCmd := &cobra.Command{Use: "down", Short: "Disconnect and keep this device's identity", Example: "  sudo zirocd down",
 		RunE: func(cmd *cobra.Command, args []string) error { return call(http.MethodPost, "/down", nil, nil) }}
@@ -244,6 +268,16 @@ func printStatus(s daemon.Status) {
 	}
 	if s.Name != "" {
 		fmt.Printf("Device:   %s.%s  %s %s\n", s.Name, s.Domain, s.IPv4, s.IPv6)
+	}
+	if s.SignIn != nil {
+		fmt.Printf("Sign in:  open %s and enter %s (until %s)\n", s.SignIn.URL, s.SignIn.Code, s.SignIn.Expires.Local().Format("15:04"))
+	}
+	if !s.KeyExpires.IsZero() {
+		note := ""
+		if time.Until(s.KeyExpires) < 14*24*time.Hour {
+			note = "  ⚠ sign in again soon: sudo zirocd up --sso"
+		}
+		fmt.Printf("Key:      signed in until %s%s\n", s.KeyExpires.Local().Format("2006-01-02"), note)
 	}
 	if s.Interface != "" {
 		fmt.Printf("Tunnel:   %s (filtered %d packets)\n", s.Interface, s.Dropped)

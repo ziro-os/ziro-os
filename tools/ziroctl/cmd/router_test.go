@@ -38,7 +38,7 @@ func registerDev(st *ClusterState, req zr.RegisterRequest, now time.Time) (zr.Re
 	if err != nil {
 		return zr.RegisterResponse{}, err
 	}
-	return routerRegister(st, req, csr, kh, now)
+	return routerRegister(st, req, csr, kh, now, nil)
 }
 
 func routerTestState(t *testing.T, acl zr.ACL) (*ClusterState, *zr.Network) {

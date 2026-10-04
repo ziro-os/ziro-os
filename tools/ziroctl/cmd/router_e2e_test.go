@@ -37,12 +37,17 @@ func TestRouterServeE2E(t *testing.T) {
 	if relayIP != "" {
 		routerOf(st).Relays = []zr.Relay{{Name: "r1", Addr: relayIP + ":8443", STUN: relayIP + ":3478"}}
 	}
+	// Sign-in: a fake OIDC provider that approves alice@example.com at once.
+	idp := newFakeIdP(t, "ziro-router")
+	idp.approve(map[string]any{"email": "alice@example.com", "email_verified": true})
+	routerOf(st).SSO = &zr.SSO{Issuer: idp.srv.URL, ClientID: "ziro-router"}
+	n.SSO = &zr.NetworkSSO{Domains: []string{"example.com"}, Tags: []string{"laptop"}}
 	plain, web := addJoinKey(st, true, time.Now().Add(time.Hour)), addJoinKey(st, true, time.Now().Add(time.Hour), "web")
 	if err := saveStateFiles(clusterDir, st); err != nil {
 		t.Fatal(err)
 	}
 	pin, _ := pemHash(st.CACert)
-	for name, key := range map[string]string{"plain": plain, "web": web} {
+	for name, key := range map[string]string{"plain": plain, "web": web, "sso": ""} { // "sso": a network invite
 		inv := zr.Invite{Endpoints: []string{adv}, Pin: pin, Network: n.ID, Key: key}.String()
 		if err := os.WriteFile(out+"/key-"+name, []byte(inv), 0600); err != nil {
 			t.Fatal(err)
@@ -50,6 +55,7 @@ func TestRouterServeE2E(t *testing.T) {
 	}
 	hub := newRouterHub()
 	rt := newRouterServer(hub, st.CACert)
+	rt.sso.hc = idp.srv.Client()
 	var ver atomic.Uint64
 	rt.sync = func() {
 		if cur, err := readState(); err == nil {

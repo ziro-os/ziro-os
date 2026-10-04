@@ -236,6 +236,11 @@ func (e *Engine) converge() error {
 			}
 		}
 	}
+	overlay := make([]netip.Prefix, 0, len(want))
+	for r := range want {
+		overlay = append(overlay, r)
+	}
+	e.bind.SetOverlay(overlay)
 	var errs []string
 	for r := range e.routes {
 		if !want[r] {

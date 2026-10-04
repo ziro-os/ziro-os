@@ -8,7 +8,7 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 | Client | `zirocd` for Linux, macOS and Windows (amd64, arm64), signed releases with self-update | shipped (R2) |
 | Relays + NAT traversal | `ziroctl router relay enable` (TLS relay + STUN), disco hole punching, `zirocd netcheck` | shipped (R3) |
 | Ziro OS hosts, subnet routers | `ziroctl router join` (zirocd ships in the full image), routed LANs and cluster meshes | shipped (R4) |
-| SSO | OIDC device-code login (`zirocd up --sso`) | R5 |
+| SSO | OIDC device-code sign-in (`zirocd up --sso`), expiring device keys, `user:` ACL selectors | shipped (R5) |
 
 ## Operator quick start
 
@@ -32,6 +32,7 @@ Other ways in:
 
 - **Admin approval:** `ziroctl router network invite office` prints a key without a secret. Each device that uses it waits until `ziroctl router member approve office <device>`.
 - **Ephemeral devices** (CI, autoscaling): `key create --ephemeral`. They are removed 10 minutes after going offline.
+- **Sign-in:** users join with their company account (`zirocd up --sso`). See [Single sign-on](#single-sign-on).
 
 Every command takes `--json`. Every change is in the audit log (`ziroctl audit log`).
 
@@ -71,6 +72,44 @@ zirocd follows the tools release stream (`tools/vX.Y.Z`), which is built for all
 - It installs only if `SHA256SUMS` carries the Ziro release signature (ed25519) and the binary matches. The swap is atomic, and the previous binary is kept.
 - If the new binary fails to reach "connected" in two starts, it is rolled back automatically.
 - `--auto-update notify` only reports in `zirocd status`; `off` disables checks. `sudo zirocd update` installs now.
+
+## Single sign-on
+
+People sign their devices in with your identity provider, through any OIDC provider with the OAuth 2.0 device authorization grant (RFC 8628): Google, Microsoft Entra ID, Okta, Keycloak, Authentik, Dex and others.
+
+```sh
+# once, on a master: register an OAuth client with the device-code grant at the provider
+ziroctl router sso set --issuer https://login.example.com --client-id ziro-router [--client-secret-file f]
+# per network: who may sign in, which tags their devices get, how long they stay in
+ziroctl router network set office --sso-domains example.com --sso-tags laptop \
+    --sso-group-tags admins=admin --key-expiry 2160h
+ziroctl router network invite office      # the zr1_ invite users sign in with
+```
+
+On a device:
+
+```
+$ sudo zirocd up --sso --key zr1_...
+To sign in, open https://login.example.com/device
+and enter the code:  WDJB-MJHT
+✓ connected: alice-laptop.office.ziro  100.64.0.7
+  signed in until 2027-04-02 (zirocd up --sso to renew)
+```
+
+**How it works.** The router runs the flow, so zirocd never talks to the identity provider and the client secret never leaves the masters (it's stored and sealed with the cluster secrets).
+1. The leader asks the provider for a device code and hands the URL and user code to zirocd.
+2. The leader polls the provider until the user approves.
+3. It verifies the ID token: issuer, audience (your client ID), signature against the provider's published keys, and expiry.
+4. It applies the network's policy, and the device's next poll receives its certificate.
+
+| Policy | Rule |
+|---|---|
+| Who | The email must be verified by the provider (`--trust-unverified-email` for providers that never say), and in `--sso-domains` and/or a member of `--sso-groups` (claim `groups`, or `--groups-claim`). A network allows sign-in only with at least one of these: "any account of the provider" is never an option |
+| Tags | `--sso-tags` for every signed-in device, plus `--sso-group-tags group=tag1+tag2` per group. Use them in ACLs, alongside `user:<email>` |
+| Expiry | Signed-in devices expire after `--key-expiry` (default 180 days, i.e. 4320h). An expired device is dropped from every netmap and relay within a minute; `zirocd status` warns two weeks ahead, and `zirocd up --sso` renews. Servers: `ziroctl router member expiry office db-1 --never` |
+| Audit | Every sign-in, refusal and failed verification is in the audit log, with the user's email |
+
+As with every device-code flow, a user should only enter a code that their own `zirocd up --sso` printed.
 
 ## Ziro OS hosts
 
@@ -161,7 +200,7 @@ rules:
     dst: ["10.200.0.0/16:22"]      # a subnet routed through a device
 ```
 
-Selectors are `*`, `tag:<t>`, `group:<g>`, `member:<name>` or a CIDR. Destinations add ports: `*`, `443`, `8000-8100` or `22,443`. Unknown keys in the file are an error, so a typo can't silently drop a rule.
+Selectors are `*`, `tag:<t>`, `group:<g>`, `member:<name>`, `user:<email>` (devices signed in by that user) or a CIDR. Destinations add ports: `*`, `443`, `8000-8100` or `22,443`. Unknown keys in the file are an error, so a typo can't silently drop a rule.
 
 - `ziroctl router acl test office web-1 db-1 5432/tcp` answers from the same code the devices enforce.
 - **Least visibility:** a device's netmap holds only the peers it may talk to (in either direction). Every other member's existence, keys and addresses stay hidden from it.
@@ -202,6 +241,7 @@ sequenceDiagram
 | Boundary | Control |
 |---|---|
 | Device → router | TLS 1.3. The router is verified against the cluster CA, whose hash is in the key (no trust on first use). Requests after join need a client certificate issued by that CA (OU `ziro-device`, 30 days, renewed with a CSR). |
+| Sign-in | The router verifies ID tokens itself (issuer, audience, JWKS signature, expiry) and requires a verified email and a domain or group policy; the client secret stays sealed on the masters; signed-in devices expire and are re-authorized by signing in again |
 | Device identity | The WireGuard, disco and TLS private keys are generated on the device and never leave it. The router binds a member to the hash of its TLS public key. Renewing with a new key revokes the old certificate at once. |
 | Device certificates vs. masters | Device certificates carry OU `ziro-device` and only the client-auth EKU. Raft, the internal API and the data-key endpoint all require the master OU, and agents verify masters by name and server-auth EKU. |
 | Join keys | 256-bit secrets. Only their SHA-256 is stored, compared in constant time. They expire (default 24h, at most 1 year) and are single-use unless `--reusable`. A device whose reply was lost can retry with its own TLS key. |
@@ -209,4 +249,5 @@ sequenceDiagram
 | Abuse | Per-IP rate limit (600/min) and per-device limit (60/min). 64 KiB bodies. Endpoints and versions are validated. Rejected credentials are audited at most once per IP per 10 minutes. |
 | Revocation | `member rm`, network deletion or loss of authorization ends the device's stream within a quarter second and removes it from every peer's netmap. |
 | Data plane | WireGuard end to end. Relays forward ciphertext only, only within one network, and identify senders by certificate, never by what a frame claims. A device's own ACL filter still decides what it accepts. |
+| Underlay vs overlay | An address inside a prefix routed through the tunnel (the network, approved subnet routes) is never used as a WireGuard path, so packets can't loop into the tunnel |
 | Path discovery | Disco messages are NaCl-boxed between disco keys the router distributed: a forged or replayed ping from anyone else is dropped, and a relayed one must come from the key it claims. Ping rounds are rate-limited, so two peers cannot amplify each other |

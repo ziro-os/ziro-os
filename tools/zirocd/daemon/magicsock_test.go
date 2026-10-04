@@ -133,6 +133,29 @@ func TestMagicNoPingStorm(t *testing.T) {
 	}
 }
 
+// An endpoint inside a prefix routed through the tunnel (a subnet router's own LAN address) is
+// never pinged or used: WireGuard would be sent into WireGuard.
+func TestMagicSkipsOverlayEndpoints(t *testing.T) {
+	a, b := newTestDev(t), newTestDev(t)
+	a.bind.SetOverlay([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}) // b's only endpoint is "inside the tunnel"
+	a.bind.SetPeers([]zr.Peer{b.peer("b")})
+	b.bind.SetPeers([]zr.Peer{a.peer("a")})
+	a.bind.pingPeer(a.bind.peers[keyOf(b.wgPub)])
+	time.Sleep(300 * time.Millisecond)
+	a.bind.mu.RLock()
+	for _, ps := range a.bind.peers[keyOf(b.wgPub)].pings {
+		if ps.to.IsValid() { // only the relayed call-me-maybe may go out
+			t.Fatalf("pinged %s, an endpoint routed through the tunnel", ps.to)
+		}
+	}
+	a.bind.mu.RUnlock()
+	b.bind.pingPeer(b.bind.peers[keyOf(a.wgPub)]) // and pings arriving from such an address are ignored
+	time.Sleep(300 * time.Millisecond)
+	if strings.HasPrefix(a.bind.Path(keyOf(b.wgPub)), "direct") || len(a.bind.peers[keyOf(b.wgPub)].learned) != 0 {
+		t.Fatal("a path through the tunnel itself was learned")
+	}
+}
+
 func TestMagicRejectsForgedDisco(t *testing.T) {
 	a, b, evil := newTestDev(t), newTestDev(t), newTestDev(t)
 	a.bind.SetPeers([]zr.Peer{b.peer("b")})

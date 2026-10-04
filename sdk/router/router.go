@@ -18,6 +18,27 @@ type State struct {
 	Members   []Member  `json:"members,omitempty"`
 	Keys      []JoinKey `json:"keys,omitempty"`
 	Relays    []Relay   `json:"relays,omitempty"`
+	SSO       *SSO      `json:"sso,omitempty"` // OIDC provider for device login (zirocd up --sso)
+}
+
+// SSO is the router's OIDC provider. Devices sign in with the device-code flow (RFC 8628),
+// mediated by the router: the client secret (kept with the cluster secrets) never leaves it.
+type SSO struct {
+	Issuer      string `json:"issuer"`    // https URL with /.well-known/openid-configuration
+	ClientID    string `json:"client_id"` // the client secret, if any, is a cluster secret
+	GroupsClaim string `json:"groups_claim,omitempty"`
+	// TrustUnverifiedEmail accepts an email the provider does not mark verified (providers that
+	// never send email_verified). Off by default.
+	TrustUnverifiedEmail bool `json:"trust_unverified_email,omitempty"`
+}
+
+// NetworkSSO says who may join a network by signing in, and how long their devices stay in.
+type NetworkSSO struct {
+	Domains   []string            `json:"domains,omitempty"`          // allowed email domains
+	Groups    []string            `json:"groups,omitempty"`           // allowed groups (any of)
+	Tags      []string            `json:"tags,omitempty"`             // tags for every signed-in device
+	GroupTags map[string][]string `json:"group_tags,omitempty"`       // group -> extra tags
+	KeyExpiry int                 `json:"key_expiry_hours,omitempty"` // default 4320 (180 days)
 }
 
 // Relay forwards WireGuard packets between devices that cannot reach each other directly, and
@@ -30,13 +51,14 @@ type Relay struct {
 
 // Network is one isolated virtual network (ZeroTier-style), addressed by its random ID.
 type Network struct {
-	ID            string    `json:"id"`   // 16 hex chars
-	Name          string    `json:"name"` // DNS label: <member>.<name>.ziro
-	IPv4          string    `json:"ipv4"` // CIDR (a /16 of 100.64.0.0/10)
-	IPv6          string    `json:"ipv6"` // ULA /48
-	ACL           ACL       `json:"acl"`
-	ClientVersion string    `json:"client_version,omitempty"` // zirocd version pinned for the fleet ("" = latest)
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string      `json:"id"`   // 16 hex chars
+	Name          string      `json:"name"` // DNS label: <member>.<name>.ziro
+	IPv4          string      `json:"ipv4"` // CIDR (a /16 of 100.64.0.0/10)
+	IPv6          string      `json:"ipv6"` // ULA /48
+	ACL           ACL         `json:"acl"`
+	ClientVersion string      `json:"client_version,omitempty"` // zirocd version pinned for the fleet ("" = latest)
+	SSO           *NetworkSSO `json:"sso,omitempty"`            // nil = no sign-in for this network
+	CreatedAt     time.Time   `json:"created_at"`
 }
 
 // ACL is default deny: traffic is allowed only by a rule. Selectors: "*", "tag:<t>",
@@ -69,6 +91,8 @@ type Member struct {
 	KeyHash    string    `json:"key_hash"`            // sha256 of the TLS public key its certificate must carry
 	Routes     []string  `json:"routes,omitempty"`    // subnets it advertises
 	Approved   []string  `json:"approved,omitempty"`  // advertised subnets an admin approved
+	User       string    `json:"user,omitempty"`      // signed-in user (SSO devices)
+	Expires    time.Time `json:"expires,omitempty"`   // the device must sign in again after this (zero = never)
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -131,15 +155,23 @@ type RegisterRequest struct {
 	DiscoKey string   `json:"disco_key"`
 	CSR      string   `json:"csr"` // PEM; proves possession of the TLS key
 	Routes   []string `json:"routes,omitempty"`
+	SSO      bool     `json:"sso,omitempty"` // sign in through the router's OIDC provider
 }
 
 type RegisterResponse struct {
-	Status string `json:"status"` // "authorized" or "pending"
+	Status string `json:"status"` // "authorized", "pending" (admin approval) or "sso" (sign-in under way)
 	Member string `json:"member"`
 	Cert   string `json:"cert,omitempty"` // PEM client certificate (when authorized)
 	CA     string `json:"ca,omitempty"`   // PEM cluster CA
 	IPv4   string `json:"ipv4,omitempty"`
 	IPv6   string `json:"ipv6,omitempty"`
+	// Sign-in (Status "sso"): open URL (or URLComplete) and enter Code before SSOExpires; keep
+	// calling Register with the same request until it returns "authorized".
+	URL         string    `json:"url,omitempty"`
+	URLComplete string    `json:"url_complete,omitempty"`
+	Code        string    `json:"code,omitempty"`
+	SSOExpires  time.Time `json:"sso_expires,omitempty"`
+	Interval    int       `json:"interval,omitempty"` // seconds between polls
 }
 
 type RenewRequest struct {
@@ -157,16 +189,18 @@ const MaxEndpoints = 16
 
 // Peer is a member as another member sees it.
 type Peer struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	NodeKey    string   `json:"node_key"`
-	DiscoKey   string   `json:"disco_key"`
-	Addresses  []string `json:"addresses"`   // its own /32 and /128
-	AllowedIPs []string `json:"allowed_ips"` // addresses + approved routes
-	Endpoints  []string `json:"endpoints,omitempty"`
-	HomeRelay  string   `json:"home_relay,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Online     bool     `json:"online"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	NodeKey    string    `json:"node_key"`
+	DiscoKey   string    `json:"disco_key"`
+	Addresses  []string  `json:"addresses"`   // its own /32 and /128
+	AllowedIPs []string  `json:"allowed_ips"` // addresses + approved routes
+	Endpoints  []string  `json:"endpoints,omitempty"`
+	HomeRelay  string    `json:"home_relay,omitempty"`
+	User       string    `json:"user,omitempty"`
+	Expires    time.Time `json:"expires,omitempty"` // when this device must sign in again
+	Tags       []string  `json:"tags,omitempty"`
+	Online     bool      `json:"online"`
 }
 
 // FilterRule allows inbound packets from Src to Dst on Ports; anything else is dropped.

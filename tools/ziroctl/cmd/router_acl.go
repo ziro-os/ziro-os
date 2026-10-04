@@ -65,6 +65,11 @@ func validSelector(s string, groups map[string][]string) error {
 		return nil
 	case strings.HasPrefix(s, "member:"):
 		return validLabel(s[7:])
+	case strings.HasPrefix(s, "user:"):
+		if e := s[5:]; len(e) > 254 || !strings.Contains(e, "@") || strings.ContainsAny(e, " \t,") {
+			return fmt.Errorf("invalid user selector %q (user:<email>)", s)
+		}
+		return nil
 	}
 	if _, err := netip.ParsePrefix(s); err != nil {
 		return fmt.Errorf("invalid selector %q (want *, tag:, group:, member: or a CIDR)", s)
@@ -167,6 +172,8 @@ func selMatches(s string, m *zr.Member, groups map[string][]string) bool {
 		return hasString(groups[s[6:]], m.Name)
 	case strings.HasPrefix(s, "member:"):
 		return m.Name == s[7:]
+	case strings.HasPrefix(s, "user:"):
+		return m.User != "" && strings.EqualFold(m.User, s[5:])
 	}
 	p, err := netip.ParsePrefix(s)
 	if err != nil {
