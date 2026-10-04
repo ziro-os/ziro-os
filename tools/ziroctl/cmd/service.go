@@ -322,16 +322,24 @@ var serviceLogsCmd = &cobra.Command{
 // drops a marker in stopMarkerDir, which makes init hold the restart until it is removed.
 var initManaged = map[string]bool{"containerd": true, "sshd": true}
 
-const stopMarkerDir = "/run/ziro/stopped"
+var stopMarkerDir = "/run/ziro/stopped"
 
 var serviceBootCmd = &cobra.Command{
 	Use:    "boot",
 	Short:  "Start all enabled services (invoked by ziro-init at boot)",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_ = expandAll(false, true) // a disk resized while the host was off
-		reconcileModules()         // packages vanish after an OS upgrade; /run is empty every boot
-		nfsBoot()                  // standalone NFS mounts (the network is up)
+		// Housekeeping that touches the network or disks (an apk reinstall, an NFS mount) runs beside
+		// the service starts and is bounded: a stalled mirror or share must never keep a worker's
+		// agent and sentinel from starting. Services that need what it repairs fail their first start;
+		// the pass below and ziro-init's heal tick (service heal) bring them up.
+		housekeeping := make(chan struct{})
+		go func() {
+			defer close(housekeeping)
+			_ = expandAll(false, true) // a disk resized while the host was off
+			reconcileModules()         // packages vanish after an OS upgrade; /run is empty every boot
+			nfsBoot()                  // standalone NFS mounts (the network is up)
+		}()
 		// In parallel: init waits for this, and each start watches its daemon for up to 1s.
 		var wg sync.WaitGroup
 		for _, s := range listAllServices() {
@@ -350,7 +358,40 @@ var serviceBootCmd = &cobra.Command{
 			}(s.Name)
 		}
 		wg.Wait()
+		select {
+		case <-housekeeping:
+		case <-time.After(bootHousekeepingWait):
+			fmt.Printf("[boot] housekeeping still running after %s; continuing\n", bootHousekeepingWait)
+		}
+		printHeal(healServices(true)) // whatever housekeeping repaired or the first pass missed
 		moduleBootHooks()
+		return nil
+	},
+}
+
+// bootHousekeepingWait bounds how long boot waits for package/mount repairs before moving on.
+const bootHousekeepingWait = 60 * time.Second
+
+func printHeal(fixes []ServiceFix) {
+	for _, f := range fixes {
+		if f.Error != "" {
+			fmt.Printf("[heal] %s: %s\n", f.Name, f.Error)
+		} else {
+			fmt.Printf("[heal] started %s\n", f.Name)
+		}
+	}
+}
+
+// serviceHealCmd is ziro-init's retry tick: it starts every enabled daemon that is down, so a
+// start that failed before any process existed (init never sees an exit) is retried, and a dead
+// sentinel (the other healer) comes back.
+var serviceHealCmd = &cobra.Command{
+	Use:    "heal",
+	Short:  "Start enabled services that are down (invoked by ziro-init)",
+	Hidden: true,
+	Args:   cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		printHeal(healServices(true))
 		return nil
 	},
 }
@@ -704,6 +745,9 @@ func healServices(force bool) []ServiceFix {
 		if !svc.Enabled || svc.Status == "RUNNING" || oneShotServices[svc.Name] {
 			continue
 		}
+		if fileExists(filepath.Join(stopMarkerDir, svc.Name)) { // stopped on purpose
+			continue
+		}
 		if !force && time.Since(healLast[svc.Name]) < healCooldown {
 			continue
 		}
@@ -722,6 +766,7 @@ func startService(name string) error {
 	if err != nil {
 		return err
 	}
+	_ = os.Remove(filepath.Join(stopMarkerDir, name)) // an explicit start ends a deliberate stop
 	pid := getServicePID(def)
 	if pid > 0 {
 		return fmt.Errorf("service '%s' is already running (PID %d)", name, pid)
@@ -962,13 +1007,13 @@ func stopService(name string) error {
 	if err != nil {
 		return err
 	}
-	if initManaged[name] {
-		if err := os.MkdirAll(stopMarkerDir, 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(stopMarkerDir, name), nil, 0644); err != nil {
-			return err
-		}
+	// The marker holds ziro-init's restart (init-managed) and the heal tick (all others) until the
+	// next explicit start; /run is empty after a reboot, so a stopped service still boots.
+	if err := os.MkdirAll(stopMarkerDir, 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(stopMarkerDir, name), nil, 0644); err != nil {
+		return err
 	}
 	// Remove the pidfile first: ziro-init restarts restart=always services whose pidfile
 	// still names the exited process, and a deliberate stop must not look like a crash.
@@ -1057,7 +1102,7 @@ func init() {
 	serviceCmd.AddCommand(serviceEnableCmd)
 	serviceCmd.AddCommand(serviceDisableCmd)
 	serviceCmd.AddCommand(serviceLogsCmd)
-	serviceCmd.AddCommand(serviceBootCmd)
+	serviceCmd.AddCommand(serviceBootCmd, serviceHealCmd)
 	serviceCmd.AddCommand(serviceRotateLogsCmd)
 	rootCmd.AddCommand(serviceCmd)
 }

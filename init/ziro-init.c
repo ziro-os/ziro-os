@@ -1378,6 +1378,35 @@ static void restart_due_services(void) {
     }
 }
 
+/*
+ * Retry tick: a service that failed before any process existed (missing config, network not
+ * ready) never exits, so the supervision above can't see it. Every 15s for the first minutes of
+ * boot, then every 60s, 'ziroctl service heal' starts what is enabled and down. Not waited for
+ * here: the loop reaps it like any other child.
+ */
+static time_t heal_next = 0;
+static pid_t heal_pid = 0;
+static int heal_runs = 0;
+
+static void heal_tick(void) {
+    time_t now = time(NULL);
+    if (heal_pid > 0) {
+        int st;
+        if (waitpid(heal_pid, &st, WNOHANG) == 0) return; /* still running */
+        heal_pid = 0;
+    }
+    if (now < heal_next || access("/usr/bin/ziroctl", X_OK) != 0) return;
+    heal_next = now + (heal_runs++ < 8 ? 15 : 60);
+    pid_t p = fork();
+    if (p == 0) {
+        char *argv[] = {"ziroctl", "service", "heal", NULL};
+        execv("/usr/bin/ziroctl", argv);
+        _exit(1);
+    } else if (p > 0) {
+        heal_pid = p;
+    }
+}
+
 /* Apply the host firewall synchronously so sshd and containerd never listen unfiltered.
  * 'ziroctl service boot' applies it again later (idempotent). Skipped only when disabled. */
 static void apply_firewall_early(void) {
@@ -1627,6 +1656,7 @@ int main(int argc, char *argv[]) {
         supervise_terminals();
         restart_due_daemons();
         restart_due_services();
+        heal_tick();
 
         int status;
         pid_t exited = waitpid(-1, &status, WNOHANG);
