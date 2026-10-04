@@ -14,7 +14,7 @@ flowchart LR
   L1[laptop] -- netmap --> P1
   L2[server] -- netmap --> P3
   L1 <== WireGuard, direct when possible ==> L2
-  L1 -. relayed when not .- M1 -. .- L2
+  L1 -. relayed when not .- M1 -.- L2
 ```
 
 | Role | What it is | Needs |

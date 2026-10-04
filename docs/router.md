@@ -277,7 +277,7 @@ sequenceDiagram
   D->>P: TLS 1.3, verify cluster CA (pin from key)
   D->>P: POST /register {join key, WG + disco keys, CSR}
   P->>L: relay over master mTLS (writes only)
-  L->>L: Raft commit member; sign device cert (30 days)
+  L->>L: Raft commit member, sign device cert (30 days)
   L-->>D: cert, addresses
   D->>P: POST /map (device cert, session epoch)
   P-->>D: full netmap from P's own replica, then deltas, keepalive 30s
