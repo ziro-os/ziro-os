@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -98,8 +99,8 @@ func CSR(keyPEM []byte) ([]byte, error) {
 }
 
 // Client talks to the router over TLS 1.3, verifying it against the cluster CA and, once
-// registered, authenticating with the device certificate. Any endpoint works: followers relay
-// to the leader.
+// registered, authenticating with the device certificate. Any planet (master) works: each
+// serves netmaps itself and relays writes to the Raft leader.
 type Client struct {
 	endpoints []string
 	pool      *x509.CertPool
@@ -148,6 +149,56 @@ func (c *Client) Reset() {
 	cert := c.cert
 	c.mu.Unlock()
 	c.SetCert(cert)
+}
+
+// Current is the endpoint the client last reached ("" before the first request).
+func (c *Client) Current() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.preferred
+}
+
+// PlanetRTT is a router endpoint and its TLS handshake time (0: unreachable).
+type PlanetRTT struct {
+	Addr string
+	RTT  time.Duration
+}
+
+// Nearest measures a verified TLS handshake to every endpoint at once and returns them fastest
+// first, unreachable ones last. It also makes the fastest one the client's first choice, so the
+// netmap stream comes from the closest planet and fails over in this order.
+func (c *Client) Nearest(ctx context.Context) []PlanetRTT {
+	c.mu.Lock()
+	eps := append([]string(nil), c.endpoints...)
+	c.mu.Unlock()
+	out := make([]PlanetRTT, len(eps))
+	var wg sync.WaitGroup
+	for i, ep := range eps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i].Addr = ep
+			d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second}, Config: &tls.Config{
+				MinVersion: tls.VersionTLS13, RootCAs: c.pool, ServerName: ServerName,
+				GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &tls.Certificate{}, nil }}}
+			start := time.Now()
+			if conn, err := d.DialContext(ctx, "tcp", ep); err == nil {
+				out[i].RTT = max(time.Since(start), time.Microsecond)
+				conn.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i].RTT, out[j].RTT
+		return a != 0 && (b == 0 || a < b)
+	})
+	if len(out) > 0 && out[0].RTT > 0 {
+		c.mu.Lock()
+		c.preferred = out[0].Addr
+		c.mu.Unlock()
+	}
+	return out
 }
 
 func (c *Client) order() []string {

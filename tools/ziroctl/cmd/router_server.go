@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -15,7 +17,6 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -25,12 +26,14 @@ import (
 	zr "github.com/ziro-os/ziro-os/sdk/router"
 )
 
-// Router control plane, served on the cluster API port of every master (/router/v1/*). The
-// leader owns the live netmap hub; followers verify the device certificate and relay the request
-// to the leader over mutual TLS, so clients can dial any public router endpoint.
+// Router control plane, served on the cluster API port of every master ("planet", /router/v1/*).
+// Every planet runs a netmap hub from its own Raft replica and streams netmaps to the devices
+// connected to it; only writes (register, renew) are relayed to the leader over mutual TLS. So
+// devices use their nearest planet, and a leader change moves no stream.
 //
-// Desired state (networks, members, keys, ACLs) is committed through Raft with the cluster state;
-// liveness and endpoints are soft state in the leader's hub and never touch the log.
+// Desired state (networks, members, keys, ACLs) is committed through Raft with the cluster state.
+// Liveness and endpoints are soft state: each planet owns that of its own devices and shares it
+// with the other planets (router_planets.go). It never touches the log.
 
 const (
 	deviceOU        = "ziro-device"
@@ -290,11 +293,22 @@ type routerSoft struct {
 	NAT       string        `json:"nat,omitempty"`
 	Seen      time.Time     `json:"seen"`
 	Online    bool          `json:"online"`
+	Epoch     uint64        `json:"epoch,omitempty"`  // the device session it came from (newest wins)
+	Planet    string        `json:"planet,omitempty"` // the planet holding the device's stream ("" in tests = this one)
 }
 
+// hubPeer is a member's projection and its JSON, encoded once per version and shared by every
+// stream that sees it.
 type hubPeer struct {
 	p   zr.Peer
+	b   []byte
 	ver uint64
+}
+
+// wireMap is a MapMessage with pre-encoded peers (the outer field shadows MapMessage.Peers).
+type wireMap struct {
+	zr.MapMessage
+	Peers []json.RawMessage `json:"peers,omitempty"`
 }
 
 type routerSub struct {
@@ -306,6 +320,7 @@ type routerSub struct {
 	filter  string
 	cv      string
 	relays  string // hash of the relay list last sent
+	planets string // hash of the planet list last sent
 }
 
 // ponytail: each stream keeps the versions of the peers it was sent: O(visible) memory per
@@ -325,6 +340,11 @@ type routerHub struct {
 	since   time.Time // liveness is not replicated: everyone gets a grace period from here
 	relays  []zr.Relay
 	relayH  string
+	planets []string // router endpoints devices dial
+	planetH string
+	self    string                // this planet's node ID ("" in tests)
+	mesh    map[*meshSub]struct{} // other planets streaming this one's soft state
+	peersUp map[string]bool       // other planets: is our stream from them up
 }
 
 func newRouterHub() *routerHub {
@@ -342,7 +362,11 @@ func (h *routerHub) reset() {
 	}
 	h.loaded, h.version = false, 0
 	h.members, h.nets, h.acl = map[string]*zr.Member{}, map[string]*zr.Network{}, map[string]*compiledACL{}
+	for m := range h.mesh {
+		close(m.done)
+	}
 	h.peers, h.soft, h.subs = map[string]*hubPeer{}, map[string]*routerSoft{}, map[string]*routerSub{}
+	h.mesh = map[*meshSub]struct{}{}
 	h.since = time.Now()
 }
 
@@ -353,18 +377,28 @@ func (h *routerHub) projectLocked(m *zr.Member) zr.Peer {
 	if s := h.soft[m.ID]; s != nil {
 		p.Endpoints, p.HomeRelay, p.Relays, p.NAT = s.Endpoints, s.HomeRelay, s.Relays, s.NAT
 	}
-	_, p.Online = h.subs[m.ID]
+	p.Online = h.onlineLocked(m.ID)
 	return p
+}
+
+// onlineLocked: the device streams from this planet, or (by the newest report) from another.
+func (h *routerHub) onlineLocked(id string) bool {
+	if _, ok := h.subs[id]; ok {
+		return true
+	}
+	s := h.soft[id]
+	return s != nil && s.Planet != h.self && s.Online
 }
 
 // refreshPeerLocked re-projects a member and reports whether peers must hear about it.
 func (h *routerHub) refreshPeerLocked(m *zr.Member) bool {
 	p := h.projectLocked(m)
-	if cur := h.peers[m.ID]; cur != nil && reflect.DeepEqual(cur.p, p) {
+	b, _ := json.Marshal(p)
+	if cur := h.peers[m.ID]; cur != nil && bytes.Equal(cur.b, b) {
 		return false
 	}
 	h.seq++
-	h.peers[m.ID] = &hubPeer{p: p, ver: h.seq}
+	h.peers[m.ID] = &hubPeer{p: p, b: b, ver: h.seq}
 	return true
 }
 
@@ -376,6 +410,9 @@ func (h *routerHub) setState(st *zr.State, version uint64) {
 	h.relays = st.Relays
 	rb, _ := json.Marshal(st.Relays)
 	h.relayH = hashToken(string(rb))
+	h.planets = st.Endpoints
+	pb, _ := json.Marshal(st.Endpoints)
+	h.planetH = hashToken(string(pb))
 	h.members, h.nets, h.acl = map[string]*zr.Member{}, map[string]*zr.Network{}, map[string]*compiledACL{}
 	byNet := map[string][]*zr.Member{}
 	for i := range st.Networks {
@@ -434,10 +471,10 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 		c = &compiledACL{}
 	}
 	visible, filter := c.view(m)
-	msg := zr.MapMessage{Type: "delta"}
+	msg := wireMap{MapMessage: zr.MapMessage{Type: "delta"}}
 	if full {
-		s.seen, s.filter, s.selfVer, s.cv, s.relays = map[string]uint64{}, "", 0, "", ""
-		msg = zr.MapMessage{Type: "full", Domain: n.Name + routerDomainS, Networks: []string{n.IPv4, n.IPv6}, FilterChanged: true, Filter: filter}
+		s.seen, s.filter, s.selfVer, s.cv, s.relays, s.planets = map[string]uint64{}, "", 0, "", "", ""
+		msg.MapMessage = zr.MapMessage{Type: "full", Domain: n.Name + routerDomainS, Networks: []string{n.IPv4, n.IPv6}, FilterChanged: true, Filter: filter}
 	}
 	if self := h.peers[m.ID]; self != nil && self.ver != s.selfVer {
 		s.selfVer, msg.Self = self.ver, &self.p
@@ -448,6 +485,9 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 	if h.relayH != s.relays {
 		s.relays, msg.Relays, msg.RelaysChanged = h.relayH, h.relays, true
 	}
+	if h.planetH != s.planets {
+		s.planets, msg.Planets = h.planetH, h.planets
+	}
 	ids := make([]string, 0, len(visible))
 	for id := range visible {
 		ids = append(ids, id)
@@ -456,7 +496,7 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 	for _, id := range ids {
 		if hp := h.peers[id]; hp != nil && s.seen[id] != hp.ver {
 			s.seen[id] = hp.ver
-			msg.Peers = append(msg.Peers, hp.p)
+			msg.Peers = append(msg.Peers, hp.b)
 		}
 	}
 	for id := range s.seen {
@@ -470,7 +510,7 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 	if fh := hashToken(string(fb)); fh != s.filter {
 		s.filter, msg.Filter, msg.FilterChanged = fh, filter, true
 	}
-	if !full && msg.Self == nil && msg.ClientVersion == "" && msg.Peers == nil && msg.Removed == nil && !msg.FilterChanged && !msg.RelaysChanged {
+	if !full && msg.Self == nil && msg.ClientVersion == "" && msg.Peers == nil && msg.Removed == nil && !msg.FilterChanged && !msg.RelaysChanged && msg.Planets == nil {
 		return
 	}
 	b, _ := json.Marshal(msg)
@@ -484,7 +524,7 @@ func (h *routerHub) peerChangedLocked(id string, skip *routerSub) {
 		return
 	}
 	hp := h.peers[id]
-	b, _ := json.Marshal(zr.MapMessage{Type: "delta", Peers: []zr.Peer{hp.p}}) // same bytes for every viewer
+	b, _ := json.Marshal(wireMap{MapMessage: zr.MapMessage{Type: "delta"}, Peers: []json.RawMessage{hp.b}}) // same bytes for every viewer
 	for _, s := range h.subs {
 		if s == skip {
 			continue
@@ -515,16 +555,27 @@ func (h *routerHub) authorize(id, keyHash string) (*zr.Member, error) {
 	return m, nil
 }
 
+// updateSoft records what a device connected to this planet reports. A report from an older
+// session than the one on record (the device has since moved to another planet) is ignored.
 func (h *routerHub) updateSoft(id string, req zr.MapRequest) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	epoch := req.Epoch
+	if epoch == 0 { // older zirocd: this planet orders its sessions
+		epoch = uint64(time.Now().UnixMicro())
+	}
 	s := h.soft[id]
+	if s != nil && s.Epoch > epoch {
+		return
+	}
 	if s == nil {
 		s = &routerSoft{}
 		h.soft[id] = s
 	}
 	s.Endpoints, s.Version, s.HomeRelay, s.Relays, s.NAT, s.Seen = req.Endpoints, req.Version, req.HomeRelay, req.Relays, req.NAT, time.Now()
+	s.Epoch, s.Planet, s.Online = epoch, h.self, false
 	h.peerChangedLocked(id, nil)
+	h.announceLocked(id)
 }
 
 // subscribe opens member id's stream (replacing an older one) with its full map queued.
@@ -541,6 +592,7 @@ func (h *routerHub) subscribe(id string) (*routerSub, error) {
 	h.subs[id] = s
 	h.peerChangedLocked(id, s) // now online
 	h.pushLocked(s, true)
+	h.announceLocked(id)
 	return s, nil
 }
 
@@ -551,16 +603,17 @@ func (h *routerHub) unsubscribe(s *routerSub) {
 		return
 	}
 	h.closeLocked(s)
-	if soft := h.soft[s.id]; soft != nil {
+	if soft := h.soft[s.id]; soft != nil && soft.Planet == h.self {
 		soft.Seen = time.Now()
 	}
 	h.peerChangedLocked(s.id, nil)
+	h.announceLocked(s.id)
 }
 
 func (h *routerHub) lastSeen(id string) time.Time {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, ok := h.subs[id]; ok {
+	if h.onlineLocked(id) {
 		return time.Now()
 	}
 	if s := h.soft[id]; s != nil && s.Seen.After(h.since) {
@@ -576,7 +629,7 @@ func (h *routerHub) online() map[string]routerSoft {
 	out := map[string]routerSoft{}
 	for id, s := range h.soft {
 		v := *s
-		_, v.Online = h.subs[id]
+		v.Online = h.onlineLocked(id)
 		out[id] = v
 	}
 	return out
@@ -651,7 +704,10 @@ func (rt *routerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case !who.forwarded && !rt.limiter.allow(who.ip):
 		rt.fail(w, who, r.URL.Path, httpError{http.StatusTooManyRequests, "rate limit exceeded"})
 		return
-	case !rt.isLeader():
+	case r.URL.Path == planetSoftPath:
+		rt.servePlanetSoft(w, r, who)
+		return
+	case !rt.isLeader() && routerWrite[r.URL.Path]: // the rest is served from this planet's replica
 		if who.forwarded { // one hop only
 			rt.fail(w, who, r.URL.Path, httpError{http.StatusServiceUnavailable, "no router leader here"})
 			return
@@ -672,6 +728,12 @@ func (rt *routerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Everything else needs an admitted device.
 	m, err := rt.hub.authorize(who.member, who.keyHash)
+	if err != nil && !rt.isLeader() && !who.forwarded {
+		// This replica may lag a write the leader just made (a device that registered or renewed
+		// a moment ago): the leader answers for it, and its "unauthorized" is authoritative.
+		rt.forward(w, r, who)
+		return
+	}
 	if err == nil && !rt.devLimit.allow(m.ID) {
 		err = httpError{http.StatusTooManyRequests, "rate limit exceeded"}
 	}
@@ -794,6 +856,15 @@ func (rt *routerServer) serveMap(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	defer rt.hub.unsubscribe(sub)
+	streamLines(w, r, sub.ch, sub.done)
+}
+
+// routerWrite are the requests that change Raft state: followers relay them to the leader.
+var routerWrite = map[string]bool{"/router/v1/register": true, "/router/v1/renew": true}
+
+// streamLines writes queued JSON lines (and a keepalive every 30s) until the client goes away or
+// done closes; what was queued before the close is still sent (e.g. a revocation's last delta).
+func streamLines(w http.ResponseWriter, r *http.Request, ch <-chan []byte, done <-chan struct{}) {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -801,27 +872,33 @@ func (rt *routerServer) serveMap(w http.ResponseWriter, r *http.Request, id stri
 	w.WriteHeader(http.StatusOK)
 	keep := time.NewTicker(streamKeepalive)
 	defer keep.Stop()
+	// The deadline bounds one write and is cleared after it: on HTTP/2 a deadline that passes while
+	// the stream is idle resets it, and every quiet netmap stream would reconnect after 10s.
 	write := func(b []byte) bool {
 		_ = rc.SetWriteDeadline(time.Now().Add(streamWriteWait))
 		if _, err := w.Write(append(b, '\n')); err != nil {
 			return false
 		}
-		return rc.Flush() == nil
+		if rc.Flush() != nil {
+			return false
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
+		return true
 	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-sub.done:
-			for { // drain what was queued before the close (e.g. the revocation's last delta)
+		case <-done:
+			for {
 				select {
-				case b := <-sub.ch:
+				case b := <-ch:
 					write(b)
 				default:
 					return
 				}
 			}
-		case b := <-sub.ch:
+		case b := <-ch:
 			if !write(b) {
 				return
 			}
@@ -873,62 +950,66 @@ func (rt *routerServer) forward(w http.ResponseWriter, r *http.Request, who rout
 
 // ---- wiring into cluster serve ----
 
-// routerSnapshot copies the committed router state on the leader (nil elsewhere).
-func (rs *raftStore) routerSnapshot() (*zr.State, uint64) {
+// stateVersion is the Raft index of the state this planet holds: the live state on the leader,
+// the last applied one on a follower. Cheap: the hub reloads only when it moves.
+func (rs *raftStore) stateVersion() uint64 {
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	if !rs.leading || rs.cur == nil {
+	if rs.leading && rs.cur != nil {
+		defer rs.mu.Unlock()
+		return rs.version
+	}
+	rs.mu.Unlock()
+	_, idx := rs.fsm.latest()
+	return idx
+}
+
+// routerSnapshot copies the router state this planet holds (any master), with Endpoints set to
+// what devices dial (the configured ones, else every master).
+func (rs *raftStore) routerSnapshot(cfg *ClusterConfig) (*zr.State, uint64) {
+	st, ver, err := rs.snapshot()
+	if err != nil || st == nil {
 		return nil, 0
 	}
-	st := &zr.State{}
-	if rs.cur.Router != nil {
-		b, _ := json.Marshal(rs.cur.Router)
-		_ = json.Unmarshal(b, st)
-	}
-	return st, rs.version
+	R := routerOf(st)
+	R.Endpoints = routerEndpoints(st, cfg)
+	return R, ver
 }
 
 var localRouterHub *routerHub // set inside `cluster serve` (the local socket shows its soft state)
 
-// startRouter attaches the router to the master's API mux and runs the leader's hub loop.
+// startRouter attaches the router to the master's API mux. Every planet keeps its hub loaded from
+// its own replica; the leader alone writes housekeeping (expired ephemeral members) to Raft.
 func startRouter(mux *http.ServeMux, rs *raftStore, cfg *ClusterConfig, caPEM string) {
 	hub := newRouterHub()
+	hub.self = rs.id
 	localRouterHub = hub
 	rt := newRouterServer(hub, caPEM)
 	rt.isLeader = rs.isLeader
 	rt.leaderURL = func() (string, error) { return rs.leaderAPI(clusterPortOf(cfg)) }
-	load := func() {
-		st, ver := rs.routerSnapshot()
+	load := func(force bool) {
+		ver := rs.stateVersion()
 		hub.mu.Lock()
-		stale := st != nil && (!hub.loaded || ver != hub.version)
+		stale := !hub.loaded || ver != hub.version
 		hub.mu.Unlock()
-		if stale {
-			hub.setState(st, ver)
+		if stale || force { // force: re-evaluate expiries even when nothing was committed
+			if st, v := rs.routerSnapshot(cfg); st != nil {
+				hub.setState(st, v)
+			}
 		}
 	}
-	rt.sync = load
+	rt.sync = func() { load(false) }
 	mux.Handle("/router/v1/", rt)
+	go runPlanetMesh(context.Background(), hub, rs, cfg, caPEM)
 	go func() {
 		tick, house := time.NewTicker(250*time.Millisecond), time.NewTicker(time.Minute)
 		for {
 			select {
 			case <-tick.C:
-				if !rs.isLeader() {
-					hub.mu.Lock()
-					loaded := hub.loaded
-					hub.mu.Unlock()
-					if loaded {
-						hub.reset()
-					}
-					continue
-				}
-				load()
+				load(false)
 			case <-house.C:
+				load(true)
 				if !rs.isLeader() {
 					continue
-				}
-				if st, ver := rs.routerSnapshot(); st != nil {
-					hub.setState(st, ver) // re-evaluate expiries even when nothing was committed
 				}
 				var gone []string
 				err := withState(func(st *ClusterState) error {

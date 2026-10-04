@@ -16,6 +16,7 @@ import (
 // (SYSTEM and Administrators on Windows) can read. Private keys never leave it.
 type State struct {
 	Endpoints []string `json:"endpoints"`
+	Planets   []string `json:"planets,omitempty"` // router endpoints learned from the netmap (planets added later)
 	Pin       string   `json:"pin"`
 	Network   string   `json:"network"`
 	CA        string   `json:"ca,omitempty"` // PEM, verified against Pin on first contact

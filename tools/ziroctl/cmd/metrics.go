@@ -30,6 +30,7 @@ type hostMetrics struct {
 	ContainersRunning      int
 	ContainerdUp, Cgroups2 bool
 	Services               map[string]bool // service -> running
+	Router                 *routerStats    // masters: this planet's router
 }
 
 type metricsWriter struct{ b strings.Builder }
@@ -155,6 +156,22 @@ func renderMetrics(h hostMetrics, st *ClusterState, members []memberView, selfID
 	for k, n := range map[string]int{"apps": len(st.Apps), "routes": len(st.Routes), "peers": len(st.Peers), "secrets": len(st.Secrets)} {
 		m.sample("ziro_cluster_objects", map[string]string{"kind": k}, float64(n))
 	}
+	if r := h.Router; r != nil {
+		m.family("ziro_router_streams", "gauge", "Router devices streaming their netmap from this planet.")
+		m.sample("ziro_router_streams", nil, float64(r.Streams))
+		m.family("ziro_router_devices", "gauge", "Router devices: authorized, and online on any planet.")
+		m.sample("ziro_router_devices", map[string]string{"state": "authorized"}, float64(r.Devices))
+		m.sample("ziro_router_devices", map[string]string{"state": "online"}, float64(r.Online))
+		m.family("ziro_router_planet_up", "gauge", "This planet receives the other planet's device state (1) or not (0).")
+		ids := make([]string, 0, len(r.Peers))
+		for id := range r.Peers {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			m.sample("ziro_router_planet_up", map[string]string{"planet": id}, b2f(r.Peers[id]))
+		}
+	}
 	return m.b.String()
 }
 
@@ -185,6 +202,10 @@ func collectMetrics() string {
 		}
 		if raftMode() {
 			_, _ = socketCall(http.MethodGet, "/members", nil, &members)
+			var rs routerStats
+			if _, err := socketCall(http.MethodGet, "/router/stats", nil, &rs); err == nil {
+				h.Router = &rs
+			}
 		}
 	}
 	return renderMetrics(h, st, members, selfID, time.Now())
