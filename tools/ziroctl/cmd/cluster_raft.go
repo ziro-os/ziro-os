@@ -175,6 +175,7 @@ func hardKey(st *ClusterState) []byte {
 	for i := range cp.Nodes {
 		n := &cp.Nodes[i]
 		n.Status, n.LastSeen, n.Containers, n.Running, n.Failed, n.MeshError = "", time.Time{}, 0, nil, nil, ""
+		n.MeshEPs, n.MeshRelays, n.MeshNAT = nil, nil, "" // path soft state changes often: never a commit
 	}
 	b, _ := json.Marshal(struct {
 		State   *ClusterState
@@ -496,6 +497,7 @@ func (rs *raftStore) propose(version uint64, st *ClusterState) error {
 			n := &st.Nodes[i]
 			n.Status, n.LastSeen, n.Containers, n.Running, n.Failed, n.MeshError =
 				live.Status, live.LastSeen, live.Containers, live.Running, live.Failed, live.MeshError
+			n.MeshEPs, n.MeshRelays, n.MeshNAT = live.MeshEPs, live.MeshRelays, live.MeshNAT
 		}
 	}
 	st.CAKey = rs.cur.CAKey

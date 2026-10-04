@@ -131,6 +131,9 @@ func teardownMesh() {
 	teardownPodNetwork()
 	_ = writeHostsBlock(hostsFile, nil)
 	_ = os.Remove(meshKeyPath())
+	for _, p := range []string{meshDiscoKeyPath(), nodeKeyPath(), nodeCertPath()} {
+		_ = os.Remove(p)
+	}
 }
 
 // renderHostsBlock replaces (or appends) the managed block; everything else is kept as is.

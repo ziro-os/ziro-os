@@ -29,11 +29,12 @@ import (
 // <app>.cluster.ziro on its node's gateway IP (.1) with the IPs of running replicas.
 
 const (
-	podNetName  = "ziro-cluster"
-	podConfPath = "/etc/cni/net.d/20-ziro-cluster.conflist"
-	podDNSIface = "ziro-dns0"
-	podMTU      = 1420 // 1500 underlay minus WireGuard overhead
-	podNATTable = "ip ziro_pods"
+	podNetName     = "ziro-cluster"
+	podConfPath    = "/etc/cni/net.d/20-ziro-cluster.conflist"
+	podDNSIface    = "ziro-dns0"
+	podMTU         = 1420 // 1500 underlay minus WireGuard overhead
+	podMTUAnywhere = 1280 // mesh "anywhere": the zirocd engine's MTU (relayed and IPv6 paths fit)
+	podNATTable    = "ip ziro_pods"
 )
 
 // Ranges other Ziro networks already use: a pod CIDR must not overlap them.
@@ -252,7 +253,7 @@ func init() {
 
 // podConflist is the CNI config for the node's /24. ipMasq is off: masquerading is done once,
 // for traffic leaving the cluster only (applyPodNetwork).
-func podConflist(nodeCIDR string) ([]byte, error) {
+func podConflist(nodeCIDR string, mtu int) ([]byte, error) {
 	gw := podGateway(nodeCIDR)
 	if gw == "" {
 		return nil, fmt.Errorf("invalid node pod CIDR %q", nodeCIDR)
@@ -261,7 +262,7 @@ func podConflist(nodeCIDR string) ([]byte, error) {
 		"cniVersion": "1.0.0",
 		"name":       podNetName,
 		"plugins": []map[string]any{
-			{"type": "ptp", "ipMasq": false, "mtu": podMTU, "ipam": map[string]any{
+			{"type": "ptp", "ipMasq": false, "mtu": mtu, "ipam": map[string]any{
 				"type": "host-local", "subnet": nodeCIDR, "gateway": gw,
 				"routes": []map[string]string{{"dst": "0.0.0.0/0"}},
 			}},
@@ -291,12 +292,12 @@ table %[1]s {
 var podNetApplied atomic.Value // string: last applied "<nodeCIDR> <podNet> <meshNet>"
 
 // applyPodNetwork converges the node's pod plumbing. Idempotent and cheap when nothing changed.
-func applyPodNetwork(nodeCIDR, podNet, meshNet string) error {
-	key := nodeCIDR + " " + podNet + " " + meshNet
+func applyPodNetwork(nodeCIDR, podNet, meshNet string, mtu int) error {
+	key := fmt.Sprintf("%s %s %s %d", nodeCIDR, podNet, meshNet, mtu)
 	if v, _ := podNetApplied.Load().(string); v == key {
 		return nil
 	}
-	conf, err := podConflist(nodeCIDR)
+	conf, err := podConflist(nodeCIDR, mtu)
 	if err != nil {
 		return err
 	}

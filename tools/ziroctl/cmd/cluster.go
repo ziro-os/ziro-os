@@ -73,14 +73,19 @@ type ClusterNode struct {
 	MeshIP      string            `json:"mesh_ip,omitempty"`
 	WGPubKey    string            `json:"wg_pubkey,omitempty"`
 	WGPort      int               `json:"wg_port,omitempty"`
-	MeshError   string            `json:"mesh_error,omitempty"`   // last mesh/policy apply error reported by the agent
-	Caps        []string          `json:"caps,omitempty"`         // features the node's ziroctl reported (upgrade gating)
-	TokenIssued time.Time         `json:"token_issued,omitempty"` // when the node's current token was issued
-	Keys        []string          `json:"keys,omitempty"`         // data key IDs this node's master holds (rotation gating)
-	Gateway     bool              `json:"gateway,omitempty"`      // runs zirogate for the cluster's routes
-	PodCIDR     string            `json:"pod_cidr,omitempty"`     // this node's /24 of the cluster pod network
-	Arch        string            `json:"arch,omitempty"`         // amd64, arm64 (reported by the agent)
-	Labels      map[string]string `json:"labels,omitempty"`       // ziroctl cluster node label (builder=true, ...)
+	DiscoKey    string            `json:"disco_key,omitempty"`      // mesh "anywhere": path discovery key (public)
+	CertHash    string            `json:"cert_hash,omitempty"`      // mesh "anywhere": hash of the node certificate's key (relays)
+	MeshEPs     []string          `json:"mesh_endpoints,omitempty"` // soft: underlay endpoints the node reported
+	MeshRelays  []zr.RelayRTT     `json:"mesh_relays,omitempty"`    // soft: relays it is registered with
+	MeshNAT     string            `json:"mesh_nat,omitempty"`       // soft: easy / hard
+	MeshError   string            `json:"mesh_error,omitempty"`     // last mesh/policy apply error reported by the agent
+	Caps        []string          `json:"caps,omitempty"`           // features the node's ziroctl reported (upgrade gating)
+	TokenIssued time.Time         `json:"token_issued,omitempty"`   // when the node's current token was issued
+	Keys        []string          `json:"keys,omitempty"`           // data key IDs this node's master holds (rotation gating)
+	Gateway     bool              `json:"gateway,omitempty"`        // runs zirogate for the cluster's routes
+	PodCIDR     string            `json:"pod_cidr,omitempty"`       // this node's /24 of the cluster pod network
+	Arch        string            `json:"arch,omitempty"`           // amd64, arm64 (reported by the agent)
+	Labels      map[string]string `json:"labels,omitempty"`         // ziroctl cluster node label (builder=true, ...)
 	LastSeen    time.Time         `json:"last_seen"`
 }
 
@@ -103,6 +108,7 @@ type ClusteredApp struct {
 	// Volumes are cluster shares bind-mounted into the containers: "share:/path[:ro]".
 	Volumes     []string `json:"volumes,omitempty"`
 	VolumeEpoch int      `json:"volume_epoch,omitempty"` // bumped by storage failover: consumers restart
+	NetEpoch    int      `json:"net_epoch,omitempty"`    // bumped by a mesh mode change: pods are recreated (MTU)
 	// Data are container paths kept on the replica's node (/var/lib/ziro/apps/<app>/<index>/...).
 	// They follow the replica index, not the node: a replica that moves starts empty and must
 	// recover through the app's own replication or a backup.
@@ -148,7 +154,10 @@ type ClusterState struct {
 	GatewayACME GatewayACME       `json:"gateway_acme,omitempty"`
 	Peers       []RemotePeer      `json:"peers,omitempty"`    // WireGuard remote-access clients
 	PodCIDR     string            `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
-	DEKID       string            `json:"dek_id,omitempty"`   // data key sealing Secrets and CAKey ("" = not sealed yet)
+	// MeshMode "anywhere" runs the node mesh on the zirocd engine (NAT traversal, relays): only
+	// masters need a public address. "" (direct) is kernel WireGuard between reachable nodes.
+	MeshMode string `json:"mesh_mode,omitempty"`
+	DEKID    string `json:"dek_id,omitempty"` // data key sealing Secrets and CAKey ("" = not sealed yet)
 	// Rotation: previous node tokens stay valid briefly; nodes/masters re-issue what predates these.
 	PrevNodeTokens     map[string]prevNodeToken `json:"prev_node_tokens,omitempty"`
 	RotateTokensBefore time.Time                `json:"rotate_tokens_before,omitempty"`

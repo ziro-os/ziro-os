@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	zr "github.com/ziro-os/ziro-os/sdk/router"
 	"math/big"
 	"net"
 	"os"
@@ -368,4 +369,46 @@ func masterClientTLS(caPEM string) (*tls.Config, error) {
 func requestFromMaster(cs *tls.ConnectionState, caPEM string) bool {
 	return cs != nil && len(cs.PeerCertificates) > 0 && len(cs.VerifiedChains) > 0 &&
 		verifyMaster(cs.PeerCertificates[0], caPEM) == nil
+}
+
+// nodeOU marks node certificates: they open relay sessions for the mesh in "anywhere" mode and
+// can never pass as a master (verifyMaster) or a router device (deviceFromTLS).
+const (
+	nodeOU      = "ziro-node"
+	nodeCertTTL = 90 * 24 * time.Hour
+)
+
+// signNodeCSR issues a node certificate (identity from the caller, never the CSR) and returns it
+// with the hash of its key, which relays check.
+func signNodeCSR(st *ClusterState, csrPEM, nodeID string) (string, string, error) {
+	csr, kh, err := parseCSR(csrPEM)
+	if err != nil {
+		return "", "", err
+	}
+	ca, key, err := caSigner(st)
+	if err != nil {
+		return "", "", err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial(), Subject: pkix.Name{CommonName: nodeID, OrganizationalUnit: []string{nodeOU}},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(nodeCertTTL),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, csr.PublicKey, key)
+	if err != nil {
+		return "", "", err
+	}
+	return pemEncode("CERTIFICATE", der), kh, nil
+}
+
+// nodeFromTLS returns the node ID and key hash of a verified node certificate.
+func nodeFromTLS(cs *tls.ConnectionState) (id, keyHash string, ok bool) {
+	if cs == nil || len(cs.VerifiedChains) == 0 || len(cs.PeerCertificates) == 0 {
+		return "", "", false
+	}
+	c := cs.PeerCertificates[0]
+	if len(c.Subject.OrganizationalUnit) != 1 || c.Subject.OrganizationalUnit[0] != nodeOU {
+		return "", "", false
+	}
+	return c.Subject.CommonName, zr.PublicKeyHash(c.RawSubjectPublicKeyInfo), true
 }

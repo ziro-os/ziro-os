@@ -218,7 +218,11 @@ func (ag *agent) setupPods(resp heartbeatResponse) error {
 		podNetApplied.Store("")
 		ag.podAt = time.Now()
 	}
-	if err := applyPodNetwork(resp.PodCIDR, resp.PodNet, meshNet.String()); err != nil {
+	mtu := podMTU
+	if resp.MeshMode == "anywhere" {
+		mtu = podMTUAnywhere
+	}
+	if err := applyPodNetwork(resp.PodCIDR, resp.PodNet, meshNet.String(), mtu); err != nil {
 		return err
 	}
 	if ag.dns == nil {
@@ -304,6 +308,8 @@ type agent struct {
 	images  imageServer       // serves this node's ziro.local images over the mesh
 	token   string            // image token from the master (fetching images from other nodes)
 	meshNet netip.Prefix      // the cluster mesh: the only place images are fetched from
+	mesh    meshAnywhere      // the mesh engine (mesh mode "anywhere")
+	mode    string            // mesh mode from the last heartbeat
 }
 
 func (ag *agent) setFailed(name string, err error) {
@@ -445,6 +451,15 @@ var clusterAgentCmd = &cobra.Command{
 			var resp heartbeatResponse
 			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh,
 				Caps: builderCaps(nodeCaps), Keys: storedKeyIDs(), Arch: runtime.GOARCH, Builds: ag.builds.report()}
+			if ag.mode == "anywhere" { // path discovery key, endpoints, relays, NAT type; node cert for relays
+				if _, disco, err := meshDiscoKey(); err == nil {
+					hb.DiscoKey = disco
+				}
+				ag.mesh.report(&hb)
+				if csr, err := nodeCSR(); err == nil {
+					hb.NodeCSR = csr
+				}
+			}
 			pending := ""
 			if wantRotate { // the new token is generated here and sent once, authenticated by the old one
 				pending = randomHex(32)
@@ -489,8 +504,22 @@ var clusterAgentCmd = &cobra.Command{
 						lastPolicy = ""
 					}
 				}
+				if resp.NodeCert != "" {
+					if c, cerr := parseCertPEM(resp.NodeCert); cerr == nil && c.Subject.CommonName == cfg.NodeID {
+						_ = writeFileAtomic(nodeCertPath(), []byte(resp.NodeCert), 0644)
+					}
+				}
+				if resp.MeshMode != ag.mode {
+					fmt.Printf("[agent] mesh mode %q -> %q\n", ag.mode, resp.MeshMode)
+				}
+				ag.mode = resp.MeshMode
 				if merr == nil {
-					merr = applyMesh(resp.MeshIP, resp.MeshPrefix, resp.Peers)
+					if resp.MeshMode == "anywhere" {
+						merr = ag.mesh.apply(resp)
+					} else {
+						ag.mesh.close() // back to direct: kernel WireGuard takes ziro0 again
+						merr = applyMesh(resp.MeshIP, resp.MeshPrefix, resp.Peers)
+					}
 				}
 				// The pod network must exist before containers join it; while it cannot be set
 				// up, the desired set is frozen (running containers are left alone).

@@ -141,7 +141,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | CLI + admin API | `ziroctl`, `ziro-api` (127.0.0.1:8443) | every host | shipped |
 | Control plane | `cluster serve` → `cluster-master` (TLS :7443, Raft :7444) | every master | shipped (1, 3 or 5 masters) |
 | Node agent | `cluster agent` → `cluster-agent` | every node | shipped |
-| Mesh | WireGuard `ziro0`, udp/51821, keys distributed by the master | every node | shipped |
+| Mesh | WireGuard `ziro0`, udp/51821, keys distributed by the master; mode `anywhere` runs it on the zirocd engine (NAT traversal, relays: only masters need a public address) | every node | shipped |
 | App network policy | `allow_from` per app → `inet ziro_cluster` nft table per node | every node | shipped |
 | Audit log | hash-chained JSONL, `/var/log/ziro/audit.log` | every host | shipped |
 | Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labelled gateway | shipped |
@@ -202,7 +202,7 @@ flowchart LR
 |---|---|
 | Worker → master | TLS with standard chain and hostname verification, never skipped. A node that holds the cluster CA verifies against it. A first join (or a pre-CA agent) takes the certificate whose hash is the pin from the chain the master presents, and uses it as the only root. Bearer node token checked in constant time; per-IP rate limit; 1 MiB body limit; audit record for rejected credentials (at most one per IP per 10 min) |
 | Master → worker data | Delivered only in heartbeat replies over that channel; the agent re-validates everything it passes to nft or nerdctl (IPs, ports, image after `--`) |
-| Node ↔ node | WireGuard (Curve25519 keys per node, distributed by the master); app policy on `ziro0` |
+| Node ↔ node | WireGuard (Curve25519 keys per node, distributed by the master); app policy on `ziro0`. Mode `anywhere`: node certificates (OU `ziro-node`, client-auth only) open relay sessions for the cluster mesh only; path soft state (endpoints, relays, NAT type) never enters Raft |
 | Secrets | `0600` on the master; sent only to nodes running the app; written to tmpfs env files, never argv; excluded from backups unless `--include-secrets`; never in audit records |
 | Operator actions | Every mutating `ziroctl` command, ziro-api service action and cluster join/leave is written to the audit chain, with `KEY=VALUE` values and credential flags redacted |
 | Admin API | Loopback only; bearer token; rate limited |

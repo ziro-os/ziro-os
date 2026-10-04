@@ -595,15 +595,7 @@ func localEndpoints(port int, tunName string) []string {
 }
 
 // mapRequest is this device's soft state: local and STUN-discovered endpoints, home relay.
-func (d *Daemon) mapRequest(eng *Engine, port int) zr.MapRequest {
-	eps := localEndpoints(port, eng.Name())
-	for _, p := range eng.Bind().PublicEndpoints() {
-		if !slices.Contains(eps, p) && len(eps) < zr.MaxEndpoints {
-			eps = append(eps, p)
-		}
-	}
-	return zr.MapRequest{Endpoints: eps, Version: d.Version, HomeRelay: eng.Bind().Home(), Relays: eng.Bind().Relays(), NAT: eng.Bind().NATType()}
-}
+func (d *Daemon) mapRequest(eng *Engine, port int) zr.MapRequest { return eng.Report(d.Version) }
 
 // reportEndpoints tells the router when this device's endpoints or home relay change (network
 // switch, new NAT mapping): peers then punch towards the new address at once.
