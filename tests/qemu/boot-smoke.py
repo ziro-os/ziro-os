@@ -320,6 +320,11 @@ def main():
         rc, out = con.run("ziroctl wg init >/dev/null && ziroctl wg up && ziroctl wg up && "
                           "wg show wg0 listen-port && ziroctl wg down && echo WGOK")
         check("wireguard init/up/up(idempotent)/down", "WGOK" in out, out)
+        rc, out = con.run("ziroctl service start zirocd >/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do "
+                          "zirocd status --json 2>/dev/null | grep -q needs-login && break; sleep 1; done; "
+                          "zirocd status --json | grep -q needs-login && zirocd version && echo ZCDOK; "
+                          "ziroctl service stop zirocd >/dev/null", timeout=60)
+        check("zirocd ships in the image and answers on its control socket (ziro-init service)", "ZCDOK" in out, out)
 
         if args.flavor == "custom":
             rc, out = con.run("cat /sys/module/module/parameters/sig_enforce")
