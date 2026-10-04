@@ -33,7 +33,7 @@ var (
 	updateCheckFile = "/var/lib/ziro/update-check.json"
 	updateConfFile  = "/etc/ziro/update.json"
 	// Long-running ziroctl daemons restarted onto the new binary, one at a time.
-	toolsDaemons = []string{"sentinel", "ziro-api", "gateway", "cluster-agent", "cluster-master", "ziroctld"}
+	toolsDaemons = []string{"sentinel", "ziro-api", "gateway", "cluster-agent", "cluster-master", "router-relay", "ziroctld"}
 )
 
 // verifyReleaseSums checks an ed25519 signature (base64) over SHA256SUMS.

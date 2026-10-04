@@ -131,6 +131,15 @@ var defaultServices = []ServiceDef{
 		Autostart:   false,
 	},
 	{
+		Name:        "router-relay",
+		Description: "Ziro router relay (TLS packet relay + STUN for zirocd devices)",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "router relay serve",
+		PIDFile:     "/run/ziro-router-relay.pid",
+		LogFile:     "/var/log/router-relay.log",
+		Autostart:   false,
+	},
+	{
 		Name:        "ziro-api",
 		Description: "Ziro Control Plane REST API Server",
 		Exec:        "/usr/bin/ziroctl",

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
@@ -31,6 +32,10 @@ func TestRouterServeE2E(t *testing.T) {
 	if err := ensureMasterCert(st, "router", []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
 		t.Fatal(err)
 	}
+	relayIP := os.Getenv("ZIRO_E2E_RELAY") // also run a relay (TLS :8443, STUN :3478) announced at this IP
+	if relayIP != "" {
+		routerOf(st).Relays = []zr.Relay{{Name: "r1", Addr: relayIP + ":8443", STUN: relayIP + ":3478"}}
+	}
 	plain, web := addJoinKey(st, true, time.Now().Add(time.Hour)), addJoinKey(st, true, time.Now().Add(time.Hour), "web")
 	if err := saveStateFiles(clusterDir, st); err != nil {
 		t.Fatal(err)
@@ -51,6 +56,20 @@ func TestRouterServeE2E(t *testing.T) {
 		}
 	}
 	rt.sync()
+	if relayIP != "" {
+		tc, err := relayTLS(st.CACert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rs := newRelayServer(func() (*zr.State, error) {
+			cur, err := readState()
+			if err != nil {
+				return nil, err
+			}
+			return routerOf(cur), nil
+		})
+		go func() { t.Log(runRelay(context.Background(), rs, ":8443", ":3478", tc)) }()
+	}
 	pool, _ := caPool(st.CACert)
 	srv := &http.Server{Addr: listen, Handler: rt, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool,

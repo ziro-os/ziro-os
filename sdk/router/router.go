@@ -17,6 +17,15 @@ type State struct {
 	Networks  []Network `json:"networks,omitempty"`
 	Members   []Member  `json:"members,omitempty"`
 	Keys      []JoinKey `json:"keys,omitempty"`
+	Relays    []Relay   `json:"relays,omitempty"`
+}
+
+// Relay forwards WireGuard packets between devices that cannot reach each other directly, and
+// answers STUN so devices learn their public address. It sees only ciphertext.
+type Relay struct {
+	Name string `json:"name"`
+	Addr string `json:"addr"` // host:port, TLS (tcp)
+	STUN string `json:"stun"` // host:port, STUN (udp)
 }
 
 // Network is one isolated virtual network (ZeroTier-style), addressed by its random ID.
@@ -141,6 +150,7 @@ type RenewRequest struct {
 type MapRequest struct {
 	Endpoints []string `json:"endpoints,omitempty"` // ip:port candidates, at most MaxEndpoints
 	Version   string   `json:"version,omitempty"`
+	HomeRelay string   `json:"home_relay,omitempty"` // the relay this device is reachable through
 }
 
 const MaxEndpoints = 16
@@ -154,6 +164,7 @@ type Peer struct {
 	Addresses  []string `json:"addresses"`   // its own /32 and /128
 	AllowedIPs []string `json:"allowed_ips"` // addresses + approved routes
 	Endpoints  []string `json:"endpoints,omitempty"`
+	HomeRelay  string   `json:"home_relay,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	Online     bool     `json:"online"`
 }
@@ -183,4 +194,6 @@ type MapMessage struct {
 	Filter        []FilterRule `json:"filter,omitempty"`
 	FilterChanged bool         `json:"filter_changed,omitempty"`
 	ClientVersion string       `json:"client_version,omitempty"`
+	Relays        []Relay      `json:"relays,omitempty"` // set when RelaysChanged (always in "full")
+	RelaysChanged bool         `json:"relays_changed,omitempty"`
 }
