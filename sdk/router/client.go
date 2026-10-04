@@ -126,6 +126,7 @@ func (c *Client) SetCert(cert *tls.Certificate) {
 		ForceAttemptHTTP2: true, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: c.pool, ServerName: ServerName,
+			VerifyConnection: verifyOU(MasterOU), // only a planet, never another kind of cluster certificate
 			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 				if cert == nil {
 					return &tls.Certificate{}, nil // registration: no certificate yet
@@ -179,7 +180,7 @@ func (c *Client) Nearest(ctx context.Context) []PlanetRTT {
 			defer wg.Done()
 			out[i].Addr = ep
 			d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second}, Config: &tls.Config{
-				MinVersion: tls.VersionTLS13, RootCAs: c.pool, ServerName: ServerName,
+				MinVersion: tls.VersionTLS13, RootCAs: c.pool, ServerName: ServerName, VerifyConnection: verifyOU(MasterOU),
 				GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &tls.Certificate{}, nil }}}
 			start := time.Now()
 			if conn, err := d.DialContext(ctx, "tcp", ep); err == nil {
@@ -321,6 +322,49 @@ func (c *Client) Map(ctx context.Context, req MapRequest, fn func(MapMessage) er
 		if err := dec.Decode(&m); err != nil {
 			if ctx.Err() != nil {
 				return fmt.Errorf("netmap stream idle: %w", ctx.Err())
+			}
+			return err
+		}
+		idle.Reset(KeepaliveTimeout)
+		if m.Type == "keepalive" {
+			continue
+		}
+		if err := fn(m); err != nil {
+			return err
+		}
+	}
+}
+
+// MoonRegister registers a moon with the secret of its token and returns its certificate.
+func (c *Client) MoonRegister(ctx context.Context, req MoonRegisterRequest) (MoonRegisterResponse, error) {
+	var out MoonRegisterResponse
+	return out, c.call(ctx, "/router/v1/moon/register", req, &out)
+}
+
+// MoonRenew returns a fresh moon certificate (the client authenticates with the current one).
+func (c *Client) MoonRenew(ctx context.Context, csr []byte) (MoonRegisterResponse, error) {
+	var out MoonRegisterResponse
+	return out, c.call(ctx, "/router/v1/moon/renew", MoonRegisterRequest{CSR: string(csr)}, &out)
+}
+
+// RelayMap follows the relay map (moon certificate required): fn gets a "full" message first,
+// then deltas, until ctx ends, fn fails or the stream breaks.
+func (c *Client) RelayMap(ctx context.Context, fn func(RelayMapMessage) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	idle := time.AfterFunc(KeepaliveTimeout, cancel)
+	defer idle.Stop()
+	resp, err := c.post(ctx, "/router/v1/relaymap", struct{}{})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var m RelayMapMessage
+		if err := dec.Decode(&m); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("relay map stream idle: %w", ctx.Err())
 			}
 			return err
 		}

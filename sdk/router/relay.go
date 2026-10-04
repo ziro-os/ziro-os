@@ -84,14 +84,18 @@ func (rc *RelayConn) ReadFrame() (typ byte, key [32]byte, payload []byte, err er
 func (rc *RelayConn) Close() error { return rc.Conn.Close() }
 
 // DialRelay opens a relay connection with the device certificate, verifying the relay against
-// the cluster CA.
-func DialRelay(ctx context.Context, addr string, ca *x509.Certificate, cert *tls.Certificate) (*RelayConn, error) {
+// the cluster CA: a moon by its own name and OU, a relay on a planet as a planet.
+func DialRelay(ctx context.Context, r Relay, ca *x509.Certificate, cert *tls.Certificate) (*RelayConn, error) {
 	pool := x509.NewCertPool()
 	pool.AddCert(ca)
+	name, ou := ServerName, MasterOU
+	if r.ServerName != "" {
+		name, ou = r.ServerName, MoonOU
+	}
 	d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second},
-		Config: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, ServerName: ServerName,
-			Certificates: []tls.Certificate{*cert}}}
-	c, err := d.DialContext(ctx, "tcp", addr)
+		Config: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, ServerName: name,
+			Certificates: []tls.Certificate{*cert}, VerifyConnection: verifyOU(ou)}}
+	c, err := d.DialContext(ctx, "tcp", r.Addr)
 	if err != nil {
 		return nil, err
 	}

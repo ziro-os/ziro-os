@@ -798,6 +798,13 @@ func (rs *raftStore) localHandler(cfg *ClusterConfig, forward func(path string, 
 		}
 		_ = json.NewEncoder(w).Encode(localRouterHub.online())
 	})
+	mux.HandleFunc("/router/moons", func(w http.ResponseWriter, r *http.Request) {
+		if localMoonHub == nil {
+			http.Error(w, "router not running", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(localMoonHub.connected())
+	})
 	mux.HandleFunc("/router/stats", func(w http.ResponseWriter, r *http.Request) {
 		if localRouterHub == nil {
 			http.Error(w, "router not running", http.StatusServiceUnavailable)

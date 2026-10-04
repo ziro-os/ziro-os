@@ -1317,7 +1317,7 @@ func (l *relayLink) run() {
 		ca, cert := l.b.auth()
 		if ca != nil && cert != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			rc, err := zr.DialRelay(ctx, l.r.Addr, ca, cert)
+			rc, err := zr.DialRelay(ctx, l.r, ca, cert)
 			cancel()
 			if err == nil {
 				backoff = time.Second
@@ -1450,7 +1450,7 @@ func (b *MagicBind) Netcheck(ctx context.Context) Netcheck {
 		if ca != nil && cert != nil {
 			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			t0 := time.Now()
-			c, err := zr.DialRelay(cctx, r.Addr, ca, cert)
+			c, err := zr.DialRelay(cctx, r, ca, cert)
 			cancel()
 			if err == nil {
 				rc.TLSms = max(time.Since(t0).Milliseconds(), 1)

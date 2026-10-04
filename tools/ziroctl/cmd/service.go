@@ -140,6 +140,15 @@ var defaultServices = []ServiceDef{
 		Autostart:   false,
 	},
 	{
+		Name:        "router-moon",
+		Description: "Ziro moon (regional router relay: zirocd moon)",
+		Exec:        "/usr/bin/zirocd",
+		Args:        "moon --dir " + moonStateDir,
+		PIDFile:     "/run/ziro-router-moon.pid",
+		LogFile:     "/var/log/router-moon.log",
+		Autostart:   false,
+	},
+	{
 		Name:        "zirocd",
 		Description: "Ziro router client (joins this host to router networks)",
 		Exec:        "/usr/bin/zirocd",

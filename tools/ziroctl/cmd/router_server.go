@@ -407,8 +407,8 @@ func (h *routerHub) setState(st *zr.State, version uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.loaded, h.version = true, version
-	h.relays = st.Relays
-	rb, _ := json.Marshal(st.Relays)
+	h.relays = announcedRelays(st)
+	rb, _ := json.Marshal(h.relays)
 	h.relayH = hashToken(string(rb))
 	h.planets = st.Endpoints
 	pb, _ := json.Marshal(st.Endpoints)
@@ -639,6 +639,7 @@ func (h *routerHub) online() map[string]routerSoft {
 
 type routerServer struct {
 	hub       *routerHub
+	moons     *moonHub
 	caPEM     string
 	isLeader  func() bool
 	leaderURL func() (string, error) // leader's cluster API address
@@ -652,17 +653,18 @@ type routerServer struct {
 }
 
 func newRouterServer(hub *routerHub, caPEM string) *routerServer {
-	return &routerServer{hub: hub, caPEM: caPEM, isLeader: func() bool { return true },
+	return &routerServer{hub: hub, moons: newMoonHub(), caPEM: caPEM, isLeader: func() bool { return true },
 		limiter: newRateLimiter(600, time.Minute), devLimit: newRateLimiter(60, time.Minute),
 		denied: newClusterServer(), sync: func() {}, sso: newSSOManager()}
 }
 
 type routerIdent struct {
 	ip, member, keyHash string
+	moon, moonKey       string // a moon's certificate (relay map, renewal)
 	forwarded           bool
 }
 
-var routerHeaders = []string{"X-Ziro-Forwarded", "X-Ziro-Client-Ip", "X-Ziro-Device", "X-Ziro-Device-Key"}
+var routerHeaders = []string{"X-Ziro-Forwarded", "X-Ziro-Client-Ip", "X-Ziro-Device", "X-Ziro-Device-Key", "X-Ziro-Moon", "X-Ziro-Moon-Key"}
 
 // ident reads who is calling: a device certificate on this connection, or, only on a connection
 // from a master, the identity the relaying follower verified.
@@ -673,10 +675,12 @@ func (rt *routerServer) ident(r *http.Request) routerIdent {
 		if _, err := netip.ParseAddr(fip); err != nil {
 			fip = ip
 		}
-		return routerIdent{ip: fip, member: r.Header.Get("X-Ziro-Device"), keyHash: r.Header.Get("X-Ziro-Device-Key"), forwarded: true}
+		return routerIdent{ip: fip, member: r.Header.Get("X-Ziro-Device"), keyHash: r.Header.Get("X-Ziro-Device-Key"),
+			moon: r.Header.Get("X-Ziro-Moon"), moonKey: r.Header.Get("X-Ziro-Moon-Key"), forwarded: true}
 	}
 	id, kh, _ := deviceFromTLS(r.TLS)
-	return routerIdent{ip: ip, member: id, keyHash: kh}
+	moon, mkh, _ := moonFromTLS(r.TLS)
+	return routerIdent{ip: ip, member: id, keyHash: kh, moon: moon, moonKey: mkh}
 }
 
 func (rt *routerServer) fail(w http.ResponseWriter, who routerIdent, path string, err error) {
@@ -716,6 +720,17 @@ func (rt *routerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, routerBodyLimit)
+	switch r.URL.Path { // moons: their own credentials, never a device's
+	case "/router/v1/moon/register":
+		rt.serveMoonRegister(w, r, who)
+		return
+	case "/router/v1/moon/renew":
+		rt.serveMoonRenew(w, r, who)
+		return
+	case "/router/v1/relaymap":
+		rt.serveRelayMap(w, r, who)
+		return
+	}
 	if r.URL.Path == "/router/v1/register" {
 		out, err := rt.register(r, who)
 		if err != nil {
@@ -860,7 +875,8 @@ func (rt *routerServer) serveMap(w http.ResponseWriter, r *http.Request, id stri
 }
 
 // routerWrite are the requests that change Raft state: followers relay them to the leader.
-var routerWrite = map[string]bool{"/router/v1/register": true, "/router/v1/renew": true}
+var routerWrite = map[string]bool{"/router/v1/register": true, "/router/v1/renew": true,
+	"/router/v1/moon/register": true, "/router/v1/moon/renew": true}
 
 // streamLines writes queued JSON lines (and a keepalive every 30s) until the client goes away or
 // done closes; what was queued before the close is still sent (e.g. a revocation's last delta).
@@ -940,6 +956,10 @@ func (rt *routerServer) forward(w http.ResponseWriter, r *http.Request, who rout
 				pr.Out.Header.Set("X-Ziro-Device", who.member)
 				pr.Out.Header.Set("X-Ziro-Device-Key", who.keyHash)
 			}
+			if who.moon != "" {
+				pr.Out.Header.Set("X-Ziro-Moon", who.moon)
+				pr.Out.Header.Set("X-Ziro-Moon-Key", who.moonKey)
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			rt.fail(w, who, r.URL.Path, httpError{http.StatusServiceUnavailable, "router leader unreachable"})
@@ -963,19 +983,21 @@ func (rs *raftStore) stateVersion() uint64 {
 	return idx
 }
 
-// routerSnapshot copies the router state this planet holds (any master), with Endpoints set to
-// what devices dial (the configured ones, else every master).
-func (rs *raftStore) routerSnapshot(cfg *ClusterConfig) (*zr.State, uint64) {
+// routerSnapshot copies the cluster state this planet holds (any master), with the router's
+// Endpoints set to what devices dial (the configured ones, else every master).
+func (rs *raftStore) routerSnapshot(cfg *ClusterConfig) (*ClusterState, uint64) {
 	st, ver, err := rs.snapshot()
 	if err != nil || st == nil {
 		return nil, 0
 	}
-	R := routerOf(st)
-	R.Endpoints = routerEndpoints(st, cfg)
-	return R, ver
+	routerOf(st).Endpoints = routerEndpoints(st, cfg)
+	return st, ver
 }
 
-var localRouterHub *routerHub // set inside `cluster serve` (the local socket shows its soft state)
+var (
+	localRouterHub *routerHub // set inside `cluster serve` (the local socket shows its soft state)
+	localMoonHub   *moonHub
+)
 
 // startRouter attaches the router to the master's API mux. Every planet keeps its hub loaded from
 // its own replica; the leader alone writes housekeeping (expired ephemeral members) to Raft.
@@ -984,6 +1006,7 @@ func startRouter(mux *http.ServeMux, rs *raftStore, cfg *ClusterConfig, caPEM st
 	hub.self = rs.id
 	localRouterHub = hub
 	rt := newRouterServer(hub, caPEM)
+	localMoonHub = rt.moons
 	rt.isLeader = rs.isLeader
 	rt.leaderURL = func() (string, error) { return rs.leaderAPI(clusterPortOf(cfg)) }
 	load := func(force bool) {
@@ -993,7 +1016,8 @@ func startRouter(mux *http.ServeMux, rs *raftStore, cfg *ClusterConfig, caPEM st
 		hub.mu.Unlock()
 		if stale || force { // force: re-evaluate expiries even when nothing was committed
 			if st, v := rs.routerSnapshot(cfg); st != nil {
-				hub.setState(st, v)
+				hub.setState(routerOf(st), v)
+				rt.moons.setState(st)
 			}
 		}
 	}

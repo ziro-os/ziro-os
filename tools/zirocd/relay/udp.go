@@ -1,4 +1,4 @@
-package cmd
+package relay
 
 import (
 	"net"
@@ -10,7 +10,7 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 )
 
-// The relay's UDP side: one port (IPv4 and IPv6) answers STUN, binds UDP sessions from
+// The UDP side: one port (IPv4 and IPv6) answers STUN, binds UDP sessions from
 // authenticated hellos, and forwards relayed datagrams. I/O goes through wireguard-go's
 // StdNetBind, the socket layer zirocd uses too: batched reads with UDP GRO, batched writes with
 // UDP GSO (a run of packets to one receiver leaves in one syscall), large socket buffers.
@@ -20,7 +20,7 @@ const (
 	udpBindingTTL = 90 * time.Second // a binding not refreshed (hello every 5-25s, or traffic) expires
 )
 
-func (s *relayServer) listenUDP(addr string) error {
+func (s *Server) listenUDP(addr string) error {
 	_, ps, err := net.SplitHostPort(addr)
 	if err != nil {
 		return err
@@ -41,13 +41,13 @@ func (s *relayServer) listenUDP(addr string) error {
 	return nil
 }
 
-func (s *relayServer) closeUDP() {
+func (s *Server) closeUDP() {
 	if s.udp != nil {
 		s.udp.Close()
 	}
 }
 
-func (s *relayServer) endpoint(a netip.AddrPort) conn.Endpoint {
+func (s *Server) endpoint(a netip.AddrPort) conn.Endpoint {
 	ep, err := s.udp.ParseEndpoint(a.String())
 	if err != nil {
 		return nil
@@ -71,7 +71,7 @@ func (o *udpOut) add(to netip.AddrPort, ep conn.Endpoint, b []byte) {
 	o.bufs[to] = append(o.bufs[to], b)
 }
 
-func (s *relayServer) udpLoop(fn conn.ReceiveFunc) {
+func (s *Server) udpLoop(fn conn.ReceiveFunc) {
 	bs := s.udp.BatchSize()
 	bufs, sizes, eps := make([][]byte, bs), make([]int, bs), make([]conn.Endpoint, bs)
 	for i := range bufs {
@@ -101,7 +101,7 @@ func (s *relayServer) udpLoop(fn conn.ReceiveFunc) {
 }
 
 // handleUDP processes one datagram; replies and forwarded packets go into out.
-func (s *relayServer) handleUDP(b []byte, from netip.AddrPort, fromEP conn.Endpoint, out *udpOut) {
+func (s *Server) handleUDP(b []byte, from netip.AddrPort, fromEP conn.Endpoint, out *udpOut) {
 	if len(b) == 0 {
 		return
 	}
@@ -155,6 +155,7 @@ func (s *relayServer) handleUDP(b []byte, from netip.AddrPort, fromEP conn.Endpo
 			fwd[0] = zr.UDPRecv
 			copy(fwd[1:33], c.key[:])
 			out.add(bind.addr, bind.ep, fwd)
+			s.relayed.Add(uint64(len(fwd)))
 			return
 		}
 		s.deliver(c, to, b[zr.UDPSendHdr:])
@@ -163,7 +164,7 @@ func (s *relayServer) handleUDP(b []byte, from netip.AddrPort, fromEP conn.Endpo
 
 // route applies the sender's and the relay's rate limits and finds the receiving device (same
 // network only).
-func (s *relayServer) route(c *relayClient, dst [32]byte, n int) (*relayClient, bool) {
+func (s *Server) route(c *client, dst [32]byte, n int) (*client, bool) {
 	now := time.Now()
 	if !c.bucket.allow(n, now) || !s.global.allow(n, now) {
 		s.drop()
@@ -182,7 +183,8 @@ func (s *relayServer) route(c *relayClient, dst [32]byte, n int) (*relayClient, 
 // deliver hands a packet from c to its receiver: as a UDP datagram when the receiver has a live
 // UDP session, otherwise over its TLS connection. (UDP-to-UDP forwarding takes the in-place path
 // in handleUDP; this serves packets that arrived over TLS.)
-func (s *relayServer) deliver(c, to *relayClient, payload []byte) {
+func (s *Server) deliver(c, to *client, payload []byte) {
+	s.relayed.Add(uint64(len(payload)))
 	if bind := to.udp.Load(); bind != nil && bind.ep != nil && time.Since(bind.seen) < udpBindingTTL {
 		pkt := make([]byte, 0, zr.UDPRecvHdr+len(payload))
 		pkt = append(append(append(pkt, zr.UDPRecv), c.key[:]...), payload...)

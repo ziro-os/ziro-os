@@ -11,6 +11,7 @@ import (
 	"time"
 
 	zr "github.com/ziro-os/ziro-os/sdk/router"
+	"github.com/ziro-os/zirocd/relay"
 )
 
 // TestRouterServeE2E runs a standalone router for tests/router/e2e.sh (skipped otherwise):
@@ -39,14 +40,34 @@ func TestRouterServeE2E(t *testing.T) {
 		routerOf(st).Relays = []zr.Relay{{Name: "r1", Addr: relayIP + ":8443", STUN: relayIP + ":3478"},
 			{Name: "r2", Addr: relayIP + ":8444", STUN: relayIP + ":3479"}}
 	}
+	// A moon ("m1", zirocd moon in a container at this IP) registers with the token written below.
+	moonIP := os.Getenv("ZIRO_E2E_MOON")
+	if moonIP != "" {
+		R := routerOf(st)
+		R.Endpoints = []string{adv}
+		R.Relays = append(R.Relays, zr.Relay{Name: "m1", Addr: moonIP + ":8443", STUN: moonIP + ":3478", ServerName: zr.MoonServerName("m1")})
+		R.Moons = append(R.Moons, zr.Moon{Name: "m1", CreatedAt: time.Now()})
+	}
 	// Sign-in: a fake OIDC provider that approves alice@example.com at once.
 	idp := newFakeIdP(t, "ziro-router")
 	idp.approve(map[string]any{"email": "alice@example.com", "email_verified": true})
 	routerOf(st).SSO = &zr.SSO{Issuer: idp.srv.URL, ClientID: "ziro-router"}
 	n.SSO = &zr.NetworkSSO{Domains: []string{"example.com"}, Tags: []string{"laptop"}}
 	plain, web := addJoinKey(st, true, time.Now().Add(time.Hour)), addJoinKey(st, true, time.Now().Add(time.Hour), "web")
+	var moonTok string
+	if moonIP != "" {
+		var err error
+		if moonTok, err = moonToken(st, nil, "m1", time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := saveStateFiles(clusterDir, st); err != nil {
 		t.Fatal(err)
+	}
+	if moonTok != "" {
+		if err := os.WriteFile(out+"/moon-token", []byte(moonTok), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	pin, _ := pemHash(st.CACert)
 	for name, key := range map[string]string{"plain": plain, "web": web, "sso": ""} { // "sso": a network invite
@@ -62,6 +83,7 @@ func TestRouterServeE2E(t *testing.T) {
 	rt.sync = func() {
 		if cur, err := readState(); err == nil {
 			hub.setState(routerOf(cur), ver.Add(1))
+			rt.moons.setState(cur)
 		}
 	}
 	rt.sync()
@@ -71,15 +93,16 @@ func TestRouterServeE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, ports := range [][2]string{{":8443", ":3478"}, {":8444", ":3479"}} {
-			rs := newRelayServer(func() (*zr.State, error) {
+			rs := relay.New()
+			rs.SetRates(10000, 10000) // measure the relay, not the default per-device limit (1 Gbit/s)
+			load := func() (*zr.State, error) {
 				cur, err := readState()
 				if err != nil {
 					return nil, err
 				}
 				return routerOf(cur), nil
-			})
-			rs.rate = 10e9 / 8 // measure the relay, not the default per-device limit (1 Gbit/s)
-			go func(tls, udp string) { t.Log(runRelay(context.Background(), rs, tls, udp, tc)) }(ports[0], ports[1])
+			}
+			go func(tls, udp string) { t.Log(runPlanetRelay(context.Background(), rs, load, tls, udp, tc)) }(ports[0], ports[1])
 		}
 	}
 	// Stand-in for `ziroctl router route approve`: approve every advertised route.
