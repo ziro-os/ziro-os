@@ -577,7 +577,7 @@ func (d *Daemon) mapRequest(eng *Engine, port int) zr.MapRequest {
 			eps = append(eps, p)
 		}
 	}
-	return zr.MapRequest{Endpoints: eps, Version: d.Version, HomeRelay: eng.Bind().Home()}
+	return zr.MapRequest{Endpoints: eps, Version: d.Version, HomeRelay: eng.Bind().Home(), Relays: eng.Bind().Relays()}
 }
 
 // reportEndpoints tells the router when this device's endpoints or home relay change (network
@@ -594,7 +594,7 @@ func (d *Daemon) reportEndpoints(ctx context.Context, c *zr.Client, eng *Engine,
 		case <-changed:
 		}
 		cur := d.mapRequest(eng, port)
-		if slices.Equal(cur.Endpoints, last.Endpoints) && cur.HomeRelay == last.HomeRelay {
+		if slices.Equal(cur.Endpoints, last.Endpoints) && cur.HomeRelay == last.HomeRelay && slices.Equal(cur.Relays, last.Relays) {
 			continue
 		}
 		if err := c.UpdateEndpoints(ctx, cur); err == nil {

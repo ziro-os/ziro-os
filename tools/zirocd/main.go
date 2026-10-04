@@ -181,7 +181,7 @@ func main() {
 				}
 				fmt.Printf("Home relay:   %s\n\n", orDash(nc.Home))
 				tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-				fmt.Fprintln(tw, "RELAY\tSTUN\tTLS\tSEEN AS\t")
+				fmt.Fprintln(tw, "RELAY\tSTUN\tTLS\tRELAYS OVER\tSEEN AS\t")
 				for _, r := range nc.Relays {
 					ms := func(v int64) string {
 						if v == 0 {
@@ -196,7 +196,11 @@ func main() {
 					if r.Error != "" {
 						note = r.Error
 					}
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Name, ms(r.STUNms), ms(r.TLSms), orDash(r.Mapped), note)
+					over := "tls"
+					if r.UDP {
+						over = "udp"
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, ms(r.STUNms), ms(r.TLSms), over, orDash(r.Mapped), note)
 				}
 				tw.Flush()
 			})

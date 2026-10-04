@@ -7,7 +7,7 @@
 #
 # Checks: join; sign-in (OIDC device flow, fake provider in the router harness); subnet routing (web routes its LAN, approved by the harness); hole punching (direct path between two NATed devices); the default-deny ACL
 # (tcp/8080 only towards tag:web); DNS; relay fallback when UDP between the NATs is blocked;
-# recovery to a direct path. Reports direct and relayed throughput. Needs docker.
+# UDP relay, TLS relay when UDP to the relay is blocked too; recovery to a direct path. Reports direct and relayed throughput. Needs docker.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 arch=$(docker info --format '{{.Architecture}}' | sed 's/aarch64/arm64/; s/x86_64/amd64/')
@@ -129,11 +129,22 @@ for n in natA natB; do
 	docker exec "$p-$n" iptables -I FORWARD -p udp -s $other -j DROP
 	docker exec "$p-$n" iptables -I OUTPUT -p udp -d $other -j DROP
 done
-desc="relay fallback within 15s"; check wait_path relay 15
+desc="relay fallback within 15s, as UDP datagrams"; check wait_path "relay r1 udp" 15
 echo "  path: $(path_to_web)"
-desc="ping over the relay"; check docker exec "$p-client" ping -c 3 -W 2 "$wip"
+desc="ping over the UDP relay"; check docker exec "$p-client" ping -c 3 -W 2 "$wip"
+echo "== throughput relayed (UDP relay)"
+docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || true
+echo "== block UDP to the relay too: relayed traffic must move to TLS"
+for n in natA natB; do docker exec "$p-$n" iptables -I FORWARD -p udp -d 172.30.0.10 --dport 3478 -j DROP; done
+desc="TLS relay fallback within 15s"; check wait_path "relay r1 tls" 15
+echo "  path: $(path_to_web)"
+# Each side notices the dead UDP session on its own (within ~8s): allow for the other one.
+desc="ping over the TLS relay"
+check sh -c "for i in \$(seq 10); do docker exec $p-client ping -c 1 -W 1 $wip && exit 0; sleep 1; done; exit 1"
 echo "== throughput relayed (TLS relay)"
 docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || true
+for n in natA natB; do docker exec "$p-$n" iptables -D FORWARD -p udp -d 172.30.0.10 --dport 3478 -j DROP; done
+desc="back to the UDP relay once UDP to it returns"; check wait_path "relay r1 udp" 15
 for n in natA natB; do
 	other=172.30.0.12; [ $n = natB ] && other=172.30.0.11
 	docker exec "$p-$n" iptables -D FORWARD -p udp -d $other -j DROP

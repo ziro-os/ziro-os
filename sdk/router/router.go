@@ -183,24 +183,36 @@ type MapRequest struct {
 	Endpoints []string `json:"endpoints,omitempty"` // ip:port candidates, at most MaxEndpoints
 	Version   string   `json:"version,omitempty"`
 	HomeRelay string   `json:"home_relay,omitempty"` // the relay this device is reachable through
+	// Relays the device is registered with (up to MaxRelays) and its round trip to each: a sender
+	// picks the relay with the lowest round trip for the pair.
+	Relays []RelayRTT `json:"relays,omitempty"`
 }
+
+// RelayRTT is a relay a device is connected to, and how far away it is.
+type RelayRTT struct {
+	Name string `json:"name"`
+	RTT  int    `json:"rtt_ms"`
+}
+
+const MaxRelays = 4
 
 const MaxEndpoints = 16
 
 // Peer is a member as another member sees it.
 type Peer struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	NodeKey    string    `json:"node_key"`
-	DiscoKey   string    `json:"disco_key"`
-	Addresses  []string  `json:"addresses"`   // its own /32 and /128
-	AllowedIPs []string  `json:"allowed_ips"` // addresses + approved routes
-	Endpoints  []string  `json:"endpoints,omitempty"`
-	HomeRelay  string    `json:"home_relay,omitempty"`
-	User       string    `json:"user,omitempty"`
-	Expires    time.Time `json:"expires,omitempty"` // when this device must sign in again
-	Tags       []string  `json:"tags,omitempty"`
-	Online     bool      `json:"online"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	NodeKey    string     `json:"node_key"`
+	DiscoKey   string     `json:"disco_key"`
+	Addresses  []string   `json:"addresses"`   // its own /32 and /128
+	AllowedIPs []string   `json:"allowed_ips"` // addresses + approved routes
+	Endpoints  []string   `json:"endpoints,omitempty"`
+	HomeRelay  string     `json:"home_relay,omitempty"`
+	Relays     []RelayRTT `json:"relays,omitempty"`
+	User       string     `json:"user,omitempty"`
+	Expires    time.Time  `json:"expires,omitempty"` // when this device must sign in again
+	Tags       []string   `json:"tags,omitempty"`
+	Online     bool       `json:"online"`
 }
 
 // FilterRule allows inbound packets from Src to Dst on Ports; anything else is dropped.

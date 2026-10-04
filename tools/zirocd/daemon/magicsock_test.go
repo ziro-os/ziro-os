@@ -184,3 +184,33 @@ func mustEP(t *testing.T, b *MagicBind, wgPub string) conn.Endpoint {
 	}
 	return ep
 }
+
+// The relay for a peer is the one with the lowest round trip for the pair, among the relays the
+// peer is registered with; this device registers with its two nearest relays.
+func TestRelayChoice(t *testing.T) {
+	b, _ := NewMagicBind(func() string { k, _, _ := newCurveKey(); return k }(), nil, nil)
+	b.relays = []zr.Relay{{Name: "eu"}, {Name: "sg"}, {Name: "us"}}
+	b.stunRTT = map[string]time.Duration{"eu": 180 * time.Millisecond, "sg": 20 * time.Millisecond, "us": 150 * time.Millisecond}
+	b.pickHomeLocked()
+	if b.home != "sg" || strings.Join(b.homes, ",") != "sg,us" {
+		t.Fatalf("homes %v", b.homes)
+	}
+	// The peer sits next to eu, far from sg: eu (180+5) beats sg (20+300).
+	p := &mpeer{relays: []zr.RelayRTT{{Name: "eu", RTT: 5}, {Name: "sg", RTT: 300}}}
+	if got := b.relayForLocked(p); got != "eu" {
+		t.Fatalf("pair relay %s", got)
+	}
+	// A relay the peer reports but we don't know is skipped; with nothing usable: its home relay.
+	if got := b.relayForLocked(&mpeer{relays: []zr.RelayRTT{{Name: "mars", RTT: 1}}, home: "us"}); got != "us" {
+		t.Fatalf("fallback %s", got)
+	}
+	// Hysteresis: a slightly faster relay doesn't take over the home.
+	b.stunRTT["us"] = 18 * time.Millisecond
+	if b.pickHomeLocked(); b.home != "sg" {
+		t.Fatalf("home flapped to %s", b.home)
+	}
+	b.stunRTT["us"] = 5 * time.Millisecond
+	if b.pickHomeLocked(); b.home != "us" {
+		t.Fatalf("home should move to a clearly nearer relay, got %s", b.home)
+	}
+}
