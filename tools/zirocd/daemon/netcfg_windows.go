@@ -4,8 +4,10 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -106,4 +108,14 @@ func setSubnetRouter(name string, networks []netip.Prefix, on bool) error {
 		return errors.New("subnet routing is supported on Linux hosts only")
 	}
 	return nil
+}
+
+// defaultGateway asks Windows for the IPv4 default route with the lowest metric.
+func defaultGateway() (netip.Addr, error) {
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric | Select-Object -First 1).NextHop").Output()
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return netip.ParseAddr(strings.TrimSpace(string(out)))
 }

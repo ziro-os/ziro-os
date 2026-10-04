@@ -287,6 +287,7 @@ type routerSoft struct {
 	Version   string        `json:"version,omitempty"`
 	HomeRelay string        `json:"home_relay,omitempty"`
 	Relays    []zr.RelayRTT `json:"relays,omitempty"`
+	NAT       string        `json:"nat,omitempty"`
 	Seen      time.Time     `json:"seen"`
 	Online    bool          `json:"online"`
 }
@@ -350,7 +351,7 @@ func (h *routerHub) projectLocked(m *zr.Member) zr.Peer {
 		Addresses: memberAddrs(m), User: m.User, Expires: m.Expires}
 	p.AllowedIPs = append(append([]string(nil), p.Addresses...), m.Approved...)
 	if s := h.soft[m.ID]; s != nil {
-		p.Endpoints, p.HomeRelay, p.Relays = s.Endpoints, s.HomeRelay, s.Relays
+		p.Endpoints, p.HomeRelay, p.Relays, p.NAT = s.Endpoints, s.HomeRelay, s.Relays, s.NAT
 	}
 	_, p.Online = h.subs[m.ID]
 	return p
@@ -522,7 +523,7 @@ func (h *routerHub) updateSoft(id string, req zr.MapRequest) {
 		s = &routerSoft{}
 		h.soft[id] = s
 	}
-	s.Endpoints, s.Version, s.HomeRelay, s.Relays, s.Seen = req.Endpoints, req.Version, req.HomeRelay, req.Relays, time.Now()
+	s.Endpoints, s.Version, s.HomeRelay, s.Relays, s.NAT, s.Seen = req.Endpoints, req.Version, req.HomeRelay, req.Relays, req.NAT, time.Now()
 	h.peerChangedLocked(id, nil)
 }
 
@@ -736,6 +737,9 @@ func decodeMapRequest(r *http.Request) (zr.MapRequest, error) {
 	}
 	if req.HomeRelay != "" && validLabel(req.HomeRelay) != nil {
 		return req, httpError{http.StatusBadRequest, "invalid home relay"}
+	}
+	if req.NAT != "" && req.NAT != "easy" && req.NAT != "hard" {
+		return req, httpError{http.StatusBadRequest, "invalid nat"}
 	}
 	if len(req.Relays) > zr.MaxRelays {
 		return req, httpError{http.StatusBadRequest, "too many relays"}

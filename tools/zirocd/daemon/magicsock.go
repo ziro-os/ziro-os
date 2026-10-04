@@ -9,11 +9,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"net/netip"
+	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,11 +48,24 @@ const (
 	pingEvery       = 2 * time.Second
 	callMeEvery     = 5 * time.Second // relayed pings ask the peer to punch towards us
 	activeWindow    = 10 * time.Second
+	keepAliveBest   = 6 * time.Second // an active peer's direct path is re-pinged once its trust drops below this (~every 1s)
+	maxMissed       = 3               // pings to the best path without a pong: drop it (~3s on an active peer)
+	sprayRadius     = 32              // hard-NAT probing: ports around each public port the peer reported
+	sprayEvery      = 15 * time.Second
 	stunEvery       = 20 * time.Second
 	maxCandidates   = 16
 	relayIdle       = 2 * time.Minute
 	wgKeepaliveSize = 32 // an empty WireGuard transport message: not real traffic
 )
+
+// debugDisco logs path discovery (ZIROCD_DEBUG=disco): pings, pongs, path changes.
+var debugDisco = strings.Contains(os.Getenv("ZIROCD_DEBUG"), "disco")
+
+func dlog(format string, args ...any) {
+	if debugDisco {
+		log.Printf("disco: "+format, args...)
+	}
+}
 
 type peerEP struct{ p *mpeer }
 
@@ -81,6 +97,10 @@ type mpeer struct {
 	lastCallMe time.Time
 	pings      map[[12]byte]pingSent
 	ep         *peerEP
+	nat        string // "easy", "hard" or ""
+	missed     int    // pings sent to best since its last pong
+	rounds     int    // ping rounds while a path is trusted (every 5th also probes the other candidates)
+	lastSpray  time.Time
 }
 
 type relayPkt struct {
@@ -89,7 +109,8 @@ type relayPkt struct {
 }
 
 type stunProbe struct {
-	relay string
+	relay string // relay name; mapped addresses are kept per relay and family ("r1/4", "r1/6")
+	fam   string
 	at    time.Time
 }
 
@@ -121,7 +142,9 @@ type MagicBind struct {
 	closed   chan struct{}
 	kick     chan *mpeer
 	stopLoop context.CancelFunc
-	pings    atomic.Uint64 // disco pings sent (tests guard against ping storms)
+	pings    atomic.Uint64  // disco pings sent (tests guard against ping storms)
+	portMap  netip.AddrPort // external address a router mapped for us (PCP / NAT-PMP / UPnP)
+	mapProto string
 	overlay  atomic.Pointer[[]netip.Prefix]
 }
 
@@ -383,7 +406,7 @@ func (b *MagicBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 		p.lastSend = now
 	}
 	best, valid := p.best, now.Before(p.bestUntil)
-	needPing := active && (!valid || p.bestUntil.Sub(now) < 3*time.Second) && now.Sub(p.lastPing) >= pingEvery
+	needPing := active && (!valid || p.bestUntil.Sub(now) < keepAliveBest) && now.Sub(p.lastPing) >= pingEvery/2
 	relay := ""
 	if !valid {
 		relay = b.relayForLocked(p)
@@ -441,9 +464,13 @@ func (b *MagicBind) sendPing(p *mpeer, to netip.AddrPort) {
 		return
 	}
 	p.pings[tx] = pingSent{to: to, at: time.Now(), viaRelay: !to.IsValid()}
+	if to.IsValid() && to == p.best {
+		p.missed++
+	}
 	relay := b.relayForLocked(p)
 	b.mu.Unlock()
 	b.pings.Add(1)
+	dlog("ping %s -> %v", p.name, to)
 	pkt := b.seal(p, append([]byte{pingPong}, tx[:]...))
 	if to.IsValid() {
 		_ = b.sendUDP(to, pkt)
@@ -474,6 +501,7 @@ func (b *MagicBind) handleDisco(pkt []byte, src netip.AddrPort, from *[32]byte) 
 	var tx [12]byte
 	copy(tx[:], msg[1:13])
 	now := time.Now()
+	dlog("%s from %s src=%v relayed=%v", map[byte]string{pingPong: "ping", pongMsg: "pong"}[msg[0]], p.name, src, from != nil)
 	switch msg[0] {
 	case pingPong:
 		reply := b.seal(p, append(append([]byte{pongMsg}, tx[:]...), encodeAddrPort(src)...))
@@ -507,12 +535,19 @@ func (b *MagicBind) handleDisco(pkt []byte, src netip.AddrPort, from *[32]byte) 
 		delete(p.pings, tx)
 		if ok && !ps.viaRelay {
 			rtt := now.Sub(ps.at)
-			if !now.Before(p.bestUntil) || ps.to == p.best || float64(rtt) < 0.8*float64(p.rtt) {
+			if ps.to == p.best {
+				p.missed = 0
+			}
+			if !now.Before(p.bestUntil) || ps.to == p.best || betterPath(ps.to, rtt, p.best, p.rtt) {
+				if ps.to != p.best {
+					p.missed = 0
+				}
 				if p.best.IsValid() && p.best != ps.to && b.byAddr[p.best] == p {
 					delete(b.byAddr, p.best)
 				}
 				p.best, p.rtt = ps.to, rtt
 				b.byAddr[ps.to] = p
+				dlog("path %s -> direct %v (%v)", p.name, ps.to, rtt)
 			}
 			if ps.to == p.best {
 				p.bestUntil = now.Add(trustBest)
@@ -520,6 +555,51 @@ func (b *MagicBind) handleDisco(pkt []byte, src netip.AddrPort, from *[32]byte) 
 		}
 		b.mu.Unlock()
 	}
+}
+
+// pathRank orders direct paths: same LAN first, then IPv6 (rarely NATed), then public IPv4.
+func pathRank(a netip.AddrPort) int {
+	ip := a.Addr()
+	switch {
+	case ip.IsPrivate() || ip.IsLinkLocalUnicast():
+		return 0
+	case ip.Is6():
+		return 1
+	}
+	return 2
+}
+
+// betterPath: a better-ranked path wins unless more than 20% slower; an equal-ranked one must be
+// 20% faster (no flapping between near-equal paths).
+func betterPath(a netip.AddrPort, rttA time.Duration, b netip.AddrPort, rttB time.Duration) bool {
+	ra, rb := pathRank(a), pathRank(b)
+	switch {
+	case ra < rb:
+		return float64(rttA) <= 1.2*float64(rttB)
+	case ra > rb:
+		return 1.2*float64(rttA) < float64(rttB)
+	}
+	return float64(rttA) < 0.8*float64(rttB)
+}
+
+// sprayTargets are the ports around each IPv4 candidate the peer showed the relays (sprayRadius
+// either side), capped at 256 probes per round. Private addresses are kept: behind carrier-grade
+// NAT the "public" side is private space, and probes only go to addresses the router listed for
+// this peer.
+func sprayTargets(cands []netip.AddrPort) []netip.AddrPort {
+	var out []netip.AddrPort
+	for _, c := range cands {
+		if !c.Addr().Is4() || !c.Addr().IsGlobalUnicast() {
+			continue
+		}
+		for d := -sprayRadius; d <= sprayRadius && len(out) < 256; d++ {
+			port := int(c.Port()) + d
+			if d != 0 && port > 1024 && port < 65536 {
+				out = append(out, netip.AddrPortFrom(c.Addr(), uint16(port)))
+			}
+		}
+	}
+	return out
 }
 
 func containsAddr(list []netip.AddrPort, a netip.AddrPort) bool {
@@ -540,11 +620,33 @@ func (b *MagicBind) pingPeer(p *mpeer) {
 		b.mu.Unlock()
 		return
 	}
-	targets := append(append([]netip.AddrPort{}, p.cands...), p.learned...)
-	if p.best.IsValid() && !containsAddr(targets, p.best) {
-		targets = append(targets, p.best)
+	if p.missed >= maxMissed && now.Before(p.bestUntil) { // the direct path went quiet: relay now
+		p.bestUntil, p.missed = time.Time{}, 0
+		dlog("path %s: %v went quiet, relaying", p.name, p.best)
 	}
-	callMe := !now.Before(p.bestUntil) && now.Sub(p.lastCallMe) >= callMeEvery
+	trusted := now.Before(p.bestUntil)
+	var targets []netip.AddrPort
+	if trusted && p.rounds%5 != 0 {
+		targets = []netip.AddrPort{p.best} // keep the path alive; look for a better one every 5th round
+	} else {
+		targets = append(append([]netip.AddrPort{}, p.cands...), p.learned...)
+		if p.best.IsValid() && !containsAddr(targets, p.best) {
+			targets = append(targets, p.best)
+		}
+	}
+	if trusted {
+		p.rounds++
+	} else {
+		p.rounds = 0
+	}
+	// Hard NAT on the other side (its port varies by destination) and an easy one here: probe the
+	// ports around the ones it showed the relays. Its own pings towards us open a port near them;
+	// one of ours lands on it. Budgeted, and only at addresses the router gave us for this peer.
+	if !trusted && p.nat == "hard" && b.natTypeLocked() == "easy" && now.Sub(p.lastSpray) >= sprayEvery {
+		p.lastSpray = now
+		targets = append(targets, sprayTargets(p.cands)...)
+	}
+	callMe := !trusted && now.Sub(p.lastCallMe) >= callMeEvery
 	if callMe {
 		p.lastCallMe = now
 	}
@@ -567,22 +669,40 @@ func (b *MagicBind) probeSTUN() {
 	relays := append([]zr.Relay{}, b.relays...)
 	b.mu.RUnlock()
 	for _, r := range relays {
-		ua, err := net.ResolveUDPAddr("udp", r.STUN)
+		host, port, err := net.SplitHostPort(r.STUN)
 		if err != nil {
 			continue
 		}
-		var tx [12]byte
-		_, _ = rand.Read(tx[:])
-		b.mu.Lock()
-		for k, v := range b.stun {
-			if time.Since(v.at) > 10*time.Second {
-				delete(b.stun, k)
-			}
+		pn, _ := strconv.Atoi(port)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host) // both families: IPv6 paths too
+		cancel()
+		if err != nil {
+			continue
 		}
-		b.stun[tx] = stunProbe{relay: r.Name, at: time.Now()}
-		b.mu.Unlock()
-		ap := ua.AddrPort()
-		_ = b.sendUDP(netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), zr.STUNRequest(tx))
+		seen := map[string]bool{}
+		for _, ip := range ips {
+			ip = ip.Unmap()
+			fam := "4"
+			if ip.Is6() {
+				fam = "6"
+			}
+			if seen[fam] {
+				continue
+			}
+			seen[fam] = true
+			var tx [12]byte
+			_, _ = rand.Read(tx[:])
+			b.mu.Lock()
+			for k, v := range b.stun {
+				if time.Since(v.at) > 10*time.Second {
+					delete(b.stun, k)
+				}
+			}
+			b.stun[tx] = stunProbe{relay: r.Name, fam: fam, at: time.Now()}
+			b.mu.Unlock()
+			_ = b.sendUDP(netip.AddrPortFrom(ip, uint16(pn)), zr.STUNRequest(tx))
+		}
 	}
 }
 
@@ -598,9 +718,12 @@ func (b *MagicBind) handleSTUN(pkt []byte) {
 		return
 	}
 	delete(b.stun, tx)
-	changed := b.mapped[probe.relay] != mapped
-	b.mapped[probe.relay] = mapped
-	b.stunRTT[probe.relay] = time.Since(probe.at)
+	key := probe.relay + "/" + probe.fam
+	changed := b.mapped[key] != mapped
+	b.mapped[key] = mapped
+	if rtt, ok := b.stunRTT[probe.relay]; !ok || time.Since(probe.at) < rtt || probe.fam == "4" {
+		b.stunRTT[probe.relay] = time.Since(probe.at)
+	}
 	changed = b.pickHomeLocked() || changed
 	b.mu.Unlock()
 	if changed && b.onChange != nil {
@@ -686,7 +809,7 @@ func (b *MagicBind) loop(ctx context.Context) {
 			b.mu.Lock()
 			for _, p := range b.peers {
 				active := now.Sub(p.lastSend) < activeWindow
-				if active && p.bestUntil.Sub(now) < 3*time.Second && now.Sub(p.lastPing) >= pingEvery {
+				if active && p.bestUntil.Sub(now) < keepAliveBest && now.Sub(p.lastPing) >= pingEvery/2 {
 					due = append(due, p)
 				}
 				for tx, ps := range p.pings {
@@ -752,7 +875,7 @@ func (b *MagicBind) SetPeers(peers []zr.Peer) {
 			box.Precompute(&p.shared, &disco, &b.discoPriv)
 		}
 		b.byDisco[disco] = p
-		p.name, p.home, p.relays = pp.Name, pp.HomeRelay, pp.Relays
+		p.name, p.home, p.relays, p.nat = pp.Name, pp.HomeRelay, pp.Relays, pp.NAT
 		p.cands = p.cands[:0]
 		for _, e := range pp.Endpoints {
 			if a, err := netip.ParseAddrPort(e); err == nil && len(p.cands) < maxCandidates {
@@ -790,9 +913,13 @@ func (b *MagicBind) SetRelays(relays []zr.Relay) {
 			delete(b.relayUDP, l.udpAddr)
 		}
 	}
-	for name := range b.mapped {
+	for key := range b.mapped {
+		if name, _, _ := strings.Cut(key, "/"); !names[name] {
+			delete(b.mapped, key)
+		}
+	}
+	for name := range b.stunRTT {
 		if !names[name] {
-			delete(b.mapped, name)
 			delete(b.stunRTT, name)
 		}
 	}
@@ -813,13 +940,105 @@ func (b *MagicBind) PublicEndpoints() []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	var out []string
-	for _, a := range b.mapped {
-		if s := a.String(); !containsString(out, s) {
+	if b.portMap.IsValid() { // a router-mapped port is the most reliable way in: first
+		out = append(out, b.portMap.String())
+	}
+	keys := make([]string, 0, len(b.mapped))
+	for k := range b.mapped {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if s := b.mapped[k].String(); !containsString(out, s) {
 			out = append(out, s)
 		}
 	}
-	sort.Strings(out)
 	return out
+}
+
+// NATType is "easy" when every relay saw the same public IPv4 port, "hard" when they saw
+// different ones (symmetric NAT), "" when fewer than two relays answered. A router-mapped port
+// makes it easy.
+func (b *MagicBind) NATType() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.natTypeLocked()
+}
+
+func (b *MagicBind) natTypeLocked() string {
+	if b.portMap.IsValid() {
+		return "easy"
+	}
+	ports := map[uint16]bool{}
+	n := 0
+	for k, a := range b.mapped {
+		if strings.HasSuffix(k, "/4") {
+			ports[a.Port()] = true
+			n++
+		}
+	}
+	switch {
+	case len(ports) > 1:
+		return "hard"
+	case n >= 2:
+		return "easy"
+	}
+	return ""
+}
+
+// SetPortMapping records the external address a gateway mapped to our WireGuard port ("" proto
+// and an invalid address: no mapping).
+func (b *MagicBind) SetPortMapping(ext netip.AddrPort, proto string) {
+	b.mu.Lock()
+	changed := b.portMap != ext
+	b.portMap, b.mapProto = ext, proto
+	b.mu.Unlock()
+	if changed && b.onChange != nil {
+		b.onChange()
+	}
+}
+
+// Rebind is the reaction to a network change (another Wi-Fi, LTE, a new address): forget what
+// was learned about the old network, rediscover the public address, re-bind relay sessions and
+// find new paths to every active peer at once.
+func (b *MagicBind) Rebind() {
+	dlog("network changed: rebinding")
+	now := time.Now()
+	b.mu.Lock()
+	b.mapped = map[string]netip.AddrPort{}
+	b.stdEPs = map[netip.AddrPort]conn.Endpoint{}
+	var active []*mpeer
+	for _, p := range b.peers {
+		if p.best.IsValid() && b.byAddr[p.best] == p {
+			delete(b.byAddr, p.best)
+		}
+		p.bestUntil, p.best, p.learned, p.missed, p.lastPing, p.lastCallMe = time.Time{}, netip.AddrPort{}, nil, 0, time.Time{}, time.Time{}
+		if now.Sub(p.lastSend) < activeWindow {
+			active = append(active, p)
+		}
+	}
+	links := make([]*relayLink, 0, len(b.links))
+	for _, l := range b.links {
+		links = append(links, l)
+	}
+	b.mu.Unlock()
+	for _, l := range links {
+		l.mu.Lock()
+		l.helloAt = time.Time{} // re-bind the UDP session from the new address now
+		rc := l.rc
+		l.mu.Unlock()
+		if rc != nil {
+			rc.Close() // its TCP connection went through the old network: redial at once
+		}
+		l.maybeHello(now)
+	}
+	b.probeSTUN()
+	for _, p := range active {
+		b.pingPeer(p)
+	}
+	if b.onChange != nil {
+		b.onChange()
+	}
 }
 
 func containsString(l []string, s string) bool {
@@ -1184,6 +1403,10 @@ type RelayCheck struct {
 
 type Netcheck struct {
 	UDP          bool         `json:"udp"`
+	IPv6         bool         `json:"ipv6"`             // a relay saw us over IPv6
+	NAT          string       `json:"nat"`              // easy, hard or "" (unknown)
+	PortMap      string       `json:"port_mapping"`     // pcp, nat-pmp, upnp or "" (none)
+	Mapped       string       `json:"mapped,omitempty"` // the external address the router mapped
 	Public       []string     `json:"public_endpoints"`
 	VariesByDest bool         `json:"mapping_varies_by_destination"` // symmetric NAT: direct paths are unlikely
 	Home         string       `json:"home_relay"`
@@ -1214,8 +1437,14 @@ func (b *MagicBind) Netcheck(ctx context.Context) Netcheck {
 			rc.UDP = l.udpUp()
 		}
 		if rtt, ok := b.stunRTT[r.Name]; ok {
-			rc.STUNms, rc.Mapped, nc.UDP = max(rtt.Milliseconds(), 1), b.mapped[r.Name].String(), true
-			ports[b.mapped[r.Name].Port()] = true
+			m := b.mapped[r.Name+"/4"]
+			if !m.IsValid() {
+				m = b.mapped[r.Name+"/6"]
+			}
+			rc.STUNms, rc.Mapped, nc.UDP = max(rtt.Milliseconds(), 1), m.String(), true
+			if m4, ok := b.mapped[r.Name+"/4"]; ok {
+				ports[m4.Port()] = true
+			}
 		}
 		b.mu.RUnlock()
 		if ca != nil && cert != nil {
@@ -1240,6 +1469,16 @@ func (b *MagicBind) Netcheck(ctx context.Context) Netcheck {
 		nc.Relays[i].Current = nc.Relays[i].Name == nc.Home
 	}
 	nc.Public = b.PublicEndpoints()
+	nc.NAT = b.NATType()
+	b.mu.RLock()
+	nc.PortMap = b.mapProto
+	if b.portMap.IsValid() {
+		nc.Mapped = b.portMap.String()
+	}
+	for k := range b.mapped {
+		nc.IPv6 = nc.IPv6 || strings.HasSuffix(k, "/6")
+	}
+	b.mu.RUnlock()
 	nc.VariesByDest = len(ports) > 1
 	return nc
 }

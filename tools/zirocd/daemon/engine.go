@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	zr "github.com/ziro-os/ziro-os/sdk/router"
 	"golang.zx2c4.com/wireguard/device"
@@ -28,6 +30,10 @@ type Engine struct {
 	bind   *MagicBind
 	dev    *device.Device
 	dns    dnsServer
+	stop   context.CancelFunc // roaming watcher and port mapper
+
+	netMu       sync.Mutex
+	onNetChange func() // the daemon's reaction to a network change (fresh control connections)
 
 	mu        sync.Mutex
 	peers     map[string]zr.Peer // by member ID
@@ -62,6 +68,10 @@ func NewEngine(wgPriv, discoPriv string, port int, acceptDNS bool, auth RelayAut
 	e := &Engine{name: name, tun: t, filter: NewFilter(t), bind: bind, peers: map[string]zr.Peer{}, routes: map[netip.Prefix]bool{}, acceptDNS: acceptDNS}
 	logger := &device.Logger{Verbosef: device.DiscardLogf, Errorf: func(f string, a ...any) { log.Printf("wireguard: "+f, a...) }}
 	e.dev = device.NewDevice(e.filter, bind, logger)
+	// The socket layer chooses every packet's path (direct, relayed, probed). WireGuard must not
+	// "roam" a peer to whatever address a packet came from: that would bypass path selection,
+	// failover and status. Peers are configured with an endpoint, which pins them.
+	e.dev.DisableSomeRoamingForBrokenMobileSemantics()
 	if err := e.dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(k), port)); err != nil {
 		e.dev.Close()
 		return nil, err
@@ -70,12 +80,27 @@ func NewEngine(wgPriv, discoPriv string, port int, acceptDNS bool, auth RelayAut
 		e.dev.Close()
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	e.stop = cancel
+	go watchNetwork(ctx, name, 2*time.Second, func() { // roaming: new paths within seconds
+		bind.Rebind()
+		e.netMu.Lock()
+		f := e.onNetChange
+		e.netMu.Unlock()
+		if f != nil {
+			f()
+		}
+	})
+	go runPortMapper(ctx, bind, uint16(port)) // PCP / NAT-PMP / UPnP on the home router
 	return e, nil
 }
 
 func (e *Engine) Name() string { return e.name }
 
 func (e *Engine) Close() {
+	if e.stop != nil {
+		e.stop()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.dns.close()
@@ -125,6 +150,13 @@ func peerUAPI(b *strings.Builder, key string, p *zr.Peer, endpoint string) {
 
 func samePeer(a, b zr.Peer) bool {
 	return a.NodeKey == b.NodeKey && strings.Join(a.AllowedIPs, ",") == strings.Join(b.AllowedIPs, ",")
+}
+
+// OnNetworkChange sets what to do, besides re-finding paths, when the host's network changes.
+func (e *Engine) OnNetworkChange(f func()) {
+	e.netMu.Lock()
+	e.onNetChange = f
+	e.netMu.Unlock()
 }
 
 // Bind is the socket layer (endpoints, home relay, paths, netcheck).

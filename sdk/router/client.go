@@ -106,6 +106,7 @@ type Client struct {
 
 	mu        sync.Mutex
 	hc        *http.Client
+	cert      *tls.Certificate
 	preferred string
 }
 
@@ -133,11 +134,20 @@ func (c *Client) SetCert(cert *tls.Certificate) {
 	}
 	c.mu.Lock()
 	old := c.hc
-	c.hc = &http.Client{Transport: tr}
+	c.hc, c.cert = &http.Client{Transport: tr}, cert
 	c.mu.Unlock()
 	if old != nil {
 		old.CloseIdleConnections()
 	}
+}
+
+// Reset drops the client's connections (new requests dial afresh): after a network change, the
+// old ones lead through a NAT that no longer exists.
+func (c *Client) Reset() {
+	c.mu.Lock()
+	cert := c.cert
+	c.mu.Unlock()
+	c.SetCert(cert)
 }
 
 func (c *Client) order() []string {

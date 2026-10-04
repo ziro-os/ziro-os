@@ -441,15 +441,34 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 
 	backoff := time.Second
 	healthy := false
+	var cmu sync.Mutex
+	var cur *zr.Client
+	var restartMap context.CancelFunc
+	// After a network change the router connections lead through a NAT that is gone: drop them
+	// and reopen the netmap stream at once (endpoints reach peers in a second, not a timeout).
+	eng.OnNetworkChange(func() {
+		cmu.Lock()
+		if cur != nil {
+			cur.Reset()
+		}
+		if restartMap != nil {
+			restartMap()
+		}
+		cmu.Unlock()
+	})
 	for ctx.Err() == nil {
 		c, err := d.client(ctx, st)
 		if err == nil {
 			err = d.maybeRenew(ctx, c, st)
 		}
 		if err == nil {
+			mapCtx, cancelMap := context.WithCancel(ctx)
+			cmu.Lock()
+			cur, restartMap = c, cancelMap
+			cmu.Unlock()
 			epCtx, stopEP := context.WithCancel(ctx)
 			go d.reportEndpoints(epCtx, c, eng, port, epChanged)
-			err = c.Map(ctx, d.mapRequest(eng, port), func(m zr.MapMessage) error {
+			err = c.Map(mapCtx, d.mapRequest(eng, port), func(m zr.MapMessage) error {
 				if err := eng.Apply(m); err != nil {
 					log.Printf("zirocd: apply netmap: %v", err)
 					d.setStatus(func(s *Status) { s.Error = err.Error() })
@@ -478,6 +497,12 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 				return nil
 			})
 			stopEP()
+			if mapCtx.Err() != nil && ctx.Err() == nil { // restarted for a network change: reconnect now
+				cancelMap()
+				backoff = time.Second
+				continue
+			}
+			cancelMap()
 		}
 		if ctx.Err() != nil {
 			return
@@ -577,7 +602,7 @@ func (d *Daemon) mapRequest(eng *Engine, port int) zr.MapRequest {
 			eps = append(eps, p)
 		}
 	}
-	return zr.MapRequest{Endpoints: eps, Version: d.Version, HomeRelay: eng.Bind().Home(), Relays: eng.Bind().Relays()}
+	return zr.MapRequest{Endpoints: eps, Version: d.Version, HomeRelay: eng.Bind().Home(), Relays: eng.Bind().Relays(), NAT: eng.Bind().NATType()}
 }
 
 // reportEndpoints tells the router when this device's endpoints or home relay change (network
@@ -594,7 +619,7 @@ func (d *Daemon) reportEndpoints(ctx context.Context, c *zr.Client, eng *Engine,
 		case <-changed:
 		}
 		cur := d.mapRequest(eng, port)
-		if slices.Equal(cur.Endpoints, last.Endpoints) && cur.HomeRelay == last.HomeRelay && slices.Equal(cur.Relays, last.Relays) {
+		if slices.Equal(cur.Endpoints, last.Endpoints) && cur.HomeRelay == last.HomeRelay && slices.Equal(cur.Relays, last.Relays) && cur.NAT == last.NAT {
 			continue
 		}
 		if err := c.UpdateEndpoints(ctx, cur); err == nil {
