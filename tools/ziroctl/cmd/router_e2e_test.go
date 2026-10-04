@@ -35,7 +35,9 @@ func TestRouterServeE2E(t *testing.T) {
 	}
 	relayIP := os.Getenv("ZIRO_E2E_RELAY") // also run a relay (TLS :8443, STUN :3478) announced at this IP
 	if relayIP != "" {
-		routerOf(st).Relays = []zr.Relay{{Name: "r1", Addr: relayIP + ":8443", STUN: relayIP + ":3478"}}
+		// Two relays: a device compares the ports both saw to tell an easy NAT from a hard one.
+		routerOf(st).Relays = []zr.Relay{{Name: "r1", Addr: relayIP + ":8443", STUN: relayIP + ":3478"},
+			{Name: "r2", Addr: relayIP + ":8444", STUN: relayIP + ":3479"}}
 	}
 	// Sign-in: a fake OIDC provider that approves alice@example.com at once.
 	idp := newFakeIdP(t, "ziro-router")
@@ -68,15 +70,17 @@ func TestRouterServeE2E(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rs := newRelayServer(func() (*zr.State, error) {
-			cur, err := readState()
-			if err != nil {
-				return nil, err
-			}
-			return routerOf(cur), nil
-		})
-		rs.rate = 10e9 / 8 // measure the relay, not the default per-device limit (1 Gbit/s)
-		go func() { t.Log(runRelay(context.Background(), rs, ":8443", ":3478", tc)) }()
+		for _, ports := range [][2]string{{":8443", ":3478"}, {":8444", ":3479"}} {
+			rs := newRelayServer(func() (*zr.State, error) {
+				cur, err := readState()
+				if err != nil {
+					return nil, err
+				}
+				return routerOf(cur), nil
+			})
+			rs.rate = 10e9 / 8 // measure the relay, not the default per-device limit (1 Gbit/s)
+			go func(tls, udp string) { t.Log(runRelay(context.Background(), rs, tls, udp, tc)) }(ports[0], ports[1])
+		}
 	}
 	// Stand-in for `ziroctl router route approve`: approve every advertised route.
 	go func() {

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 const ifaceName = "utun" // the kernel picks utunN
@@ -77,4 +79,18 @@ func setSubnetRouter(name string, networks []netip.Prefix, on bool) error {
 		return errors.New("subnet routing is supported on Linux hosts only")
 	}
 	return nil
+}
+
+// defaultGateway asks the routing table for the IPv4 default route.
+func defaultGateway() (netip.Addr, error) {
+	out, err := exec.Command("/sbin/route", "-n", "get", "default").Output()
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "gateway:"); ok {
+			return netip.ParseAddr(strings.TrimSpace(v))
+		}
+	}
+	return netip.Addr{}, errors.New("no default route")
 }

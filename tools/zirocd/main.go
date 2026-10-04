@@ -174,11 +174,24 @@ func main() {
 				}
 				fmt.Printf("UDP:          %s\n", udp)
 				fmt.Printf("Public:       %s\n", orDash(strings.Join(nc.Public, ", ")))
-				if nc.VariesByDest {
-					fmt.Println("NAT:          mapping varies by destination (symmetric): direct paths need the peer to be reachable")
-				} else if nc.UDP {
-					fmt.Println("NAT:          endpoint-independent: hole punching works")
+				switch nc.NAT {
+				case "hard":
+					fmt.Println("NAT:          hard (port varies by destination): direct only with easy peers, by port probing")
+				case "easy":
+					fmt.Println("NAT:          easy (endpoint-independent): hole punching works")
+				default:
+					fmt.Println("NAT:          unknown (needs two relays to tell)")
 				}
+				if nc.PortMap != "" {
+					fmt.Printf("Port mapping: %s → %s\n", nc.PortMap, nc.Mapped)
+				} else {
+					fmt.Println("Port mapping: none (no PCP, NAT-PMP or UPnP on the router)")
+				}
+				ipv6 := "no"
+				if nc.IPv6 {
+					ipv6 = "yes"
+				}
+				fmt.Printf("IPv6:         %s\n", ipv6)
 				fmt.Printf("Home relay:   %s\n\n", orDash(nc.Home))
 				tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 				fmt.Fprintln(tw, "RELAY\tSTUN\tTLS\tRELAYS OVER\tSEEN AS\t")

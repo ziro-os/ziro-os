@@ -186,6 +186,9 @@ type MapRequest struct {
 	// Relays the device is registered with (up to MaxRelays) and its round trip to each: a sender
 	// picks the relay with the lowest round trip for the pair.
 	Relays []RelayRTT `json:"relays,omitempty"`
+	// NAT is "easy" (one public port whatever the destination), "hard" (the port varies by
+	// destination) or "" (unknown): an easy peer sprays probes at a hard one's likely ports.
+	NAT string `json:"nat,omitempty"`
 }
 
 // RelayRTT is a relay a device is connected to, and how far away it is.
@@ -209,6 +212,7 @@ type Peer struct {
 	Endpoints  []string   `json:"endpoints,omitempty"`
 	HomeRelay  string     `json:"home_relay,omitempty"`
 	Relays     []RelayRTT `json:"relays,omitempty"`
+	NAT        string     `json:"nat,omitempty"`
 	User       string     `json:"user,omitempty"`
 	Expires    time.Time  `json:"expires,omitempty"` // when this device must sign in again
 	Tags       []string   `json:"tags,omitempty"`

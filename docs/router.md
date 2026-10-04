@@ -168,22 +168,33 @@ zirocd netcheck            # on a device: UDP, NAT type, public address, relay l
 | One socket | WireGuard, path discovery (disco) and STUN share the device's WireGuard UDP port, so the NAT mapping a relay observes is the one peers can use |
 | Public address | Every 20s, STUN to each relay. The device registers with its **two nearest relays** and reports them, with their round trips, to the router, which pushes them to peers |
 | Hole punching | Disco pings (NaCl box between the two devices' disco keys) go to every candidate address of the peer at once. A ping relayed through the home relay asks the peer to ping back now, so both NATs open together. The first pong picks the path; a faster one replaces it |
-| Path choice | Per packet: the direct address while its last pong is under 7s old (pings repeat every 2s on active peers), otherwise a relay. The relay is chosen per peer: of the relays the peer is registered with, the one with the lowest round trip *for the pair* (ours + the peer's), with instant failover to the other. Path changes never interrupt the WireGuard session |
+| More direct paths | **Port mapping:** zirocd asks the home or office router to forward its WireGuard port, through PCP, NAT-PMP or UPnP IGD, as ZeroTier does. It asks only the default gateway on a private address, for UDP only, with a 2h lease renewed at half-life and removed on exit. **Hard NATs:** when a device's NAT gives each destination its own port (two relays see different ports), a peer behind an easy NAT probes ±32 ports around the ones the relays saw, budgeted to one round per 15s. **IPv6:** relays are probed over both IPv4 and IPv6, and direct paths rank same-LAN, then IPv6, then IPv4, with a 20% round-trip allowance before a lower rank wins |
+| Roaming | A 2s watch on the host's addresses and default gateway. On a change (Wi-Fi to LTE, a new DHCP lease), zirocd forgets the old paths, re-learns its public address, re-binds relay sessions, reconnects to the router at once, and pings every active peer |
+| Path choice | Per packet: the direct address while its last pong is under 7s old (active peers are pinged every second; 3 missed pongs drop a path in about 3s), otherwise a relay. WireGuard never "roams" a peer by itself: the socket layer owns every path. The relay is chosen per peer: of the relays the peer is registered with, the one with the lowest round trip *for the pair* (ours + the peer's), with instant failover to the other. Path changes never interrupt the WireGuard session |
 | Relays | **UDP first, TLS as the fallback.** Each relay connection is TLS 1.3, where the relay checks the device's certificate. Over it, the relay hands out a UDP session (ID + key). The device then binds the session to its WireGuard socket's address with an HMAC-authenticated, timestamped hello, so a replay can't move it. After that, relayed packets are plain UDP datagrams on the same port as STUN, forwarded with batched GRO/GSO I/O and no allocation per packet. Where UDP to the relay is blocked, or a hello goes unanswered for 3s, traffic moves to the TLS connection within seconds, and back once UDP answers again. The relay forwards only within one network, takes the sender's identity from its session (never from the packet), rate-limits each device (`--rate-mbps`, default 1000) and the relay as a whole (`--max-mbps`, default 10000), and drops a device within a second of its removal. It only ever sees WireGuard ciphertext |
 
 `zirocd status` shows each peer's path: `direct 203.0.113.9:41641 (12ms)`, `relay sg-1 udp`, or `relay sg-1 tls`.
 
-**What punches through:** home routers, cloud NAT gateways and most carrier NATs, which map endpoint-independently. Under "symmetric" NAT, where the mapping varies by destination (`zirocd netcheck` reports it), a direct path forms only if the peer is reachable; otherwise traffic stays on the relay.
+**What goes direct:**
+- **Endpoint-independent NATs** (home routers, cloud NAT gateways, most carrier NATs): by hole punching.
+- **Routers that offer PCP, NAT-PMP or UPnP:** through a port mapping.
+- **A hard NAT facing an easy one:** by port probing.
+- **Two hard NATs without port mapping:** the relay (UDP, or TLS where UDP is blocked) carries the traffic, by design.
 
 Measured in `tests/router/e2e.sh` (two devices, each behind its own firewalled NAT, in Docker on an M2):
 
 | Path | Throughput |
 |---|---|
-| Direct (hole punched) | 2.5–3.2 Gbit/s |
+| Direct (hole punched; also through a hard NAT by port probing, and after roaming to another NAT) | 2.0–3.2 Gbit/s |
 | UDP relay (UDP between the NATs blocked) | 0.9–1.4 Gbit/s |
 | TLS relay (UDP to the relay blocked too) | 0.6–0.7 Gbit/s |
 
-Each step down happens within seconds, and each recovers on its own when the blocked path returns.
+Each step down happens within seconds, and each recovers on its own when the blocked path returns. The same test checks:
+- roaming: direct again within 20s;
+- a hard NAT: a direct path on a port found by probing;
+- port mapping against a real `miniupnpd` (PCP).
+
+`zirocd netcheck` reports the NAT type (easy, hard or unknown), the port-mapping protocol and mapped address, IPv6 reachability, and each relay's latency and transport. Path-discovery debugging: run the daemon with `ZIROCD_DEBUG=disco`.
 
 ## Access control
 

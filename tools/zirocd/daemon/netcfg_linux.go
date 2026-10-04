@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -126,4 +128,24 @@ func setSubnetRouter(name string, networks []netip.Prefix, on bool) error {
 		}
 	}
 	return nil
+}
+
+// defaultGateway reads the IPv4 default route from /proc/net/route.
+func defaultGateway() (netip.Addr, error) {
+	b, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	for _, line := range strings.Split(string(b), "\n")[1:] {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[1] != "00000000" {
+			continue
+		}
+		v, err := strconv.ParseUint(f[2], 16, 32)
+		if err != nil || v == 0 {
+			continue
+		}
+		return netip.AddrFrom4([4]byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)}), nil // little-endian
+	}
+	return netip.Addr{}, errors.New("no default route")
 }
