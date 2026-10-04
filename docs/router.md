@@ -60,6 +60,15 @@ sudo zirocd logout                               # disconnect and delete the key
   - On the same host, this path measured faster than kernel WireGuard: 2.4–2.6 Gbit/s through two NATs with the ACL filter on, against 1.7–1.8 Gbit/s for a plain kernel tunnel in Docker on an M2. CI runners reach 6.6 Gbit/s.
   - A kernel mode would also lose hole punching and relay fallback, so there isn't one.
   - The ACL filter costs about 47 ns per packet with no allocations (`BenchmarkFilterWrite`). Peers are configured one by one from netmap deltas, so a change never resets sessions it doesn't touch.
+- **Memory.** About 16 MiB idle. At multi-Gbit rates wireguard-go keeps packets in flight, so zirocd sets a soft limit of 256 MiB by default (peak measured 215 MiB at 2.8 Gbit/s; without a limit it reached 474 MiB). On small devices, trade speed for memory with `GOMEMLIMIT` in the service environment:
+
+  | `GOMEMLIMIT` | Peak | Direct throughput (Docker, M2) |
+  |---|---|---|
+  | default (256MiB) | ~215 MiB | 2.2–2.8 Gbit/s |
+  | `96MiB` | ~65 MiB | ~1.3 Gbit/s |
+  | `48MiB` | ~40 MiB | ~0.8 Gbit/s |
+
+  Memory drops back after a burst. Relays (planets and moons) cost about 15 KB per connected device; a planet's hub about 4 KB per streaming device that sees 100 peers.
 - **Inbound filter.** The router's rules for this device are enforced on every packet. Replies to connections the device opened are let back in; anything else unsolicited is dropped (`zirocd status` counts drops).
 - **Names.** `<device>.<network>.ziro` resolve through a tiny resolver on the device's own tunnel address. Only that domain is sent to it, so other DNS is untouched.
 - **Keys and state.** The WireGuard, disco and TLS private keys are generated on the device. They live in `/var/lib/zirocd` (Linux), `/Library/Application Support/zirocd` (macOS) or `%ProgramData%\zirocd` (Windows, ACL'd to SYSTEM and Administrators). The join key is deleted once used. The CLI talks to the daemon over a root-only socket (an Administrators-only named pipe on Windows).

@@ -1,7 +1,6 @@
 package router
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -27,15 +26,17 @@ const (
 
 var errFrameTooBig = errors.New("relay frame too large")
 
-// RelayConn is one framed relay connection (used by both ends).
+// RelayConn is one framed relay connection (used by both ends). Reads go straight to the TLS
+// connection, which already buffers a whole record: an extra read buffer would cost every
+// connected device 64 KiB on the relay for nothing.
 type RelayConn struct {
 	Conn net.Conn
-	r    *bufio.Reader
+	r    io.Reader
 	wmu  sync.Mutex
 }
 
 func NewRelayConn(c net.Conn) *RelayConn {
-	return &RelayConn{Conn: c, r: bufio.NewReaderSize(c, 64<<10)}
+	return &RelayConn{Conn: c, r: c}
 }
 
 // WriteFrame writes one frame: key (32 bytes, may be nil) followed by payload.

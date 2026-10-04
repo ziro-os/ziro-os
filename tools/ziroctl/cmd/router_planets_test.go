@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,9 @@ import (
 
 	zr "github.com/ziro-os/ziro-os/sdk/router"
 )
+
+// hubBytesPerDeviceBudget bounds a streaming device's cost on a planet (99 visible peers; measured 3.7 KB).
+const hubBytesPerDeviceBudget int64 = 8 << 10
 
 // Soft state merges by device session: the newest session wins, whichever planet holds it.
 func TestPlanetSoftMerge(t *testing.T) {
@@ -327,5 +332,57 @@ func TestRouterSnapshotOnFollowers(t *testing.T) {
 			R := routerOf(st)
 			return len(R.Networks) == 2 && len(R.Endpoints) == 1 && R.Endpoints[0] == "router.example.com:7443"
 		})
+	}
+}
+
+// TestRouterHubMemory measures what a streaming device costs a planet: 20 full-mesh networks of
+// 100 devices, so each stream tracks 99 peers.
+func TestRouterHubMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("memory measurement")
+	}
+	const nets, per = 20, 100
+	st := &zr.State{}
+	for n := range nets {
+		netID := fmt.Sprintf("n%02d", n)
+		st.Networks = append(st.Networks, zr.Network{ID: netID, Name: netID, IPv4: fmt.Sprintf("100.%d.0.0/16", 64+n),
+			ACL: zr.ACL{Rules: []zr.Rule{{Src: []string{"*"}, Dst: []string{"*:*"}}}}})
+		for i := range per {
+			id := fmt.Sprintf("%s-%03d", netID, i)
+			st.Members = append(st.Members, zr.Member{ID: id, Name: id, Network: netID, IPv4: fmt.Sprintf("100.%d.0.%d", 64+n, i+1),
+				NodeKey: wgKey(byte(i)), Authorized: true, KeyHash: "h" + id})
+		}
+	}
+	h := newRouterHub()
+	h.setState(st, 1)
+	measure := func() int64 {
+		runtime.GC()
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		return int64(ms.HeapAlloc)
+	}
+	base := measure()
+	subs := make([]*routerSub, 0, len(st.Members))
+	for _, m := range st.Members {
+		s, err := h.subscribe(m.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		subs = append(subs, s)
+		for len(s.ch) > 0 { // a live stream drains its queue
+			<-s.ch
+		}
+	}
+	for _, s := range subs {
+		for len(s.ch) > 0 {
+			<-s.ch
+		}
+	}
+	perDev := (measure() - base) / int64(len(subs))
+	runtime.KeepAlive(h)
+	t.Logf("%d streams seeing %d peers each: %d bytes per device", len(subs), per-1, perDev)
+	if perDev > hubBytesPerDeviceBudget {
+		t.Fatalf("%d bytes per streaming device, budget %d", perDev, hubBytesPerDeviceBudget)
 	}
 }

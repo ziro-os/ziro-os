@@ -88,6 +88,9 @@ path_of() { # device peer: the device's path to the peer named peer
 path_to_web() { path_of client web; }
 cip=$(ip_of client); wip=$(ip_of web)
 echo "client=$cip web=$wip"
+mem() { # device field: zirocd's VmRSS (now) or VmHWM (peak), in KiB
+	docker exec "$p-$1" sh -c "awk '/^$2:/ {print \$2}' /proc/\$(pidof zirocd)/status"
+}
 
 fail=0
 check() { if "$@" >/dev/null 2>&1; then echo "✓ $desc"; else echo "✗ $desc"; fail=1; fi; }
@@ -127,6 +130,7 @@ check sh -c "docker exec $p-laptop /w/zirocd status | grep -q 'signed in until'"
 # A first handshake can reach web just before web's netmap lists laptop: WireGuard retries in 5s.
 desc="signed-in device pings web"
 check sh -c "for i in \$(seq 10); do docker exec $p-laptop ping -c 1 -W 1 $wip && exit 0; sleep 1; done; exit 1"
+echo "  zirocd memory idle: client $(mem client VmRSS) KiB, web $(mem web VmRSS) KiB"
 echo "== throughput direct (userspace WireGuard through two NATs)"
 docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || true
 
@@ -233,5 +237,12 @@ desc="web maps its WireGuard port on the gateway"
 check sh -c "for i in \$(seq 45); do docker exec $p-web /w/zirocd netcheck --json | grep -q '\"mapped\": \"11.22.33.44:' && exit 0; sleep 1; done; exit 1"
 docker exec "$p-web" /w/zirocd netcheck | grep -E "Port mapping|NAT:" | sed 's/^/  /'
 docker exec "$p-client" /w/zirocd netcheck || true
+echo "== memory"
+echo "  zirocd peak (VmHWM): client $(mem client VmHWM) KiB, web $(mem web VmHWM) KiB; now: client $(mem client VmRSS) KiB"
+echo "  moon container: $(docker stats --no-stream --format '{{.MemUsage}}' "$p-moon")"
+# zirocd's default soft limit is 256 MiB (multi-Gbit traffic above fills it); without it the
+# peak was 474 MiB. The gate allows for memory outside the Go heap.
+desc="zirocd peak memory within 300 MiB after every throughput run"
+check sh -c "[ $(mem client VmHWM) -le 307200 ] && [ $(mem web VmHWM) -le 307200 ]"
 [ $fail = 0 ] || docker logs "$p-router" 2>&1 | tail -20
 exit $fail
