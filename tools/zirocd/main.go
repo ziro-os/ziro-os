@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -39,7 +40,18 @@ var (
 	upSSO    bool
 )
 
+// defaultMemoryLimit caps the heap softly at 256 MiB unless GOMEMLIMIT is set. At multi-Gbit
+// rates wireguard-go's queues hold hundreds of MiB of packets in flight (474 MiB peak measured
+// with no limit, 2.9 Gbit/s); 256 MiB keeps about 2.2 Gbit/s. Idle stays near 16 MiB either way.
+// Small devices trade speed for memory with GOMEMLIMIT=96MiB (about 1.3 Gbit/s).
+func defaultMemoryLimit() {
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(256 << 20)
+	}
+}
+
 func main() {
+	defaultMemoryLimit()
 	root := &cobra.Command{
 		Use:           "zirocd",
 		Short:         "Ziro client: join devices to Ziro router networks",

@@ -31,7 +31,7 @@ const (
 	DefaultRateMbps = 1000  // per-device sustained rate
 	DefaultMaxMbps  = 10000 // relay-wide rate
 
-	queueLen    = 512             // frames buffered per receiving device (TLS path)
+	queueLen    = 128             // frames buffered per receiving device (TLS path): up to 8 MiB of burst
 	burstBytes  = 4 << 20         // per-device burst
 	idleTimeout = 2 * time.Minute // no frame (keepalives included) for this long: close
 )

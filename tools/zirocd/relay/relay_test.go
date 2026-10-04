@@ -8,14 +8,20 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"net"
 	"net/netip"
+	"runtime"
 	"testing"
 	"time"
 
 	zr "github.com/ziro-os/ziro-os/sdk/router"
 )
+
+// relayBytesPerDeviceBudget bounds a connected device's cost, relay and test client together
+// (measured 29 KB: mostly the relay's two goroutine stacks and the client's).
+const relayBytesPerDeviceBudget = 40 << 10
 
 // pki is a throwaway cluster CA for tests.
 type pki struct {
@@ -289,5 +295,52 @@ func TestRelayUDP(t *testing.T) {
 		t.Fatal("no STUN answer")
 	} else if gtx, _, ok := zr.ParseSTUNResponse(pl); !ok || gtx != tx {
 		t.Fatal("bad STUN answer")
+	}
+}
+
+// TestRelayMemoryPerDevice measures what a connected device costs the relay (heap and
+// goroutine stacks), the number that decides how many devices a small moon can carry.
+func TestRelayMemoryPerDevice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("memory measurement")
+	}
+	const n = 300
+	p := newPKI(t)
+	members := map[string]Member{}
+	certs := make([]*tls.Certificate, n)
+	for i := range n {
+		id := fmt.Sprintf("d%d", i)
+		c, kh := p.device(t, id)
+		certs[i] = c
+		members[id] = Member{KeyHash: kh, NodeKey: key(byte(i % 250)), Network: fmt.Sprintf("n%d", i/250)}
+	}
+	s := New()
+	s.SetMembers(members)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	planetCert, _ := p.issue(t, "m1", zr.MasterOU, []string{zr.ServerName}, x509.ExtKeyUsageServerAuth)
+	addr, _ := serve(t, ctx, p, s, planetCert)
+	r := zr.Relay{Name: "r1", Addr: addr}
+	measure := func() uint64 {
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		return ms.HeapInuse + ms.StackInuse
+	}
+	conns := make([]*zr.RelayConn, 0, n)
+	_ = dialRelay(t, ctx, r, p.ca, certs[0]) // warm up (TLS, UDP socket)
+	base := measure()
+	for _, c := range certs[1:] {
+		conns = append(conns, dialRelay(t, ctx, r, p.ca, c))
+	}
+	waitFor := time.Now().Add(5 * time.Second)
+	for s.Stats().Connected < n && time.Now().Before(waitFor) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	per := (measure() - base) / uint64(len(conns))
+	// Both ends of every connection live in this process: the client side is about half of it.
+	t.Logf("%d devices: %d bytes per device (relay and test client together)", len(conns), per)
+	if per > relayBytesPerDeviceBudget {
+		t.Fatalf("%d bytes per connected device, budget %d", per, relayBytesPerDeviceBudget)
 	}
 }
