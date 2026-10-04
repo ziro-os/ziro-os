@@ -72,10 +72,6 @@ for n in natA natB; do
 done
 KEEP=${KEEP:-}
 for _ in $(seq 60); do docker exec "$p-router" test -s /w/shared/key-web 2>/dev/null && break; sleep 1; done
-# The moon: the published image as it ships (read-only root, its own volume, not root).
-docker run -d --name "$p-moon" --network "$p-pub" --ip 172.30.0.20 --read-only -v "$p-moon:/var/lib/zirocd-moon" \
-	-e ZIROCD_MOON_TOKEN="$(docker exec "$p-router" cat /w/shared/moon-token)" "$p-zirocd" \
-	moon --dir /var/lib/zirocd-moon --metrics-listen 0.0.0.0:9102 >/dev/null
 
 echo "== join"
 # The router writes the keys as root (0600): read them through its container, not the host.
@@ -160,7 +156,12 @@ docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || tr
 for n in natA natB; do docker exec "$p-$n" iptables -D FORWARD -p udp -d 172.30.0.10 --dport 3478:3479 -j DROP; done
 desc="back to the UDP relay once UDP to it returns"; check wait_path "relay r? udp" 15
 
-echo "== moon: the planet's relays go dark; relaying must move to the moon"
+echo "== moon: one joins while the network runs; then the planet's relays go dark"
+# The published image as it ships (read-only root, its own volume, not root). Devices learn about
+# it once it registers.
+docker run -d --name "$p-moon" --network "$p-pub" --ip 172.30.0.20 --read-only -v "$p-moon:/var/lib/zirocd-moon" \
+	-e ZIROCD_MOON_TOKEN="$(docker exec "$p-router" cat /w/shared/moon-token)" "$p-zirocd" \
+	moon --dir /var/lib/zirocd-moon --metrics-listen 0.0.0.0:9102 >/dev/null
 desc="moon registered and ready (relay map loaded)"
 check sh -c "for i in \$(seq 30); do docker exec $p-router wget -qO- http://172.30.0.20:9102/readyz && exit 0; sleep 1; done; exit 1"
 for n in natA natB; do
