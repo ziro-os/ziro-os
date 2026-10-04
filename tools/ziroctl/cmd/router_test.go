@@ -537,3 +537,11 @@ func BenchmarkRouterHub(b *testing.B) {
 		drain()
 	}
 }
+
+func TestRouterKeyRedacted(t *testing.T) {
+	got := strings.Join(redactArgs([]string{"router", "join", "--key", "zr1_secret", "--key=zr1_s2", "--name", "gw",
+		"zr1_positional", "ZIROCD_KEY=zr1_env"}), " ")
+	if strings.Contains(got, "secret") || strings.Contains(got, "zr1_") || !strings.Contains(got, "--name gw") {
+		t.Fatalf("router key leaked into the audit log: %s", got)
+	}
+}

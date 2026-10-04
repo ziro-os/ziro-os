@@ -172,7 +172,7 @@ var auditReadOnly = map[string]bool{
 }
 
 // sensitiveFlags hold credentials; their values are never recorded.
-var sensitiveFlags = map[string]bool{"token": true, "t": true, "password": true, "passphrase": true, "private-key": true}
+var sensitiveFlags = map[string]bool{"token": true, "t": true, "password": true, "passphrase": true, "private-key": true, "key": true}
 
 // redactArgs keeps what an auditor needs (command, names, images, counts) and drops values
 // that may be secret: KEY=VALUE pairs keep only KEY, credential flags lose their value.
@@ -183,6 +183,8 @@ func redactArgs(args []string) []string {
 		switch {
 		case redactNext:
 			a, redactNext = "<redacted>", false
+		case strings.Contains(a, "zr1_"): // a router key, wherever it appears
+			a = "<redacted>"
 		case strings.HasPrefix(a, "-"):
 			name, val, hasVal := strings.Cut(strings.TrimLeft(a, "-"), "=")
 			if sensitiveFlags[name] {

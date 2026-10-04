@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,14 +28,18 @@ import (
 var releasePublicKey = release.PublicKey
 
 var (
-	toolsTagRe      = regexp.MustCompile(`^tools/v([0-9]+\.[0-9]+\.[0-9]+)$`)
-	toolsBinDir     = "/usr/bin"
-	toolsLinkDir    = "/bin"
-	toolsBinaries   = []string{"ziroctl", "ziropkg"}
+	toolsTagRe    = regexp.MustCompile(`^tools/v([0-9]+\.[0-9]+\.[0-9]+)$`)
+	toolsBinDir   = "/usr/bin"
+	toolsLinkDir  = "/bin"
+	toolsBinaries = []string{"ziroctl", "ziropkg"}
+	// Installed only where the image has them and the release carries them: zirocd ships in the
+	// full image from its first tools release on, and updates through here on Ziro OS (its own
+	// self-update stands down there, so the integrity baselines always know its hash).
+	optionalTools   = []string{"zirocd"}
 	updateCheckFile = "/var/lib/ziro/update-check.json"
 	updateConfFile  = "/etc/ziro/update.json"
 	// Long-running ziroctl daemons restarted onto the new binary, one at a time.
-	toolsDaemons = []string{"sentinel", "ziro-api", "gateway", "cluster-agent", "cluster-master", "router-relay", "ziroctld"}
+	toolsDaemons = []string{"sentinel", "ziro-api", "gateway", "cluster-agent", "cluster-master", "router-relay", "zirocd", "ziroctld"}
 )
 
 // verifyReleaseSums checks an ed25519 signature (base64) over SHA256SUMS.
@@ -137,9 +143,13 @@ func fetchToolsRelease(rel *ghRelease, dir string) (map[string]string, error) {
 		return nil, fmt.Errorf("%s needs Ziro OS %s or newer (this host runs %s): run ziroctl upgrade first", rel.TagName, tj.MinOS, osv)
 	}
 	out := map[string]string{}
-	for _, b := range toolsBinaries {
-		name := b + "-" + hostArch()
+	for _, b := range append(append([]string{}, toolsBinaries...), optionalTools...) {
+		name := toolAsset(b)
 		a := rel.asset(name)
+		optional := slices.Contains(optionalTools, b)
+		if optional && (a == nil || !fileExists(filepath.Join(toolsBinDir, b))) {
+			continue
+		}
 		if a == nil || want[name] == "" {
 			return nil, fmt.Errorf("release %s has no signed %s", rel.TagName, name)
 		}
@@ -154,6 +164,25 @@ func fetchToolsRelease(rel *ghRelease, dir string) (map[string]string, error) {
 		out[b] = p
 	}
 	return out, nil
+}
+
+// toolAsset is a tool's file name in a tools release.
+func toolAsset(b string) string {
+	if b == "zirocd" { // the cross-platform client is named <os>-<goarch>
+		return "zirocd-linux-" + runtime.GOARCH
+	}
+	return b + "-" + hostArch()
+}
+
+// installedTools lists the tools an update replaces on this host.
+func installedTools(bins map[string]string) []string {
+	out := append([]string{}, toolsBinaries...)
+	for _, b := range optionalTools {
+		if bins[b] != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // installTool replaces /usr/bin/<name> atomically (same-filesystem rename), keeping the
@@ -323,12 +352,13 @@ func runToolsUpdate(tag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, n := range toolsBinaries {
+	names := installedTools(bins)
+	for _, n := range names {
 		if err := installTool(n, bins[n]); err != nil {
 			return "", fmt.Errorf("install %s: %w", n, err)
 		}
 	}
-	if err := trustToolHashes(toolsBinaries); err != nil {
+	if err := trustToolHashes(names); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: integrity baselines: %v\n", err)
 	}
 	if err := writeCompletions("/"); err != nil {
@@ -348,13 +378,19 @@ func rollbackTools() error {
 			return fmt.Errorf("no previous %s to roll back to", n)
 		}
 	}
-	for _, n := range toolsBinaries {
+	names := append([]string{}, toolsBinaries...)
+	for _, n := range optionalTools {
+		if fileExists(filepath.Join(toolsBinDir, n) + ".prev") {
+			names = append(names, n)
+		}
+	}
+	for _, n := range names {
 		dst := filepath.Join(toolsBinDir, n)
 		if err := os.Rename(dst+".prev", dst); err != nil {
 			return err
 		}
 	}
-	return trustToolHashes(toolsBinaries)
+	return trustToolHashes(names)
 }
 
 type updateConf struct {

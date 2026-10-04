@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -97,4 +98,12 @@ func setDNS(name, domain string, ns netip.Addr) error {
 func clearDNS(name, domain string) {
 	_ = run("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"Get-DnsClientNrptRule | Where-Object Comment -eq 'zirocd' | Remove-DnsClientNrptRule -Force")
+}
+
+// setSubnetRouter: routing a LAN into the network needs a Linux host.
+func setSubnetRouter(name string, networks []netip.Prefix, on bool) error {
+	if on {
+		return errors.New("subnet routing is supported on Linux hosts only")
+	}
+	return nil
 }

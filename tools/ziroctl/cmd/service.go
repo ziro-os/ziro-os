@@ -140,6 +140,15 @@ var defaultServices = []ServiceDef{
 		Autostart:   false,
 	},
 	{
+		Name:        "zirocd",
+		Description: "Ziro router client (joins this host to router networks)",
+		Exec:        "/usr/bin/zirocd",
+		Args:        "daemon",
+		PIDFile:     "/run/zirocd.pid",
+		LogFile:     "/var/log/zirocd.log",
+		Autostart:   false,
+	},
+	{
 		Name:        "ziro-api",
 		Description: "Ziro Control Plane REST API Server",
 		Exec:        "/usr/bin/ziroctl",

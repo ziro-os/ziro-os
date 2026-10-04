@@ -37,6 +37,7 @@ type Engine struct {
 	domain    string
 	dnsUp     bool
 	addrsSet  bool
+	routing   bool // this device routes approved subnets into the network
 	acceptDNS bool
 }
 
@@ -80,6 +81,9 @@ func (e *Engine) Close() {
 	e.dns.close()
 	if e.dnsUp {
 		clearDNS(e.name, e.domain)
+	}
+	if e.routing {
+		_ = setSubnetRouter(e.name, e.networks, false)
 	}
 	e.dev.Close() // closes the TUN too
 }
@@ -248,6 +252,25 @@ func (e *Engine) converge() error {
 				continue
 			}
 			e.routes[r] = true
+		}
+	}
+
+	// Approved subnet routes for this device: forward and masquerade into them.
+	own := map[string]bool{}
+	for _, a := range e.self.Addresses {
+		own[a] = true
+	}
+	approved := false
+	for _, a := range e.self.AllowedIPs {
+		if !own[a] {
+			approved = true
+		}
+	}
+	if approved != e.routing {
+		if err := setSubnetRouter(e.name, e.networks, approved); err != nil {
+			errs = append(errs, "subnet routing: "+err.Error())
+		} else {
+			e.routing = approved
 		}
 	}
 
