@@ -17,5 +17,9 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	gvisor.dev/gvisor v0.0.0-20261004063249-f57b8fc79db4 // indirect
 )
+
+// wireguard-go's go.mod requires gVisor for its optional netstack TUN, which we never import.
+// Replacing it with an empty module keeps gVisor out of the build and the module graph: no gVisor
+// code can be linked by accident, and scanners stop reporting advisories for code we don't ship.
+replace gvisor.dev/gvisor => ../gvisor-stub
