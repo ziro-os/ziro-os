@@ -104,7 +104,7 @@ func (s *relayServer) refresh() error {
 	m := map[string]relayMember{}
 	for _, mb := range st.Members {
 		k, err := base64.StdEncoding.DecodeString(mb.NodeKey)
-		if !mb.Authorized || err != nil || len(k) != 32 {
+		if !mb.Authorized || err != nil || len(k) != 32 || memberExpired(&mb, time.Now()) {
 			continue
 		}
 		var key [32]byte

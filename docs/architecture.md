@@ -148,7 +148,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
 | HA control plane | Raft (hashicorp/raft + bbolt), cluster CA, mutual-TLS master links | masters | shipped |
-| Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices anywhere ([router.md](router.md)) | every master; `zirocd` on devices | control plane, zirocd (Linux/macOS/Windows), relays + NAT traversal, Ziro OS integration and subnet routers shipped |
+| Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices anywhere ([router.md](router.md)) | every master; `zirocd` on devices | control plane, zirocd (Linux/macOS/Windows), relays + NAT traversal, Ziro OS integration, subnet routers and SSO shipped |
 | Enterprise controls | scoped API tokens, credential and data-key rotation, signed-image policy, `/api/v1/metrics`, [compliance mapping](compliance.md) | all | shipped |
 
 ```mermaid
@@ -241,7 +241,7 @@ Known limits, each addressed by a later phase:
   - NAT traversal: one UDP socket multiplexes WireGuard, NaCl-boxed disco ping/pong and STUN. Devices punch to each other's candidate addresses and fall back per packet to the peer's home relay (`router relay enable`, TLS on masters: the relay reads the replicated member list, forwards only within a network, rate-limits each device).
   - Ziro OS: zirocd ships in the full image (`ziroctl router join|leave|status`, `zirocd` ziro-init service, split DNS through Ziro DNS forward rules) and is updated by `ziroctl update`, which keeps the integrity baselines current. Linux devices act as subnet routers (forwarding + masquerade for approved routes).
   - No kernel data plane: measured slower than wireguard-go with batching on the same host, and it cannot do hole punching or relay fallback.
-  - Next: OIDC device login.
+  - Single sign-on: the OAuth 2.0 device-code grant, run by the leader (client secret sealed with the cluster secrets; ID tokens verified with go-oidc). A per-network policy (verified email + domains/groups → tags) admits users, and devices expire (default 180 days); expiry is enforced by the hub and the relays. `user:<email>` ACL selectors.
 - **Phase 5: enterprise.**
   - Secrets encrypted at rest: shipped (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
   - Scoped API tokens (viewer / operator / admin): shipped.

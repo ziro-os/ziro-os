@@ -145,11 +145,23 @@ func checkRegister(req *zr.RegisterRequest) error {
 // routerRegister admits a device with a join key, re-registers a known device (same TLS key),
 // or files an approval request. A reply lost in transit is safe to retry: the device's TLS key
 // identifies its member, so a consumed single-use key still works for that same device.
-func routerRegister(st *ClusterState, req zr.RegisterRequest, csr *x509.CertificateRequest, keyHash string, now time.Time) (zr.RegisterResponse, error) {
+type csrInfo struct {
+	req     *x509.CertificateRequest
+	keyHash string
+}
+
+// errKeyExpired: a signed-in device past its expiry (zirocd up --sso signs in again).
+var errKeyExpired = httpError{http.StatusUnauthorized, "device key expired: sign in again (zirocd up --sso)"}
+
+func memberExpired(m *zr.Member, now time.Time) bool {
+	return !m.Expires.IsZero() && now.After(m.Expires)
+}
+
+func routerRegister(st *ClusterState, req zr.RegisterRequest, csr *x509.CertificateRequest, keyHash string, now time.Time, sso *ssoIdentity) (zr.RegisterResponse, error) {
 	R := routerOf(st)
 	var key *zr.JoinKey
 	var n *zr.Network
-	if req.Key != "" {
+	if req.Key != "" && sso == nil {
 		id, secret, _ := strings.Cut(req.Key, ".")
 		for i := range R.Keys {
 			if R.Keys[i].ID == id {
@@ -179,12 +191,12 @@ func routerRegister(st *ClusterState, req zr.RegisterRequest, csr *x509.Certific
 			return zr.RegisterResponse{}, httpError{http.StatusConflict, "node key belongs to another device"}
 		}
 	}
-	known := idx >= 0 && R.Members[idx].Authorized
+	known := idx >= 0 && R.Members[idx].Authorized && !memberExpired(&R.Members[idx], now)
 	if key != nil && !known && (now.After(key.Expires) || (!key.Reusable && key.Uses > 0)) {
 		return zr.RegisterResponse{}, errBadJoinKey
 	}
 	if idx < 0 {
-		if key == nil {
+		if key == nil && sso == nil {
 			pending := 0
 			for _, m := range R.Members {
 				if m.Network == n.ID && !m.Authorized {
@@ -219,6 +231,14 @@ func routerRegister(st *ClusterState, req zr.RegisterRequest, csr *x509.Certific
 	if key != nil && !m.Authorized {
 		key.Uses++
 		m.Authorized, m.Tags, m.Ephemeral = true, append([]string(nil), key.Tags...), key.Ephemeral
+	}
+	if sso != nil { // signed in: the identity provider vouched for the user, the policy admitted them
+		m.Authorized, m.Ephemeral, m.User = true, false, sso.email
+		m.Tags = append([]string(nil), sso.tags...)
+		m.Expires = now.Add(sso.ttl).UTC()
+	}
+	if memberExpired(m, now) {
+		return zr.RegisterResponse{}, errKeyExpired
 	}
 	out := zr.RegisterResponse{Status: "pending", Member: m.ID}
 	if m.Authorized {
@@ -326,7 +346,7 @@ func (h *routerHub) reset() {
 
 func (h *routerHub) projectLocked(m *zr.Member) zr.Peer {
 	p := zr.Peer{ID: m.ID, Name: m.Name, NodeKey: m.NodeKey, DiscoKey: m.DiscoKey, Tags: m.Tags,
-		Addresses: memberAddrs(m)}
+		Addresses: memberAddrs(m), User: m.User, Expires: m.Expires}
 	p.AllowedIPs = append(append([]string(nil), p.Addresses...), m.Approved...)
 	if s := h.soft[m.ID]; s != nil {
 		p.Endpoints, p.HomeRelay = s.Endpoints, s.HomeRelay
@@ -359,8 +379,12 @@ func (h *routerHub) setState(st *zr.State, version uint64) {
 	for i := range st.Networks {
 		h.nets[st.Networks[i].ID] = &st.Networks[i]
 	}
+	now := time.Now()
 	for i := range st.Members {
 		m := &st.Members[i]
+		if memberExpired(m, now) {
+			m.Authorized = false // expired: out of every netmap until it signs in again (a copy: never stored)
+		}
 		h.members[m.ID] = m
 		if m.Authorized && h.nets[m.Network] != nil {
 			byNet[m.Network] = append(byNet[m.Network], m)
@@ -480,6 +504,9 @@ func (h *routerHub) authorize(id, keyHash string) (*zr.Member, error) {
 		return nil, errRouterLoading
 	}
 	m := h.members[id]
+	if m != nil && memberExpired(m, time.Now()) {
+		return nil, errKeyExpired
+	}
 	if m == nil || !m.Authorized || h.nets[m.Network] == nil || subtle.ConstantTimeCompare([]byte(m.KeyHash), []byte(keyHash)) != 1 {
 		return nil, errUnauthorized
 	}
@@ -564,6 +591,7 @@ type routerServer struct {
 	limiter   *rateLimiter           // per client IP
 	devLimit  *rateLimiter           // per device
 	denied    *clusterServer         // rate-limited audit of rejected credentials
+	sso       *ssoManager
 	proxyOnce sync.Once
 	proxyTr   http.RoundTripper
 }
@@ -571,7 +599,7 @@ type routerServer struct {
 func newRouterServer(hub *routerHub, caPEM string) *routerServer {
 	return &routerServer{hub: hub, caPEM: caPEM, isLeader: func() bool { return true },
 		limiter: newRateLimiter(600, time.Minute), devLimit: newRateLimiter(60, time.Minute),
-		denied: newClusterServer(), sync: func() {}}
+		denied: newClusterServer(), sync: func() {}, sso: newSSOManager()}
 }
 
 type routerIdent struct {
@@ -720,11 +748,14 @@ func (rt *routerServer) register(r *http.Request, who routerIdent) (zr.RegisterR
 	if err == nil {
 		err = checkRegister(&req)
 	}
+	if err == nil && req.SSO {
+		return rt.registerSSO(r, req, csrInfo{csr, kh}, who)
+	}
 	var out zr.RegisterResponse
 	if err == nil {
 		err = withState(func(st *ClusterState) error {
 			var e error
-			out, e = routerRegister(st, req, csr, kh, time.Now())
+			out, e = routerRegister(st, req, csr, kh, time.Now(), nil)
 			return e
 		})
 	}
@@ -882,6 +913,9 @@ func startRouter(mux *http.ServeMux, rs *raftStore, cfg *ClusterConfig, caPEM st
 			case <-house.C:
 				if !rs.isLeader() {
 					continue
+				}
+				if st, ver := rs.routerSnapshot(); st != nil {
+					hub.setState(st, ver) // re-evaluate expiries even when nothing was committed
 				}
 				var gone []string
 				err := withState(func(st *ClusterState) error {

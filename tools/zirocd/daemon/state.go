@@ -28,6 +28,7 @@ type State struct {
 	DiscoKey  string   `json:"disco_key"`        // base64 private
 	IPv4      string   `json:"ipv4,omitempty"`
 	IPv6      string   `json:"ipv6,omitempty"`
+	SSO       bool     `json:"sso,omitempty"` // registering by signing in (zirocd up --sso)
 	Prefs     Prefs    `json:"prefs"`
 }
 

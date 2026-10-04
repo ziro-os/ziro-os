@@ -244,27 +244,28 @@ var routerNetworkRmCmd = &cobra.Command{
 var routerNetworkSetCmd = &cobra.Command{
 	Use:     "set <network>",
 	Short:   "Change network settings",
-	Example: "  ziroctl router network set office --client-version 1.0.21\n  ziroctl router network set office --client-version latest",
+	Example: "  ziroctl router network set office --client-version 1.0.21\n  ziroctl router network set office --sso-domains example.com --sso-group-tags admins=admin --key-expiry 2160h",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
 			return err
 		}
-		if !cmd.Flags().Changed("client-version") {
-			return fmt.Errorf("nothing to set (--client-version)")
-		}
+		cvSet := cmd.Flags().Changed("client-version")
 		cv := strings.TrimPrefix(rtClientVersion, "v")
 		if cv == "latest" {
 			cv = ""
-		} else if _, ok := parseSemver(cv); !ok {
+		} else if _, ok := parseSemver(cv); cvSet && !ok {
 			return fmt.Errorf("invalid --client-version %q (X.Y.Z or latest)", rtClientVersion)
 		}
 		return withState(func(st *ClusterState) error {
 			n, err := mustNetwork(st, args[0])
-			if err == nil {
+			if err != nil {
+				return err
+			}
+			if cvSet {
 				n.ClientVersion = cv
 			}
-			return err
+			return applyNetworkSSO(cmd, n)
 		})
 	},
 }
@@ -567,7 +568,7 @@ var routerACLCmd = &cobra.Command{
 	Short:   "Who may reach whom; default deny",
 	Example: "  ziroctl router acl get office > acl.yaml\n  ziroctl router acl set office -f acl.yaml\n  ziroctl router acl test office web-1 db-1 5432/tcp",
 	Long: `Rules allow traffic; everything else is dropped by the receiving device.
-Selectors: *, tag:<t>, group:<g>, member:<name> or a CIDR (subnet routes).
+Selectors: *, tag:<t>, group:<g>, member:<name>, user:<email> (signed-in devices) or a CIDR.
 Destinations add ports: tag:db:5432, *:*, member:nas:80,443, 10.0.0.0/16:22.
 
   groups:

@@ -5,7 +5,7 @@
 #   lanA 172.31.1.0/24   natA (.2) -- client (.10)      each LAN reaches "pub" only through
 #   lanB 172.31.2.0/24   natB (.2) -- web (.10)         its NAT (iptables MASQUERADE)
 #
-# Checks: join; subnet routing (web routes its LAN, approved by the harness); hole punching (direct path between two NATed devices); the default-deny ACL
+# Checks: join; sign-in (OIDC device flow, fake provider in the router harness); subnet routing (web routes its LAN, approved by the harness); hole punching (direct path between two NATed devices); the default-deny ACL
 # (tcp/8080 only towards tag:web); DNS; relay fallback when UDP between the NATs is blocked;
 # recovery to a direct path. Reports direct and relayed throughput. Needs docker.
 set -eu
@@ -16,7 +16,7 @@ p=zr-e2e-$$
 img=alpine:3.22
 cleanup() {
 	[ -n "${KEEP:-}" ] && { echo "kept containers with prefix $p"; return; }
-	docker rm -f "$p-router" "$p-natA" "$p-natB" "$p-client" "$p-web" "$p-lanhost" >/dev/null 2>&1 || true
+	docker rm -f "$p-router" "$p-natA" "$p-natB" "$p-client" "$p-web" "$p-lanhost" "$p-laptop" >/dev/null 2>&1 || true
 	for n in pub lanA lanB; do docker network rm "$p-$n" >/dev/null 2>&1 || true; done
 	docker run --rm -v "$work:/w" $img rm -rf /w/shared >/dev/null 2>&1 || true # root-owned
 	rm -rf "$work"
@@ -76,7 +76,10 @@ for _ in $(seq 30); do docker exec "$p-client" test -S /run/zirocd.sock 2>/dev/n
 docker exec -e ZIROCD_KEY="$key_plain" "$p-client" /w/zirocd up --name client
 docker exec -e ZIROCD_KEY="$key_web" "$p-web" /w/zirocd up --name web --advertise-routes 172.31.2.0/24
 ip_of() { docker exec "$p-$1" /w/zirocd status --json | sed -n 's/.*"ipv4": "\([0-9.]*\)".*/\1/p' | head -1; }
-path_to_web() { docker exec "$p-client" /w/zirocd status --json | sed -n 's/.*"path": "\([^"]*\)".*/\1/p' | head -1; }
+path_to_web() { # the path of the peer named web (peers are sorted by name)
+	docker exec "$p-client" /w/zirocd status --json |
+		awk '/"name": "web"/ {w=1} w && /"path"/ {sub(/.*"path": "/, ""); sub(/".*/, ""); print; exit}'
+}
 cip=$(ip_of client); wip=$(ip_of web)
 echo "client=$cip web=$wip"
 
@@ -90,7 +93,9 @@ wait_path() { # prefix seconds
 	done
 	return 1
 }
-desc="client pings web (two NATs apart)"; check docker exec "$p-client" ping -c 3 -W 2 "$wip"
+# First contact may cost one WireGuard handshake retry (5s) while both netmaps settle.
+desc="client pings web (two NATs apart)"
+check sh -c "for i in \$(seq 10); do docker exec $p-client ping -c 1 -W 1 $wip && exit 0; sleep 1; done; exit 1"
 desc="hole punching: direct path through both NATs"; check wait_path direct 20
 echo "  path: $(path_to_web)"
 desc="web pings client"; check docker exec "$p-web" ping -c 3 -W 2 "$cip"
@@ -103,6 +108,17 @@ desc="DNS: web.e2e.ziro resolves on the tunnel resolver"
 check sh -c "docker exec $p-client nslookup web.e2e.ziro $cip 2>/dev/null | grep -q $wip"
 desc="subnet router: client reaches a plain host on web's LAN through web"
 check sh -c "for i in \$(seq 15); do docker exec $p-client ping -c 1 -W 1 172.31.2.20 && exit 0; sleep 1; done; exit 1"
+echo "== sign-in (OIDC device flow through the router)"
+docker run -d --name "$p-laptop" --network "$p-pub" --cap-add NET_ADMIN --device /dev/net/tun -v "$work:/w" \
+	$img sh -c 'apk add -q --no-cache iproute2 >/dev/null; /w/zirocd daemon' >/dev/null
+for _ in $(seq 60); do docker exec "$p-laptop" test -S /run/zirocd.sock 2>/dev/null && break; sleep 1; done
+key_sso=$(docker exec "$p-router" cat /w/shared/key-sso)
+docker exec -e ZIROCD_KEY="$key_sso" "$p-laptop" /w/zirocd up --sso --name laptop | sed 's/^/  /'
+desc="signed-in device is connected, as alice with an expiring key"
+check sh -c "docker exec $p-laptop /w/zirocd status | grep -q 'signed in until'"
+# A first handshake can reach web just before web's netmap lists laptop: WireGuard retries in 5s.
+desc="signed-in device pings web"
+check sh -c "for i in \$(seq 10); do docker exec $p-laptop ping -c 1 -W 1 $wip && exit 0; sleep 1; done; exit 1"
 echo "== throughput direct (userspace WireGuard through two NATs)"
 docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || true
 

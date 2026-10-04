@@ -118,6 +118,26 @@ type MagicBind struct {
 	kick     chan *mpeer
 	stopLoop context.CancelFunc
 	pings    atomic.Uint64 // disco pings sent (tests guard against ping storms)
+	overlay  atomic.Pointer[[]netip.Prefix]
+}
+
+// SetOverlay is the set of prefixes routed through the tunnel (the network and approved subnet
+// routes). An underlay address inside it is never used: WireGuard packets sent there would be
+// routed back into WireGuard (a subnet router's own LAN address, for example).
+func (b *MagicBind) SetOverlay(ps []netip.Prefix) {
+	cp := append([]netip.Prefix(nil), ps...)
+	b.overlay.Store(&cp)
+}
+
+func (b *MagicBind) underlay(a netip.AddrPort) bool {
+	if ps := b.overlay.Load(); ps != nil {
+		for _, p := range *ps {
+			if p.Contains(a.Addr()) {
+				return false
+			}
+		}
+	}
+	return a.IsValid()
 }
 
 func NewMagicBind(discoPrivB64 string, auth RelayAuth, onChange func()) (*MagicBind, error) {
@@ -410,6 +430,9 @@ func (b *MagicBind) handleDisco(pkt []byte, src netip.AddrPort, from *[32]byte) 
 	if p == nil || (from != nil && *from != p.key) { // a relayed packet must come from that peer's key
 		return
 	}
+	if from == nil && !b.underlay(src) { // arrived through our own tunnel: never a path
+		return
+	}
 	msg, ok := box.OpenAfterPrecomputation(nil, pkt[discoHeader:], &nonce, &p.shared)
 	if !ok || len(msg) < 13 {
 		return
@@ -491,7 +514,9 @@ func (b *MagicBind) pingPeer(p *mpeer) {
 	p.lastPing = now
 	b.mu.Unlock()
 	for _, t := range targets {
-		b.sendPing(p, t)
+		if b.underlay(t) {
+			b.sendPing(p, t)
+		}
 	}
 	if callMe {
 		b.sendPing(p, netip.AddrPort{})
@@ -700,6 +725,7 @@ func (b *MagicBind) SetRelays(relays []zr.Relay) {
 		l.close()
 	}
 	go b.probeSTUN()
+	_ = b.link("") // be reachable through the home relay at once: a first handshake is not lost
 	if changed && b.onChange != nil {
 		b.onChange()
 	}

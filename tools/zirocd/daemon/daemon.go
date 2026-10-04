@@ -42,11 +42,22 @@ type Status struct {
 	ClientVersion string       `json:"client_version,omitempty"` // pinned by the network admin
 	Update        string       `json:"update,omitempty"`         // newer version available (notify mode)
 	CertExpires   time.Time    `json:"cert_expires,omitempty"`
+	KeyExpires    time.Time    `json:"key_expires,omitempty"` // signed-in devices: sign in again before this
+	SignIn        *SignIn      `json:"sign_in,omitempty"`     // a sign-in under way
 	Dropped       uint64       `json:"dropped_packets"`
 	Peers         []PeerStatus `json:"peers"`
 }
 
+// SignIn is what the user does to finish `zirocd up --sso`.
+type SignIn struct {
+	URL         string    `json:"url"`
+	URLComplete string    `json:"url_complete,omitempty"`
+	Code        string    `json:"code"`
+	Expires     time.Time `json:"expires"`
+}
+
 type UpRequest struct {
+	SSO        bool     `json:"sso,omitempty"` // sign in through the router's identity provider
 	Key        string   `json:"key,omitempty"` // zr1_ invite (with or without a join key)
 	Name       string   `json:"name,omitempty"`
 	Routes     []string `json:"routes,omitempty"`
@@ -102,6 +113,9 @@ func (d *Daemon) Up(ctx context.Context, req UpRequest) (Status, error) {
 	if req.AutoUpdate != "" && !slices.Contains([]string{"on", "notify", "off"}, req.AutoUpdate) {
 		return d.Status(), errors.New("auto-update must be on, notify or off")
 	}
+	if req.SSO {
+		return d.upSSO(ctx, cur, req)
+	}
 	if req.Key == "" {
 		if cur == nil {
 			return d.Status(), errors.New("not registered: zirocd up --key <zr1_...>")
@@ -152,6 +166,45 @@ func (d *Daemon) Up(ctx context.Context, req UpRequest) (Status, error) {
 	d.stopLocked()
 	d.st = st
 	d.startLocked()
+	d.mu.Unlock()
+	return d.Status(), nil
+}
+
+// upSSO starts a sign-in: with an invite (zr1_ without a join key) for a new device, or for the
+// current device (signing in again after its key expired).
+func (d *Daemon) upSSO(ctx context.Context, cur *State, req UpRequest) (Status, error) {
+	var st *State
+	switch {
+	case req.Key != "":
+		inv, err := zr.ParseInvite(req.Key)
+		if err != nil {
+			return d.Status(), err
+		}
+		if cur != nil && cur.Network == inv.Network && cur.Pin == inv.Pin {
+			cp := *cur
+			st = &cp
+			st.Endpoints = inv.Endpoints
+		} else if st, err = newState(inv, Prefs{AcceptDNS: true, AutoUpdate: "on"}); err != nil {
+			return d.Status(), err
+		}
+		applyPrefs(&st.Prefs, req)
+	case cur != nil:
+		cp := *cur
+		st = &cp
+		applyPrefs(&st.Prefs, req)
+	default:
+		return d.Status(), errors.New("not registered: zirocd up --sso --key <zr1_ invite>")
+	}
+	st.JoinKey, st.SSO = "", true
+	if err := d.register(ctx, st); err != nil {
+		return d.Status(), err
+	}
+	d.mu.Lock()
+	d.stopLocked()
+	d.st = st
+	si := d.status.SignIn
+	d.startLocked()
+	d.status.SignIn = si
 	d.mu.Unlock()
 	return d.Status(), nil
 }
@@ -234,6 +287,7 @@ func (d *Daemon) register(ctx context.Context, st *State) error {
 	if st.JoinKey == "" {
 		req.Network = st.Network
 	}
+	req.SSO = st.SSO
 	out, err := c.Register(ctx, req)
 	if err != nil {
 		return err
@@ -244,8 +298,17 @@ func (d *Daemon) register(ctx context.Context, st *State) error {
 			return errors.New("router returned a CA that does not match the pin")
 		}
 	}
+	if out.Status == "sso" { // sign-in under way: the user finishes it in a browser
+		st.Status = "pending"
+		d.setStatus(func(s *Status) {
+			s.SignIn = &SignIn{URL: out.URL, URLComplete: out.URLComplete, Code: out.Code, Expires: out.SSOExpires}
+		})
+		return SaveState(d.Dir, st)
+	}
 	st.Member, st.Status = out.Member, out.Status
 	if out.Status == "authorized" {
+		st.SSO = false
+		d.setStatus(func(s *Status) { s.SignIn = nil })
 		st.Cert, st.IPv4, st.IPv6, st.JoinKey = out.Cert, out.IPv4, out.IPv6, "" // the key is spent: never kept
 	}
 	return SaveState(d.Dir, st)
@@ -255,7 +318,11 @@ func (d *Daemon) startLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel, d.done = cancel, make(chan struct{})
 	st := *d.st
-	d.status = Status{State: "connecting", Network: st.Network, Name: st.Prefs.Name, IPv4: st.IPv4, IPv6: st.IPv6}
+	state := "connecting"
+	if st.Status == "pending" {
+		state = "pending"
+	}
+	d.status = Status{State: state, Network: st.Network, Name: st.Prefs.Name, IPv4: st.IPv4, IPv6: st.IPv6}
 	go func(done chan struct{}) {
 		defer close(done)
 		d.run(ctx, &st)
@@ -322,14 +389,24 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 		d.setStatus(func(s *Status) { s.State, s.Error = state, err.Error() })
 	}
 	for st.Status == "pending" {
-		d.setStatus(func(s *Status) { s.State, s.Error = "pending", "waiting for an admin: ziroctl router member approve" })
-		if !sleepCtx(ctx, 10*time.Second) {
+		wait := 10 * time.Second
+		msg := "waiting for an admin: ziroctl router member approve"
+		if st.SSO {
+			wait, msg = 5*time.Second, "waiting for you to sign in (zirocd status shows the code)"
+		}
+		d.setStatus(func(s *Status) { s.State, s.Error = "pending", msg })
+		if !sleepCtx(ctx, wait) {
 			return
 		}
 		if err := d.register(ctx, st); err != nil {
 			var se *zr.StatusError
-			if errors.As(err, &se) && (se.Code == http.StatusUnauthorized || se.Code == http.StatusNotFound) {
-				fail("revoked", err)
+			if errors.As(err, &se) && (se.Code == http.StatusUnauthorized || se.Code == http.StatusNotFound || se.Code == http.StatusForbidden) {
+				state := "revoked"
+				if se.Code == http.StatusForbidden {
+					state = "denied" // sign-in refused: the user or their account may not join
+				}
+				d.setStatus(func(s *Status) { s.SignIn = nil })
+				fail(state, err)
 				return
 			}
 			fail("pending", err)
@@ -339,6 +416,7 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 	if d.st != nil && d.st.Network == st.Network {
 		*d.st = *st
 	}
+	d.status.IPv4, d.status.IPv6 = st.IPv4, st.IPv6 // known once admitted
 	d.mu.Unlock()
 
 	port := st.Prefs.Port
@@ -384,7 +462,7 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 						s.Domain = m.Domain
 					}
 					if m.Self != nil {
-						s.Name = m.Self.Name
+						s.Name, s.KeyExpires = m.Self.Name, m.Self.Expires
 					}
 				})
 				if m.Type == "full" || m.ClientVersion != "" {
@@ -406,10 +484,17 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 		}
 		var se *zr.StatusError
 		if errors.As(err, &se) && (se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
-			fail("revoked", errors.New("this device was removed from the network (zirocd up --key to join again)"))
+			if strings.Contains(se.Message, "expired") {
+				fail("expired", errors.New("this device's sign-in expired: zirocd up --sso"))
+			} else {
+				fail("revoked", errors.New("this device was removed from the network (zirocd up --key to join again)"))
+			}
 			d.mu.Lock()
 			if d.st != nil {
 				d.st.Status = "revoked"
+				if strings.Contains(se.Message, "expired") {
+					d.st.Status = "expired"
+				}
 				_ = SaveState(d.Dir, d.st)
 			}
 			d.mu.Unlock()
