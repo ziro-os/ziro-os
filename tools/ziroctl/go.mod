@@ -35,9 +35,11 @@ require (
 	go.etcd.io/bbolt v1.4.1 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	// Not built into ziroctl, but wireguard-go's go.mod pins a gVisor affected by CVE-2026-96812
-	// (fixed in 20260824.0): raise it in the module graph scanners read.
-	gvisor.dev/gvisor v0.0.0-20261004063249-f57b8fc79db4 // indirect
 )
 
 replace github.com/ziro-os/ziro-os/sdk => ../../sdk
+
+// wireguard-go's go.mod requires gVisor for its optional netstack TUN, which we never import.
+// Replacing it with an empty module keeps gVisor out of the build and the module graph: no gVisor
+// code can be linked by accident, and scanners stop reporting advisories for code we don't ship.
+replace gvisor.dev/gvisor => ../gvisor-stub
