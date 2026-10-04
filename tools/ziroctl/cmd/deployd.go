@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -411,24 +412,61 @@ func deployRaw(method, path string, body any) (*http.Response, error) {
 }
 
 func deployRawCtx(ctx context.Context, method, path string, body any) (*http.Response, error) {
-	var rd io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		rd = strings.NewReader(string(b))
+		payload = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://ziroctld"+path, rd)
-	if err != nil {
-		return nil, err
+	do := func() (*http.Response, error) {
+		var rd io.Reader
+		if payload != nil {
+			rd = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, "http://ziroctld"+path, rd)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return deployHTTP.Do(req)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := deployHTTP.Do(req)
-	if err != nil {
-		return nil, errors.New("ziroctld isn't running (enable it with: ziroctl module enable builder)")
+	resp, err := do()
+	if err == nil {
+		return resp, nil
+	}
+	// ziroctld is a supervised service of the builder module: if it is down (crashed, or not up
+	// yet after a boot), start it once and retry instead of sending the operator away.
+	if serr := startDeployDaemon(ctx); serr != nil {
+		return nil, serr
+	}
+	if resp, err = do(); err != nil {
+		return nil, fmt.Errorf("ziroctld isn't answering on %s (log: /var/log/ziroctld.log): %w", deploySocket, err)
 	}
 	return resp, nil
+}
+
+// startDeployDaemon starts the ziroctld service and waits (up to 10s) for its socket.
+func startDeployDaemon(ctx context.Context) error {
+	if _, err := loadServiceDef("ziroctld"); err != nil {
+		return errors.New("ziroctld isn't running (enable it with: ziroctl module enable builder)")
+	}
+	if err := startModuleService("ziroctld"); err != nil && !strings.Contains(err.Error(), "already running") {
+		return fmt.Errorf("ziroctld isn't running and could not be started: %w (log: /var/log/ziroctld.log)", err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if c, err := net.DialTimeout("unix", deploySocket, time.Second); err == nil {
+			c.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return nil // let the retry report why the socket doesn't answer
 }
 
 // serveDeployDaemon runs ziroctld until SIGTERM.
