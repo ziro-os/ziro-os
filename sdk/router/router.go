@@ -176,7 +176,8 @@ type PortRange struct {
 type MapMessage struct {
 	Type          string       `json:"type"`
 	Self          *Peer        `json:"self,omitempty"`
-	Domain        string       `json:"domain,omitempty"` // <network>.ziro
+	Domain        string       `json:"domain,omitempty"`   // <network>.ziro
+	Networks      []string     `json:"networks,omitempty"` // the network's IPv4 and IPv6 prefixes (full only)
 	Peers         []Peer       `json:"peers,omitempty"`
 	Removed       []string     `json:"removed,omitempty"`
 	Filter        []FilterRule `json:"filter,omitempty"`

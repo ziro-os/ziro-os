@@ -41,7 +41,7 @@ source, not suppressed.
 
 | What | Key | Verified by |
 |---|---|---|
-| Tools and OS releases (`SHA256SUMS.sig`, ed25519) | public half in [`tools/ziroctl/cmd/release.pub`](tools/ziroctl/cmd/release.pub) | `ziroctl update` / `ziroctl upgrade` before installing |
+| Tools and OS releases (`SHA256SUMS.sig`, ed25519) | public half in [`sdk/release/release.pub`](sdk/release/release.pub) | `ziroctl update` / `ziroctl upgrade` / `zirocd` self-update before installing |
 | Kernel modules | certificate [`kernel/certs/ziro-modules.crt`](kernel/certs/ziro-modules.crt) | the kernel (`MODULE_SIG_FORCE`) |
 | Official catalogs (ed25519-signed index; separate keys for plugins and apps) | public keys in [`tools/ziroctl/cmd/catalog_keys.go`](tools/ziroctl/cmd/catalog_keys.go) | `ziroctl` on every catalog sync |
 

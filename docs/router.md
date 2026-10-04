@@ -5,7 +5,7 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 | Piece | What it is | Status |
 |---|---|---|
 | Control plane | `ziroctl router`, served by `cluster-master` on every master (`/router/v1/*` on the cluster port, 7443) | shipped (R1) |
-| Client | `zirocd` for Linux, macOS and Windows (amd64, arm64), signed releases with self-update | R2 |
+| Client | `zirocd` for Linux, macOS and Windows (amd64, arm64), signed releases with self-update | shipped (R2) |
 | Relays + NAT traversal | `ziroctl router relay serve` (QUIC udp/443, TLS tcp/443, STUN udp/3478), hole punching | R3 |
 | Kernel fast path, subnet routing on Ziro OS | `zirocd --dataplane kernel`, `ziroctl router join` | R4 |
 | SSO | OIDC device-code login (`zirocd up --sso`) | R5 |
@@ -34,6 +34,40 @@ Other ways in:
 - **Ephemeral devices** (CI, autoscaling): `key create --ephemeral`. They are removed 10 minutes after going offline.
 
 Every command takes `--json`. Every change is in the audit log (`ziroctl audit log`).
+
+## Client: zirocd
+
+`zirocd` is a single static binary (about 8 MB) that runs as a system service and is controlled with the same binary:
+
+| OS | Install | Tunnel | Split DNS |
+|---|---|---|---|
+| Linux (amd64, arm64) | `curl -fsSL https://raw.githubusercontent.com/ziro-os/ziro-os/main/scripts/install-zirocd.sh \| sh` | TUN `zr0`, systemd unit | `resolvectl` (systemd-resolved) |
+| macOS (Intel, Apple silicon) | same script | `utunN`, launchd daemon | `/etc/resolver/<network>.ziro` |
+| Windows (amd64, arm64) | `irm https://raw.githubusercontent.com/ziro-os/ziro-os/main/scripts/install-zirocd.ps1 \| iex` (elevated) | Wintun adapter `Ziro`, Windows service | NRPT rule |
+
+```sh
+sudo zirocd up --key zr1_...                     # or ZIROCD_KEY=zr1_... to keep it out of history
+sudo zirocd up --key zr1_... --name build-01 --advertise-routes 10.0.0.0/16
+zirocd status                                    # state, address, peers, handshakes, traffic
+zirocd ping db-1
+sudo zirocd down                                 # disconnect, keep the identity
+sudo zirocd logout                               # disconnect and delete the keys
+```
+
+- **Data plane.** Userspace WireGuard (wireguard-go) with MTU 1280. Peers are configured one by one from netmap deltas, so a change never resets sessions it doesn't touch. On a 2-container Docker test on an M2 it carries about 2.7 Gbit/s. Linux hosts get a kernel fast path in R4.
+- **Inbound filter.** The router's rules for this device are enforced on every packet. Replies to connections the device opened are let back in; anything else unsolicited is dropped (`zirocd status` counts drops).
+- **Names.** `<device>.<network>.ziro` resolve through a tiny resolver on the device's own tunnel address. Only that domain is sent to it, so other DNS is untouched.
+- **Keys and state.** The WireGuard, disco and TLS private keys are generated on the device. They live in `/var/lib/zirocd` (Linux), `/Library/Application Support/zirocd` (macOS) or `%ProgramData%\zirocd` (Windows, ACL'd to SYSTEM and Administrators). The join key is deleted once used. The CLI talks to the daemon over a root-only socket (an Administrators-only named pipe on Windows).
+- **Endpoints.** In R2 a device reports its interface addresses, so it reaches peers on the same network or with public addresses. NAT traversal and relays arrive in R3.
+
+### Updates
+
+zirocd follows the tools release stream (`tools/vX.Y.Z`), which is built for all six targets by `.github/workflows/tools-release.yml` with build-provenance attestations.
+
+- Every 6 hours (with jitter) it checks for a newer version, or for the version the network admin pinned (`ziroctl router network set office --client-version X.Y.Z`).
+- It installs only if `SHA256SUMS` carries the Ziro release signature (ed25519) and the binary matches. The swap is atomic, and the previous binary is kept.
+- If the new binary fails to reach "connected" in two starts, it is rolled back automatically.
+- `--auto-update notify` only reports in `zirocd status`; `off` disables checks. `sudo zirocd update` installs now.
 
 ## Access control
 

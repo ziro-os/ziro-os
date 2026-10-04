@@ -31,10 +31,11 @@ jobs:
           cache-dependency-path: |
             tools/ziroctl/go.sum
             tools/ziropkg/go.sum
+            tools/zirocd/go.sum
 
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l tools/ziroctl tools/ziropkg sdk)
+          unformatted=$(gofmt -l tools/ziroctl tools/ziropkg tools/zirocd sdk)
           [ -z "$unformatted" ] || { echo "::error::gofmt needed:"; echo "$unformatted"; exit 1; }
 
       - name: go vet + staticcheck
@@ -46,6 +47,10 @@ jobs:
             (cd "$m" && go vet ./...) || fail=1
             (cd "$m" && "$(go env GOPATH)/bin/staticcheck" ./...) || fail=1
           done
+          for os in linux darwin windows; do # zirocd is cross-platform: check every OS's files
+            echo "== tools/zirocd ($os)"
+            (cd tools/zirocd && GOOS=$os go vet ./... && GOOS=$os "$(go env GOPATH)/bin/staticcheck" ./...) || fail=1
+          done
           exit "$fail"
 
       - name: shellcheck
@@ -53,7 +58,7 @@ jobs:
           curl -fsSLo /tmp/sc.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
           echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/sc.tar.xz" | sha256sum -c -
           tar -xJf /tmp/sc.tar.xz -C /tmp
-          /tmp/shellcheck-v0.11.0/shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh
+          /tmp/shellcheck-v0.11.0/shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh tests/router/*.sh
 
   unit-tests:
     name: Unit & Audit Tests
@@ -69,6 +74,7 @@ jobs:
           cache-dependency-path: |
             tools/ziroctl/go.sum
             tools/ziropkg/go.sum
+            tools/zirocd/go.sum
 
       - name: SDK (schema, catalog, client, API types) tests
         run: cd sdk && go vet ./... && go test ./...
@@ -95,6 +101,7 @@ jobs:
           (cd sdk && govulncheck ./...)
           (cd tools/ziroctl && govulncheck ./...)
           (cd tools/ziropkg && govulncheck ./...)
+          for os in linux darwin windows; do (cd tools/zirocd && GOOS=$os govulncheck ./...); done
           (cd packages/cni-dhcp && GOOS=linux govulncheck github.com/containernetworking/plugins/plugins/ipam/dhcp)
 
       - name: Test installer bootstrap transport
@@ -109,6 +116,37 @@ jobs:
         run: |
           cd tools/ziroctl
           go run . security audit --json
+
+  zirocd:
+    name: zirocd (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: tools/zirocd/go.sum
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          race=-race; [ "$RUNNER_OS" = Windows ] && race= # the Windows race detector needs cgo
+          cd tools/zirocd && go test $race ./...
+
+      - name: Cross-build every release target
+        if: runner.os == 'Linux'
+        run: make zirocd-all
+
+      - name: Router + zirocd end to end (Docker, real TUN devices)
+        if: runner.os == 'Linux'
+        run: sh tests/router/e2e.sh
 
   build-and-smoke:
     name: Build & Smoke Test
@@ -126,6 +164,7 @@ jobs:
           cache-dependency-path: |
             tools/ziroctl/go.sum
             tools/ziropkg/go.sum
+            tools/zirocd/go.sum
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4

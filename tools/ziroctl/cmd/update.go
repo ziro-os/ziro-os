@@ -2,12 +2,7 @@ package cmd
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/x509"
-	_ "embed"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/ziro-os/ziro-os/sdk/release"
 )
 
 // `ziroctl update`: ziroctl and ziropkg ship on their own release stream (tags tools/vX.Y.Z),
@@ -25,11 +21,9 @@ import (
 // (ed25519; the public half is below), and nothing is installed unless the signature and every
 // hash verify. The binaries are replaced atomically, the previous ones kept for --rollback.
 
-// releasePublicKey verifies SHA256SUMS.sig of tools and OS releases (signed in CI with the
-// secret ZIRO_RELEASE_KEY by scripts/release/sign-sums.sh, which checks against this file).
-//
-//go:embed release.pub
-var releasePublicKey string
+// releasePublicKey verifies SHA256SUMS.sig of tools and OS releases (sdk/release/release.pub,
+// shared with zirocd; signed in CI with the secret ZIRO_RELEASE_KEY by scripts/release/sign-sums.sh).
+var releasePublicKey = release.PublicKey
 
 var (
 	toolsTagRe      = regexp.MustCompile(`^tools/v([0-9]+\.[0-9]+\.[0-9]+)$`)
@@ -44,20 +38,7 @@ var (
 
 // verifyReleaseSums checks an ed25519 signature (base64) over SHA256SUMS.
 func verifyReleaseSums(sums, sig []byte, pubPEM string) error {
-	blk, _ := pem.Decode([]byte(pubPEM))
-	if blk == nil {
-		return errors.New("bad release public key")
-	}
-	k, err := x509.ParsePKIXPublicKey(blk.Bytes)
-	pub, ok := k.(ed25519.PublicKey)
-	if err != nil || !ok {
-		return errors.New("release public key is not ed25519")
-	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
-	if err != nil || !ed25519.Verify(pub, sums, raw) {
-		return errors.New("SHA256SUMS signature does not verify: refusing the release")
-	}
-	return nil
+	return release.Verify(sums, sig, pubPEM)
 }
 
 // UpdateCheck is the cached result of the last check (shown in the login summary).
