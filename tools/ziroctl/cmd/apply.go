@@ -15,7 +15,8 @@ import (
 )
 
 // `ziroctl apply -f host.yaml`: provision a whole host from one declarative file (hostname, SSH
-// keys, firewall, packages, plugins, stacks, updates, network, cluster membership). It plans
+// keys, firewall, packages, plugins, stacks, updates, network, cluster membership, and on a
+// master the router). It plans
 // first and changes only what differs, so applying the same file twice is a no-op. Each section
 // calls the same operation as its CLI command. The file can arrive as cloud user-data starting
 // with "#ziro-config", from the installer (ziro.config=https://...), or over the API.
@@ -192,6 +193,11 @@ func planHost(cfg HostConfig, dir string, confirm time.Duration) (*hostPlanner, 
 			joinTokenFile, joinCAHashFlag, joinControlPlane, joinTokenFlag = c.Join.TokenFile, c.Join.CAHash, c.Join.ControlPlane, ""
 			return clusterJoinCmd.RunE(clusterJoinCmd, []string{c.Join.Address})
 		})
+	}
+	if h.Router != nil {
+		if err := planRouter(p, h.Router); err != nil {
+			return nil, err
+		}
 	}
 	return p, nil
 }

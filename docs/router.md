@@ -11,6 +11,8 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 | Ziro OS hosts, subnet routers | `ziroctl router join` (zirocd ships in the full image), routed LANs and cluster meshes | shipped (R4) |
 | SSO | OIDC device-code sign-in (`zirocd up --sso`), expiring device keys, `user:` ACL selectors | shipped (R5) |
 
+**Running it in production** (planets in several regions, moons, monitoring, upgrades, failure drills): [router-deploy.md](router-deploy.md).
+
 ## Operator quick start
 
 The router runs on the cluster masters. A standalone router is a one-master cluster (`ziroctl cluster init`). Masters must be reachable on the cluster port (tcp/7443) from wherever devices are. If devices dial a public name or a load balancer, set it once:

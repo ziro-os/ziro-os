@@ -25,6 +25,8 @@ Ziro-OS is under active development and is not ready for production use. Start w
 - [Virtualization](virtualization.md) and [multi-architecture builds](multi-architecture-guide.md).
 - [Clustering](clustering.md), and the [gateway](gateway.md): L4/L7 routing with TLS and HTTP/3, managed by CLI and API, on clusters and standalone hosts.
 - [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes with rollback.
+- [Global router](router.md): private mesh networks for devices anywhere (zirocd, planets, moons, ACLs, SSO), and
+  [running it in production](router-deploy.md).
 - [Storage](storage.md): automatic disk growth and data disks.
 - [Smart DNS](dns.md): caching resolver, split DNS, cluster records, container egress control.
 - [SDK](sdk.md): Go packages (schemas and validators, catalogs, typed API client) and the OpenAPI spec for building on Ziro OS.

@@ -378,10 +378,10 @@ var routerMoonAddCmd = &cobra.Command{
 		if err := validLabel(name); err != nil {
 			return err
 		}
-		h, p, err := net.SplitHostPort(moonPublic)
-		if err != nil || h == "" || !validPortNum(p) || !(validHost(h) || net.ParseIP(h) != nil) {
-			return fmt.Errorf("--public must be the host:port devices dial (got %q)", moonPublic)
+		if err := validHostPort(moonPublic); err != nil {
+			return fmt.Errorf("--public: %w", err)
 		}
+		h, _, _ := net.SplitHostPort(moonPublic)
 		if moonSTUNPort < 1 || moonSTUNPort > 65535 {
 			return errors.New("invalid --stun-port")
 		}

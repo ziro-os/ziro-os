@@ -176,6 +176,7 @@ Every section calls the same operation as its command:
 | `update` | the auto-update switch of `ziroctl update` |
 | `network` | `network apply` (`--confirm-timeout` rolls back unless confirmed) |
 | `cluster.join` | `cluster join` |
+| `router` (masters) | `router endpoints set`, `router sso set`, `router network create`/`set`, `router acl set`, `router moon add`; adds and changes, never deletes. See [router-deploy.md](router-deploy.md#3-router-configuration-as-code) |
 
 **SSH keys:** `apply` manages only the keys listed in the file. Removing a key from the file removes it from the
 host, and keys added any other way are never touched.
