@@ -856,7 +856,7 @@ static void write_pidfile(const char *path, pid_t pid) {
 
 /* 'ziroctl service stop' drops /run/ziro/stopped/<name>: hold the restart until it is gone. */
 static int daemon_held(const char *name) {
-    char p[64];
+    char p[4096];
     snprintf(p, sizeof(p), "/run/ziro/stopped/%s", name);
     return access(p, F_OK) == 0;
 }
