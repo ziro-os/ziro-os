@@ -330,7 +330,13 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 	if port == 0 {
 		port = DefaultPort
 	}
-	eng, err := NewEngine(st.WGKey, port, st.Prefs.AcceptDNS)
+	epChanged := make(chan struct{}, 1)
+	eng, err := NewEngine(st.WGKey, st.DiscoKey, port, st.Prefs.AcceptDNS, d.relayAuth, func() {
+		select {
+		case epChanged <- struct{}{}:
+		default:
+		}
+	})
 	if err != nil {
 		fail("error", err)
 		return
@@ -349,8 +355,8 @@ func (d *Daemon) run(ctx context.Context, st *State) {
 		}
 		if err == nil {
 			epCtx, stopEP := context.WithCancel(ctx)
-			go d.reportEndpoints(epCtx, c, port)
-			err = c.Map(ctx, zr.MapRequest{Endpoints: localEndpoints(port, eng.Name()), Version: d.Version}, func(m zr.MapMessage) error {
+			go d.reportEndpoints(epCtx, c, eng, port, epChanged)
+			err = c.Map(ctx, d.mapRequest(eng, port), func(m zr.MapMessage) error {
 				if err := eng.Apply(m); err != nil {
 					log.Printf("zirocd: apply netmap: %v", err)
 					d.setStatus(func(s *Status) { s.Error = err.Error() })
@@ -463,23 +469,72 @@ func localEndpoints(port int, tunName string) []string {
 	return out
 }
 
-func (d *Daemon) reportEndpoints(ctx context.Context, c *zr.Client, port int) {
-	d.mu.Lock()
-	name := ""
-	if d.eng != nil {
-		name = d.eng.Name()
+// mapRequest is this device's soft state: local and STUN-discovered endpoints, home relay.
+func (d *Daemon) mapRequest(eng *Engine, port int) zr.MapRequest {
+	eps := localEndpoints(port, eng.Name())
+	for _, p := range eng.Bind().PublicEndpoints() {
+		if !slices.Contains(eps, p) && len(eps) < zr.MaxEndpoints {
+			eps = append(eps, p)
+		}
 	}
-	d.mu.Unlock()
-	last := localEndpoints(port, name)
-	for sleepCtx(ctx, 30*time.Second) {
-		cur := localEndpoints(port, name)
-		if slices.Equal(cur, last) {
+	return zr.MapRequest{Endpoints: eps, Version: d.Version, HomeRelay: eng.Bind().Home()}
+}
+
+// reportEndpoints tells the router when this device's endpoints or home relay change (network
+// switch, new NAT mapping): peers then punch towards the new address at once.
+func (d *Daemon) reportEndpoints(ctx context.Context, c *zr.Client, eng *Engine, port int, changed <-chan struct{}) {
+	last := d.mapRequest(eng, port)
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-changed:
+		}
+		cur := d.mapRequest(eng, port)
+		if slices.Equal(cur.Endpoints, last.Endpoints) && cur.HomeRelay == last.HomeRelay {
 			continue
 		}
-		if err := c.UpdateEndpoints(ctx, zr.MapRequest{Endpoints: cur, Version: d.Version}); err == nil {
+		if err := c.UpdateEndpoints(ctx, cur); err == nil {
 			last = cur
 		}
 	}
+}
+
+// relayAuth gives relay connections the router CA and the current device certificate.
+func (d *Daemon) relayAuth() (*x509.Certificate, *tls.Certificate) {
+	d.mu.Lock()
+	st := d.st
+	d.mu.Unlock()
+	if st == nil || st.CA == "" || st.Cert == "" {
+		return nil, nil
+	}
+	b, _ := pem.Decode([]byte(st.CA))
+	if b == nil {
+		return nil, nil
+	}
+	ca, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		return nil, nil
+	}
+	cert, err := tls.X509KeyPair([]byte(st.Cert), []byte(st.TLSKey))
+	if err != nil {
+		return nil, nil
+	}
+	return ca, &cert
+}
+
+// Netcheck probes UDP reachability, NAT mapping and relay latency.
+func (d *Daemon) Netcheck(ctx context.Context) (Netcheck, error) {
+	d.mu.Lock()
+	eng := d.eng
+	d.mu.Unlock()
+	if eng == nil {
+		return Netcheck{}, errors.New("not connected (zirocd up)")
+	}
+	return eng.Bind().Netcheck(ctx), nil
 }
 
 // PinnedVersion is the zirocd version the network admin pinned ("" = latest).
@@ -544,6 +599,10 @@ func (d *Daemon) Handler(update func(ctx context.Context) (string, error)) http.
 		defer cancel()
 		s, err := d.Up(ctx, req)
 		reply(w, s, err)
+	})
+	mux.HandleFunc("GET /netcheck", func(w http.ResponseWriter, r *http.Request) {
+		nc, err := d.Netcheck(r.Context())
+		reply(w, nc, err)
 	})
 	mux.HandleFunc("POST /down", func(w http.ResponseWriter, r *http.Request) { d.Down(); reply(w, d.Status(), nil) })
 	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) { reply(w, d.Status(), d.Logout()) })

@@ -128,15 +128,3 @@ func TestFilter(t *testing.T) {
 		t.Fatal("fragment from a disallowed source delivered")
 	}
 }
-
-func TestPickEndpoint(t *testing.T) {
-	if got := pickEndpoint([]string{"10.0.0.5:41641", "203.0.113.7:41641", "[2001:db8::1]:41641"}); got != "203.0.113.7:41641" {
-		t.Fatalf("got %s", got)
-	}
-	if got := pickEndpoint([]string{"127.0.0.1:1", "junk", "192.168.1.2:41641"}); got != "192.168.1.2:41641" {
-		t.Fatalf("got %s", got)
-	}
-	if pickEndpoint(nil) != "" {
-		t.Fatal("endpoint from nothing")
-	}
-}

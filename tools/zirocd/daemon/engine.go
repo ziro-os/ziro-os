@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	zr "github.com/ziro-os/ziro-os/sdk/router"
-	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -26,6 +25,7 @@ type Engine struct {
 	name   string
 	tun    tun.Device
 	filter *Filter
+	bind   *MagicBind
 	dev    *device.Device
 	dns    dnsServer
 
@@ -40,10 +40,14 @@ type Engine struct {
 	acceptDNS bool
 }
 
-func NewEngine(wgPriv string, port int, acceptDNS bool) (*Engine, error) {
+func NewEngine(wgPriv, discoPriv string, port int, acceptDNS bool, auth RelayAuth, onChange func()) (*Engine, error) {
 	k, err := base64.StdEncoding.DecodeString(wgPriv)
 	if err != nil || len(k) != 32 {
 		return nil, fmt.Errorf("invalid WireGuard key")
+	}
+	bind, err := NewMagicBind(discoPriv, auth, onChange)
+	if err != nil {
+		return nil, err
 	}
 	t, err := tun.CreateTUN(ifaceName, MTU)
 	if err != nil {
@@ -54,9 +58,9 @@ func NewEngine(wgPriv string, port int, acceptDNS bool) (*Engine, error) {
 		t.Close()
 		return nil, err
 	}
-	e := &Engine{name: name, tun: t, filter: NewFilter(t), peers: map[string]zr.Peer{}, routes: map[netip.Prefix]bool{}, acceptDNS: acceptDNS}
+	e := &Engine{name: name, tun: t, filter: NewFilter(t), bind: bind, peers: map[string]zr.Peer{}, routes: map[netip.Prefix]bool{}, acceptDNS: acceptDNS}
 	logger := &device.Logger{Verbosef: device.DiscardLogf, Errorf: func(f string, a ...any) { log.Printf("wireguard: "+f, a...) }}
-	e.dev = device.NewDevice(e.filter, conn.NewDefaultBind(), logger)
+	e.dev = device.NewDevice(e.filter, bind, logger)
 	if err := e.dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(k), port)); err != nil {
 		e.dev.Close()
 		return nil, err
@@ -98,29 +102,6 @@ func prefixes(ss []string) []netip.Prefix {
 	return out
 }
 
-// pickEndpoint prefers a public address. ponytail: one candidate, no probing; R3 replaces this
-// with disco path selection (direct, hole-punched or relayed).
-func pickEndpoint(eps []string) string {
-	best, bestScore := "", -1
-	for _, e := range eps {
-		ap, err := netip.ParseAddrPort(e)
-		if err != nil || !ap.Addr().IsGlobalUnicast() {
-			continue
-		}
-		score := 1
-		if !ap.Addr().IsPrivate() {
-			score = 3
-		}
-		if ap.Addr().Is4() {
-			score++
-		}
-		if score > bestScore {
-			best, bestScore = ap.String(), score
-		}
-	}
-	return best
-}
-
 // peerUAPI renders one peer for IpcSet (removal when p is nil).
 func peerUAPI(b *strings.Builder, key string, p *zr.Peer, endpoint string) {
 	fmt.Fprintf(b, "public_key=%s\n", key)
@@ -141,6 +122,9 @@ func peerUAPI(b *strings.Builder, key string, p *zr.Peer, endpoint string) {
 func samePeer(a, b zr.Peer) bool {
 	return a.NodeKey == b.NodeKey && strings.Join(a.AllowedIPs, ",") == strings.Join(b.AllowedIPs, ",")
 }
+
+// Bind is the socket layer (endpoints, home relay, paths, netcheck).
+func (e *Engine) Bind() *MagicBind { return e.bind }
 
 // Apply converges the data plane to one netmap message.
 func (e *Engine) Apply(m zr.MapMessage) error {
@@ -174,19 +158,27 @@ func (e *Engine) Apply(m zr.MapMessage) error {
 			}
 		}
 	}
+	list := make([]zr.Peer, 0, len(next))
 	for id, p := range next {
-		old, had := e.peers[id]
-		k, ok := keyHex(p.NodeKey)
-		if !ok {
+		if _, ok := keyHex(p.NodeKey); !ok {
 			delete(next, id)
 			continue
 		}
-		ep := pickEndpoint(p.Endpoints)
-		if had && samePeer(old, p) && pickEndpoint(old.Endpoints) == ep {
+		list = append(list, p)
+	}
+	e.bind.SetPeers(list) // before IpcSet: WireGuard resolves zrpeer: endpoints through it
+	if m.RelaysChanged {
+		e.bind.SetRelays(m.Relays)
+	}
+	for id, p := range next {
+		old, had := e.peers[id]
+		if had && samePeer(old, p) {
 			continue
 		}
-		if had && old.NodeKey == p.NodeKey && pickEndpoint(old.Endpoints) == ep {
-			ep = "" // unchanged: keep whatever endpoint WireGuard roamed to
+		k, _ := keyHex(p.NodeKey)
+		ep := ""
+		if !had || old.NodeKey != p.NodeKey {
+			ep = "zrpeer:" + k // the socket layer picks the path (direct or relay) per packet
 		}
 		pp := p
 		peerUAPI(&b, k, &pp, ep)
@@ -295,7 +287,7 @@ func (e *Engine) peerList() []zr.Peer {
 type PeerStatus struct {
 	Name          string   `json:"name"`
 	Addresses     []string `json:"addresses"`
-	Endpoint      string   `json:"endpoint,omitempty"`
+	Path          string   `json:"path,omitempty"` // direct <addr> (rtt) or relay <name>
 	Online        bool     `json:"online"`
 	LastHandshake int64    `json:"last_handshake,omitempty"` // unix seconds
 	RxBytes       uint64   `json:"rx_bytes"`
@@ -325,9 +317,11 @@ func (e *Engine) Peers() []PeerStatus {
 	out := make([]PeerStatus, 0, len(list))
 	for _, p := range list {
 		ps := PeerStatus{Name: p.Name, Addresses: p.Addresses, Online: p.Online}
+		if raw, err := base64.StdEncoding.DecodeString(p.NodeKey); err == nil && len(raw) == 32 {
+			ps.Path = e.bind.Path([32]byte(raw))
+		}
 		if k, ok := keyHex(p.NodeKey); ok && stats[k] != nil {
 			s := stats[k]
-			ps.Endpoint = s["endpoint"]
 			fmt.Sscan(s["last_handshake_time_sec"], &ps.LastHandshake)
 			fmt.Sscan(s["rx_bytes"], &ps.RxBytes)
 			fmt.Sscan(s["tx_bytes"], &ps.TxBytes)

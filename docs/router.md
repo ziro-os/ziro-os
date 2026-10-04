@@ -6,7 +6,7 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 |---|---|---|
 | Control plane | `ziroctl router`, served by `cluster-master` on every master (`/router/v1/*` on the cluster port, 7443) | shipped (R1) |
 | Client | `zirocd` for Linux, macOS and Windows (amd64, arm64), signed releases with self-update | shipped (R2) |
-| Relays + NAT traversal | `ziroctl router relay serve` (QUIC udp/443, TLS tcp/443, STUN udp/3478), hole punching | R3 |
+| Relays + NAT traversal | `ziroctl router relay enable` (TLS relay + STUN), disco hole punching, `zirocd netcheck` | shipped (R3) |
 | Kernel fast path, subnet routing on Ziro OS | `zirocd --dataplane kernel`, `ziroctl router join` | R4 |
 | SSO | OIDC device-code login (`zirocd up --sso`) | R5 |
 
@@ -54,11 +54,11 @@ sudo zirocd down                                 # disconnect, keep the identity
 sudo zirocd logout                               # disconnect and delete the keys
 ```
 
-- **Data plane.** Userspace WireGuard (wireguard-go) with MTU 1280. Peers are configured one by one from netmap deltas, so a change never resets sessions it doesn't touch. On a 2-container Docker test on an M2 it carries about 2.7 Gbit/s. Linux hosts get a kernel fast path in R4.
+- **Data plane.** Userspace WireGuard (wireguard-go) with MTU 1280, over zirocd's own socket layer (below). Peers are configured one by one from netmap deltas, so a change never resets sessions it doesn't touch. On a 2-container Docker test on an M2 it carries about 2.7 Gbit/s. Linux hosts get a kernel fast path in R4.
 - **Inbound filter.** The router's rules for this device are enforced on every packet. Replies to connections the device opened are let back in; anything else unsolicited is dropped (`zirocd status` counts drops).
 - **Names.** `<device>.<network>.ziro` resolve through a tiny resolver on the device's own tunnel address. Only that domain is sent to it, so other DNS is untouched.
 - **Keys and state.** The WireGuard, disco and TLS private keys are generated on the device. They live in `/var/lib/zirocd` (Linux), `/Library/Application Support/zirocd` (macOS) or `%ProgramData%\zirocd` (Windows, ACL'd to SYSTEM and Administrators). The join key is deleted once used. The CLI talks to the daemon over a root-only socket (an Administrators-only named pipe on Windows).
-- **Endpoints.** In R2 a device reports its interface addresses, so it reaches peers on the same network or with public addresses. NAT traversal and relays arrive in R3.
+- **Endpoints.** A device reports its interface addresses plus the public address the relays see (STUN), and its home relay. See [Relays and NAT traversal](#relays-and-nat-traversal).
 
 ### Updates
 
@@ -68,6 +68,36 @@ zirocd follows the tools release stream (`tools/vX.Y.Z`), which is built for all
 - It installs only if `SHA256SUMS` carries the Ziro release signature (ed25519) and the binary matches. The swap is atomic, and the previous binary is kept.
 - If the new binary fails to reach "connected" in two starts, it is rolled back automatically.
 - `--auto-update notify` only reports in `zirocd status`; `off` disables checks. `sudo zirocd update` installs now.
+
+## Relays and NAT traversal
+
+Most devices sit behind NAT. zirocd finds a direct path when one exists, and uses a relay until then (or when none does), so traffic flows from the first packet.
+
+```sh
+# on a master with a public address (run it on several masters, in several regions)
+ziroctl router relay enable sg-1 --public relay-sg.example.com:8443
+ziroctl router relay ls
+zirocd netcheck            # on a device: UDP, NAT type, public address, relay latency
+```
+
+| Mechanism | How |
+|---|---|
+| One socket | WireGuard, path discovery (disco) and STUN share the device's WireGuard UDP port, so the NAT mapping a relay observes is the one peers can use |
+| Public address | Every 20s, STUN to each relay; the lowest-latency relay becomes the device's **home relay**. Both go to the router, which pushes them to peers |
+| Hole punching | Disco pings (NaCl box between the two devices' disco keys) go to every candidate address of the peer at once. A ping relayed through the home relay asks the peer to ping back now, so both NATs open together. The first pong picks the path; a faster one replaces it |
+| Path choice | Per packet: the direct address while its last pong is under 7s old (pings repeat every 2s on active peers), otherwise the peer's home relay. Path changes never interrupt the WireGuard session |
+| Relays | TLS 1.3 over TCP (works where UDP is blocked). The relay identifies each device by its certificate, forwards only within one network, rate-limits each device (`--rate-mbps`, default 200), and drops a device within a second of its removal. It only ever sees WireGuard ciphertext |
+
+`zirocd status` shows each peer's path, `direct 203.0.113.9:41641 (12ms)` or `relay sg-1`.
+
+**What punches through:** home routers, cloud NAT gateways and most carrier NATs, which map endpoint-independently. Under "symmetric" NAT, where the mapping varies by destination (`zirocd netcheck` reports it), a direct path forms only if the peer is reachable; otherwise traffic stays on the relay.
+
+Measured in `tests/router/e2e.sh` (two devices, each behind its own firewalled NAT, in Docker on an M2):
+- hole punching gives a direct path at about 2.6 Gbit/s;
+- blocking UDP between the NATs moves traffic to the relay within seconds (at the 200 Mbit/s per-device limit);
+- unblocking returns to the direct path.
+
+The relay transport is TLS/TCP only, DERP-style. QUIC datagrams would serve relayed bulk traffic better; they are deferred because relays are the fallback path.
 
 ## Access control
 
@@ -134,4 +164,5 @@ sequenceDiagram
 | Approval requests | By network ID only (16 random hex; names are guessable). At most 1000 pending per network, removed after 7 days. |
 | Abuse | Per-IP rate limit (600/min) and per-device limit (60/min). 64 KiB bodies. Endpoints and versions are validated. Rejected credentials are audited at most once per IP per 10 minutes. |
 | Revocation | `member rm`, network deletion or loss of authorization ends the device's stream within a quarter second and removes it from every peer's netmap. |
-| Data plane | WireGuard end to end. Relays (R3) forward ciphertext between pairs the ACL allows. |
+| Data plane | WireGuard end to end. Relays forward ciphertext only, only within one network, and identify senders by certificate, never by what a frame claims. A device's own ACL filter still decides what it accepts. |
+| Path discovery | Disco messages are NaCl-boxed between disco keys the router distributed: a forged or replayed ping from anyone else is dropped, and a relayed one must come from the key it claims. Ping rounds are rate-limited, so two peers cannot amplify each other |

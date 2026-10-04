@@ -137,6 +137,47 @@ func main() {
 			return c.Run()
 		}}
 
+	netcheckCmd := &cobra.Command{Use: "netcheck", Short: "Check UDP, NAT mapping and relay latency", Example: "  zirocd netcheck\n  zirocd netcheck --json",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var nc daemon.Netcheck
+			if err := call(http.MethodGet, "/netcheck", nil, &nc); err != nil {
+				return err
+			}
+			return show(nc, func() {
+				udp := "blocked: every peer goes through a relay"
+				if nc.UDP {
+					udp = "ok"
+				}
+				fmt.Printf("UDP:          %s\n", udp)
+				fmt.Printf("Public:       %s\n", orDash(strings.Join(nc.Public, ", ")))
+				if nc.VariesByDest {
+					fmt.Println("NAT:          mapping varies by destination (symmetric): direct paths need the peer to be reachable")
+				} else if nc.UDP {
+					fmt.Println("NAT:          endpoint-independent: hole punching works")
+				}
+				fmt.Printf("Home relay:   %s\n\n", orDash(nc.Home))
+				tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+				fmt.Fprintln(tw, "RELAY\tSTUN\tTLS\tSEEN AS\t")
+				for _, r := range nc.Relays {
+					ms := func(v int64) string {
+						if v == 0 {
+							return "-"
+						}
+						return fmt.Sprintf("%dms", v)
+					}
+					note := ""
+					if r.Current {
+						note = "home"
+					}
+					if r.Error != "" {
+						note = r.Error
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Name, ms(r.STUNms), ms(r.TLSms), orDash(r.Mapped), note)
+				}
+				tw.Flush()
+			})
+		}}
+
 	updateCmd := &cobra.Command{Use: "update", Short: "Install the newest signed zirocd now", Example: "  sudo zirocd update",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var out map[string]string
@@ -172,7 +213,7 @@ func main() {
 			RunE: func(cmd *cobra.Command, args []string) error { return uninstallService() }},
 	)
 
-	root.AddCommand(daemonCmd, upCmd, downCmd, logoutCmd, statusCmd, pingCmd, updateCmd, versionCmd, serviceCmd)
+	root.AddCommand(daemonCmd, upCmd, downCmd, logoutCmd, statusCmd, pingCmd, netcheckCmd, updateCmd, versionCmd, serviceCmd)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "✗", err)
 		os.Exit(1)
@@ -217,7 +258,7 @@ func printStatus(s daemon.Status) {
 	}
 	fmt.Println()
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "PEER\tADDRESS\tENDPOINT\tHANDSHAKE\tRX\tTX")
+	fmt.Fprintln(tw, "PEER\tADDRESS\tPATH\tHANDSHAKE\tRX\tTX")
 	for _, p := range s.Peers {
 		hs := "-"
 		if p.LastHandshake > 0 {
@@ -227,7 +268,7 @@ func printStatus(s daemon.Status) {
 		if len(p.Addresses) > 0 {
 			addr = p.Addresses[0]
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\n", p.Name, addr, orDash(p.Endpoint), hs, p.RxBytes, p.TxBytes)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\n", p.Name, addr, orDash(p.Path), hs, p.RxBytes, p.TxBytes)
 	}
 	tw.Flush()
 }

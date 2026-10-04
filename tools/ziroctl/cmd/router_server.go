@@ -265,6 +265,7 @@ func routerHousekeeping(st *ClusterState, lastSeen func(id string) time.Time, no
 type routerSoft struct {
 	Endpoints []string  `json:"endpoints,omitempty"`
 	Version   string    `json:"version,omitempty"`
+	HomeRelay string    `json:"home_relay,omitempty"`
 	Seen      time.Time `json:"seen"`
 	Online    bool      `json:"online"`
 }
@@ -282,6 +283,7 @@ type routerSub struct {
 	selfVer uint64
 	filter  string
 	cv      string
+	relays  string // hash of the relay list last sent
 }
 
 // ponytail: each stream keeps the versions of the peers it was sent: O(visible) memory per
@@ -299,6 +301,8 @@ type routerHub struct {
 	soft    map[string]*routerSoft
 	subs    map[string]*routerSub
 	since   time.Time // liveness is not replicated: everyone gets a grace period from here
+	relays  []zr.Relay
+	relayH  string
 }
 
 func newRouterHub() *routerHub {
@@ -325,7 +329,7 @@ func (h *routerHub) projectLocked(m *zr.Member) zr.Peer {
 		Addresses: memberAddrs(m)}
 	p.AllowedIPs = append(append([]string(nil), p.Addresses...), m.Approved...)
 	if s := h.soft[m.ID]; s != nil {
-		p.Endpoints = s.Endpoints
+		p.Endpoints, p.HomeRelay = s.Endpoints, s.HomeRelay
 	}
 	_, p.Online = h.subs[m.ID]
 	return p
@@ -347,6 +351,9 @@ func (h *routerHub) setState(st *zr.State, version uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.loaded, h.version = true, version
+	h.relays = st.Relays
+	rb, _ := json.Marshal(st.Relays)
+	h.relayH = hashToken(string(rb))
 	h.members, h.nets, h.acl = map[string]*zr.Member{}, map[string]*zr.Network{}, map[string]*compiledACL{}
 	byNet := map[string][]*zr.Member{}
 	for i := range st.Networks {
@@ -403,7 +410,7 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 	visible, filter := c.view(m)
 	msg := zr.MapMessage{Type: "delta"}
 	if full {
-		s.seen, s.filter, s.selfVer, s.cv = map[string]uint64{}, "", 0, ""
+		s.seen, s.filter, s.selfVer, s.cv, s.relays = map[string]uint64{}, "", 0, "", ""
 		msg = zr.MapMessage{Type: "full", Domain: n.Name + routerDomainS, Networks: []string{n.IPv4, n.IPv6}, FilterChanged: true, Filter: filter}
 	}
 	if self := h.peers[m.ID]; self != nil && self.ver != s.selfVer {
@@ -411,6 +418,9 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 	}
 	if n.ClientVersion != s.cv {
 		s.cv, msg.ClientVersion = n.ClientVersion, n.ClientVersion
+	}
+	if h.relayH != s.relays {
+		s.relays, msg.Relays, msg.RelaysChanged = h.relayH, h.relays, true
 	}
 	ids := make([]string, 0, len(visible))
 	for id := range visible {
@@ -434,7 +444,7 @@ func (h *routerHub) pushLocked(s *routerSub, full bool) {
 	if fh := hashToken(string(fb)); fh != s.filter {
 		s.filter, msg.Filter, msg.FilterChanged = fh, filter, true
 	}
-	if !full && msg.Self == nil && msg.ClientVersion == "" && msg.Peers == nil && msg.Removed == nil && !msg.FilterChanged {
+	if !full && msg.Self == nil && msg.ClientVersion == "" && msg.Peers == nil && msg.Removed == nil && !msg.FilterChanged && !msg.RelaysChanged {
 		return
 	}
 	b, _ := json.Marshal(msg)
@@ -484,7 +494,7 @@ func (h *routerHub) updateSoft(id string, req zr.MapRequest) {
 		s = &routerSoft{}
 		h.soft[id] = s
 	}
-	s.Endpoints, s.Version, s.Seen = req.Endpoints, req.Version, time.Now()
+	s.Endpoints, s.Version, s.HomeRelay, s.Seen = req.Endpoints, req.Version, req.HomeRelay, time.Now()
 	h.peerChangedLocked(id, nil)
 }
 
@@ -694,6 +704,9 @@ func decodeMapRequest(r *http.Request) (zr.MapRequest, error) {
 	}
 	if req.Version != "" && !versionRe.MatchString(req.Version) {
 		return req, httpError{http.StatusBadRequest, "invalid version"}
+	}
+	if req.HomeRelay != "" && validLabel(req.HomeRelay) != nil {
+		return req, httpError{http.StatusBadRequest, "invalid home relay"}
 	}
 	return req, nil
 }
