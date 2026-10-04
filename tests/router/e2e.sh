@@ -11,6 +11,7 @@ net=zr-e2e-$$
 cleanup() {
 	docker rm -f "$net-router" "$net-client" "$net-web" >/dev/null 2>&1 || true
 	docker network rm "$net" >/dev/null 2>&1 || true
+	docker run --rm -v "$work:/w" alpine:3.22 rm -rf /w/shared >/dev/null 2>&1 || true # root-owned
 	rm -rf "$work"
 }
 trap cleanup EXIT
@@ -28,11 +29,15 @@ for d in client web; do
 	docker run -d --name "$net-$d" --network "$net" --cap-add NET_ADMIN --device /dev/net/tun -v "$work:/w" \
 		alpine:3.22 sh -c 'apk add -q --no-cache iproute2 iperf3 >/dev/null && /w/zirocd daemon' >/dev/null
 done
-for _ in $(seq 60); do [ -s "$work/shared/key-web" ] && docker exec "$net-web" test -S /run/zirocd.sock 2>/dev/null && docker exec "$net-client" test -S /run/zirocd.sock 2>/dev/null && break; sleep 1; done
+for _ in $(seq 60); do docker exec "$net-router" test -s /w/shared/key-web 2>/dev/null && docker exec "$net-web" test -S /run/zirocd.sock 2>/dev/null && docker exec "$net-client" test -S /run/zirocd.sock 2>/dev/null && break; sleep 1; done
 
 echo "== join"
-docker exec -e ZIROCD_KEY="$(cat "$work/shared/key-plain")" "$net-client" /w/zirocd up --name client
-docker exec -e ZIROCD_KEY="$(cat "$work/shared/key-web")" "$net-web" /w/zirocd up --name web
+# The router writes the keys as root (0600): read them through its container, not the host.
+key_plain=$(docker exec "$net-router" cat /w/shared/key-plain)
+key_web=$(docker exec "$net-router" cat /w/shared/key-web)
+[ -n "$key_plain" ] && [ -n "$key_web" ] || { echo "✗ router wrote no keys"; docker logs "$net-router" | tail -20; exit 1; }
+docker exec -e ZIROCD_KEY="$key_plain" "$net-client" /w/zirocd up --name client
+docker exec -e ZIROCD_KEY="$key_web" "$net-web" /w/zirocd up --name web
 ip_of() { docker exec "$net-$1" /w/zirocd status --json | sed -n 's/.*"ipv4": "\([0-9.]*\)".*/\1/p' | head -1; }
 for _ in $(seq 30); do
 	n=$(docker exec "$net-client" /w/zirocd status --json | grep -c '"name": "web"' || true)
