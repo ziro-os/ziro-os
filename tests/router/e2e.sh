@@ -131,7 +131,9 @@ for n in natA natB; do
 done
 desc="relay fallback within 15s, as UDP datagrams"; check wait_path "relay r1 udp" 15
 echo "  path: $(path_to_web)"
-desc="ping over the UDP relay"; check docker exec "$p-client" ping -c 3 -W 2 "$wip"
+# web may still trust its dead direct path for a few seconds: allow for it.
+desc="ping over the UDP relay"
+check sh -c "for i in \$(seq 10); do docker exec $p-client ping -c 1 -W 1 $wip && exit 0; sleep 1; done; exit 1"
 echo "== throughput relayed (UDP relay)"
 docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || true
 echo "== block UDP to the relay too: relayed traffic must move to TLS"
