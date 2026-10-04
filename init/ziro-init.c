@@ -856,7 +856,7 @@ static void write_pidfile(const char *path, pid_t pid) {
 
 /* 'ziroctl service stop' drops /run/ziro/stopped/<name>: hold the restart until it is gone. */
 static int daemon_held(const char *name) {
-    char p[64];
+    char p[4096];
     snprintf(p, sizeof(p), "/run/ziro/stopped/%s", name);
     return access(p, F_OK) == 0;
 }
@@ -1366,6 +1366,9 @@ static void restart_due_services(void) {
     for (int i = 0; i < MAX_SUPERVISED; i++) {
         if (!supervised[i].restart_at || now < supervised[i].restart_at) continue;
         supervised[i].restart_at = 0;
+        /* Stopped on purpose while the restart was pending ('service start' would clear the
+         * marker and undo the stop): stay down until an explicit start. */
+        if (daemon_held(supervised[i].name)) continue;
         supervised[i].started = now;
         pid_t p = fork();
         if (p == 0) {
@@ -1375,6 +1378,35 @@ static void restart_due_services(void) {
         } else if (p > 0) {
             waitpid(p, NULL, 0);
         }
+    }
+}
+
+/*
+ * Retry tick: a service that failed before any process existed (missing config, network not
+ * ready) never exits, so the supervision above can't see it. Every 15s for the first minutes of
+ * boot, then every 60s, 'ziroctl service heal' starts what is enabled and down. Not waited for
+ * here: the loop reaps it like any other child.
+ */
+static time_t heal_next = 0;
+static pid_t heal_pid = 0;
+static int heal_runs = 0;
+
+static void heal_tick(void) {
+    time_t now = time(NULL);
+    if (heal_pid > 0) {
+        int st;
+        if (waitpid(heal_pid, &st, WNOHANG) == 0) return; /* still running */
+        heal_pid = 0;
+    }
+    if (now < heal_next || access("/usr/bin/ziroctl", X_OK) != 0) return;
+    heal_next = now + (heal_runs++ < 8 ? 15 : 60);
+    pid_t p = fork();
+    if (p == 0) {
+        char *argv[] = {"ziroctl", "service", "heal", NULL};
+        execv("/usr/bin/ziroctl", argv);
+        _exit(1);
+    } else if (p > 0) {
+        heal_pid = p;
     }
 }
 
@@ -1627,6 +1659,7 @@ int main(int argc, char *argv[]) {
         supervise_terminals();
         restart_due_daemons();
         restart_due_services();
+        heal_tick();
 
         int status;
         pid_t exited = waitpid(-1, &status, WNOHANG);
