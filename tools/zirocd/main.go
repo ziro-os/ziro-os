@@ -254,7 +254,7 @@ func main() {
 			RunE: func(cmd *cobra.Command, args []string) error { return uninstallService() }},
 	)
 
-	root.AddCommand(daemonCmd, upCmd, downCmd, logoutCmd, statusCmd, pingCmd, netcheckCmd, updateCmd, versionCmd, serviceCmd)
+	root.AddCommand(daemonCmd, upCmd, downCmd, logoutCmd, statusCmd, pingCmd, netcheckCmd, updateCmd, versionCmd, serviceCmd, moonCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "✗", err)
 		os.Exit(1)

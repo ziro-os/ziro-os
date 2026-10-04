@@ -7,6 +7,8 @@ name: Tools Release (ziroctl, ziropkg & zirocd)
 # Every OS release tag (vX.Y.Z) also publishes tools/vX.Y.Z, so the stream never falls behind.
 # zirocd (the router client, Linux/macOS/Windows) ships here too and updates itself from it with
 # the same signature check; Windows zips add the signed Wintun driver, pinned by SHA-256.
+# The same Linux zirocd binaries are published as the container image ghcr.io/<owner>/zirocd
+# (moons: `zirocd moon`), with a build provenance attestation.
 on:
   push:
     tags:
@@ -32,6 +34,7 @@ jobs:
       contents: write
       id-token: write     # build provenance attestation
       attestations: write
+      packages: write     # ghcr.io/<owner>/zirocd
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -100,6 +103,39 @@ jobs:
             out/ziroctl-*
             out/ziropkg-*
             out/zirocd-*
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # FROM scratch with no RUN step: the multi-arch build copies the release binaries and needs
+      # no emulation, so the image holds exactly the attested, signed binaries.
+      - name: Build & push the zirocd image
+        id: image
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          name="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/zirocd"
+          ctx=$(mktemp -d)
+          mkdir -p "$ctx/rootfs/var/lib/zirocd-moon"
+          cp out/zirocd-linux-amd64 out/zirocd-linux-arm64 "$ctx/"
+          docker buildx build --platform linux/amd64,linux/arm64 -f images/zirocd/Dockerfile \
+            -t "$name:$VERSION" -t "$name:latest" --metadata-file /tmp/zirocd-image.json --push "$ctx"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "digest=$(jq -r '."containerimage.digest"' /tmp/zirocd-image.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
 
       - name: Publish
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3

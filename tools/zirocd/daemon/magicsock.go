@@ -53,6 +53,8 @@ const (
 	sprayRadius     = 32              // hard-NAT probing: ports around each public port the peer reported
 	sprayEvery      = 15 * time.Second
 	stunEvery       = 20 * time.Second
+	stunStale       = 50 * time.Second // no STUN answer for ~2.5 rounds: the round trip is unknown again
+	linkGrace       = 5 * time.Second  // a relay link still down this long after dialing counts as down
 	maxCandidates   = 16
 	relayIdle       = 2 * time.Minute
 	wgKeepaliveSize = 32 // an empty WireGuard transport message: not real traffic
@@ -137,6 +139,7 @@ type MagicBind struct {
 	stun     map[[12]byte]stunProbe
 	mapped   map[string]netip.AddrPort
 	stunRTT  map[string]time.Duration
+	stunAt   map[string]time.Time // last STUN answer per relay
 	open     bool
 	recv     chan relayPkt
 	closed   chan struct{}
@@ -175,7 +178,7 @@ func NewMagicBind(discoPrivB64 string, auth RelayAuth, onChange func()) (*MagicB
 	b := &MagicBind{std: conn.NewDefaultBind(), auth: auth, onChange: onChange,
 		peers: map[[32]byte]*mpeer{}, byDisco: map[[32]byte]*mpeer{}, byAddr: map[netip.AddrPort]*mpeer{},
 		stdEPs: map[netip.AddrPort]conn.Endpoint{}, links: map[string]*relayLink{}, stun: map[[12]byte]stunProbe{}, relayUDP: map[netip.AddrPort]*relayLink{},
-		mapped: map[string]netip.AddrPort{}, stunRTT: map[string]time.Duration{}, kick: make(chan *mpeer, 256)}
+		mapped: map[string]netip.AddrPort{}, stunRTT: map[string]time.Duration{}, stunAt: map[string]time.Time{}, kick: make(chan *mpeer, 256)}
 	copy(b.discoPriv[:], k)
 	pub, err := publicOf(discoPrivB64)
 	if err != nil {
@@ -724,6 +727,7 @@ func (b *MagicBind) handleSTUN(pkt []byte) {
 	if rtt, ok := b.stunRTT[probe.relay]; !ok || time.Since(probe.at) < rtt || probe.fam == "4" {
 		b.stunRTT[probe.relay] = time.Since(probe.at)
 	}
+	b.stunAt[probe.relay] = time.Now()
 	changed = b.pickHomeLocked() || changed
 	b.mu.Unlock()
 	if changed && b.onChange != nil {
@@ -731,22 +735,38 @@ func (b *MagicBind) handleSTUN(pkt []byte) {
 	}
 }
 
-// pickHomeLocked ranks the relays by STUN round trip (relays without an answer last, by name)
-// and registers with the nearest two: the first is the home relay, kept unless another is clearly
-// better (no flapping). Without any UDP answer, the first relays by name still work over TLS.
+// pickHomeLocked ranks the relays and registers with the best two: the first is the home relay,
+// kept unless another is clearly better (no flapping). Ranking: relays answering STUN, by round
+// trip; then relays not heard from lately (by name: without any UDP answer they still work over
+// TLS); last, relays whose link is down. A relay that dies stops being a home within seconds, so
+// peers move to a live one instead of trying to reach this device through it.
 func (b *MagicBind) pickHomeLocked() bool {
 	ranked := make([]string, 0, len(b.relays))
 	for _, r := range b.relays {
 		ranked = append(ranked, r.Name)
 	}
+	tier := func(n string) int {
+		if l := b.links[n]; l != nil && !l.up() && time.Since(l.born) > linkGrace {
+			return 2
+		}
+		if at, ok := b.stunAt[n]; !ok || time.Since(at) > stunStale {
+			return 1
+		}
+		return 0
+	}
 	rtt := func(n string) time.Duration {
-		if d, ok := b.stunRTT[n]; ok {
+		if d, ok := b.stunRTT[n]; ok && tier(n) == 0 {
 			return d
 		}
 		return time.Duration(math.MaxInt64)
 	}
-	sort.SliceStable(ranked, func(i, j int) bool { return rtt(ranked[i]) < rtt(ranked[j]) })
-	if b.home != "" && len(ranked) > 0 && ranked[0] != b.home && slices.Contains(ranked, b.home) {
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ti, tj := tier(ranked[i]), tier(ranked[j]); ti != tj {
+			return ti < tj
+		}
+		return rtt(ranked[i]) < rtt(ranked[j])
+	})
+	if b.home != "" && len(ranked) > 0 && ranked[0] != b.home && slices.Contains(ranked, b.home) && tier(b.home) == tier(ranked[0]) {
 		if cur, ok := b.stunRTT[b.home]; ok && float64(cur) <= 1.5*float64(rtt(ranked[0])) {
 			ranked = append([]string{b.home}, slices.DeleteFunc(ranked, func(n string) bool { return n == b.home })...)
 		}
@@ -839,6 +859,13 @@ func (b *MagicBind) loop(ctx context.Context) {
 			for _, l := range live {
 				l.maybeHello(now)
 			}
+			b.mu.Lock()
+			changed := b.pickHomeLocked() // a home relay may have died since the last STUN round
+			homes = append(homes[:0], b.homes...)
+			b.mu.Unlock()
+			if changed && b.onChange != nil {
+				b.onChange()
+			}
 			for _, h := range homes {
 				_ = b.link(h) // stay reachable through the nearest relays
 			}
@@ -921,6 +948,7 @@ func (b *MagicBind) SetRelays(relays []zr.Relay) {
 	for name := range b.stunRTT {
 		if !names[name] {
 			delete(b.stunRTT, name)
+			delete(b.stunAt, name)
 		}
 	}
 	changed := b.pickHomeLocked()
@@ -1159,6 +1187,7 @@ type relayLink struct {
 	once    sync.Once
 	mu      sync.Mutex
 	used    time.Time
+	born    time.Time // when the link was created (it may take a moment to come up)
 	rc      *zr.RelayConn
 	udpAddr netip.AddrPort
 	session uint32
@@ -1169,7 +1198,7 @@ type relayLink struct {
 }
 
 func newRelayLink(r zr.Relay, b *MagicBind) *relayLink {
-	l := &relayLink{r: r, b: b, out: make(chan []byte, 1024), done: make(chan struct{}), used: time.Now()}
+	l := &relayLink{r: r, b: b, out: make(chan []byte, 1024), done: make(chan struct{}), used: time.Now(), born: time.Now()}
 	if ua, err := net.ResolveUDPAddr("udp", r.STUN); err == nil {
 		ap := ua.AddrPort()
 		l.udpAddr = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
@@ -1317,7 +1346,7 @@ func (l *relayLink) run() {
 		ca, cert := l.b.auth()
 		if ca != nil && cert != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			rc, err := zr.DialRelay(ctx, l.r.Addr, ca, cert)
+			rc, err := zr.DialRelay(ctx, l.r, ca, cert)
 			cancel()
 			if err == nil {
 				backoff = time.Second
@@ -1416,7 +1445,7 @@ type Netcheck struct {
 // Netcheck probes every relay now (STUN over the WireGuard socket, a TLS connect).
 func (b *MagicBind) Netcheck(ctx context.Context) Netcheck {
 	b.mu.Lock()
-	b.mapped, b.stunRTT = map[string]netip.AddrPort{}, map[string]time.Duration{}
+	b.mapped, b.stunRTT, b.stunAt = map[string]netip.AddrPort{}, map[string]time.Duration{}, map[string]time.Time{}
 	relays := append([]zr.Relay{}, b.relays...)
 	b.mu.Unlock()
 	b.probeSTUN()
@@ -1450,7 +1479,7 @@ func (b *MagicBind) Netcheck(ctx context.Context) Netcheck {
 		if ca != nil && cert != nil {
 			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			t0 := time.Now()
-			c, err := zr.DialRelay(cctx, r.Addr, ca, cert)
+			c, err := zr.DialRelay(cctx, r, ca, cert)
 			cancel()
 			if err == nil {
 				rc.TLSms = max(time.Since(t0).Milliseconds(), 1)

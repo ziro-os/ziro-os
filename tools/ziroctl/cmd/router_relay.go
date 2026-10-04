@@ -1,45 +1,30 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 	"os"
 	"strconv"
-	"sync"
-	"sync/atomic"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	zr "github.com/ziro-os/ziro-os/sdk/router"
-	"golang.zx2c4.com/wireguard/conn"
+	"github.com/ziro-os/zirocd/relay"
 )
 
-// Router relays: a device that cannot reach a peer directly (both behind hard NATs) sends its
-// WireGuard packets to a relay the peer is connected to, which hands them on. Every device holds
-// a TLS connection (authentication, session setup, and the transport of last resort where UDP is
-// blocked) and, normally, a UDP session on the same relay (router_relay_udp.go): relayed
-// traffic then flows as plain datagrams, with no TCP head-of-line latency. Relays run on masters
-// (they read the replicated member list), only see WireGuard ciphertext, only connect devices of
-// the same network, and drop a device within seconds of its removal. They also answer STUN.
+// Router relays on planets (`ziroctl router relay enable`): the relay itself is the zirocd
+// relay package, shared with moons (`zirocd moon`). Here it reads the member list from this
+// master's replica of the cluster state.
 
 const (
-	relayConfPath    = "/etc/ziro/router-relay.json"
-	relayRefresh     = 5 * time.Second
-	relayQueue       = 512             // frames buffered per receiving device
-	relayRateMbps    = 1000            // default per-device sustained rate
-	relayMaxMbps     = 10000           // default relay-wide rate
-	relayBurstBytes  = 4 << 20         // per-device burst
-	relayIdleTimeout = 2 * time.Minute // no frame (keepalives included) for this long: close
+	relayConfPath = "/etc/ziro/router-relay.json"
+	relayRefresh  = 5 * time.Second
 )
 
 type relayConf struct {
@@ -50,237 +35,37 @@ type relayConf struct {
 	MaxMbps int    `json:"max_mbps,omitempty"` // relay-wide rate limit (default 10000)
 }
 
-// relayMember is what the relay needs to know about a device.
-type relayMember struct {
-	keyHash string
-	nodeKey [32]byte
-	network string
-}
-
-type relayClient struct {
-	member  string
-	network string
-	key     [32]byte
-	rc      *zr.RelayConn
-	out     chan []byte // encoded frames to write
-	done    chan struct{}
-	once    sync.Once
-	bucket  byteBucket
-
-	session uint32
-	skey    [32]byte
-	udp     atomic.Pointer[udpBinding] // set by a valid UDP hello
-}
-
-// udpBinding is where a device's UDP session lives (its NAT mapping towards the relay).
-type udpBinding struct {
-	addr netip.AddrPort
-	ep   conn.Endpoint // for sends
-	ms   uint64        // timestamp of the hello that bound it (replays must be newer)
-	seen time.Time
-}
-
-// byteBucket limits bytes per second; the TLS reader and the UDP loop share a device's bucket.
-type byteBucket struct {
-	mu     sync.Mutex
-	tokens float64
-	last   time.Time
-	rate   float64 // bytes/s
-	burst  float64
-}
-
-func newByteBucket(rate, burst float64) byteBucket {
-	return byteBucket{tokens: burst, last: time.Now(), rate: rate, burst: burst}
-}
-
-func (b *byteBucket) allow(n int, now time.Time) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.tokens = min(b.tokens+now.Sub(b.last).Seconds()*b.rate, b.burst)
-	b.last = now
-	if b.tokens < float64(n) {
-		return false
-	}
-	b.tokens -= float64(n)
-	return true
-}
-
-func (c *relayClient) close() { c.once.Do(func() { close(c.done); c.rc.Close() }) }
-
-type relayServer struct {
-	load   func() (*zr.State, error) // the replicated router state
-	rate   float64                   // per-device bytes/s
-	global byteBucket                // relay-wide
-	udp    conn.Bind                 // UDP port: relayed datagrams + STUN
-
-	refreshMu   sync.Mutex
-	lastRefresh time.Time
-
-	mu       sync.RWMutex
-	members  map[string]relayMember    // member ID -> identity
-	byKey    map[[32]byte]*relayClient // connected devices
-	sessions map[uint32]*relayClient   // UDP sessions
-	dropped  uint64
-}
-
-func newRelayServer(load func() (*zr.State, error)) *relayServer {
-	return &relayServer{load: load, rate: relayRateMbps * 1e6 / 8, global: newByteBucket(relayMaxMbps*1e6/8, 64<<20),
-		members: map[string]relayMember{}, byKey: map[[32]byte]*relayClient{}, sessions: map[uint32]*relayClient{}}
-}
-
-// refresh reloads the member list and disconnects devices that were removed or re-keyed.
-func (s *relayServer) refresh() error {
-	s.refreshMu.Lock()
-	s.lastRefresh = time.Now()
-	s.refreshMu.Unlock()
-	st, err := s.load()
-	if err != nil {
-		return err
-	}
-	m := map[string]relayMember{}
+// relayMemberSet is who may use a relay: authorized, unexpired members with a valid node key.
+func relayMemberSet(st *zr.State) map[string]relay.Member {
+	m := map[string]relay.Member{}
+	now := time.Now()
 	for _, mb := range st.Members {
 		k, err := base64.StdEncoding.DecodeString(mb.NodeKey)
-		if !mb.Authorized || err != nil || len(k) != 32 || memberExpired(&mb, time.Now()) {
+		if !mb.Authorized || err != nil || len(k) != 32 || memberExpired(&mb, now) {
 			continue
 		}
-		var key [32]byte
-		copy(key[:], k)
-		m[mb.ID] = relayMember{keyHash: mb.KeyHash, nodeKey: key, network: mb.Network}
+		m[mb.ID] = relay.Member{KeyHash: mb.KeyHash, NodeKey: [32]byte(k), Network: mb.Network}
 	}
-	s.mu.Lock()
-	s.members = m
-	var gone []*relayClient
-	for k, c := range s.byKey {
-		if cur, ok := m[c.member]; !ok || cur.nodeKey != k {
-			gone = append(gone, c)
-			delete(s.byKey, k)
-		}
-	}
-	s.mu.Unlock()
-	for _, c := range gone {
-		c.close()
-	}
-	return nil
+	return m
 }
 
-// serveConn runs one device connection until it closes.
-func (s *relayServer) serveConn(conn *tls.Conn) {
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if err := conn.Handshake(); err != nil {
-		return
-	}
-	_ = conn.SetDeadline(time.Time{})
-	cs := conn.ConnectionState()
-	id, kh, ok := deviceFromTLS(&cs)
-	if !ok { // a cluster node (mesh "anywhere"): its member entry is "node:<id>"
-		if nid, nkh, nok := nodeFromTLS(&cs); nok {
-			id, kh, ok = "node:"+nid, nkh, true
-		}
-	}
-	s.mu.RLock()
-	m, known := s.members[id]
-	s.mu.RUnlock()
-	if ok && !known && s.refreshDue() { // a device that joined since the last refresh
-		_ = s.refresh()
-		s.mu.RLock()
-		m, known = s.members[id]
-		s.mu.RUnlock()
-	}
-	if !ok || !known || subtle.ConstantTimeCompare([]byte(m.keyHash), []byte(kh)) != 1 {
-		return
-	}
-	c := &relayClient{member: id, network: m.network, key: m.nodeKey, rc: zr.NewRelayConn(conn),
-		out: make(chan []byte, relayQueue), done: make(chan struct{}), bucket: newByteBucket(s.rate, relayBurstBytes)}
-	_, _ = rand.Read(c.skey[:])
-	s.mu.Lock()
-	if old := s.byKey[c.key]; old != nil {
-		old.close() // the newest connection of a device wins
-	}
-	s.byKey[c.key] = c
-	for c.session == 0 || s.sessions[c.session] != nil {
-		var b [4]byte
-		_, _ = rand.Read(b[:])
-		c.session = binary.BigEndian.Uint32(b[:])
-	}
-	s.sessions[c.session] = c
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		if s.byKey[c.key] == c {
-			delete(s.byKey, c.key)
-		}
-		delete(s.sessions, c.session)
-		s.mu.Unlock()
-		c.close()
-	}()
-	// The UDP session: its ID and key travel only inside this authenticated TLS connection.
-	if c.rc.WriteFrame(zr.FrameSession, nil, zr.SessionFrame(c.session, c.skey)) != nil {
-		return
-	}
-
-	go func() { // writer: frames queued for this device, plus keepalives
-		t := time.NewTicker(zr.RelayKeepalive)
-		defer t.Stop()
-		for {
-			select {
-			case <-c.done:
-				return
-			case f := <-c.out:
-				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if _, err := conn.Write(f); err != nil {
-					c.close()
-					return
-				}
-			case <-t.C:
-				if c.rc.WriteFrame(zr.FrameKeepalive, nil, nil) != nil {
-					c.close()
-					return
-				}
-			}
-		}
-	}()
-
-	for {
-		_ = conn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
-		typ, dst, payload, err := c.rc.ReadFrame()
+// runPlanetRelay serves a relay fed from load (re-read every 5s, and at once for an unknown
+// device), until ctx ends.
+func runPlanetRelay(ctx context.Context, s *relay.Server, load func() (*zr.State, error), listen, stun string, tlsConf *tls.Config) error {
+	refresh := func() error {
+		st, err := load()
 		if err != nil {
-			return
+			return err
 		}
-		if typ != zr.FrameSend {
-			continue
-		}
-		if to, ok := s.route(c, dst, len(payload)); ok {
-			s.deliver(c, to, payload)
-		}
+		s.SetMembers(relayMemberSet(st))
+		return nil
 	}
-}
-
-// refreshDue allows an on-demand refresh at most once a second (unknown devices cannot make the
-// relay hammer the state).
-func (s *relayServer) refreshDue() bool {
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
-	return time.Since(s.lastRefresh) >= time.Second
-}
-
-func (s *relayServer) drop() {
-	s.mu.Lock()
-	s.dropped++
-	s.mu.Unlock()
-}
-
-// runRelay serves until ctx ends.
-func runRelay(ctx context.Context, s *relayServer, listen, stun string, tlsConf *tls.Config) error {
-	if err := s.refresh(); err != nil {
+	if err := refresh(); err != nil {
 		return err
 	}
+	s.Reload = func() { _ = refresh() }
 	ln, err := tls.Listen("tcp", listen, tlsConf)
 	if err != nil {
-		return err
-	}
-	if err := s.listenUDP(stun); err != nil {
-		ln.Close()
 		return err
 	}
 	go func() {
@@ -289,29 +74,15 @@ func runRelay(ctx context.Context, s *relayServer, listen, stun string, tlsConf 
 		for {
 			select {
 			case <-ctx.Done():
-				ln.Close()
-				s.closeUDP()
 				return
 			case <-t.C:
-				if err := s.refresh(); err != nil {
+				if err := refresh(); err != nil {
 					fmt.Printf("[relay] refresh members: %v\n", err)
 				}
 			}
 		}
 	}()
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			continue
-		}
-		go s.serveConn(c.(*tls.Conn))
-	}
+	return s.Serve(ctx, ln, stun)
 }
 
 // relayTLS: the relay presents this master's certificate (verified by devices under the cluster
@@ -469,21 +240,16 @@ var routerRelayServeCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		s := newRelayServer(func() (*zr.State, error) {
+		s := relay.New()
+		s.SetRates(cmp.Or(conf.Mbps, relay.DefaultRateMbps), cmp.Or(conf.MaxMbps, relay.DefaultMaxMbps))
+		fmt.Printf("[relay] %s serving TLS on %s, STUN on udp %s\n", conf.Name, conf.Listen, conf.STUN)
+		return runPlanetRelay(cmd.Context(), s, func() (*zr.State, error) {
 			cur, err := readState()
 			if err != nil {
 				return nil, err
 			}
 			return relayMembers(cur), nil
-		})
-		if conf.Mbps > 0 {
-			s.rate = float64(conf.Mbps) * 1e6 / 8
-		}
-		if conf.MaxMbps > 0 {
-			s.global = newByteBucket(float64(conf.MaxMbps)*1e6/8, 64<<20)
-		}
-		fmt.Printf("[relay] %s serving TLS on %s, STUN on udp %s\n", conf.Name, conf.Listen, conf.STUN)
-		return runRelay(cmd.Context(), s, conf.Listen, conf.STUN, tc)
+		}, conf.Listen, conf.STUN, tc)
 	},
 }
 
@@ -491,8 +257,8 @@ func init() {
 	routerRelayEnableCmd.Flags().StringVar(&relayPublic, "public", "", "host:port devices dial (required)")
 	routerRelayEnableCmd.Flags().StringVar(&relayListen, "listen", ":8443", "TLS listen address")
 	routerRelayEnableCmd.Flags().IntVar(&relaySTUN, "stun-port", 3478, "STUN UDP port")
-	routerRelayEnableCmd.Flags().IntVar(&relayMbps, "rate-mbps", relayRateMbps, "per-device relayed bandwidth limit")
-	routerRelayEnableCmd.Flags().IntVar(&relayMaxMbpsFlag, "max-mbps", relayMaxMbps, "relay-wide relayed bandwidth limit")
+	routerRelayEnableCmd.Flags().IntVar(&relayMbps, "rate-mbps", relay.DefaultRateMbps, "per-device relayed bandwidth limit")
+	routerRelayEnableCmd.Flags().IntVar(&relayMaxMbpsFlag, "max-mbps", relay.DefaultMaxMbps, "relay-wide relayed bandwidth limit")
 	routerRelayCmd.AddCommand(routerRelayEnableCmd, routerRelayDisableCmd, routerRelayLsCmd, routerRelayServeCmd)
 	routerCmd.AddCommand(routerRelayCmd)
 }

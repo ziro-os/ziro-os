@@ -13,6 +13,7 @@ import (
 	"time"
 
 	zr "github.com/ziro-os/ziro-os/sdk/router"
+	"github.com/ziro-os/zirocd/relay"
 )
 
 func TestMeshPeersConversion(t *testing.T) {
@@ -97,25 +98,14 @@ func TestNodeCertificatesAndRelay(t *testing.T) {
 		t.Fatal("direct mode: nodes must not use relays")
 	}
 	cs.MeshMode = "anywhere"
-	s := newRelayServer(func() (*zr.State, error) { return relayMembers(cs), nil })
-	if err := s.refresh(); err != nil {
-		t.Fatal(err)
-	}
+	s := relay.New()
+	s.SetMembers(relayMemberSet(relayMembers(cs)))
 	tc, _ := relayTLS(st.CACert)
 	ln, _ := tls.Listen("tcp", "127.0.0.1:0", tc)
-	defer ln.Close()
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go s.serveConn(c.(*tls.Conn))
-		}
-	}()
+	go s.Serve(t.Context(), ln, "127.0.0.1:0")
 	ca, _ := parseCertPEM(st.CACert)
 	dial := func(c *tls.Certificate) *zr.RelayConn {
-		rc, err := zr.DialRelay(t.Context(), ln.Addr().String(), ca, c)
+		rc, err := zr.DialRelay(t.Context(), zr.Relay{Addr: ln.Addr().String()}, ca, c)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -219,4 +209,23 @@ func TestMeshAnywhereHeartbeat(t *testing.T) {
 	if n := st.node(w1.NodeID); n == nil || n.CertHash == "" || n.DiscoKey != wgKey(111) {
 		t.Fatal("node certificate hash / disco key not stored")
 	}
+}
+
+// relayDevice issues a device certificate for member id, as the router would.
+func relayDevice(t *testing.T, st *ClusterState, id string) (*tls.Certificate, string) {
+	t.Helper()
+	keyPEM, csrPEM, _ := zr.NewTLSKey()
+	csr, kh, err := parseCSR(string(csrPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	crt, err := issueDeviceCert(st, csr, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := tls.X509KeyPair([]byte(crt), keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &c, kh
 }

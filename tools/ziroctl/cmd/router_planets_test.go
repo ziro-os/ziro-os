@@ -307,8 +307,8 @@ func TestRouterSnapshotOnFollowers(t *testing.T) {
 	cfg := &ClusterConfig{MasterAddr: "10.0.0.1:7443"}
 	for _, m := range ms {
 		waitFor(t, m.rs.id+" router state", func() bool {
-			R, v := m.rs.routerSnapshot(cfg)
-			return R != nil && v == m.rs.stateVersion() && len(R.Networks) == 1 && len(R.Endpoints) == 3
+			st, v := m.rs.routerSnapshot(cfg)
+			return st != nil && v == m.rs.stateVersion() && len(routerOf(st).Networks) == 1 && len(routerOf(st).Endpoints) == 3
 		})
 	}
 	if err := ms[0].rs.mutate(func(st *ClusterState) error {
@@ -320,8 +320,12 @@ func TestRouterSnapshotOnFollowers(t *testing.T) {
 	}
 	for _, m := range ms[1:] {
 		waitFor(t, m.rs.id+" follows the change", func() bool {
-			R, _ := m.rs.routerSnapshot(cfg)
-			return R != nil && len(R.Networks) == 2 && len(R.Endpoints) == 1 && R.Endpoints[0] == "router.example.com:7443"
+			st, _ := m.rs.routerSnapshot(cfg)
+			if st == nil {
+				return false
+			}
+			R := routerOf(st)
+			return len(R.Networks) == 2 && len(R.Endpoints) == 1 && R.Endpoints[0] == "router.example.com:7443"
 		})
 	}
 }

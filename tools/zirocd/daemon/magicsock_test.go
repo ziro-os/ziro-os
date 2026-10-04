@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/base64"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -191,6 +192,8 @@ func TestRelayChoice(t *testing.T) {
 	b, _ := NewMagicBind(func() string { k, _, _ := newCurveKey(); return k }(), nil, nil)
 	b.relays = []zr.Relay{{Name: "eu"}, {Name: "sg"}, {Name: "us"}}
 	b.stunRTT = map[string]time.Duration{"eu": 180 * time.Millisecond, "sg": 20 * time.Millisecond, "us": 150 * time.Millisecond}
+	now := time.Now()
+	b.stunAt = map[string]time.Time{"eu": now, "sg": now, "us": now}
 	b.pickHomeLocked()
 	if b.home != "sg" || strings.Join(b.homes, ",") != "sg,us" {
 		t.Fatalf("homes %v", b.homes)
@@ -212,5 +215,17 @@ func TestRelayChoice(t *testing.T) {
 	b.stunRTT["us"] = 5 * time.Millisecond
 	if b.pickHomeLocked(); b.home != "us" {
 		t.Fatalf("home should move to a clearly nearer relay, got %s", b.home)
+	}
+	// A relay that stopped answering STUN loses its old round trip: the live ones rank first.
+	b.stunAt["us"] = now.Add(-2 * stunStale)
+	if b.pickHomeLocked(); strings.Join(b.homes, ",") != "sg,eu" {
+		t.Fatalf("stale relay still a home: %v", b.homes)
+	}
+	// A relay whose link is down (past the dialing grace) ranks last, even if STUN still answers.
+	b.stunAt["us"] = now
+	dead := &relayLink{r: zr.Relay{Name: "sg"}, b: b, born: now.Add(-time.Minute), done: make(chan struct{})} // never connected
+	b.links = map[string]*relayLink{"sg": dead}
+	if b.pickHomeLocked(); b.home == "sg" || slices.Contains(b.homes, "sg") {
+		t.Fatalf("dead relay still a home: %v", b.homes)
 	}
 }

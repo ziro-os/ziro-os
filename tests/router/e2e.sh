@@ -1,13 +1,14 @@
 #!/bin/sh
 # End-to-end test of the router, relays and zirocd in Docker (Linux containers, real TUN devices).
 #
-#   pub  172.30.0.0/24   router + relay (.10), natA (.11), natB (.12)
+#   pub  172.30.0.0/24   router + relay (.10), natA (.11), natB (.12), moon (.20, the zirocd image)
 #   lanA 172.31.1.0/24   natA (.2) -- client (.10)      each LAN reaches "pub" only through
 #   lanB 172.31.2.0/24   natB (.2) -- web (.10)         its NAT (iptables MASQUERADE)
 #
 # Checks: join; sign-in (OIDC device flow, fake provider in the router harness); subnet routing (web routes its LAN, approved by the harness); hole punching (direct path between two NATed devices); the default-deny ACL
 # (tcp/8080 only towards tag:web); DNS; relay fallback when UDP between the NATs is blocked;
-# UDP relay, TLS relay when UDP to the relay is blocked too; recovery to a direct path. Reports direct and relayed throughput. Needs docker.
+# UDP relay, TLS relay when UDP to the relay is blocked too; a moon (zirocd moon from the
+# container image, read-only, not root) taking over relaying from the planet; recovery to a direct path. Reports direct and relayed throughput. Needs docker.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 arch=$(docker info --format '{{.Architecture}}' | sed 's/aarch64/arm64/; s/x86_64/amd64/')
@@ -16,7 +17,9 @@ p=zr-e2e-$$
 img=alpine:3.22
 cleanup() {
 	[ -n "${KEEP:-}" ] && { echo "kept containers with prefix $p"; return; }
-	docker rm -f "$p-router" "$p-natA" "$p-natB" "$p-natC" "$p-client" "$p-web" "$p-lanhost" "$p-laptop" >/dev/null 2>&1 || true
+	docker rm -f "$p-router" "$p-natA" "$p-natB" "$p-natC" "$p-client" "$p-web" "$p-lanhost" "$p-laptop" "$p-moon" >/dev/null 2>&1 || true
+	docker volume rm "$p-moon" >/dev/null 2>&1 || true
+	docker image rm "$p-zirocd" >/dev/null 2>&1 || true
 	for n in pub lanA lanB lanC; do docker network rm "$p-$n" >/dev/null 2>&1 || true; done
 	docker run --rm -v "$work:/w" $img rm -rf /w/shared >/dev/null 2>&1 || true # root-owned
 	rm -rf "$work"
@@ -26,14 +29,16 @@ trap cleanup EXIT
 echo "== build (linux/$arch)"
 (cd "$root/tools/ziroctl" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go test -c -o "$work/router.test" ./cmd)
 (cd "$root/tools/zirocd" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -o "$work/zirocd" .)
-mkdir -p "$work/shared"
+mkdir -p "$work/shared" "$work/img/rootfs/var/lib/zirocd-moon"
+cp "$work/zirocd" "$work/img/zirocd-linux-$arch"
+docker build -q -t "$p-zirocd" -f "$root/images/zirocd/Dockerfile" "$work/img" >/dev/null
 
 echo "== topology"
 docker network create --subnet 172.30.0.0/24 "$p-pub" >/dev/null
 docker network create --internal --subnet 172.31.1.0/24 "$p-lanA" >/dev/null
 docker network create --internal --subnet 172.31.2.0/24 "$p-lanB" >/dev/null
 docker run -d --name "$p-router" --network "$p-pub" --ip 172.30.0.10 -v "$work:/w" \
-	-e ZIRO_E2E_LISTEN=0.0.0.0:7443 -e ZIRO_E2E_ADVERTISE=172.30.0.10:7443 -e ZIRO_E2E_RELAY=172.30.0.10 \
+	-e ZIRO_E2E_LISTEN=0.0.0.0:7443 -e ZIRO_E2E_ADVERTISE=172.30.0.10:7443 -e ZIRO_E2E_RELAY=172.30.0.10 -e ZIRO_E2E_MOON=172.30.0.20 \
 	-e ZIRO_E2E_OUT=/w/shared $img /w/router.test -test.run TestRouterServeE2E -test.v >/dev/null
 nat() { # name pubIP lan lanIP
 	docker run -d --name "$p-$1" --network "$p-pub" --ip "$2" --cap-add NET_ADMIN \
@@ -76,24 +81,26 @@ for _ in $(seq 30); do docker exec "$p-client" test -S /run/zirocd.sock 2>/dev/n
 docker exec -e ZIROCD_KEY="$key_plain" "$p-client" /w/zirocd up --name client
 docker exec -e ZIROCD_KEY="$key_web" "$p-web" /w/zirocd up --name web --advertise-routes 172.31.2.0/24
 ip_of() { docker exec "$p-$1" /w/zirocd status --json | sed -n 's/.*"ipv4": "\([0-9.]*\)".*/\1/p' | head -1; }
-path_to_web() { # the path of the peer named web (peers are sorted by name)
-	docker exec "$p-client" /w/zirocd status --json |
-		awk '/"name": "web"/ {w=1} w && /"path"/ {sub(/.*"path": "/, ""); sub(/".*/, ""); print; exit}'
+path_of() { # device peer: the device's path to the peer named peer
+	docker exec "$p-$1" /w/zirocd status --json |
+		awk -v n="\"name\": \"$2\"" 'index($0, n) {w=1} w && /"path"/ {sub(/.*"path": "/, ""); sub(/".*/, ""); print; exit}'
 }
+path_to_web() { path_of client web; }
 cip=$(ip_of client); wip=$(ip_of web)
 echo "client=$cip web=$wip"
 
 fail=0
 check() { if "$@" >/dev/null 2>&1; then echo "✓ $desc"; else echo "✗ $desc"; fail=1; fi; }
-wait_path() { # prefix seconds
-	for _ in $(seq "$2"); do
-		docker exec "$p-client" ping -c 1 -W 1 "$wip" >/dev/null 2>&1 || true
-		# shellcheck disable=SC2254 # $1 is a glob on purpose ("relay r? udp")
-		case $(path_to_web) in $1*) return 0 ;; esac
+wait_path_of() { # device peer peerIP prefix seconds
+	for _ in $(seq "$5"); do
+		docker exec "$p-$1" ping -c 1 -W 1 "$3" >/dev/null 2>&1 || true
+		# shellcheck disable=SC2254 # $4 is a glob on purpose ("relay r? udp")
+		case $(path_of "$1" "$2") in $4*) return 0 ;; esac
 		sleep 1
 	done
 	return 1
 }
+wait_path() { wait_path_of client web "$wip" "$1" "$2"; } # prefix seconds
 # First contact may cost one WireGuard handshake retry (5s) while both netmaps settle.
 desc="client pings web (two NATs apart)"
 check sh -c "for i in \$(seq 10); do docker exec $p-client ping -c 1 -W 1 $wip && exit 0; sleep 1; done; exit 1"
@@ -148,6 +155,31 @@ echo "== throughput relayed (TLS relay)"
 docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || true
 for n in natA natB; do docker exec "$p-$n" iptables -D FORWARD -p udp -d 172.30.0.10 --dport 3478:3479 -j DROP; done
 desc="back to the UDP relay once UDP to it returns"; check wait_path "relay r? udp" 15
+
+echo "== moon: one joins while the network runs; then the planet's relays go dark"
+# The published image as it ships (read-only root, its own volume, not root). Devices learn about
+# it once it registers.
+docker run -d --name "$p-moon" --network "$p-pub" --ip 172.30.0.20 --read-only -v "$p-moon:/var/lib/zirocd-moon" \
+	-e ZIROCD_MOON_TOKEN="$(docker exec "$p-router" cat /w/shared/moon-token)" "$p-zirocd" \
+	moon --dir /var/lib/zirocd-moon --metrics-listen 0.0.0.0:9102 >/dev/null
+desc="moon registered and ready (relay map loaded)"
+check sh -c "for i in \$(seq 30); do docker exec $p-router wget -qO- http://172.30.0.20:9102/readyz && exit 0; sleep 1; done; exit 1"
+for n in natA natB; do
+	docker exec "$p-$n" iptables -I FORWARD -d 172.30.0.10 -p tcp --dport 8443:8444 -j REJECT --reject-with tcp-reset
+	docker exec "$p-$n" iptables -I FORWARD -d 172.30.0.10 -p udp --dport 3478:3479 -j DROP
+done
+desc="relayed through the moon within 60s, as UDP datagrams"; check wait_path "relay m1 udp" 60
+desc="web relays back through the moon too"; check wait_path_of web client "$cip" "relay m1 udp" 30
+echo "  paths: client->web $(path_to_web), web->client $(path_of web client)"
+desc="ping through the moon"
+check sh -c "for i in \$(seq 10); do docker exec $p-client ping -c 1 -W 1 $wip && exit 0; sleep 1; done; exit 1"
+echo "== throughput relayed (moon, UDP)"
+docker exec "$p-client" iperf3 -c "$wip" -p 8080 -t 4 -f m | grep receiver || true
+docker exec "$p-router" wget -qO- http://172.30.0.20:9102/metrics | grep -E '^ziro_moon_(connected|udp_sessions|relayed_bytes_total) ' | sed 's/^/  /'
+for n in natA natB; do
+	docker exec "$p-$n" iptables -D FORWARD -d 172.30.0.10 -p tcp --dport 8443:8444 -j REJECT --reject-with tcp-reset
+	docker exec "$p-$n" iptables -D FORWARD -d 172.30.0.10 -p udp --dport 3478:3479 -j DROP
+done
 for n in natA natB; do
 	other=172.30.0.12; [ $n = natB ] && other=172.30.0.11
 	docker exec "$p-$n" iptables -D FORWARD -p udp -d $other -j DROP

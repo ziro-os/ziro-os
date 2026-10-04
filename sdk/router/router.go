@@ -19,6 +19,16 @@ type State struct {
 	Keys      []JoinKey `json:"keys,omitempty"`
 	Relays    []Relay   `json:"relays,omitempty"`
 	SSO       *SSO      `json:"sso,omitempty"` // OIDC provider for device login (zirocd up --sso)
+	Moons     []Moon    `json:"moons,omitempty"`
+}
+
+// Moon is a relay that is not a master (its public part is in Relays, under the same name).
+type Moon struct {
+	Name         string    `json:"name"`
+	TokenHash    string    `json:"token_hash,omitempty"` // sha256 of the registration secret; cleared once used
+	TokenExpires time.Time `json:"token_expires,omitempty"`
+	KeyHash      string    `json:"key_hash,omitempty"` // the registered moon's TLS key ("" until it registers)
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // SSO is the router's OIDC provider. Devices sign in with the device-code flow (RFC 8628),
@@ -47,6 +57,9 @@ type Relay struct {
 	Name string `json:"name"`
 	Addr string `json:"addr"` // host:port, TLS (tcp)
 	STUN string `json:"stun"` // host:port, STUN (udp)
+	// ServerName is a moon's certificate name (MoonServerName); empty: a relay on a planet,
+	// verified like the planets.
+	ServerName string `json:"server_name,omitempty"`
 }
 
 // Network is one isolated virtual network (ZeroTier-style), addressed by its random ID.

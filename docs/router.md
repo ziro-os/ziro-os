@@ -7,6 +7,7 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 | Control plane | `ziroctl router`, served by `cluster-master` on every master (`/router/v1/*` on the cluster port, 7443). Every master ("planet") serves netmaps; devices use the nearest one | shipped (R1; every planet serves since G1) |
 | Client | `zirocd` for Linux, macOS and Windows (amd64, arm64), signed releases with self-update | shipped (R2) |
 | Relays + NAT traversal | `ziroctl router relay enable` (TLS relay + STUN), disco hole punching, `zirocd netcheck` | shipped (R3) |
+| Moons | Regional relays on any Linux host or container (`zirocd moon`, image `ghcr.io/ziro-os/zirocd`), not masters | shipped (G2) |
 | Ziro OS hosts, subnet routers | `ziroctl router join` (zirocd ships in the full image), routed LANs and cluster meshes | shipped (R4) |
 | SSO | OIDC device-code sign-in (`zirocd up --sso`), expiring device keys, `user:` ACL selectors | shipped (R5) |
 
@@ -175,6 +176,36 @@ zirocd netcheck            # on a device: UDP, NAT type, public address, relay l
 
 `zirocd status` shows each peer's path: `direct 203.0.113.9:41641 (12ms)`, `relay sg-1 udp`, or `relay sg-1 tls`.
 
+### Moons
+
+A moon is a relay that isn't a master: a small Linux VM or a container in a region where you have devices but no planet. It needs a public address and nothing else. It holds no cluster state and never needs inbound access to the planets.
+
+```sh
+# on a master: record the moon and get a one-time token (valid 1h)
+ziroctl router moon add sg-1 --public relay-sg.example.com:8443
+
+# on the moon host (any Linux), with the token in the environment, not argv
+ZIROCD_MOON_TOKEN=zm1_... zirocd moon --dir /var/lib/zirocd-moon
+
+# or as a container
+docker run -d --name moon --read-only --restart unless-stopped \
+  -p 8443:8443/tcp -p 3478:3478/udp -v zirocd-moon:/var/lib/zirocd-moon \
+  -e ZIROCD_MOON_TOKEN=zm1_... ghcr.io/ziro-os/zirocd
+
+# or on a Ziro OS host
+ziroctl router moon join --token-file /root/sg-1.token
+
+ziroctl router moon ls       # registered, waiting, or token expired
+ziroctl router moon rm sg-1  # devices stop using it within a second
+```
+
+- **Registration.** The moon makes its own key and sends a CSR with the token. The planets certify it (OU `ziro-relay`, name `sg-1.moon.ziro`, 7 days); the moon renews it by itself. The token works once and only its hash is stored. A rebuilt host gets a new one with `ziroctl router moon token sg-1`.
+- **Relay map.** The moon streams, from its nearest planet, only what forwarding needs: each member's ID, certificate key hash, WireGuard key and network. It gets no names, endpoints or ACLs.
+- **Fail closed.** When it's removed, the moon drops every device and exits. When no planet has answered for 5 minutes, it stops relaying until the relay map is back, so it can't keep forwarding for a device that was revoked meanwhile.
+- **Devices** use a moon like any relay (UDP first, TLS fallback). Devices learn about it only once it has registered, and verify it by its own name and OU. A moon certificate can never pass as a planet. Moons need zirocd from this release or later; older clients skip them.
+- **Health.** `--metrics-listen 127.0.0.1:9102` serves `/healthz`, `/readyz` (relay map loaded) and `/metrics` (`ziro_moon_connected`, `ziro_moon_udp_sessions`, `ziro_moon_relayed_bytes_total`, `ziro_moon_relaymap_up`, `ziro_moon_cert_expiry_seconds`, ...).
+- **Ports.** tcp/8443 (TLS) and udp/3478 (relayed datagrams and STUN), set with `--listen` and `--stun-port` and saved with the moon's state. The container runs as an unprivileged user with a read-only root.
+
 **What goes direct:**
 - **Endpoint-independent NATs** (home routers, cloud NAT gateways, most carrier NATs): by hole punching.
 - **Routers that offer PCP, NAT-PMP or UPnP:** through a port mapping.
@@ -267,5 +298,6 @@ sequenceDiagram
 | Revocation | `member rm`, network deletion or loss of authorization ends the device's stream within a quarter second of the planet applying the change, and removes it from every peer's netmap. |
 | Planet mesh | Planets exchange soft state only over master mutual TLS. Entries for devices that aren't authorized members are dropped, and endpoint and relay lists are capped, so a planet can't be flooded and soft state can't grant access. |
 | Data plane | WireGuard end to end. Relays forward ciphertext only, only within one network, and identify senders by certificate, never by what a frame claims. A device's own ACL filter still decides what it accepts. |
+| Moons | One-time, hashed, expiring tokens. A moon certificate (OU `ziro-relay`, its own DNS name, 7 days) is accepted only for the relay map and its own renewal, and refused everywhere else. Devices verify moons by their own name, and planets by OU `ziro-master`, so neither can pass for the other. The relay map is least privilege (no names, endpoints or ACLs). Removing a moon ends its stream at once, and a moon cut off from the planets for 5 minutes stops relaying. |
 | Underlay vs overlay | An address inside a prefix routed through the tunnel (the network, approved subnet routes) is never used as a WireGuard path, so packets can't loop into the tunnel |
 | Path discovery | Disco messages are NaCl-boxed between disco keys the router distributed: a forged or replayed ping from anyone else is dropped, and a relayed one must come from the key it claims. Ping rounds are rate-limited, so two peers cannot amplify each other |
