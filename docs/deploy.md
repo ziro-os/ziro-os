@@ -19,6 +19,17 @@ ziroctl deploy rm web --purge
 
 ## How a deploy works
 
+```mermaid
+flowchart LR
+  G[git push or ziroctl deploy] --> F[fetch: https only,<br/>token via GIT_ASKPASS]
+  F --> D[detect: Dockerfile, Node,<br/>Go, Python, static]
+  D --> B[BuildKit on containerd:<br/>ziro.local/app:bN + digest]
+  B --> R[release: hardened container,<br/>digest checked, env-file secrets]
+  R --> H{answers on its port<br/>within 2 min?}
+  H -- yes --> L[live; gateway route if --expose]
+  H -- no --> P[previous build released again]
+```
+
 1. **Fetch.** ziroctld shallow-clones the branch over `https://` only. `file://`, `ext::` and other transports
    are refused, and submodules are off. A private repository's token goes through `GIT_ASKPASS`; it never
    appears in the URL, the arguments or the records.

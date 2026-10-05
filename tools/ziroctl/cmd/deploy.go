@@ -20,7 +20,8 @@ import (
 
 var (
 	deployName, deployRef, deployPath, deployExpose, deployExposeTLS, deployTokenFile string
-	deployPort, deployPublish                                                         int
+	deployArch                                                                        string
+	deployPort, deployPublish, deployReplicas                                         int
 	deployEnv, deploySecrets                                                          []string
 	deployMemory                                                                      string
 	deployCPUs                                                                        float64
@@ -67,7 +68,8 @@ by the previous build.`,
 			name = nameFromRepo(args[0])
 		}
 		req := DeployRequest{Deployment: Deployment{Name: name, Repo: args[0], Ref: deployRef, Path: deployPath,
-			Port: deployPort, Publish: deployPublish, Env: env, Expose: deployExpose, ExposeTLS: deployExposeTLS},
+			Port: deployPort, Publish: deployPublish, Env: env, Expose: deployExpose, ExposeTLS: deployExposeTLS,
+			Replicas: deployReplicas, Arch: deployArch},
 			SecretValues: secrets}
 		if deployMemory != "" || deployCPUs > 0 {
 			req.Resources = &Resources{Memory: deployMemory, CPUs: deployCPUs}
@@ -333,6 +335,8 @@ func init() {
 	f.StringVar(&deployTokenFile, "git-token-file", "", "File with an access token for a private repository")
 	f.StringVar(&deployMemory, "memory", "", "Memory limit, e.g. 512Mi")
 	f.Float64Var(&deployCPUs, "cpus", 0, "CPU limit, e.g. 1.5")
+	f.IntVar(&deployReplicas, "replicas", 0, "On a cluster: replicas to run (default 1)")
+	f.StringVar(&deployArch, "arch", "", "On a cluster: build and run on amd64 or arm64 nodes")
 	for _, c := range []*cobra.Command{deployCmd, deployRedeployCmd, deployRollbackCmd} {
 		c.Flags().BoolVar(&deployNoFollow, "no-follow", false, "Return once the build is queued")
 	}

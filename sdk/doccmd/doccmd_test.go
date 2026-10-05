@@ -6,7 +6,7 @@ import (
 )
 
 func TestLines(t *testing.T) {
-	md := "text ziroctl not-code\n```sh\n# a comment\nziroctl router moon add sg-1 --public h:1 # trailing\nZIROCD_KEY=k sudo zirocd up --name \"a b\"\nziroctl a \\\n  --b c && ziroctl d | grep x\ndocker run img\n```\n"
+	md := "text ziroctl not-code\n```mermaid\nziroctl not-a-command\n```\n```text\nziroctl (diagram)\n```\n```sh\n# a comment\nziroctl router moon add sg-1 --public h:1 # trailing\nZIROCD_KEY=k sudo zirocd up --name \"a b\"\nziroctl a \\\n  --b c && ziroctl d | grep x\ndocker run img\n```\n"
 	got := Lines([]byte(md), "ziroctl")
 	want := []string{"router moon add sg-1 --public h:1", "a --b c", "d"}
 	if len(got) != len(want) {

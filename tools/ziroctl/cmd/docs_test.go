@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,6 +20,9 @@ func checkDocCommand(root *cobra.Command, args []string) error {
 	}
 	if !cmd.Runnable() {
 		return fmt.Errorf("%q is not a command (unknown subcommand?)", cmd.CommandPath())
+	}
+	if cmd.DisableFlagParsing { // passes its flags through (compose)
+		return nil
 	}
 	for _, a := range rest {
 		if !strings.HasPrefix(a, "-") || a == "-" || a == "--" {
@@ -47,20 +51,24 @@ func TestDocCommands(t *testing.T) {
 			t.Fatalf("the check accepts ziroctl %s", strings.Join(bad, " "))
 		}
 	}
-	for _, doc := range []string{"../../../docs/router-deploy.md", "../../../docs/router.md", "../../../docs/cloudflare-tunnel.md"} {
+	docs, _ := filepath.Glob("../../../docs/*.md")
+	tutorials, _ := filepath.Glob("../../../docs/tutorials/*.md")
+	total := 0
+	for _, doc := range append(docs, tutorials...) {
 		md, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)
 		}
 		lines := doccmd.Lines(md, "ziroctl")
-		if len(lines) == 0 {
-			t.Fatalf("%s: no ziroctl commands found", doc)
-		}
-		t.Logf("%s: %d ziroctl commands", doc, len(lines))
+		total += len(lines)
 		for _, args := range lines {
 			if err := checkDocCommand(rootCmd, args); err != nil {
 				t.Errorf("%s: ziroctl %s: %v", doc, strings.Join(args, " "), err)
 			}
 		}
 	}
+	if total < 200 {
+		t.Fatalf("only %d ziroctl commands found in %d docs: is the docs path right?", total, len(docs))
+	}
+	t.Logf("%d ziroctl commands in %d docs", total, len(docs)+len(tutorials))
 }

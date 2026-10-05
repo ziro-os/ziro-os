@@ -2,9 +2,41 @@
 
 Security is a foundational design pillar of Ziro-OS. Unlike general-purpose distributions that run dozens of background daemons, cron jobs, and SSH servers by default, Ziro-OS eliminates non-essential attack surfaces.
 
+## Lock down a host
+
+```sh
+ziroctl ssh key import gh:alice               # keys from GitHub, GitLab (gl:) or Launchpad (lp:)
+ziroctl firewall enable                       # default drop; SSH (22), WireGuard (51820/udp), ICMP stay open
+ziroctl firewall allow 443/tcp --comment web
+ziroctl firewall block-ip 198.51.100.0/24 --comment scanner
+ziroctl firewall status
+ziroctl security audit                        # check the hardening
+```
+
+| Command | What it does |
+|---|---|
+| `firewall enable` / `disable` / `status` / `list` | Default-drop inbound firewall (its own `inet ziro` nftables table) |
+| `firewall allow` / `deny <port[/proto]>` | Open or close a port |
+| `firewall block-ip` / `unblock-ip <ip-or-cidr>` | Drop everything from an address |
+| `ssh key import <gh:u\|gl:u\|lp:u>... [--sync]` | Authorize published keys; `--sync` drops the ones the user removed upstream |
+| `ssh key add` / `list` / `remove --source` / `clear` | Manage root's authorized keys |
+| `ssh status` | sshd state and host key fingerprints |
+
+## Defence layers
+
+```mermaid
+flowchart TB
+  N[Network: default-drop firewall, Ziro Guard flood/scan/brute-force bans] -->
+  A[Access: SSH keys only, console login required, API tokens with roles, audit log] -->
+  S[Services: own cgroups, unprivileged plugin users, memory watchdog] -->
+  W[Workloads: containerd + runc, namespaces, seccomp, image policy, egress control] -->
+  K[Kernel: hardened sysctls; custom kernel adds lockdown, module signing, LSMs] -->
+  B[Boot and supply chain: signed releases and catalogs, sha256-pinned artifacts, rollback]
+```
+
 ---
 
-## 🔒 Security Principles
+## Security Principles
 
 ### 1. Minimal Attack Surface
 - Full hosts include containerd/runc/CNI, OpenSSH, apk/ziropkg, and enabled host services.
@@ -34,7 +66,7 @@ Configured in `/etc/sysctl.d/99-ziro.conf`:
 
 ---
 
-## 🛡️ Running Security Audits
+## Running Security Audits
 
 Verify system hardening in real-time using `ziroctl`:
 

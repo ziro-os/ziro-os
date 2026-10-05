@@ -9,6 +9,24 @@ ziroctl dns status        # queries, cache hit rate, upstream latency and health
 ziroctl dns disable       # stop it and restore plain resolvers
 ```
 
+## How a query is answered
+
+```mermaid
+flowchart LR
+  Q[query from host, pod DNS<br/>or allowed network] --> RL{allowed source,<br/>under rate limit?}
+  RL -- no --> R1[REFUSED]
+  RL -- yes --> B{blocked domain?}
+  B -- yes --> NX[NXDOMAIN]
+  B -- no --> L{local or cluster record?}
+  L -- yes --> A1[authoritative answer]
+  L -- no --> C{in cache?}
+  C -- yes --> A2[cached answer]
+  C -- no --> F{split DNS<br/>forward rule?}
+  F -- yes --> FW[that domain's resolvers]
+  F -- no --> UP[fastest healthy upstream<br/>UDP or DNS-over-TLS]
+  UP -- all down --> ST[serve stale, TTL 30]
+```
+
 ## What it does
 
 - **Caching:** answers are cached for their TTL, bounded by an LRU (10,000 answers by default). NXDOMAIN and

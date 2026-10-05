@@ -14,6 +14,17 @@ ziroctl disk expand --dry-run   # what would grow
 ziroctl disk expand
 ```
 
+```mermaid
+flowchart LR
+  R[disk resized by the cloud or hypervisor] --> C{every minute and at boot:<br/>last partition has 16 MiB+ free?}
+  C -- no --> N[nothing to do]
+  C -- yes --> G[move backup GPT to the new end]
+  G --> P[sfdisk: extend the partition]
+  P --> K[partx -u: tell the kernel, online]
+  K --> F[ext4 online resize]
+  F --> A[audit + alert]
+```
+
 - **What grows:** the root filesystem and every data disk added below. Only the last partition on a disk can grow
   (the installer puts the root partition last).
 - **How:** the backup GPT header moves to the new end of the disk, the partition is extended with `sfdisk`, the

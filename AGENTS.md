@@ -55,7 +55,7 @@
 
 ## Commands Agents Should Know
 
-- Build kernel: e.g. `make` / `make defconfig && make` in `kernel/`
+- Build kernel: `make kernel` (runs `kernel/build-kernel.sh`; the hardened `custom` flavor by default, `KERNEL_FLAVOR=alpine` for the distro kernel)
 - Build userland: compile musl + BusyBox + essential tools
 - Install container runtime: build or integrate containerd + runtime
 - Build images: via scripts in `images/` for different targets (VM, cloud, bare metal)

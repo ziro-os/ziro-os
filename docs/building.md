@@ -2,16 +2,31 @@
 
 Ziro-OS features a fully reproducible, Docker-isolated multi-architecture build system supporting both `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).
 
----
+**You need:** Docker (Docker Desktop, Colima or OrbStack, with buildx for multi-arch images), Go 1.27, `make`, and
+QEMU for the boot tests. Everything else (Alpine packages, the kernel toolchain) runs inside containers.
 
-## 🏗️ Target Architectures
+```mermaid
+flowchart LR
+  T[tools: ziroctl, ziropkg<br/>Go, static] --> R
+  K[kernel: alpine flavor<br/>or custom build] --> R
+  A[Alpine packages<br/>musl, BusyBox, containerd, runc, CNI] --> R[rootfs assembly<br/>in Docker]
+  I[ziro-init<br/>static C, PID 1] --> R
+  R --> B[ziro-rootfs-arch.tar.gz<br/>container base, about 16 MB]
+  R --> F[ziro-initramfs-arch.cpio.gz<br/>full host, live boot]
+  F --> ISO[ziro-os-arch.iso<br/>make image-iso]
+  B --> D[Docker image<br/>make docker-image]
+```
+
+Every bootable image (ISO and initramfs, both kernel flavors) must stay under 300 MB; CI enforces it.
+
+## Target Architectures
 
 - `x86_64` (amd64): For Intel/AMD cloud VMs, workstations, and bare metal servers.
 - `arm64` (aarch64): For Apple Silicon machines, AWS Graviton, and ARM-based cloud instances.
 
 ---
 
-## 🛠️ Build Commands
+## Build Commands
 
 ### Default Build (Current Host Architecture)
 ```bash
@@ -66,7 +81,7 @@ git worktree add /Volumes/ziro/ziro-os && cd /Volumes/ziro/ziro-os && make rootf
 Rebuilds are fast: `build/apk-cache` keeps packages, and the custom kernel is only rebuilt when
 `kernel/**` changes (ccache makes a config change a ~10 minute rebuild).
 
-## 🧪 Verification & Testing
+## Verification & Testing
 
 ```bash
 # Run unit tests and container smoke tests
@@ -89,7 +104,7 @@ It needs `qemu-system-x86_64` or `qemu-system-aarch64` and uses KVM (Linux) or H
 Pass `--no-pull` to the script if the machine has no internet access. The serial log is written to
 `build/qemu-boot-<arch>.log`. CI runs this test on every PR.
 
-## 🐧 Kernel Flavors
+## Kernel Flavors
 
 Ziro-OS ships two kernel flavors. Each one produces its own, separately named artifacts. **`custom`, the hardened
 Ziro kernel, is the default** for builds and new installs. `alpine` is the fallback.
@@ -120,7 +135,7 @@ The kernel and its modules always come from **one** source. `build/kernel-releas
 version, and `images/iso/build-iso.sh` refuses to build an ISO whose kernel has no matching `lib/modules/<version>`
 in the rootfs. All build containers use the pinned `ALPINE_IMAGE` (default `alpine:3.24`).
 
-## 📏 Image Size Goal
+## Image Size Goal
 
 Every bootable host image (ISO and initramfs, both flavors) must stay **under 300 MB** (decimal MB). CI and the
 release workflow fail if an artifact crosses that limit. The minimal container base rootfs is about 16 MB.

@@ -42,7 +42,7 @@
 ## Testing
 <!-- Describe how you tested your changes -->
 - [ ] Unit tests pass (`make test`)
-- [ ] Integration tests pass (`make test-full`)
+- [ ] Boot test passes where a booted host is involved (`make test-boot`)
 - [ ] Manual testing performed
 - [ ] New tests added for new functionality
 
@@ -50,7 +50,7 @@
 ```bash
 # List the commands you ran to test your changes
 make test-smoke
-make test-container
+make test-boot
 ```
 
 ## Screenshots/Logs
