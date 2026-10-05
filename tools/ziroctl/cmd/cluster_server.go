@@ -239,7 +239,7 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 		}
 		n.Status = "Ready"
 		ready[n.ID] = true
-		eligible[n.ID] = !n.Cordoned
+		eligible[n.ID] = !n.Cordoned && n.Labels["runner"] != "false"
 	}
 	for _, id := range gone {
 		removeNode(st, id)

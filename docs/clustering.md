@@ -35,6 +35,7 @@ The join token expires after 24 hours (`--token-ttl`, `0` = never). Print the jo
 | Scale | `ziroctl cluster scale web 5` |
 | Roll back to the previous revision (last 5 kept) | `ziroctl cluster rollback web` |
 | Maintenance | `ziroctl cluster node cordon\|uncordon\|drain <node>` |
+| Split builder, runner and gateway work | `ziroctl cluster node role <node> builder\|runner\|gateway on\|off` ([deploy.md](deploy.md#roles)) |
 | Remove a dead worker and revoke its token | `ziroctl cluster node rm <node>` |
 | Secrets (names and keys are listed, never values) | `ziroctl cluster secret set\|rm\|ls` |
 | Network policy: who may reach an app over the mesh | `ziroctl cluster deploy --name api --allow-from web,worker` (`'*'` = any app), `cluster policy ls`, `cluster policy default deny\|allow` |

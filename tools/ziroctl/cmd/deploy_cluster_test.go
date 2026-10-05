@@ -73,14 +73,14 @@ func TestPickBuilderAndHeartbeat(t *testing.T) {
 	for i := range st.Nodes {
 		st.Nodes[i].Status = "Ready"
 	}
-	if b := pickBuilder(st, ""); b == nil || b.ID != "a1" {
+	if b := pickBuilder(st, "", nil); b == nil || b.ID != "a1" {
 		t.Fatalf("builder %v (want the labelled one)", b)
 	}
-	if b := pickBuilder(st, "amd64"); b == nil || b.ID != "m" {
+	if b := pickBuilder(st, "amd64", nil); b == nil || b.ID != "m" {
 		t.Fatalf("amd64 builder %v", b)
 	}
 	st.Nodes[1].Labels["builder"] = "false"
-	if b := pickBuilder(st, "arm64"); b != nil {
+	if b := pickBuilder(st, "arm64", nil); b != nil {
 		t.Fatalf("builder=false or no builder plugin still picked: %v", b)
 	}
 	st.Nodes[1].Labels["builder"] = "true"
@@ -123,8 +123,8 @@ func TestAgentBuilds(t *testing.T) {
 	}
 	var ab agentBuilds
 	task := ClusterBuild{App: "web", Build: "b2"}
-	ab.start([]ClusterBuild{task})
-	ab.start([]ClusterBuild{task}) // still running: not started twice
+	ab.start([]ClusterBuild{task}, nil)
+	ab.start([]ClusterBuild{task}, nil) // still running: not started twice
 	close(release)
 	deadline := time.Now().Add(2 * time.Second)
 	for len(ab.report()) == 0 && time.Now().Before(deadline) {
@@ -133,7 +133,7 @@ func TestAgentBuilds(t *testing.T) {
 	if r := ab.report(); len(r) != 1 || r[0].Image != testLocalImage {
 		t.Fatalf("report %+v", r)
 	}
-	ab.start(nil) // the master has it
+	ab.start(nil, nil) // the master has it
 	if len(ab.report()) != 0 {
 		t.Error("result kept after the master dropped the task")
 	}

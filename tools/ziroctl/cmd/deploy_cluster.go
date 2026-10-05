@@ -61,16 +61,21 @@ var (
 
 // ClusterBuild is a build the master asked a builder node to run.
 type ClusterBuild struct {
-	App      string       `json:"app"`
-	Build    string       `json:"build"`
-	Node     string       `json:"node"`
-	Repo     string       `json:"repo"`
-	Ref      string       `json:"ref,omitempty"`
-	Path     string       `json:"path,omitempty"`
-	GitToken string       `json:"git_token,omitempty"` // only in the builder's heartbeat reply (from sealed secrets)
-	Status   string       `json:"status"`              // pending, done, failed
-	Result   *BuildResult `json:"result,omitempty"`
-	Created  time.Time    `json:"created"`
+	App   string `json:"app"`
+	Build string `json:"build"`
+	Node  string `json:"node"`
+	Repo  string `json:"repo"`
+	Ref   string `json:"ref,omitempty"`
+	Path  string `json:"path,omitempty"`
+	// Uploaded source: the builder pulls the archive (checked against SourceSHA) from SourceFrom,
+	// a node's mesh address, instead of cloning Repo.
+	Source     string       `json:"source,omitempty"`
+	SourceSHA  string       `json:"source_sha,omitempty"`
+	SourceFrom string       `json:"source_from,omitempty"`
+	GitToken   string       `json:"git_token,omitempty"` // only in the builder's heartbeat reply (from sealed secrets)
+	Status     string       `json:"status"`              // pending, done, failed
+	Result     *BuildResult `json:"result,omitempty"`
+	Created    time.Time    `json:"created"`
 }
 
 // BuildResult is what a builder reports.
@@ -216,8 +221,9 @@ func clusterNodeID() string {
 }
 
 // pickBuilder chooses the node that builds: Ready, with the builder plugin; nodes labelled
-// builder=true first, then the least busy; arch narrows it when the deployment pins one.
-func pickBuilder(st *ClusterState, arch string) *ClusterNode {
+// builder=true first, then the least busy; arch narrows it when the deployment pins one. skip
+// names nodes that already lost this build.
+func pickBuilder(st *ClusterState, arch string, skip map[string]bool) *ClusterNode {
 	busy := map[string]int{}
 	for _, b := range st.Builds {
 		if b.Status == "pending" {
@@ -234,7 +240,7 @@ func pickBuilder(st *ClusterState, arch string) *ClusterNode {
 	}
 	for i := range st.Nodes {
 		n := &st.Nodes[i]
-		if n.Status != "Ready" || n.Cordoned || !hasCap(n, capBuilder) || (arch != "" && n.Arch != arch) || n.Labels["builder"] == "false" {
+		if n.Status != "Ready" || n.Cordoned || !hasCap(n, capBuilder) || (arch != "" && n.Arch != arch) || n.Labels["builder"] == "false" || skip[n.ID] {
 			continue
 		}
 		if best == nil || score(n) < score(best) {
@@ -244,20 +250,55 @@ func pickBuilder(st *ClusterState, arch string) *ClusterNode {
 	return best
 }
 
-// buildOnCluster runs b on a builder node and waits for its result.
+// Builder failover: a build whose builder stops answering is given to another builder, up to
+// deployBuildRetries times. deployPollEvery is how often the master looks at the result.
+var (
+	deployBuildRetries = 2
+	deployPollEvery    = 2 * time.Second
+	errBuilderLost     = errors.New("the builder stopped answering")
+)
+
+// buildOnCluster runs b on a builder node and waits for its result, moving it to another
+// builder if the first one is lost.
 func buildOnCluster(ctx context.Context, d *Deployment, b *Build, log io.Writer, logf func(string, ...any)) (BuildPlan, error) {
-	if d.Source == deploySourceUpload {
-		return BuildPlan{}, errors.New("uploaded source can't be built on a cluster yet (deploy from a git repository)")
+	tried := map[string]bool{}
+	for attempt := 0; ; attempt++ {
+		plan, node, err := buildOnNode(ctx, d, b, log, logf, tried)
+		if !errors.Is(err, errBuilderLost) || attempt >= deployBuildRetries {
+			return plan, err
+		}
+		tried[node] = true
+		logf("%s stopped answering; trying another builder", node)
 	}
+}
+
+// buildOnNode picks a builder (not in skip), hands it the build and waits. node is the builder
+// chosen, so the caller can skip it next time.
+func buildOnNode(ctx context.Context, d *Deployment, b *Build, log io.Writer, logf func(string, ...any), skip map[string]bool) (plan BuildPlan, node string, err error) {
 	self := clusterNodeID()
-	var node *ClusterNode
+	var picked *ClusterNode
 	token, _ := os.ReadFile(filepath.Join(deployTokenDir, d.Name+".token"))
-	err := withState(func(st *ClusterState) error {
-		if node = pickBuilder(st, d.Arch); node == nil {
+	var sha string
+	if d.Source == deploySourceUpload {
+		if sha, err = fileSHA256(uploadArchive(d.Name)); err != nil {
+			return plan, "", fmt.Errorf("uploaded source: %w", err)
+		}
+	}
+	err = withState(func(st *ClusterState) error {
+		if picked = pickBuilder(st, d.Arch, skip); picked == nil {
 			return errors.New("no builder node: enable the builder plugin on a node (ziroctl module enable builder)")
 		}
-		if node.ID == self {
+		if picked.ID == self {
 			return nil
+		}
+		cb := ClusterBuild{App: d.Name, Build: b.ID, Node: picked.ID, Repo: d.Repo, Ref: b.Ref, Path: d.Path,
+			Status: "pending", Created: time.Now().UTC()}
+		if d.Source == deploySourceUpload {
+			me := st.node(self)
+			if me == nil || me.MeshIP == "" {
+				return errors.New("this master has no mesh address to serve the uploaded source from")
+			}
+			cb.Source, cb.SourceSHA, cb.SourceFrom = deploySourceUpload, sha, net.JoinHostPort(me.MeshIP, strconv.Itoa(imageServerPort))
 		}
 		if t := strings.TrimSpace(string(token)); t != "" {
 			if st.Secrets == nil {
@@ -265,26 +306,33 @@ func buildOnCluster(ctx context.Context, d *Deployment, b *Build, log io.Writer,
 			}
 			st.Secrets[clusterBuildSecret(d.Name)] = map[string]string{"GIT_TOKEN": t}
 		}
-		st.Builds = append(st.Builds, ClusterBuild{App: d.Name, Build: b.ID, Node: node.ID, Repo: d.Repo, Ref: b.Ref,
-			Path: d.Path, Status: "pending", Created: time.Now().UTC()})
+		st.Builds = append(slices.DeleteFunc(st.Builds, func(x ClusterBuild) bool { return x.App == d.Name && x.Build == b.ID }), cb)
 		return nil
 	})
 	if err != nil {
-		return BuildPlan{}, err
+		return plan, "", err
 	}
-	b.Node, b.Arch = node.ID, node.Arch
-	if node.ID == self {
+	node = picked.ID
+	b.Node, b.Arch = node, picked.Arch
+	if node == self {
 		b.Arch = runtime.GOARCH
 		logf("building on this node (%s)", b.Arch)
-		return fetchAndBuild(ctx, d, b, log, logf)
+		plan, err = fetchAndBuild(ctx, d, b, log, logf)
+		return plan, node, err
 	}
-	logf("building on %s (%s)", node.ID, node.Arch)
+	logf("building on %s (%s)", node, picked.Arch)
+	drop := func() { // done with the task
+		_ = withState(func(st *ClusterState) error {
+			st.Builds = slices.DeleteFunc(st.Builds, func(x ClusterBuild) bool { return x.App == d.Name && x.Build == b.ID })
+			return nil
+		})
+	}
 	deadline := time.Now().Add(deployFetchLimit + deployBuildLimit)
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return BuildPlan{}, ctx.Err()
-		case <-time.After(2 * time.Second):
+			return plan, node, ctx.Err()
+		case <-time.After(deployPollEvery):
 		}
 		st, err := readState()
 		if err != nil {
@@ -295,19 +343,21 @@ func buildOnCluster(ctx context.Context, d *Deployment, b *Build, log io.Writer,
 				continue
 			}
 			r := cb.Result
-			fmt.Fprintf(log, "--- log from %s ---\n%s\n------\n", node.ID, r.LogTail)
-			_ = withState(func(st *ClusterState) error { // done with the task
-				st.Builds = slices.DeleteFunc(st.Builds, func(x ClusterBuild) bool { return x.App == d.Name && x.Build == b.ID })
-				return nil
-			})
+			fmt.Fprintf(log, "--- log from %s ---\n%s\n------\n", node, r.LogTail)
+			drop()
 			if cb.Status == "failed" {
-				return BuildPlan{}, fmt.Errorf("on %s: %s", node.ID, r.Error)
+				return plan, node, fmt.Errorf("on %s: %s", node, r.Error)
 			}
 			b.Image, b.Commit, b.Kind = r.Image, r.Commit, r.Kind
-			return BuildPlan{Kind: r.Kind, Port: r.Port, Health: r.Health}, nil
+			return BuildPlan{Kind: r.Kind, Port: r.Port, Health: r.Health}, node, nil
+		}
+		if n := st.node(node); n == nil || n.Status != "Ready" {
+			drop() // a result it posts later has no task to match and is ignored
+			return plan, node, fmt.Errorf("%w (%s)", errBuilderLost, node)
 		}
 	}
-	return BuildPlan{}, fmt.Errorf("%s did not finish the build in time", node.ID)
+	drop()
+	return plan, node, fmt.Errorf("%s did not finish the build in time", node)
 }
 
 // waitRollout waits until every replica of app runs its current spec.
@@ -348,7 +398,7 @@ func waitRollout(app string, limit time.Duration) error {
 // buildTask builds a ClusterBuild locally (no release) for this node's agent.
 func buildTask(ctx context.Context, t ClusterBuild) BuildResult {
 	res := BuildResult{App: t.App, Build: t.Build, Arch: runtime.GOARCH}
-	d := &Deployment{Name: t.App, Repo: t.Repo, Ref: t.Ref, Path: t.Path}
+	d := &Deployment{Name: t.App, Source: t.Source, Repo: t.Repo, Ref: t.Ref, Path: t.Path}
 	if err := validateDeployment(d); err != nil || !buildIDRe.MatchString(t.Build) {
 		res.Error = fmt.Sprintf("invalid build task: %v", err)
 		return res
@@ -387,7 +437,9 @@ type agentBuilds struct {
 	results map[string]BuildResult
 }
 
-func (ab *agentBuilds) start(tasks []ClusterBuild) {
+// start runs the tasks it isn't running yet. fetch, when set, brings an uploaded source to this
+// node first (a failure fails the task).
+func (ab *agentBuilds) start(tasks []ClusterBuild, fetch func(ClusterBuild) error) {
 	ab.mu.Lock()
 	defer ab.mu.Unlock()
 	if ab.running == nil {
@@ -405,7 +457,12 @@ func (ab *agentBuilds) start(tasks []ClusterBuild) {
 		}
 		ab.running[key] = true
 		go func(t ClusterBuild) {
-			r := requestBuildTask(t)
+			var r BuildResult
+			if err := fetchTaskSource(t, fetch); err != nil {
+				r = BuildResult{App: t.App, Build: t.Build, Error: err.Error()}
+			} else {
+				r = requestBuildTask(t)
+			}
 			ab.mu.Lock()
 			delete(ab.running, key)
 			ab.results[key] = r
@@ -417,6 +474,13 @@ func (ab *agentBuilds) start(tasks []ClusterBuild) {
 			delete(ab.results, k)
 		}
 	}
+}
+
+func fetchTaskSource(t ClusterBuild, fetch func(ClusterBuild) error) error {
+	if t.Source != deploySourceUpload || fetch == nil {
+		return nil
+	}
+	return fetch(t)
 }
 
 func (ab *agentBuilds) report() []BuildResult {
@@ -469,17 +533,51 @@ func (s *imageServer) ensure(meshIP, token string) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/images/{digest}", s.serveImage)
+	mux.HandleFunc("GET /v1/source/{app}/{sha}", s.serveSource)
 	s.addr, s.srv = addr, &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func(srv *http.Server) { _ = srv.Serve(l) }(s.srv)
 }
 
-func (s *imageServer) serveImage(w http.ResponseWriter, r *http.Request) {
+// authorized checks the cluster token (the same one for images and sources).
+func (s *imageServer) authorized(w http.ResponseWriter, r *http.Request) bool {
 	s.mu.Lock()
 	tok := s.token
 	s.mu.Unlock()
 	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if tok == "" || subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// serveSource sends a deployment's uploaded archive to the builder that was assigned its build,
+// if it is still the one with this digest (a newer upload replaces it: 409).
+func (s *imageServer) serveSource(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	app, sha := r.PathValue("app"), r.PathValue("sha")
+	if validName(app) != nil || !sha256Re.MatchString(sha) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if got, err := fileSHA256(uploadArchive(app)); err != nil || got != sha {
+		http.Error(w, "no such source (replaced by a newer upload?)", http.StatusConflict)
+		return
+	}
+	f, err := os.Open(uploadArchive(app))
+	if err != nil {
+		http.Error(w, "no such source", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/gzip")
+	_, _ = io.Copy(w, f)
+}
+
+func (s *imageServer) serveImage(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
 		return
 	}
 	name := localImageByDigest(r.PathValue("digest"))
@@ -528,26 +626,11 @@ func fetchClusterImage(ctx context.Context, a Assignment, token string, meshNet 
 	if a.ImageFrom == "" || token == "" {
 		return "", fmt.Errorf("%s is not on this node and no node serves it", a.Image)
 	}
-	src, err := netip.ParseAddrPort(a.ImageFrom)
-	if err != nil || !meshNet.IsValid() || !meshNet.Contains(src.Addr()) || src.Port() != imageServerPort {
-		return "", fmt.Errorf("image source %q is not a node of the mesh %s", a.ImageFrom, meshNet)
-	}
 	_, digest, _ := strings.Cut(a.Image, "@")
-	if !digestRe.MatchString(digest) || !tokenRe.MatchString(token) {
+	if !digestRe.MatchString(digest) {
 		return "", errors.New("invalid image digest or token")
 	}
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", src.String())
-	if err != nil {
-		return "", fmt.Errorf("fetch %s: %w", a.Image, err)
-	}
-	defer conn.Close()
-	// Plain HTTP inside the WireGuard mesh; the digest is checked after loading.
-	if _, err := fmt.Fprintf(conn, "GET /v1/images/%s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n",
-		digest, src, token); err != nil {
-		return "", err
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	resp, err := meshGet(ctx, a.ImageFrom, "/v1/images/"+digest, token, meshNet)
 	if err != nil {
 		return "", fmt.Errorf("fetch %s: %w", a.Image, err)
 	}
@@ -568,6 +651,61 @@ func fetchClusterImage(ctx context.Context, a Assignment, token string, meshNet 
 }
 
 var tokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// connBody closes the connection with the body: meshGet reads the reply off a raw connection.
+type connBody struct {
+	io.ReadCloser
+	conn net.Conn
+}
+
+func (b connBody) Close() error { b.conn.Close(); return b.ReadCloser.Close() }
+
+// meshGet GETs path from a node's server (from is its mesh address, port 7444) with the cluster
+// token. The request goes straight to that address, which must be inside meshNet, so a master's
+// reply can't point the agent anywhere else. Plain HTTP inside the WireGuard mesh; callers check
+// what arrives (an image's digest, an archive's SHA-256). The caller closes resp.Body.
+func meshGet(ctx context.Context, from, path, token string, meshNet netip.Prefix) (*http.Response, error) {
+	src, err := netip.ParseAddrPort(from)
+	if err != nil || !meshNet.IsValid() || !meshNet.Contains(src.Addr()) || src.Port() != imageServerPort {
+		return nil, fmt.Errorf("source %q is not a node of the mesh %s", from, meshNet)
+	}
+	if !tokenRe.MatchString(token) {
+		return nil, errors.New("invalid image digest or token")
+	}
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", src.String())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n", path, src, token); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp.Body = connBody{resp.Body, conn}
+	return resp, nil
+}
+
+// fetchTaskArchive brings the uploaded source of a build task to this node (the master's
+// archive, checked against the digest in the task).
+func fetchTaskArchive(ctx context.Context, t ClusterBuild, token string, meshNet netip.Prefix) error {
+	if validName(t.App) != nil || !sha256Re.MatchString(t.SourceSHA) {
+		return errors.New("invalid source in the build task")
+	}
+	resp, err := meshGet(ctx, t.SourceFrom, "/v1/source/"+t.App+"/"+t.SourceSHA, token, meshNet)
+	if err != nil {
+		return fmt.Errorf("fetch source: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetch source: HTTP %d", resp.StatusCode)
+	}
+	return storeUpload(t.App, io.LimitReader(resp.Body, deployUploadMax+1), t.SourceSHA)
+}
 
 // ---- ziroctl cluster node label ----
 
@@ -613,6 +751,58 @@ builder plugin the first choice for builds; builder=false keeps builds off it.`,
 	},
 }
 
+// Node roles: builder (builds deployments), runner (runs app replicas) and gateway (serves
+// ports 80 and 443). A node has all of them by default. builder and runner are labels (builder=true
+// makes a node the first choice for builds; =false keeps the role off it); gateway is the node's
+// flag, the same one `ziroctl gateway node enable` sets.
+func setNodeRole(n *ClusterNode, role string, on bool) error {
+	switch role {
+	case "gateway":
+		n.Gateway = on
+		return nil
+	case "builder", "runner":
+		if n.Labels == nil {
+			n.Labels = map[string]string{}
+		}
+		switch {
+		case !on:
+			n.Labels[role] = "false"
+		case role == "builder":
+			n.Labels[role] = "true"
+		default:
+			delete(n.Labels, role)
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown role %q (builder, runner or gateway)", role)
+}
+
+var clusterNodeRoleCmd = &cobra.Command{
+	Use:   "role <node> <builder|runner|gateway> <on|off>",
+	Short: "Turn a node's build, run or gateway role on or off",
+	Long: `Split the work of a cluster across nodes. A node does everything by default.
+  builder off   builds never run on the node (on: it is the first choice for builds)
+  runner off    no new app replicas are placed on it (running ones stay until you drain it)
+  gateway on    the node serves ports 80 and 443 for the cluster's routes
+A build whose builder stops answering moves to another builder.`,
+	Example: `  ziroctl cluster node role build-1 builder on
+  ziroctl cluster node role build-1 runner off
+  ziroctl cluster node role edge-1 gateway on`,
+	Args: cobra.ExactArgs(3),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if args[2] != "on" && args[2] != "off" {
+			return fmt.Errorf("%q: want on or off", args[2])
+		}
+		return nodeOp(args[0], func(st *ClusterState, n *ClusterNode) error {
+			if err := setNodeRole(n, args[1], args[2] == "on"); err != nil {
+				return err
+			}
+			fmt.Printf("✓ %s: %s %s (applied on its next heartbeat)\n", n.ID, args[1], args[2])
+			return nil
+		})
+	},
+}
+
 func init() {
-	clusterNodeCmd.AddCommand(clusterNodeLabelCmd)
+	clusterNodeCmd.AddCommand(clusterNodeLabelCmd, clusterNodeRoleCmd)
 }
