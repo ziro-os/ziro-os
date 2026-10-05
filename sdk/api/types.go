@@ -140,6 +140,19 @@ type Token struct {
 	Secret  string `json:"token,omitempty"`
 }
 
+// SourceSpec is the "spec" part of POST /api/v1/deployments/{app}/source: how to run the
+// uploaded files. Where traffic goes (expose, publish) is an admin's, so it isn't here.
+type SourceSpec struct {
+	Path         string            `json:"path,omitempty"` // subdirectory of the archive to build
+	Port         int               `json:"port,omitempty"`
+	Replicas     int               `json:"replicas,omitempty"` // cluster
+	Arch         string            `json:"arch,omitempty"`     // cluster: amd64, arm64
+	Env          map[string]string `json:"env,omitempty"`
+	Secrets      []string          `json:"secrets,omitempty"`
+	SecretValues map[string]string `json:"secret_values,omitempty"`
+	SourceSHA256 string            `json:"source_sha256"` // hex SHA-256 of the archive (PushSource fills it in)
+}
+
 // DeployRequest is the body of POST /api/v1/deployments: build and run an app from git.
 type DeployRequest struct {
 	Name         string            `json:"name"`

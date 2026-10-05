@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -455,6 +459,70 @@ func (c *Client) Redeploy(ctx context.Context, app, ref string) (map[string]any,
 func (c *Client) RollbackDeployment(ctx context.Context, app, build string) (map[string]any, error) {
 	var out map[string]any
 	return out, c.Do(ctx, http.MethodPost, "/api/v1/deployments/"+esc(app)+"/rollback", map[string]string{"build": build}, &out)
+}
+
+// PushSource deploys a .tar.gz of source files as app and returns the queued build. It needs a
+// deployer token. The archive is read twice (a digest first, then the upload), hence the Seeker.
+func (c *Client) PushSource(ctx context.Context, app string, spec api.SourceSpec, archive io.ReadSeeker) (map[string]any, error) {
+	h := sha256.New()
+	if _, err := io.Copy(h, archive); err != nil {
+		return nil, err
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	spec.SourceSHA256 = hex.EncodeToString(h.Sum(nil))
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		err := func() error {
+			w, err := mw.CreateFormField("spec")
+			if err != nil {
+				return err
+			}
+			if err := json.NewEncoder(w).Encode(spec); err != nil {
+				return err
+			}
+			if w, err = mw.CreateFormFile("source", "source.tar.gz"); err != nil {
+				return err
+			}
+			if _, err := io.Copy(w, archive); err != nil {
+				return err
+			}
+			return mw.Close()
+		}()
+		pw.CloseWithError(err)
+	}()
+	req, err := c.newRequest(ctx, http.MethodPost, "/api/v1/deployments/"+esc(app)+"/source", pr, mw.FormDataContentType())
+	if err != nil {
+		pr.CloseWithError(err)
+		return nil, err
+	}
+	resp, err := c.longHTTP().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	return out, decodeReply(resp, &out)
+}
+
+// StreamBuildLog copies a build's log to w until the build finishes.
+func (c *Client) StreamBuildLog(ctx context.Context, app, build string, w io.Writer) error {
+	req, err := c.newRequest(ctx, http.MethodGet, "/api/v1/deployments/"+esc(app)+"/builds/"+esc(build)+"/log?follow=true", nil, "")
+	if err != nil {
+		return err
+	}
+	resp, err := c.longHTTP().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return decodeReply(resp, nil)
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
 }
 
 // BuildLog returns a build's log.
