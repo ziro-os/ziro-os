@@ -26,6 +26,7 @@ var nameRe = regexp.MustCompile(`[^a-z0-9]+`)
 // token (a "deployer" API token) comes from a file or the environment, never argv.
 func deployCmd() *cobra.Command {
 	var host, tokenFile, caFile, name, subdir string
+	var insecure bool
 	var port int
 	var envs []string
 	var noFollow bool
@@ -81,8 +82,16 @@ Create the token on the host: ziroctl api token create ci --role deployer`,
 				spec.Env[k] = v
 			}
 			opts := []client.Option{client.WithUserAgent("zirocd/" + Version)}
-			if caFile != "" {
+			switch {
+			case insecure:
+				fmt.Fprintln(os.Stderr, "! --insecure: the host's certificate is not checked; anyone on the path can read the token")
+				opts = append(opts, client.WithInsecureSkipVerify())
+			case caFile != "":
 				opts = append(opts, client.WithCAFile(caFile))
+			default:
+				if pem := trustedCert(host); pem != nil { // saved by zirocd trust
+					opts = append(opts, client.WithCAPEM(pem))
+				}
 			}
 			cl, err := client.New(host, token, opts...)
 			if err != nil {
@@ -112,7 +121,7 @@ Create the token on the host: ziroctl api token create ci --role deployer`,
 				if client.IsForbidden(err) {
 					return fmt.Errorf("%w (the token needs the deployer role)", err)
 				}
-				return err
+				return trustHint(err, host)
 			}
 			id, _ := b["id"].(string)
 			if !noFollow && !jsonOut {
@@ -147,6 +156,7 @@ Create the token on the host: ziroctl api token create ci --role deployer`,
 	f.StringVar(&host, "host", "", "API URL of the Ziro OS host (or set ZIROCD_DEPLOY_HOST)")
 	f.StringVar(&tokenFile, "token-file", "", "file holding a deployer API token (or set ZIROCD_DEPLOY_TOKEN)")
 	f.StringVar(&caFile, "ca-file", "", "PEM certificate (or CA) that signs the host's API")
+	f.BoolVar(&insecure, "insecure", false, "skip certificate checks (prefer: zirocd trust <url>)")
 	f.StringVar(&name, "name", "", "app name (default: the directory's name)")
 	f.StringVar(&subdir, "path", "", "subdirectory to build (monorepos)")
 	f.IntVar(&port, "port", 0, "container port (default: detected)")

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -180,6 +181,21 @@ func tlsCertCurrent(path string, ips []net.IP, now time.Time) bool {
 	return true
 }
 
+// apiCertFingerprint is the SHA-256 of the API certificate ("sha256:<hex>"; "" if unreadable), what
+// `zirocd trust` shows so a client can compare it before trusting a self-signed certificate.
+func apiCertFingerprint() string {
+	b, err := os.ReadFile(apiTLSCert)
+	if err != nil {
+		return ""
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return ""
+	}
+	sum := sha256.Sum256(blk.Bytes)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // ensureTLSCertificates (re)issues the API's self-signed certificate (ECDSA P-256, one year)
 // when it is missing, expires within 30 days, or no longer covers the host's addresses.
 func ensureTLSCertificates() error {
@@ -328,6 +344,11 @@ func startAPIServer() {
 
 	addr := fmt.Sprintf("%s:%d", apiBindHost, apiPort)
 	fmt.Printf("ziro-api listening on %s (TLS %v, TLS 1.2 minimum); %d routes, docs: sdk/openapi.yaml\n", addr, apiUseTLS, len(apiRoutes().routes))
+	if apiUseTLS {
+		if fp := apiCertFingerprint(); fp != "" {
+			fmt.Printf("certificate %s (trust it from a client with: zirocd trust https://<this host>:<port>)\n", fp)
+		}
+	}
 
 	server := &http.Server{
 		Addr:         addr,

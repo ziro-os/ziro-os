@@ -274,7 +274,7 @@ func newRoot() *cobra.Command {
 			RunE: func(cmd *cobra.Command, args []string) error { return uninstallService() }},
 	)
 
-	root.AddCommand(daemonCmd, upCmd, downCmd, logoutCmd, statusCmd, pingCmd, netcheckCmd, updateCmd, versionCmd, serviceCmd, moonCmd(), deployCmd())
+	root.AddCommand(daemonCmd, upCmd, downCmd, logoutCmd, statusCmd, pingCmd, netcheckCmd, updateCmd, versionCmd, serviceCmd, moonCmd(), deployCmd(), trustCmd())
 	return root
 }
 
