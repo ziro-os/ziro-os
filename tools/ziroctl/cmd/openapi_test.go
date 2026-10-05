@@ -75,7 +75,7 @@ func TestRoutePolicy(t *testing.T) {
 		if rt.Role == "public" && rt.Path != "/api/v1/health" {
 			t.Errorf("%s %s is public", rt.Method, rt.Path)
 		}
-		if rt.Method != "GET" && apiRoleRank[rt.Role] < apiRoleRank["operator"] {
+		if rt.Method != "GET" && apiRoleRank[rt.Role] < apiRoleRank["deployer"] {
 			t.Errorf("%s %s changes state with role %s", rt.Method, rt.Path, rt.Role)
 		}
 	}

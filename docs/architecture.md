@@ -229,7 +229,7 @@ flowchart LR
 | Node ↔ node | WireGuard (Curve25519 keys per node, distributed by the master); app policy on `ziro0`. Mode `anywhere`: node certificates (OU `ziro-node`, client-auth only) open relay sessions for the cluster mesh only; path soft state (endpoints, relays, NAT type) never enters Raft |
 | Secrets | `0600` on the master; sent only to nodes running the app; written to tmpfs env files, never argv; excluded from backups unless `--include-secrets`; never in audit records |
 | Operator actions | Every mutating `ziroctl` command, ziro-api service action and cluster join/leave is written to the audit chain, with `KEY=VALUE` values and credential flags redacted |
-| Admin API | Loopback by default; scoped bearer tokens (viewer, operator, admin); rate limited ([api.md](api.md)) |
+| Admin API | Loopback by default; scoped bearer tokens (viewer, deployer, operator, admin); rate limited ([api.md](api.md)) |
 | Device → router | TLS 1.3 to the pinned cluster CA; device client certificates (OU `ziro-device`, client-auth only, never accepted as a master); member bound to its TLS key hash; join keys hashed, expiring, single-use by default; followers relay writes with verified identity headers trusted only from master certificates; planets share soft state over master mTLS only, and it can never admit a device; default-deny ACL with least-visibility netmaps ([router.md](router.md#security-model)) |
 | Plugin and app catalogs | ed25519-signed index (keys compiled into `ziroctl`, or added by an admin per third-party repo); every manifest and artifact pinned by sha256; index expiry (freeze) and serial (rollback) checks; cache re-verified on every read; no shadowing of built-in or official names; placeholders substitute values only, settings match anchored patterns, secrets never reach argv or backups |
 
@@ -269,7 +269,7 @@ Known limits:
   - Single sign-on: the OAuth 2.0 device-code grant, run by the leader (client secret sealed with the cluster secrets; ID tokens verified with go-oidc). A per-network policy (verified email + domains/groups → tags) admits users, and devices expire (default 180 days); expiry is enforced by the hub and the relays. `user:<email>` ACL selectors.
 - **Enterprise controls.**
   - Secrets encrypted at rest (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
-  - Scoped API tokens (viewer / operator / admin).
+  - Scoped API tokens (viewer / deployer / operator / admin).
   - Rotation: node tokens (30 days or `cluster rotate tokens`) and master certificates (`cluster rotate certs`). The data key rotates in two phases (`cluster keys rotate`); rotating the CA is not planned yet.
   - Image policy: registry allowlist and cosign signature verification (native, key-based), with digest pinning.
   - Prometheus `/api/v1/metrics` on the admin API (viewer token).

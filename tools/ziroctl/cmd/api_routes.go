@@ -19,7 +19,7 @@ import (
 // role checks, the audit trail and the OpenAPI drift test (sdk/openapi.yaml) are all built from
 // this table, so a route can't be served without being authorized, audited and documented.
 //
-// Roles: "public" (no token), "viewer" (read), "operator" (day-to-day changes), "admin"
+// Roles: "public" (no token), "viewer" (read), "deployer" (deploy apps), "operator" (day-to-day changes), "admin"
 // (anything that grants or removes access, installs software, deletes data or changes where
 // traffic goes).
 

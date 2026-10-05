@@ -19,7 +19,8 @@ import (
 // Scoped API tokens. Each token has a role and an optional expiry; only its SHA-256 is stored.
 //
 //	viewer    read-only: GET/HEAD on every endpoint
-//	operator  viewer + actions (POST/PUT/DELETE, e.g. service start/stop)
+//	deployer  viewer + deploy: push source, redeploy and roll back deployments (for CI and agents)
+//	operator  deployer + actions (POST/PUT/DELETE, e.g. service start/stop)
 //	admin     everything (the pre-RBAC token in /etc/ziro/api.token counts as admin)
 //
 // Token format: ziro_<id>_<secret>; the id locates the entry, the secret is compared in constant
@@ -27,7 +28,7 @@ import (
 
 var apiTokensFile = "/etc/ziro/api-tokens.json"
 
-var apiRoleRank = map[string]int{"viewer": 1, "operator": 2, "admin": 3}
+var apiRoleRank = map[string]int{"viewer": 1, "deployer": 2, "operator": 3, "admin": 4}
 
 type apiToken struct {
 	ID      string `json:"id"`
@@ -99,7 +100,7 @@ func createAPIToken(name, role string, ttl time.Duration) (string, apiToken, err
 		return "", apiToken{}, err
 	}
 	if apiRoleRank[role] == 0 {
-		return "", apiToken{}, fmt.Errorf("role must be viewer, operator or admin")
+		return "", apiToken{}, fmt.Errorf("role must be viewer, deployer, operator or admin")
 	}
 	if ttl < 0 || ttl > 5*365*24*time.Hour {
 		return "", apiToken{}, fmt.Errorf("ttl must be between 0 (no expiry) and 5 years")
@@ -217,7 +218,7 @@ var apiTokenRevokeCmd = &cobra.Command{
 }
 
 func init() {
-	apiTokenCreateCmd.Flags().StringVar(&apiTokenRole, "role", "viewer", "viewer (read-only), operator (+ actions) or admin")
+	apiTokenCreateCmd.Flags().StringVar(&apiTokenRole, "role", "viewer", "viewer (read-only), deployer (+ deploy), operator (+ actions) or admin")
 	apiTokenCreateCmd.Flags().DurationVar(&apiTokenTTL, "ttl", 90*24*time.Hour, "Lifetime (0 = never expires)")
 	apiTokenCmd.AddCommand(apiTokenCreateCmd, apiTokenLsCmd, apiTokenRevokeCmd)
 }

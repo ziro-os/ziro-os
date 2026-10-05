@@ -3,6 +3,8 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,24 +123,8 @@ func fetchAndBuild(ctx context.Context, d *Deployment, b *Build, log io.Writer, 
 	if err := os.MkdirAll(work, 0700); err != nil {
 		return BuildPlan{}, err
 	}
-	env, err := gitEnv(d.Name, work)
-	if err != nil {
+	if err := fetchSource(ctx, d, b, work, src, log, logf); err != nil {
 		return BuildPlan{}, err
-	}
-	logf("fetching %s %s", d.Repo, b.Ref)
-	args := []string{"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "clone", "--depth", "1",
-		"--single-branch", "--no-tags", "--recurse-submodules=no"}
-	if b.Ref != "" {
-		args = append(args, "--branch", b.Ref)
-	}
-	fctx, cancel := context.WithTimeout(ctx, deployFetchLimit)
-	defer cancel()
-	if err := deployExec(fctx, log, env, "git", append(args, "--", d.Repo, src)...); err != nil {
-		return BuildPlan{}, fmt.Errorf("git clone: %w", err)
-	}
-	var head strings.Builder
-	if err := deployExec(fctx, &head, env, "git", "-C", src, "rev-parse", "HEAD"); err == nil {
-		b.Commit = strings.TrimSpace(head.String())
 	}
 	ctxDir := filepath.Join(src, filepath.FromSlash(d.Path))
 	root, err := os.OpenRoot(ctxDir)
@@ -151,7 +137,7 @@ func fetchAndBuild(ctx context.Context, d *Deployment, b *Build, log io.Writer, 
 		return plan, err
 	}
 	b.Kind = plan.Kind
-	logf("commit %s, build: %s, port %d", b.Commit, plan.Kind, plan.Port)
+	logf("source %s, build: %s, port %d", b.Commit, plan.Kind, plan.Port)
 
 	dfDir, dfName := ctxDir, plan.File
 	if plan.Dockerfile != "" {
@@ -181,6 +167,61 @@ func fetchAndBuild(ctx context.Context, d *Deployment, b *Build, log io.Writer, 
 	}
 	b.Image = name + "@" + string(m[1])
 	return plan, nil
+}
+
+// fetchSource puts the source in src: a shallow clone of the commit, or the unpacked upload.
+// It sets b.Commit (the commit, or the upload's digest).
+func fetchSource(ctx context.Context, d *Deployment, b *Build, work, src string, log io.Writer, logf func(string, ...any)) error {
+	if d.Source == deploySourceUpload {
+		return unpackUpload(d.Name, b, src, logf)
+	}
+	env, err := gitEnv(d.Name, work)
+	if err != nil {
+		return err
+	}
+	logf("fetching %s %s", d.Repo, b.Ref)
+	args := []string{"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "clone", "--depth", "1",
+		"--single-branch", "--no-tags", "--recurse-submodules=no"}
+	if b.Ref != "" {
+		args = append(args, "--branch", b.Ref)
+	}
+	fctx, cancel := context.WithTimeout(ctx, deployFetchLimit)
+	defer cancel()
+	if err := deployExec(fctx, log, env, "git", append(args, "--", d.Repo, src)...); err != nil {
+		return fmt.Errorf("git clone: %w", err)
+	}
+	var head strings.Builder
+	if err := deployExec(fctx, &head, env, "git", "-C", src, "rev-parse", "HEAD"); err == nil {
+		b.Commit = strings.TrimSpace(head.String())
+	}
+	return nil
+}
+
+// Limits for an uploaded source tree (after unpacking).
+var (
+	deployUploadMax   int64 = 256 << 20 // the archive
+	deployUnpackMax   int64 = 1 << 30   // its files
+	deployUnpackFiles       = 100000
+)
+
+// unpackUpload extracts the app's uploaded archive into src.
+func unpackUpload(app string, b *Build, src string, logf func(string, ...any)) error {
+	f, err := os.Open(uploadArchive(app))
+	if err != nil {
+		return fmt.Errorf("no uploaded source: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if err := os.MkdirAll(src, 0700); err != nil {
+		return err
+	}
+	if err := extractTarGz(src, io.TeeReader(f, h), deployUnpackMax, deployUnpackFiles); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	_, _ = io.Copy(h, f) // the digest covers the whole archive, trailing padding included
+	b.Commit = "sha256:" + hex.EncodeToString(h.Sum(nil))[:12]
+	logf("unpacked upload %s", b.Commit)
+	return nil
 }
 
 // gitEnv is git's environment: no prompts, no system or user config, and the deployment's token
@@ -227,7 +268,7 @@ func releaseBuild(d *Deployment, b *Build, plan BuildPlan, secrets map[string]st
 			env = in.Def.Components[0].Env
 		}
 	}
-	def := AppDef{Schema: 1, Name: d.Name, Description: "deployed from " + d.Repo, Default: b.ID,
+	def := AppDef{Schema: 1, Name: d.Name, Description: "deployed from " + orDefault(d.Repo, "an upload"), Default: b.ID,
 		Versions:   map[string]schema.AppVersion{b.ID: {Images: map[string]string{"web": b.Image}}},
 		Components: []AppComponent{{Name: "web", Port: port, Env: env, Secrets: d.Secrets, Resources: d.Resources}},
 		Outputs:    map[string]string{"url": "http://{{host}}:{{port}}/", "host": "{{host}}", "port": "{{port}}"},

@@ -8,7 +8,7 @@ import (
 
 // /api/v1/deployments: the REST API forwards to ziroctld's socket. Creating a deployment runs
 // code from a repository, so it needs admin (like apps deploy); rebuilding or rolling back an
-// existing one is an operator's job.
+// existing one, or pushing source to a deployment that is already set up, is a deployer's job (a CI token).
 func registerDeployRoutes(a *apiRouter) {
 	proxy := &httputil.ReverseProxy{
 		Transport: deployHTTP.Transport,
@@ -28,10 +28,15 @@ func registerDeployRoutes(a *apiRouter) {
 	}
 	a.get("/api/v1/deployments", "viewer", fwd)
 	a.post("/api/v1/deployments", "admin", fwd)
+	// A client pushes its source here: the one route with a large body (ziroctld streams it to disk).
+	a.post("/api/v1/deployments/{app}/source", "deployer", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, deployUploadMax+(64<<10))
+		proxy.ServeHTTP(w, r)
+	})
 	a.get("/api/v1/deployments/{app}", "viewer", fwd)
 	a.delete("/api/v1/deployments/{app}", "admin", fwd)
-	a.post("/api/v1/deployments/{app}/redeploy", "operator", fwd)
-	a.post("/api/v1/deployments/{app}/rollback", "operator", fwd)
+	a.post("/api/v1/deployments/{app}/redeploy", "deployer", fwd)
+	a.post("/api/v1/deployments/{app}/rollback", "deployer", fwd)
 	a.get("/api/v1/deployments/{app}/builds/{id}/log", "viewer", fwd)
 	// Git push webhooks: public, authenticated by the deployment's hook secret (in ziroctld).
 	a.post("/api/v1/hooks/deploy/{app}", "public", fwd)

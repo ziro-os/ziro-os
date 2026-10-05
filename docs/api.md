@@ -41,7 +41,8 @@ flowchart LR
 | Role | Can |
 |---|---|
 | `viewer` | read every endpoint (GET/HEAD) |
-| `operator` | viewer, plus actions such as restarting services or deploying |
+| `deployer` | viewer, plus pushing source, redeploying and rolling back deployments (CI, agents) |
+| `operator` | deployer, plus actions such as restarting services |
 | `admin` | everything, including tokens, modules and the firewall |
 
 ```sh

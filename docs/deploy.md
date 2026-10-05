@@ -134,9 +134,29 @@ The route is public, and the secret decides everything:
 
 `ziroctl deploy` talks to ziroctld on a root-only socket, `/run/ziro/ziroctld.sock`. The REST API exposes the same
 operations under `/api/v1/deployments`:
-- creating a deployment needs `admin`, because it runs code from a repository
-- redeploy and rollback need `operator`
+- creating a deployment from a repository needs `admin`, because it runs code from that repository
+- pushing source, redeploy and rollback need `deployer`
 - reading needs `viewer`
+
+### Pushing source
+
+`POST /api/v1/deployments/{app}/source` deploys files a client uploads instead of a repository. The body is
+`multipart/form-data`: first a `spec` part (the deployment as JSON, with `source_sha256`, the hex SHA-256 of the
+archive), then a `source` part (a `.tar.gz`). Source is detected and built like a repository checkout.
+
+```bash
+ziroctl api token create ci --role deployer --ttl 720h   # a token for CI or an agent
+```
+
+- **Role.** A `deployer` token can push, redeploy, roll back and read. It can't create a deployment from a
+  repository, remove one or change `expose`, `expose_tls` or `publish`: where traffic goes stays with an admin, so
+  those keep the deployment's current values.
+- **Archive.** Files and directories only. Symlinks, hard links, devices, absolute names and `..` are refused, and
+  every file is written through a root-confined handle. The archive is capped at 256 MiB, the files at 1 GiB and
+  100000 entries.
+- **Integrity.** The server hashes the stream and refuses a digest that doesn't match. The archive is kept
+  (`0600`) as the app's current source, so a redeploy rebuilds the same files.
+- **Cluster.** Uploaded source builds on a single host. On a cluster master it's refused for now.
 
 See `sdk/openapi.yaml`.
 
