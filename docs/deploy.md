@@ -17,6 +17,23 @@ ziroctl deploy rollback web                         # release the previous build
 ziroctl deploy rm web --purge
 ```
 
+## From your machine: `zirocd deploy`
+
+Developers and AI agents can push a directory or a single file without a git repository. On the host, create a
+token that can only deploy; on your machine, point `zirocd` at the API:
+
+```sh
+ziroctl api token create ci --role deployer --ttl 720h        # on the host
+export ZIROCD_DEPLOY_HOST=https://ziro.example.com:8443 ZIROCD_DEPLOY_TOKEN=ziro_...
+zirocd deploy ./mynextjs-app                                  # packs, uploads, follows the build
+zirocd deploy index.html --name landing
+zirocd deploy ./site --no-follow --json                       # for scripts and agents
+```
+
+The token comes from `--token-file` or the environment, never an argument. Inside a git work tree `zirocd` sends
+what git tracks or could add, so `.gitignore` is honoured; `.env*` files and links are never sent. The command
+exits non-zero if the build doesn't go live. See [Pushing source](#pushing-source) for the limits and the role.
+
 ## How a deploy works
 
 ```mermaid

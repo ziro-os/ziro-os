@@ -107,33 +107,55 @@ func IsNotFound(err error) bool {
 // Do sends method path with in (JSON, may be nil) and decodes a JSON answer into out (may be nil).
 func (c *Client) Do(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
+	ctype := ""
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(b)
+		body, ctype = bytes.NewReader(b), "application/json"
 	}
-	u := *c.base
-	p, q, _ := strings.Cut(path, "?")
-	u.Path, u.RawQuery = c.base.Path+p, q
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	req, err := c.newRequest(ctx, method, path, body, ctype)
 	if err != nil {
 		return err
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.ua)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	return decodeReply(resp, out)
+}
+
+func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader, ctype string) (*http.Request, error) {
+	u := *c.base
+	p, q, _ := strings.Cut(path, "?")
+	u.Path, u.RawQuery = c.base.Path+p, q
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	if err != nil {
+		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.ua)
+	return req, nil
+}
+
+// longHTTP is the client for transfers that outlast the default timeout (uploads, log streams):
+// the caller's context bounds them instead.
+func (c *Client) longHTTP() *http.Client {
+	h := *c.http
+	h.Timeout = 0
+	return &h
+}
+
+// decodeReply maps a non-2xx answer to an *Error and decodes a 2xx body into out.
+func decodeReply(resp *http.Response, out any) error {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return err

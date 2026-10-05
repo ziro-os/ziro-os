@@ -7,6 +7,7 @@ replace github.com/ziro-os/ziro-os/sdk => ../../sdk
 require (
 	github.com/spf13/cobra v1.10.2
 	github.com/ziro-os/ziro-os/sdk v0.0.0
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0

@@ -1,8 +1,12 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,4 +63,33 @@ func errorsAs(err error, target **Error) bool {
 		*target = e
 	}
 	return ok
+}
+
+func TestPushSource(t *testing.T) {
+	archive := []byte("not really a tarball, the server here only checks the digest")
+	var spec api.SourceSpec
+	var got []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/deployments/site/source" || r.Header.Get("Authorization") != "Bearer dep" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		p, _ := mr.NextPart()
+		json.NewDecoder(p).Decode(&spec)
+		p, _ = mr.NextPart()
+		got, _ = io.ReadAll(p)
+		json.NewEncoder(w).Encode(map[string]string{"id": "b1"})
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL, "dep")
+	out, err := c.PushSource(context.Background(), "site", api.SourceSpec{Port: 3000}, bytes.NewReader(archive))
+	sum := sha256.Sum256(archive)
+	if err != nil || out["id"] != "b1" || !bytes.Equal(got, archive) || spec.Port != 3000 || spec.SourceSHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("push: %v %v spec=%+v got=%d bytes", out, err, spec, len(got))
+	}
 }
