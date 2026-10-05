@@ -1,0 +1,61 @@
+# Ziro router lab: a moon (relay) and two devices in Docker, joined to a planet that runs on a Ziro OS
+# VM or host. Walkthrough: docs/router-deploy.md, "Try it".
+#
+#   ZIRO_PLANET=192.168.1.20 ZIROCD_MOON_TOKEN=zm1_... ZIROCD_KEY=zr1_... docker compose up -d
+#   docker compose exec device-a zirocd up --name device-a
+#   docker compose exec device-b zirocd up --name device-b
+#   docker compose exec device-a zirocd ping device-b
+#
+# The moon runs the official image: FROM scratch with the signed zirocd binary, read-only, not root.
+# Devices also need iproute2 and ping for their tunnel, so they add Alpine around the same binary.
+name: ziro-router-lab
+
+x-zirocd: &zirocd
+  image: ghcr.io/ziro-os/zirocd:${ZIROCD_VERSION:-latest}
+  restart: unless-stopped
+  extra_hosts:
+    - "planet:${ZIRO_PLANET:-host-gateway}" # the address in `ziroctl router endpoints` resolves here
+
+services:
+  moon:
+    <<: *zirocd
+    command: ["moon", "--dir", "/var/lib/zirocd-moon", "--metrics-listen", "127.0.0.1:9102"]
+    read_only: true # runs as uid 65532; its identity lives in the volume
+    environment:
+      ZIROCD_MOON_TOKEN: ${ZIROCD_MOON_TOKEN:-} # first start only
+    ports:
+      - "8443:8443/tcp" # TLS relay
+      - "3478:3478/udp" # relayed datagrams and STUN
+    volumes:
+      - moon:/var/lib/zirocd-moon
+
+  # Devices need root, NET_ADMIN and /dev/net/tun for their WireGuard interface. On real machines
+  # install zirocd instead (see docs/router.md).
+  device-a: &device
+    build:
+      dockerfile_inline: |
+        FROM ghcr.io/ziro-os/zirocd:${ZIROCD_VERSION:-latest} AS zirocd
+        FROM alpine:3.22
+        RUN apk add --no-cache iproute2 iputils
+        COPY --from=zirocd /zirocd /usr/local/bin/zirocd
+        ENTRYPOINT ["zirocd"]
+    image: ziro-router-lab-device
+    restart: unless-stopped
+    extra_hosts:
+      - "planet:${ZIRO_PLANET:-host-gateway}"
+    command: ["daemon"]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun"]
+    environment:
+      ZIROCD_KEY: ${ZIROCD_KEY:-}
+    volumes:
+      - device-a:/var/lib/zirocd
+  device-b:
+    <<: *device
+    volumes:
+      - device-b:/var/lib/zirocd
+
+volumes:
+  moon: {}
+  device-a: {}
+  device-b: {}

@@ -107,7 +107,7 @@ var (
 )
 
 var routerRelayCmd = &cobra.Command{Use: "relay", Aliases: []string{"relays"}, Short: "Relays for devices without a direct path",
-	Example: "  ziroctl router relay enable sg-1 --public relay-sg.example.com:8443\n  ziroctl router relay ls"}
+	Example: "  ziroctl router relay enable sg-1 --public relay-sg.example.com:8444 --listen :8444\n  ziroctl router relay ls"}
 
 func listenPort(hostport string) (int, error) {
 	_, p, err := net.SplitHostPort(hostport)
@@ -120,7 +120,7 @@ func listenPort(hostport string) (int, error) {
 var routerRelayEnableCmd = &cobra.Command{
 	Use:   "enable <name>",
 	Short: "Run a relay on this master and announce it to devices",
-	Example: `  ziroctl router relay enable sg-1 --public relay-sg.example.com:8443
+	Example: `  ziroctl router relay enable sg-1 --public relay-sg.example.com:8444 --listen :8444
   ziroctl router relay enable sg-1 --public 203.0.113.7:443 --listen :443 --stun-port 3478`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {

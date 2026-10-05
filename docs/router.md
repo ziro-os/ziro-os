@@ -169,10 +169,21 @@ Write the ACL rules with the subnet as the destination, for example `dst: ["10.2
 Most devices sit behind NAT. zirocd finds a direct path when one exists, and uses a relay until then (or when none does), so traffic flows from the first packet.
 
 ```sh
-# on a master with a public address (run it on several masters, in several regions)
-ziroctl router relay enable sg-1 --public relay-sg.example.com:8443
+# on a master with a public address (run it on several masters, in several regions).
+# Not 8443 on a master: that's the admin API's port.
+ziroctl router relay enable sg-1 --public relay-sg.example.com:8444 --listen :8444
 ziroctl router relay ls
 zirocd netcheck            # on a device: UDP, NAT type, public address, relay latency
+```
+
+```mermaid
+flowchart LR
+  P[packet for a peer] --> D{direct path with a pong<br/>in the last 7 s?}
+  D -- yes --> W[send to the peer's address<br/>LAN, then IPv6, then IPv4]
+  D -- no --> R{UDP session with the pair's<br/>best relay answering?}
+  R -- yes --> U[relay over UDP]
+  R -- no --> T[relay over TLS]
+  W -. disco pings every second keep checking .-> D
 ```
 
 | Mechanism | How |
@@ -208,6 +219,23 @@ ziroctl router moon join --token-file /root/sg-1.token
 
 ziroctl router moon ls       # registered, waiting, or token expired
 ziroctl router moon rm sg-1  # devices stop using it within a second
+```
+
+```mermaid
+sequenceDiagram
+  participant A as admin
+  participant P as planet
+  participant M as moon
+  participant D as device
+  A->>P: router moon add sg-1 --public host:8443
+  P-->>A: one-time token zm1_ (1 h, only its hash kept)
+  A->>M: ZIROCD_MOON_TOKEN=zm1_... zirocd moon
+  M->>P: CSR + token
+  P-->>M: certificate: OU ziro-relay, sg-1.moon.ziro, 7 days
+  M->>P: stream the relay map (IDs, keys, networks only)
+  P-->>D: netmap now lists sg-1
+  D->>M: TLS (verify name + OU), then UDP session
+  Note over M: no planet for 5 min: stop relaying<br/>removed: drop everyone and exit
 ```
 
 - **Registration.** The moon makes its own key and sends a CSR with the token. The planets certify it (OU `ziro-relay`, name `sg-1.moon.ziro`, 7 days); the moon renews it by itself. The token works once and only its hash is stored. A rebuilt host gets a new one with `ziroctl router moon token sg-1`.
