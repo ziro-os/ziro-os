@@ -48,9 +48,11 @@ var dnsDomainRe = regexp.MustCompile(`^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)
 
 func validDomain(d string) bool { return len(d) <= 254 && dnsDomainRe.MatchString(fqdn(d)) }
 
+// parseRecord checks a record and returns its owner name. A name may start with "*.": the record
+// then answers for every name below it that has no record of its own.
 func parseRecord(r DNSRecord) (string, localRR, error) {
 	name := fqdn(r.Name)
-	if !validDomain(name) {
+	if !validDomain(strings.TrimPrefix(name, "*.")) {
 		return "", localRR{}, fmt.Errorf("invalid record name %q", r.Name)
 	}
 	ttl := uint32(300)

@@ -64,6 +64,7 @@ func apiRoutes() *apiRouter {
 	registerAppRoutes(a)
 	registerNFSRoutes(a)
 	registerGatewayRoutes(a)
+	registerGatewayDomainRoutes(a)
 	registerContainerRoutes(a)
 	registerFirewallRoutes(a)
 	registerClusterRoutes(a)

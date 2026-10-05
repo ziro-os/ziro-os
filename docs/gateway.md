@@ -87,6 +87,28 @@ ziroctl gateway status                     # upstream health, active connections
 
 `route add` with an existing name replaces that route. Routes that would match exactly the same traffic are refused.
 
+## A base domain for deployed apps
+
+Instead of giving every app its own `--expose`, set one domain. Each deployed app without a host of its own is
+published at `<app>.<domain>` when it is released (a gateway route is created for it).
+
+```sh
+ziroctl gateway domain set apps.example.com   # apps get https://<app>.apps.example.com
+ziroctl gateway domain                         # the domain, the gateway addresses and the DNS records
+ziroctl gateway domain rm
+```
+
+- **TLS.** Public names get ACME certificates. Private names (`.local`, `.internal`, `.lan`, `.test`, `.home.arpa`,
+  or no dot) use the gateway's own CA; trust it with `ziroctl gateway ca`.
+- **Per app.** `ziroctl deploy ... --expose host` still wins over the domain.
+- **DNS.** Setting the domain adds `*.apps.example.com A <gateway address>` to the built-in DNS (see
+  [dns.md](dns.md)): on a cluster as a cluster record, one per gateway node, so every node resolves the apps; on a
+  standalone host as a local record. Everyone else needs the same records at your DNS provider, which the command
+  prints. With no gateway node yet on a cluster, it says so and adds nothing.
+- **Existing apps** take the domain on their next release (`ziroctl deploy redeploy <app>`). Removing the domain
+  leaves the routes it created; remove them with `ziroctl gateway route rm`.
+- **API.** `/api/v1/gateway/domain` (see below).
+
 ## API
 
 The API server exposes the gateway behind its usual tokens. Any token can read; changes need `admin`.
@@ -98,6 +120,9 @@ GET    /api/v1/gateway/routes/{name}
 PUT    /api/v1/gateway/routes/{name}
 DELETE /api/v1/gateway/routes/{name}
 GET    /api/v1/gateway/status              upstream health, active connections, requests per route
+GET    /api/v1/gateway/domain              the base domain of deployed apps, gateway addresses, DNS records
+PUT    /api/v1/gateway/domain              {"name":"apps.example.com"}
+DELETE /api/v1/gateway/domain
 GET    /api/v1/gateway/ca                  internal CA certificate (PEM)
 GET    /api/v1/gateway/certs               POST {"name","cert","key"}   DELETE /api/v1/gateway/certs/{name}
 ```

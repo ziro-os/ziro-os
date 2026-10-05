@@ -76,7 +76,7 @@ func TestDeployUpload(t *testing.T) {
 	if err := fetchSource(context.Background(), d, b, "", src, io.Discard, func(string, ...any) {}); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(filepath.Join(src, "index.html")); string(got) != "hi" || !strings.HasPrefix(b.Commit, "sha256:"+sha[:12]) {
+	if got, _ := os.ReadFile(filepath.Join(src, "index.html")); string(got) != "hi" || b.Commit != sha[:12] {
 		t.Errorf("unpacked %q, commit %q", got, b.Commit)
 	}
 

@@ -6,7 +6,7 @@ the `builder` plugin.
 
 ```sh
 ziroctl module enable builder                       # BuildKit + git + ziroctld (needs 2 GB RAM)
-ziroctl deploy https://github.com/acme/web --expose web.example.com
+ziroctl deploy https://github.com/acme/web --expose web.example.com   # or set a base domain once: gateway.md
 ziroctl deploy https://github.com/acme/api --branch release --env LOG_LEVEL=info --secret DATABASE_URL=@db.url
 ziroctl deploy https://gitlab.com/acme/mono --path apps/site --git-token-file ~/.gitlab-token
 ziroctl deploy ls                                   # deployments, live build, URL

@@ -36,6 +36,7 @@ var (
 type gatewayData struct {
 	Routes []GatewayRoute `json:"routes"`
 	ACME   GatewayACME    `json:"acme"`
+	Domain GatewayDomain  `json:"domain,omitempty"` // base domain of deployed apps
 }
 
 type routeStore interface {
@@ -73,16 +74,16 @@ func (clusterRouteStore) read() (*gatewayData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &gatewayData{Routes: st.Routes, ACME: st.GatewayACME}, nil
+	return &gatewayData{Routes: st.Routes, ACME: st.GatewayACME, Domain: st.GatewayDomain}, nil
 }
 
 func (clusterRouteStore) update(fn func(d *gatewayData) error) error {
 	return withState(func(st *ClusterState) error {
-		d := &gatewayData{Routes: append([]GatewayRoute(nil), st.Routes...), ACME: st.GatewayACME}
+		d := &gatewayData{Routes: append([]GatewayRoute(nil), st.Routes...), ACME: st.GatewayACME, Domain: st.GatewayDomain}
 		if err := fn(d); err != nil {
 			return err
 		}
-		st.Routes, st.GatewayACME = d.Routes, d.ACME
+		st.Routes, st.GatewayACME, st.GatewayDomain = d.Routes, d.ACME, d.Domain
 		for _, r := range d.Routes {
 			if r.TLS == "internal" && st.Secrets[gatewayInternalCASecret] == nil {
 				c, k, err := newInternalCA()

@@ -123,7 +123,7 @@ func followBuild(app, id string) error {
 			if b.Status == "failed" {
 				return fmt.Errorf("build %s failed: %s", id, b.Error)
 			}
-			fmt.Printf("%s is live at %s\n", app, st.URL)
+			fmt.Printf("%s is live at %s\n", app, orDash(st.URL))
 		}
 	}
 	return nil
@@ -170,7 +170,7 @@ var deployLsCmd = &cobra.Command{
 				if r.Latest != nil {
 					id, st, commit = r.Latest.ID, r.Latest.Status, shortCommit(r.Latest.Commit)
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Deployment.Name, orDash(r.Deployment.Live), id, st, commit, r.URL, r.Deployment.Repo)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Deployment.Name, orDash(r.Deployment.Live), id, st, commit, orDash(r.URL), repoOrUpload(r.Deployment))
 			}
 			tw.Flush()
 		})
@@ -193,7 +193,7 @@ var deployStatusCmd = &cobra.Command{
 		}
 		return printResult(st, func() {
 			d := st.Deployment
-			fmt.Printf("%s  %s\n  repo   %s %s%s\n  live   %s\n", d.Name, st.URL, d.Repo, orDash(d.Ref), map[bool]string{true: " (" + d.Path + ")", false: ""}[d.Path != ""], orDash(d.Live))
+			fmt.Printf("%s  %s\n  repo   %s %s%s\n  live   %s\n", d.Name, orDash(st.URL), repoOrUpload(d), orDash(d.Ref), map[bool]string{true: " (" + d.Path + ")", false: ""}[d.Path != ""], orDash(d.Live))
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "\nBUILD\tSTATUS\tKIND\tCOMMIT\tQUEUED\tTOOK\tERROR")
 			for _, b := range st.Builds {
@@ -305,6 +305,14 @@ var deployServeCmd = &cobra.Command{
 	Hidden: true,
 	Args:   cobra.NoArgs,
 	RunE:   func(cmd *cobra.Command, args []string) error { return serveDeployDaemon() },
+}
+
+// repoOrUpload is the REPO column: the repository, or "(upload)" for pushed source.
+func repoOrUpload(d Deployment) string {
+	if d.Source == deploySourceUpload {
+		return "(upload)"
+	}
+	return orDash(d.Repo)
 }
 
 func shortCommit(c string) string {

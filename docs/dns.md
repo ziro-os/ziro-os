@@ -40,7 +40,8 @@ flowchart LR
   reused.
 - **Split DNS:** forward a domain (and its subdomains) to specific resolvers, for VPNs, on-prem AD/DNS or cloud
   private zones.
-- **Local records:** A, AAAA, CNAME (resolved one hop locally) and TXT, answered authoritatively. Cluster-wide
+- **Local records:** A, AAAA, CNAME (resolved one hop locally) and TXT, answered authoritatively. A name may start
+  with `*.`: it answers for every name below it that has no record of its own (`ziroctl gateway domain set` uses it). Cluster-wide
   records come from the cluster (below).
 - **Blocking:** domains and their subdomains get NXDOMAIN. You can subscribe to HTTPS blocklists in hosts or
   domain-per-line format; cron refreshes them daily, and a failed download keeps the previous copy.
