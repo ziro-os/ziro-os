@@ -78,6 +78,15 @@ flowchart TB
 - **Gateway:** zirogate is one L4/L7 data plane (HTTP/1.1, HTTP/2, HTTP/3, TCP, TLS passthrough) fed by a
   route store: cluster state, resolved by the master to running replicas, or a local file on standalone hosts.
   The CLI and the API server edit routes; the gateway re-validates and hot-swaps them ([gateway guide](gateway.md)).
+- **Cloudflare Tunnel (`ziroctl cf`):**
+  - It's the catalog plugin `cloudflared`: the upstream static binary, sha256-pinned, running as its own user.
+    The catalog changes the binary and ziroctl changes the commands, so a new upstream release is only a catalog
+    bump, and the commands are always present but refuse to run until the plugin is enabled.
+  - One remotely managed tunnel per host. Hostnames, DNS and Access are set through the Cloudflare API.
+  - The API token is wrapped by the same file/TPM providers as the cluster data key. The tunnel token reaches
+    cloudflared only through a root-only env file.
+  - The gateway trusts `CF-Connecting-IP` and the edge scheme only from loopback while a tunnel runs
+    ([guide](cloudflare-tunnel.md)).
 - **Apps:** a digest-pinned app definition (components, settings, generated secrets, data paths) that
   `ziroctl apps deploy` runs as hardened containers on a host, or as cluster apps through the same scheduler
   and policy as any other ([apps guide](apps.md)).

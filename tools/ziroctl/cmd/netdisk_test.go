@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -218,5 +219,58 @@ func TestMountSourceAndDiskGuards(t *testing.T) {
 		if _, err := addDataDisk(dev, "/data", "", false); err == nil {
 			t.Errorf("disk add %s accepted", dev)
 		}
+	}
+}
+
+func TestExtSuperAndHalfGrownResize(t *testing.T) {
+	sb := make([]byte, 1024)
+	binary.LittleEndian.PutUint16(sb[0x38:], 0xEF53)
+	binary.LittleEndian.PutUint32(sb[0x18:], 2) // 4 KiB blocks
+	binary.LittleEndian.PutUint32(sb[0x04:], 5)
+	binary.LittleEndian.PutUint32(sb[0x150:], 1)
+	if b, bs, err := parseExtSuper(sb); err != nil || b != 5 || bs != 4096 {
+		t.Fatalf("32-bit: %d %d %v", b, bs, err)
+	}
+	binary.LittleEndian.PutUint32(sb[0x60:], 0x80) // 64bit feature: the high word counts
+	if b, _, _ := parseExtSuper(sb); b != 1<<32|5 {
+		t.Fatalf("64-bit: %d", b)
+	}
+	if _, _, err := parseExtSuper(make([]byte, 1024)); err == nil {
+		t.Fatal("accepted a non-ext superblock")
+	}
+
+	// The partition already fills the disk (an older image grew it, then had no resize2fs), but
+	// the filesystem is 1 GiB short: only the filesystem is grown, with no partition commands.
+	fakeSysBlock(t, 41943040, [2]int64{2048, 41943040 - 34 - 2048})
+	oldRun, oldSize, oldResize := diskRun, extSize, resizeFS
+	t.Cleanup(func() { diskRun, extSize, resizeFS = oldRun, oldSize, oldResize })
+	var ran []string
+	diskRun = func(_ string, name string, args ...string) error { ran = append(ran, name); return nil }
+	partBlocks := uint64(41943040-34-2048) * 512 / 4096
+	extSize = func(string) (uint64, uint64, error) { return partBlocks - (1<<30)/4096, 4096, nil }
+	var got uint64
+	resizeFS = func(mnt string, blocks uint64) error { got = blocks; return nil }
+	n, err := growPartition("/dev/vda1", "/", "ext4", false)
+	if err != nil || n != (1<<30)/512 || got != partBlocks || len(ran) != 0 {
+		t.Fatalf("grew %d sectors to %d blocks, ran %v: %v", n, got, ran, err)
+	}
+	// Filesystem matches its partition: nothing to do.
+	extSize = func(string) (uint64, uint64, error) { return partBlocks, 4096, nil }
+	got = 0
+	if n, err := growPartition("/dev/vda1", "/", "ext4", false); n != 0 || err != nil || got != 0 {
+		t.Fatalf("up-to-date fs resized: %d %v", n, err)
+	}
+	// Room on the disk: partition commands run, then the fs grows to the new partition size.
+	fakeSysBlock(t, 41943040, [2]int64{2048, 20971520})
+	extSize = func(string) (uint64, uint64, error) { return 20971520 * 512 / 4096, 4096, nil }
+	diskRun = func(_ string, name string, args ...string) error {
+		ran = append(ran, name)
+		if name == "partx" { // the kernel now sees the grown partition
+			os.WriteFile(filepath.Join(sysBlock, "vda1", "size"), []byte(itoa64(41943040-34-2048)), 0644)
+		}
+		return nil
+	}
+	if _, err := growPartition("/dev/vda1", "/", "ext4", false); err != nil || got != partBlocks || strings.Join(ran, " ") != "sfdisk sfdisk partx" {
+		t.Fatalf("grow: %d blocks, ran %v: %v", got, ran, err)
 	}
 }

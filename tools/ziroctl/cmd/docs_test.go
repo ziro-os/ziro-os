@@ -44,7 +44,7 @@ func checkDocCommand(root *cobra.Command, args []string) error {
 	return nil
 }
 
-// Every ziroctl command in the docs is a real command with real flags.
+// Every ziroctl command in these guides is a real command with real flags.
 func TestDocCommands(t *testing.T) {
 	for _, bad := range [][]string{{"router", "moon", "ad", "sg-1"}, {"router", "key", "create", "x", "--nope"}} {
 		if checkDocCommand(rootCmd, bad) == nil {

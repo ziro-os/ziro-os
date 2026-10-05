@@ -738,6 +738,7 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
 		}
+		secure := cfTunnelRequest(req) || isTLS // through a Cloudflare Tunnel: visitor's address and scheme
 		ip, _, _ := net.SplitHostPort(req.RemoteAddr)
 		upstream, routeName := "", ""
 		reqID := req.Header.Get("X-Request-ID")
@@ -757,7 +758,7 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 			return
 		}
 		routeName = rt.Name
-		if !isTLS && rt.TLS != "off" {
+		if !secure && rt.TLS != "off" {
 			http.Redirect(sw, req, "https://"+host+req.URL.RequestURI(), http.StatusPermanentRedirect)
 			return
 		}
@@ -819,7 +820,7 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 			defer gz.Close()
 			out = gz
 		}
-		c := &gwCtx{route: rt, upstream: upstream, tls: isTLS, clientIP: ip, reqID: reqID}
+		c := &gwCtx{route: rt, upstream: upstream, tls: secure, clientIP: ip, reqID: reqID}
 		g.proxy.ServeHTTP(out, req.WithContext(context.WithValue(req.Context(), gwCtxKey{}, c)))
 		upstream = c.upstream
 	})
