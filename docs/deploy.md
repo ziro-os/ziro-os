@@ -126,6 +126,32 @@ ziroctl deploy https://github.com/acme/api --arch amd64       # build on (and ru
   (port 7444, a cluster bearer token). It loads the image and runs it only if its digest matches the pin; a
   mismatch is deleted. With the `deny` policy, only nodes that run replicas of the app may reach that port.
 - **Check.** A release is live when every replica runs it. Otherwise the previous build is released again.
+- **Uploaded source.** The master keeps the archive. It records the archive's SHA-256 in the build task, and the
+  builder's agent fetches it from the master's mesh address on port 7444 (the same cluster token as images, and
+  only from inside the mesh), then checks the digest before it unpacks anything. If a newer upload replaced the
+  archive in between, the build fails and the newer one builds.
+- **Failover.** If the builder stops answering (the master marks it `NotReady`), the build moves to another builder,
+  up to twice, and the log says so.
+
+### Roles
+
+A node does everything by default. Give nodes one job each to spread the work:
+
+```sh
+ziroctl cluster node role build-1 builder on       # first choice for builds
+ziroctl cluster node role build-1 runner off       # no new replicas on it
+ziroctl cluster node role edge-1 gateway on        # serves ports 80 and 443
+ziroctl cluster node role master-1 builder off
+```
+
+| Role | On | Off |
+|---|---|---|
+| `builder` | first choice for builds | never builds |
+| `runner` | (default) runs replicas | no new replicas; running ones stay until you drain the node |
+| `gateway` | serves the cluster's routes | doesn't (the default) |
+
+`builder` and `runner` are node labels, so `ziroctl cluster node label` does the same; `gateway` is the flag that
+`ziroctl gateway node enable` sets. `ziroctl cluster nodes` shows `Gateway` and `NoRunner`.
 
 ## Git webhooks
 
@@ -173,7 +199,7 @@ ziroctl api token create ci --role deployer --ttl 720h   # a token for CI or an 
   100000 entries.
 - **Integrity.** The server hashes the stream and refuses a digest that doesn't match. The archive is kept
   (`0600`) as the app's current source, so a redeploy rebuilds the same files.
-- **Cluster.** Uploaded source builds on a single host. On a cluster master it's refused for now.
+- **Cluster.** The master keeps the archive and the builder pulls it over the mesh (see [On a cluster](#on-a-cluster)).
 
 See `sdk/openapi.yaml`.
 

@@ -479,14 +479,21 @@ var clusterAgentCmd = &cobra.Command{
 				}
 				wantRotate = resp.RotateToken
 				adoptClusterCA(cfg, resp.CA, resp.Masters)
-				ag.builds.start(resp.Builds)
+				var meshNet netip.Prefix
+				if ip, err := netip.ParseAddr(resp.MeshIP); err == nil && resp.MeshPrefix > 0 {
+					meshNet, _ = ip.Prefix(resp.MeshPrefix)
+				}
+				token := resp.ImageToken
+				ag.builds.start(resp.Builds, func(t ClusterBuild) error {
+					ctx, cancel := context.WithTimeout(context.Background(), deployFetchLimit)
+					defer cancel()
+					return fetchTaskArchive(ctx, t, token, meshNet)
+				})
 				ag.images.ensure(resp.MeshIP, resp.ImageToken)
 				ag.mu.Lock()
 				ag.token = resp.ImageToken
-				if ip, err := netip.ParseAddr(resp.MeshIP); err == nil && resp.MeshPrefix > 0 {
-					if p, err := ip.Prefix(resp.MeshPrefix); err == nil {
-						ag.meshNet = p
-					}
+				if meshNet.IsValid() {
+					ag.meshNet = meshNet
 				}
 				ag.mu.Unlock()
 			}

@@ -1001,6 +1001,9 @@ var clusterNodesCmd = &cobra.Command{
 				if n.Gateway {
 					status += ",Gateway"
 				}
+				if n.Labels["runner"] == "false" {
+					status += ",NoRunner"
+				}
 				fmt.Printf("%-14s %-16s %-16s %-14s %-7s %-19s %-5d %-8d %s ago\n", n.ID, n.Hostname, n.IP, n.MeshIP, n.Role, status, n.CPUs, count,
 					time.Since(n.LastSeen).Round(time.Second))
 			}
