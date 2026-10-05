@@ -8,20 +8,27 @@ import (
 	"strings"
 )
 
-// Lines returns the arguments (after bin) of every `bin ...` command in md's fenced code blocks.
+// Lines returns the arguments (after bin) of every `bin ...` command in md's shell code blocks (no
+// language, or sh, bash, shell, console, zsh; diagrams and config files are skipped).
 // It handles line continuations, `sudo`, leading VAR=value assignments, comments, and commands
 // chained with |, && or ;. Placeholders such as <name> are kept as arguments.
 func Lines(md []byte, bin string) [][]string {
 	var out [][]string
-	in, cur := false, ""
+	in, shell, cur := false, false, ""
 	sc := bufio.NewScanner(bytes.NewReader(md))
 	for sc.Scan() {
 		l := sc.Text()
-		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+		if fence, ok := strings.CutPrefix(strings.TrimSpace(l), "```"); ok {
 			in, cur = !in, ""
+			switch strings.Fields(fence + " x")[0] {
+			case "x", "sh", "bash", "shell", "console", "zsh":
+				shell = true
+			default:
+				shell = false
+			}
 			continue
 		}
-		if !in {
+		if !in || !shell {
 			continue
 		}
 		if s, ok := strings.CutSuffix(strings.TrimRight(l, " "), "\\"); ok {

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,13 +37,16 @@ func TestDocCommands(t *testing.T) {
 	if check([]string{"moon", "--nope"}) == nil || check([]string{"mon"}) == nil {
 		t.Fatal("the check accepts unknown commands or flags")
 	}
-	for _, doc := range []string{"../../docs/router-deploy.md", "../../docs/router.md"} {
+	docs, _ := filepath.Glob("../../docs/*.md")
+	if len(docs) < 10 {
+		t.Fatalf("found %d docs: is the docs path right?", len(docs))
+	}
+	for _, doc := range docs {
 		md, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)
 		}
 		lines := doccmd.Lines(md, "zirocd")
-		t.Logf("%s: %d zirocd commands", doc, len(lines))
 		for _, args := range lines {
 			if err := check(args); err != nil {
 				t.Errorf("%s: zirocd %s: %v", doc, strings.Join(args, " "), err)
