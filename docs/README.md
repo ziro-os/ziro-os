@@ -28,6 +28,8 @@ Ziro-OS is under active development and is not ready for production use. Start w
 - [Global router](router.md): private mesh networks for devices anywhere (zirocd, planets, moons, ACLs, SSO), and
   [running it in production](router-deploy.md).
 - [Storage](storage.md): automatic disk growth and data disks.
+- [Cloudflare Tunnel](cloudflare-tunnel.md): publish services without a public IP, with optional Zero Trust
+  Access (`ziroctl cf`, opt-in module).
 - [Smart DNS](dns.md): caching resolver, split DNS, cluster records, container egress control.
 - [SDK](sdk.md): Go packages (schemas and validators, catalogs, typed API client) and the OpenAPI spec for building on Ziro OS.
 - [Apps](apps.md): one-command deployments (postgres, mysql, mysql-cluster, valkey) from signed catalogs.

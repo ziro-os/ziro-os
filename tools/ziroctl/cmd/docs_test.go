@@ -40,14 +40,14 @@ func checkDocCommand(root *cobra.Command, args []string) error {
 	return nil
 }
 
-// Every ziroctl command in the router guides is a real command with real flags.
+// Every ziroctl command in these guides is a real command with real flags.
 func TestDocCommands(t *testing.T) {
 	for _, bad := range [][]string{{"router", "moon", "ad", "sg-1"}, {"router", "key", "create", "x", "--nope"}} {
 		if checkDocCommand(rootCmd, bad) == nil {
 			t.Fatalf("the check accepts ziroctl %s", strings.Join(bad, " "))
 		}
 	}
-	for _, doc := range []string{"../../../docs/router-deploy.md", "../../../docs/router.md"} {
+	for _, doc := range []string{"../../../docs/router-deploy.md", "../../../docs/router.md", "../../../docs/cloudflare-tunnel.md"} {
 		md, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)
