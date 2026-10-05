@@ -49,9 +49,20 @@ func WithCAFile(path string) Option {
 		if err != nil {
 			return err
 		}
+		if err := WithCAPEM(b)(c); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		return nil
+	}
+}
+
+// WithCAPEM trusts the PEM certificates given (the server's own self-signed certificate, or its
+// CA). The server's name or address must still match the certificate.
+func WithCAPEM(pemData []byte) Option {
+	return func(c *Client) error {
 		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(b) {
-			return fmt.Errorf("%s: no PEM certificates", path)
+		if !pool.AppendCertsFromPEM(pemData) {
+			return errors.New("no PEM certificates")
 		}
 		c.http.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 		return nil

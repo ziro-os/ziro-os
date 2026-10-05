@@ -81,8 +81,13 @@ Create the token on the host: ziroctl api token create ci --role deployer`,
 				spec.Env[k] = v
 			}
 			opts := []client.Option{client.WithUserAgent("zirocd/" + Version)}
-			if caFile != "" {
+			switch {
+			case caFile != "":
 				opts = append(opts, client.WithCAFile(caFile))
+			default:
+				if pem := trustedCert(host); pem != nil { // saved by zirocd trust
+					opts = append(opts, client.WithCAPEM(pem))
+				}
 			}
 			cl, err := client.New(host, token, opts...)
 			if err != nil {
@@ -112,7 +117,7 @@ Create the token on the host: ziroctl api token create ci --role deployer`,
 				if client.IsForbidden(err) {
 					return fmt.Errorf("%w (the token needs the deployer role)", err)
 				}
-				return err
+				return trustHint(err, host)
 			}
 			id, _ := b["id"].(string)
 			if !noFollow && !jsonOut {
