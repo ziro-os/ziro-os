@@ -353,8 +353,8 @@ func startAPIServer() {
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      handler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  apiReadTimeout,
+		WriteTimeout: apiWriteTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -379,6 +379,15 @@ func startAPIServer() {
 		fmt.Printf("API server error: %v\n", err)
 	}
 }
+
+// The server's default limits for a request and its answer. A route that moves a lot of data
+// (a source upload, a streamed build log) lifts them for itself with http.ResponseController:
+// a write deadline that fires in the middle of a TLS record leaves a partial record, which the
+// client reports as "tls: bad record MAC", so a long answer must not run into the default.
+const (
+	apiReadTimeout  = 10 * time.Second
+	apiWriteTimeout = 15 * time.Second
+)
 
 func init() {
 	apiStartCmd.Flags().IntVarP(&apiPort, "port", "p", 8443, "REST API listening port")
