@@ -44,8 +44,8 @@ zirocd trust https://10.0.0.5:8443 --remove
 
 The saved certificate lives in your user config directory (`zirocd/trusted/`, `0600`). The address you deploy to
 must still be one the certificate covers; `ziroctl api generate-certs` reissues it for the host's current
-addresses. `--ca-file` does the same from a file you copied, and `--insecure` skips the check for one command (the
-token is then exposed to anyone on the path, so prefer `trust`).
+addresses. `--ca-file` does the same from a file you copied. There is no switch that turns certificate checks off: the
+token would be exposed to anyone on the path.
 
 The token comes from `--token-file` or the environment, never an argument. Inside a git work tree `zirocd` sends
 what git tracks or could add, so `.gitignore` is honoured; `.env*` files and links are never sent. The command

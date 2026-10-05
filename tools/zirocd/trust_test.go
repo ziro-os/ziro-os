@@ -12,7 +12,7 @@ import (
 )
 
 // A host with a self-signed certificate: deploy fails with a hint, zirocd trust (checked by
-// fingerprint) fixes it, a different fingerprint is refused, and --insecure is an explicit way out.
+// fingerprint) fixes it, a different fingerprint is refused.
 func TestSelfSignedHost(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("HOME", cfg)
@@ -61,9 +61,6 @@ func TestSelfSignedHost(t *testing.T) {
 	}
 	if err := run("trust", srv.URL, "--remove"); err != nil || deploy() == nil {
 		t.Fatalf("after --remove the host should be untrusted again (%v)", err)
-	}
-	if err := deploy("--insecure"); err != nil {
-		t.Fatalf("--insecure: %v", err)
 	}
 	if _, err := hostPort("http://10.0.0.5:8443"); err == nil {
 		t.Error("trust accepted a plain http URL")

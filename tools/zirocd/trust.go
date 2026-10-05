@@ -66,19 +66,24 @@ func fingerprint(der []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// peerCert fetches the certificate a server presents, without trusting it.
+// errPublicCert means the host's certificate already verifies (a public CA signed it).
+var errPublicCert = errors.New("the certificate is already trusted by this system; there is nothing to save")
+
+// peerCert fetches the certificate a server presents without trusting it: the handshake is
+// verified as usual and refused, and Go hands the certificates it refused back in the error. Nothing
+// is sent over the connection.
 func peerCert(hostport string) (*x509.Certificate, error) {
 	d := &net.Dialer{Timeout: 10 * time.Second}
-	conn, err := tls.DialWithDialer(d, "tcp", hostport, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) // #nosec G402 -- only reads the certificate to show it; nothing is sent
-	if err != nil {
-		return nil, err
+	conn, err := tls.DialWithDialer(d, "tcp", hostport, &tls.Config{MinVersion: tls.VersionTLS12})
+	if err == nil {
+		conn.Close()
+		return nil, errPublicCert
 	}
-	defer conn.Close()
-	certs := conn.ConnectionState().PeerCertificates
-	if len(certs) == 0 {
-		return nil, errors.New("the server presented no certificate")
+	var verr *tls.CertificateVerificationError
+	if errors.As(err, &verr) && len(verr.UnverifiedCertificates) > 0 {
+		return verr.UnverifiedCertificates[0], nil
 	}
-	return certs[0], nil
+	return nil, err
 }
 
 func trustCmd() *cobra.Command {

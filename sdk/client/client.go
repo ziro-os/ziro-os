@@ -69,15 +69,6 @@ func WithCAPEM(pemData []byte) Option {
 	}
 }
 
-// WithInsecureSkipVerify accepts any certificate. The token is then readable by anyone who can
-// intercept the connection: use WithCAPEM with the server's certificate instead.
-func WithInsecureSkipVerify() Option {
-	return func(c *Client) error {
-		c.http.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}} // #nosec G402 -- opt-in, documented
-		return nil
-	}
-}
-
 // WithUserAgent sets the User-Agent (useful in the server's audit log).
 func WithUserAgent(ua string) Option {
 	return func(c *Client) error { c.ua = ua; return nil }
