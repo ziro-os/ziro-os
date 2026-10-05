@@ -63,37 +63,23 @@ Understanding the project layout:
 
 ```text
 ziro-os/
-├── Makefile                       # Top-level build orchestrator
-├── AGENTS.md                      # AI agent and development guidelines
-├── README.md                      # Main project documentation
-├── LICENSE                        # MIT license
-├── containerd/, docker/, podman/  # Runtime integration and compatibility notes
-├── docs/                          # Public architecture, build, and operations guides
-├── init/                          # C99 static PID 1 supervisor (ziro-init)
-│   ├── ziro-init.c
-│   └── Makefile
-├── kernel/                        # Linux kernel configs and direct-boot builders
-│   ├── configs/
-│   └── build-kernel.sh
-├── rootfs/                        # Base rootfs skeleton configuration
-│   └── etc/                       # os-release, inittab, cni, apk repositories
-├── packages/                      # Rootfs and container runtime packager
-│   ├── build-rootfs.sh            # Multi-arch rootfs constructor
-│   └── install-container-runtime.sh
-├── images/                        # Target image generators
-│   ├── docker/                    # FROM scratch Docker base image
-│   ├── iso/                       # Hybrid UEFI/BIOS ISO builder
-│   └── qemu/                      # Direct-kernel microVM runner
-├── tools/                         # Native Go CLI tools
-│   ├── ziroctl/                   # System & container management CLI
-│   └── ziropkg/                   # Official package manager CLI
-├── tests/                         # Test suites
-│   ├── smoke/                     # Container & rootfs smoke tests
-│   └── security/                  # CIS & security audit tests
-└── community/                     # Contribution and community guides
-    ├── CONTRIBUTING.md
-    └── docs/
-        └── getting-started.md
+├── Makefile                # build orchestrator: tools, kernel, rootfs, images, tests
+├── docs/                   # user and design documentation (start at docs/README.md)
+├── init/                   # ziro-init, the C99 static PID 1 supervisor
+├── kernel/                 # kernel configs and build-kernel.sh (alpine and custom flavors)
+├── rootfs/                 # files copied into the host image (/etc, installer)
+├── packages/               # build-rootfs.sh and the pinned base components
+├── images/                 # ISO, QEMU, Docker, zirocd and cloud image builders
+├── tools/
+│   ├── ziroctl/            # host CLI and daemons (Go)
+│   ├── ziropkg/            # extra package manager (Go)
+│   └── zirocd/             # router client and moon relay (Go)
+├── sdk/                    # Go SDK: schemas, catalogs, API client, openapi.yaml
+├── scripts/                # installer, release and zirocd install scripts
+├── deploy/terraform/aws/   # example AWS deployment
+├── security/               # host hardening script
+├── tests/                  # smoke, QEMU boot/cluster, router e2e, security
+└── community/              # contributing guide
 ```
 
 Keep each directory focused on one responsibility. Put base configuration in `rootfs/etc/`, package recipes in

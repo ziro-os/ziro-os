@@ -1,6 +1,6 @@
 # Kernel
 
-Ziro-OS has two kernel flavors (see [docs/building.md](../docs/building.md#-kernel-flavors)):
+Ziro-OS has two kernel flavors (see [docs/building.md](../docs/building.md#kernel-flavors)):
 
 - `custom` (default): built by `build-kernel.sh` from kernel.org LTS sources, using the upstream arch `defconfig` plus:
   - `configs/ziro-common.config`: containers, networking, filesystems, cloud/hypervisor drivers, hardening

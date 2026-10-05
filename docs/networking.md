@@ -54,6 +54,23 @@ ziroctl network apply --confirm-timeout 120s
 ziroctl network confirm               # keep it; otherwise it rolls back after 120s
 ```
 
+```mermaid
+sequenceDiagram
+  participant You
+  participant Z as ziroctl
+  participant T as rollback timer
+  You->>Z: network apply --confirm-timeout 120s
+  Z->>Z: save the last working config, apply only the differences
+  Z->>T: start (detached, also armed across a reboot)
+  alt you can still reach the host
+    You->>Z: network confirm
+    Z->>T: cancel, keep the new config
+  else locked out, or rebooted first
+    T->>Z: restore the previous config
+    Z->>Z: raise a network alert
+  end
+```
+
 - **Modes:** `dhcp` (the default), `static`, `manual` (link up, no address; used for bond members) and `off`.
 - **IPv6:** `auto` (SLAAC, the default), `static` or `off`.
 - **`apply` changes only what differs** from the last applied configuration. It removes VLANs, bonds and routes you

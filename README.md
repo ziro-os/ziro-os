@@ -13,18 +13,26 @@ other environments dedicated to container workloads.
 
 ## Get started
 
-The local container image is the simplest way to explore the userland. You will need Make, Go, and a running Docker
-daemon. On macOS, build from a case-sensitive filesystem; see the
-[building instructions](docs/building.md#building-on-macos).
-
 ```sh
-make all
-docker run --rm -it ziro-os:latest sh
+docker run --rm -it ghcr.io/ziro-os/ziro-os:latest sh     # the 16 MB userland
 ```
 
-Inside the container, run `ziroctl version` or explore the BusyBox tools. For host boot in QEMU and ISO builds, see
-the [getting started guide](docs/getting-started.md). The [build guide](docs/building.md) covers supported
-architectures, kernel flavors, prerequisites, and tests.
+To run the full host, boot the release kernel and initramfs in QEMU, or install the ISO on a VM or server:
+see [getting started](docs/getting-started.md) and [installation](docs/installation-guide.md). Then follow the
+[first app tutorial](docs/tutorials/01-first-application.md). To build from source, see [building](docs/building.md).
+
+## What's in it
+
+- **Containers:** containerd, runc and CNI; `ziroctl container` and `compose`; signed app catalogs; deploys from git
+  with rollback ([containers](docs/containers.md), [apps](docs/apps.md), [deploy](docs/deploy.md)).
+- **Networking:** a gateway with automatic TLS and HTTP/3, smart DNS, WireGuard, and a global mesh router for
+  devices anywhere ([gateway](docs/gateway.md), [router](docs/router.md)).
+- **Clusters:** Raft HA control plane, WireGuard mesh, pod network, policies and sealed secrets in the same binary
+  ([clustering](docs/clustering.md)).
+- **Operations:** declarative host config, signed tools updates and OS upgrades with rollback, backups, an
+  audited REST API ([provisioning](docs/provisioning.md), [upgrade](docs/upgrade.md), [api](docs/api.md)).
+- **Security:** default-drop firewall, flood and brute-force bans, key-only SSH, a hardened kernel flavor, and
+  opt-in plugins from signed catalogs ([security](docs/security.md), [modules](docs/modules.md)).
 
 ## Project goals
 

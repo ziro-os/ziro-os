@@ -35,6 +35,18 @@ POST /api/v1/modules/{name}/purge         # disable and delete the module's data
 
 ## Catalogs and trust
 
+```mermaid
+flowchart LR
+  subgraph CI[catalog repo CI]
+    M[manifests] --> V[validate] --> I[index.json:<br/>sha256 of each manifest,<br/>serial, expiry] --> S[sign ed25519 → index.json.sig]
+  end
+  S --> P[(GitHub Pages)]
+  P --> H{host: signature by a<br/>trusted key? not expired?<br/>serial not lower?}
+  H -- no --> X[refuse, keep cache]
+  H -- yes --> D[manifest sha256 matches index?]
+  D --> A[artifacts: https + pinned sha256] --> E[enable: packages, files, services]
+```
+
 A catalog is a static HTTPS site with `index.json`, its signature `index.json.sig`, and one manifest per module.
 
 - **Signed:** the index is signed with ed25519. The official catalogs' public keys are compiled into `ziroctl`.

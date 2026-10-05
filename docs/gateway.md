@@ -113,6 +113,21 @@ curl -H "Authorization: Bearer $TOKEN" -X PUT https://host:8443/api/v1/gateway/r
 
 ## How it works
 
+```mermaid
+flowchart LR
+  subgraph Control[routes]
+    CLI[ziroctl gateway / API] --> ST[(route store: cluster state<br/>or routes.json)]
+    ST -- heartbeat, resolved to replicas --> CFG[config.json on gateway nodes]
+  end
+  CFG -- reload every 1s, validate, atomic swap --> T
+  C[client] -- ":80 / :443 TCP+QUIC" --> L[listener: TLS auto, internal, cert, passthrough]
+  L --> T{route table:<br/>host, path, method, headers}
+  T --> AC[allow-cidr, rate limit, basic auth]
+  AC --> LB[load balancing:<br/>round robin, least conn, ip hash, cookie]
+  LB --> H{upstream healthy?<br/>passive + active checks}
+  H --> U[app replicas / ip:port]
+```
+
 1. **Storage:** routes live in a store, the cluster state on the master or `/etc/ziro/gateway/routes.json` (0600) on a standalone host. Both are validated on write, with the same checks the CLI, the API and the gateway use.
 2. **Resolving apps to addresses:**
    - **On a cluster:** every heartbeat, the master resolves each app to the running replicas. That means pod IPs and the container port on a pod network, otherwise mesh IP and host port. It uses the same health signal as discovery.

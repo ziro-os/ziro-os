@@ -76,9 +76,7 @@ variable "ziro_version" {
 variable "bootstrap_sha256" {
   description = "Optional sha256 of each bootstrap script at ziro_version; verified when set"
   type = object({
-    install_k8s        = optional(string, "")
-    install_monitoring = optional(string, "")
-    harden             = optional(string, "")
+    harden = optional(string, "")
   })
   default = {}
 }
@@ -342,11 +340,9 @@ resource "aws_launch_template" "ziro_os" {
   vpc_security_group_ids = [aws_security_group.ziro_os_nodes.id]
 
   user_data = base64encode(templatefile("${path.module}/user-data.sh", {
-    cluster_name              = var.cluster_name
-    ziro_version              = var.ziro_version
-    install_k8s_sha256        = var.bootstrap_sha256.install_k8s
-    install_monitoring_sha256 = var.bootstrap_sha256.install_monitoring
-    harden_sha256             = var.bootstrap_sha256.harden
+    cluster_name  = var.cluster_name
+    ziro_version  = var.ziro_version
+    harden_sha256 = var.bootstrap_sha256.harden
   }))
 
   # Enforce IMDSv2; hop limit 1 keeps containers from reaching instance credentials

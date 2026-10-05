@@ -46,7 +46,7 @@ jobs:
               Thank you for your first contribution! Here are some helpful resources:
               
               - 📚 [Contributing Guide](https://github.com/ziro-os/ziro-os/blob/main/community/CONTRIBUTING.md)
-              - 🛠️ [Development Setup](https://github.com/ziro-os/ziro-os/blob/main/community/docs/getting-started.md)
+              - 🛠️ [Development Setup](https://github.com/ziro-os/ziro-os/blob/main/docs/getting-started.md)
               - 💬 [Discord Community](https://discord.gg/ziro-os)
               - 📖 [Documentation](https://docs.ziro-os.io)
               
@@ -171,7 +171,7 @@ jobs:
 
               **Getting Started:**
               1. Read our [Contributing Guide](https://github.com/ziro-os/ziro-os/blob/main/community/CONTRIBUTING.md)
-              2. Set up your [development environment](https://github.com/ziro-os/ziro-os/blob/main/community/docs/getting-started.md)
+              2. Set up your [development environment](https://github.com/ziro-os/ziro-os/blob/main/docs/getting-started.md)
               3. Comment on this issue to let us know you're working on it
               4. Join our [Discord](https://discord.gg/ziro-os) if you need help!`
             });

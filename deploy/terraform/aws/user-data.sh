@@ -36,23 +36,6 @@ until ziroctl service status containerd | grep -q RUNNING; do
 done
 echo "✓ Containerd is ready"
 
-if [ ! -f /opt/bin/kubelet ]; then
-    echo "Installing Kubernetes..."
-    fetch_run kubernetes/install-k8s.sh "${install_k8s_sha256}"
-fi
-
-mkdir -p /etc/kubernetes
-cat > /etc/kubernetes/kubelet-extra-args << EOT
---node-labels=node.kubernetes.io/instance-type=ziro-os
---node-labels=topology.kubernetes.io/zone=$(imds placement/availability-zone)
---node-labels=node.kubernetes.io/cluster=$${CLUSTER_NAME}
-EOT
-
-if [ ! -f /opt/monitoring/prometheus/prometheus ]; then
-    echo "Installing monitoring..."
-    fetch_run monitoring/install-monitoring.sh "${install_monitoring_sha256}"
-fi
-
 if [ ! -f /etc/security/limits.d/ziro-os.conf ]; then
     echo "Applying security hardening..."
     fetch_run security/harden-system.sh "${harden_sha256}"

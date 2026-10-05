@@ -1,37 +1,63 @@
-# Ziro-OS documentation
+# Ziro OS documentation
 
-Ziro-OS is under active development and is not ready for production use. Start with the
-[project README](../README.md) for an overview and a local container quick start.
+Ziro OS is a small, hardened Linux for running containers: one static CLI (`ziroctl`), containerd, and opt-in
+plugins for everything else. New here? Read [getting started](getting-started.md), then the
+[first app tutorial](tutorials/01-first-application.md).
 
-## Start here
+## Start
 
-- [Getting started](getting-started.md): container image, QEMU, and ISO basics.
-- [Building](building.md): architectures, kernel flavors, build commands, and verification.
-- [Installation](installation-guide.md): installing from bootable media.
-- [Project goals](project-goals.md): intended use cases and future directions.
-- [Contributing](../community/CONTRIBUTING.md): development workflow and pull requests.
-- [Design standard](design/README.md): principles, resource model, API and CLI conventions, extension points,
-  security model, and [RFCs](design/rfcs/README.md).
-- [Security policy](../SECURITY.md) and [governance](../GOVERNANCE.md).
+- [Getting started](getting-started.md): container base image, boot a VM, where to go next.
+- [Installation](installation-guide.md): ISO, interactive and unattended installs, PXE.
+- [Running in the cloud](cloud.md): metadata keys, user-data, cloud images, Terraform.
+- [Tutorial: your first app](tutorials/01-first-application.md): deploy from git, HTTPS, rollback, a database.
 
-## System and operations
+## Run workloads
 
-- [Stacks and host provisioning](provisioning.md): YAML/JSON definitions, `ziroctl stack`, `ziroctl apply`,
+- [Containers, Compose and cron](containers.md): `ziroctl container`, `compose`, scheduled jobs.
+- [Apps](apps.md): one-command databases and services from signed catalogs.
+- [Deploy from git](deploy.md): build and release your code, with rollback and webhooks.
+- [Stacks and host provisioning](provisioning.md): YAML for apps and whole hosts, `stack up`, `apply`,
   first-boot `#ziro-config`.
-- [Operating a host](operations.md): login summary, `system top`, disk usage and pruning, memory protection,
-  `ziroctl update`.
-- [Architecture](architecture.md): host components and cluster design.
-- [Security](security.md): current controls and limitations.
-- [Virtualization](virtualization.md) and [multi-architecture builds](multi-architecture-guide.md).
-- [Clustering](clustering.md), and the [gateway](gateway.md): L4/L7 routing with TLS and HTTP/3, managed by CLI and API, on clusters and standalone hosts.
-- [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes with rollback.
-- [Global router](router.md): private mesh networks for devices anywhere (zirocd, planets, moons, ACLs, SSO), and
+
+## Networking
+
+- [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes, with rollback.
+- [Smart DNS](dns.md): caching resolver, split DNS, records, blocklists, egress control.
+- [Gateway](gateway.md): HTTP(S), HTTP/3 and TCP routing with automatic TLS.
+- [WireGuard VPN](wireguard.md): remote access to a host.
+- [Global router](router.md): private networks for devices anywhere (zirocd, ACLs, SSO), and
   [running it in production](router-deploy.md).
-- [Storage](storage.md): automatic disk growth and data disks.
-- [Smart DNS](dns.md): caching resolver, split DNS, cluster records, container egress control.
-- [SDK](sdk.md): Go packages (schemas and validators, catalogs, typed API client) and the OpenAPI spec for building on Ziro OS.
-- [Apps](apps.md): one-command deployments (postgres, mysql, mysql-cluster, valkey) from signed catalogs.
-- [Modules and plugins](modules.md): opt-in plugins (ClamAV, auditd, S3 storage, rclone), signed catalogs, and how to write and publish a plugin.
-- [Upgrades](upgrade.md) and [compliance mapping](compliance.md).
-- [Advanced deployment](advanced-deployment-guide.md) and
-  [first application tutorial](tutorials/01-first-application.md).
+
+## Storage and data
+
+- [Storage](storage.md): automatic disk growth, data disks, NFS, cluster storage.
+- [Backup and restore](backup.md): host configuration and cluster state, local or off-host.
+
+## Clusters
+
+- [Clustering](clustering.md): join, scheduling, HA control plane, pod network, policy, secrets.
+
+## Security
+
+- [Security](security.md): firewall, SSH keys, hardening and secure defaults.
+- [Compliance](compliance.md): NIST SP 800-190, CIS Controls and SOC 2 mapping.
+- [Security policy](../SECURITY.md): how to report a vulnerability.
+
+## Operate
+
+- [Operating a host](operations.md): login summary, `system top`, disk usage, memory protection, tools updates.
+- [Upgrades](upgrade.md): OS upgrades and rollback.
+- [REST API](api.md): tokens, roles and endpoints.
+
+## Extend
+
+- [Modules and plugins](modules.md): opt-in plugins, signed catalogs, writing your own.
+- [SDK](sdk.md): Go packages, typed API client and OpenAPI spec, `ziroctl dev`.
+
+## Build and contribute
+
+- [Building](building.md): architectures, kernel flavors, build and test commands.
+- [Architecture](architecture.md): how the pieces fit, with design notes and the threat model.
+- [Design standard](design/README.md) and [RFCs](design/rfcs/README.md): conventions for APIs, CLIs and extensions.
+- [Project goals](project-goals.md), [contributing](../community/CONTRIBUTING.md) and
+  [governance](../GOVERNANCE.md).

@@ -51,6 +51,22 @@ An `apps.json` manifest uses the same fields as the API:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+  participant N as new node
+  participant M as master (Raft leader)
+  participant F as other masters
+  N->>M: join: token + pinned CA hash (TLS :7443)
+  M->>F: Raft: add node (desired state)
+  M-->>N: node ID, node token (master keeps only its hash), mesh IP
+  loop every 10s
+    N->>M: heartbeat: running containers, failures, mesh errors
+    M-->>N: desired state: assignments, peers, policy, secrets for its apps
+    N->>N: converge: policy, then WireGuard ziro0, then containers
+  end
+  Note over N,M: a follower redirects agents to the leader (HTTP 421).<br/>If no master answers, workloads keep running
+```
+
 | Piece | Runs on | Service | What it does |
 |---|---|---|---|
 | Control plane | every master | `cluster-master` (`ziroctl cluster serve`, TLS :7443, Raft :7444) | Join, heartbeat, leave, scheduling (the Raft leader). Each master holds the replicated state in `/etc/ziro/cluster/` (`state.json`, `secrets.json`, `raft/`). |

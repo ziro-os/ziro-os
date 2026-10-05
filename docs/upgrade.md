@@ -13,6 +13,18 @@ There are two ways to upgrade, and both use the same engine (`ziroctl upgrade ap
 | Verification | Release `SHA256SUMS`, signed with the Ziro release key (hard fail on mismatch) | ISO `SHA256SUMS` |
 | Snapshot | `ziroctl backup create` (pre-upgrade) | Same, run with the installed ziroctl |
 
+```mermaid
+flowchart LR
+  D[download initramfs + SHA256SUMS + .sig] --> V{signature and sha256 OK?<br/>same arch?}
+  V -- no --> X[refuse]
+  V -- yes --> S[snapshot /etc]
+  S --> U[unpack next to the live root]
+  U --> R["atomic rename(2) swap of /bin /sbin /lib /usr /opt;<br/>old files to /var/lib/ziro/upgrade/rollback"]
+  R --> B["new vmlinuz + initramfs in /boot;<br/>previous pair kept as *.prev"]
+  B --> RB[reboot]
+  RB -- doesn't boot --> P[GRUB: previous version] --> RO[ziroctl upgrade rollback]
+```
+
 ## What is kept and what is replaced
 
 The release image `ziro-initramfs-<arch>[-custom].cpio.gz` is the complete OS:
