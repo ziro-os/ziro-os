@@ -110,7 +110,11 @@ func runBuild(ctx context.Context, d *Deployment, b *Build, secrets map[string]s
 		return fail(err)
 	}
 	set("live", "")
-	logf("live: %s", deploymentURL(d))
+	if u := deploymentURL(d); u != "" {
+		logf("live: %s", u)
+	} else {
+		logf("live, but not published: set a base domain (ziroctl gateway domain set <domain>) or deploy with --expose <host>")
+	}
 	pruneBuilds(d)
 	return nil
 }
@@ -218,8 +222,8 @@ func unpackUpload(app string, b *Build, src string, logf func(string, ...any)) e
 	if err := extractTarGz(src, io.TeeReader(f, h), deployUnpackMax, deployUnpackFiles); err != nil {
 		return fmt.Errorf("source: %w", err)
 	}
-	_, _ = io.Copy(h, f) // the digest covers the whole archive, trailing padding included
-	b.Commit = "sha256:" + hex.EncodeToString(h.Sum(nil))[:12]
+	_, _ = io.Copy(h, f)                           // the digest covers the whole archive, trailing padding included
+	b.Commit = hex.EncodeToString(h.Sum(nil))[:12] // the archive's digest, as a short commit
 	logf("unpacked upload %s", b.Commit)
 	return nil
 }
@@ -279,9 +283,10 @@ func releaseBuild(d *Deployment, b *Build, plan BuildPlan, secrets map[string]st
 	if err := def.Validate(); err != nil {
 		return err
 	}
-	if clusterNodeID() != "" { // cluster: replicas on nodes of the image's arch, checked by the rollout
+	expose, exposeTLS := exposeFor(d) // its own host, else <app>.<gateway domain>
+	if clusterNodeID() != "" {        // cluster: replicas on nodes of the image's arch, checked by the rollout
 		if err := deployAppDef(def, b.ID, appDeployOpts{Name: d.Name, NewVersion: true, Replicas: d.Replicas, Publish: d.Publish,
-			Expose: d.Expose, ExposeTLS: d.ExposeTLS, Secrets: secrets, Arch: b.Arch, ImageNode: b.Node}); err != nil {
+			Expose: expose, ExposeTLS: exposeTLS, Secrets: secrets, Arch: b.Arch, ImageNode: b.Node}); err != nil {
 			return err
 		}
 		return waitRollout(d.Name, 2*deployCheckLimit)
@@ -300,7 +305,7 @@ func releaseBuild(d *Deployment, b *Build, plan BuildPlan, secrets map[string]st
 		}
 	}
 	if err := deployAppDef(def, b.ID, appDeployOpts{Name: d.Name, Local: true, NewVersion: true, Publish: d.Publish,
-		Bind: "127.0.0.1", Expose: d.Expose, ExposeTLS: d.ExposeTLS, Secrets: secrets}); err != nil {
+		Bind: "127.0.0.1", Expose: expose, ExposeTLS: exposeTLS, Secrets: secrets}); err != nil {
 		return err
 	}
 	return deployCheck(d.Publish, plan.Health, deployCheckLimit)
@@ -388,13 +393,16 @@ func freeLocalPort() (int, error) {
 }
 
 func deploymentURL(d *Deployment) string {
-	if d.Expose != "" {
-		if d.ExposeTLS == "off" {
-			return "http://" + d.Expose
+	if host, tlsMode := exposeFor(d); host != "" {
+		if tlsMode == "off" {
+			return "http://" + host
 		}
-		return "https://" + d.Expose
+		return "https://" + host
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d", d.Publish)
+	if d.Publish > 0 { // a single host without a public name: its loopback port
+		return fmt.Sprintf("http://127.0.0.1:%d", d.Publish)
+	}
+	return "" // a cluster app nobody exposed has no address from outside
 }
 
 // localBuildImage resolves a ziro.local/<app>:<build>@sha256 reference to the local image name,

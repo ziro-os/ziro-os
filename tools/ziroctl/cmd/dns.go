@@ -426,6 +426,13 @@ func (s *dnsServer) localAnswer(q dnsmessage.Message) (*dnsmessage.Message, bool
 	name := strings.ToLower(qs.Name.String())
 	s.mu.RLock()
 	rrs, ok := s.records[name]
+	for rest := name; !ok; { // no record of its own: the closest wildcard above it answers
+		_, rest, _ = strings.Cut(rest, ".")
+		if !strings.Contains(rest, ".") {
+			break
+		}
+		rrs, ok = s.records["*."+rest]
+	}
 	s.mu.RUnlock()
 	if !ok {
 		return nil, false

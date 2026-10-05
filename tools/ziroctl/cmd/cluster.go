@@ -150,10 +150,11 @@ type ClusterState struct {
 	Shares        []ClusterShare `json:"shares,omitempty"`      // NFS shares served over the mesh
 	// PurgeData: apps whose node-local data every node deletes (app -> when requested). Entries
 	// expire after purgeDataTTL; deploying an app of that name again cancels its entry.
-	PurgeData   map[string]string `json:"purge_data,omitempty"`
-	GatewayACME GatewayACME       `json:"gateway_acme,omitempty"`
-	Peers       []RemotePeer      `json:"peers,omitempty"`    // WireGuard remote-access clients
-	PodCIDR     string            `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
+	PurgeData     map[string]string `json:"purge_data,omitempty"`
+	GatewayACME   GatewayACME       `json:"gateway_acme,omitempty"`
+	GatewayDomain GatewayDomain     `json:"gateway_domain,omitempty"`
+	Peers         []RemotePeer      `json:"peers,omitempty"`    // WireGuard remote-access clients
+	PodCIDR       string            `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
 	// MeshMode "anywhere" runs the node mesh on the zirocd engine (NAT traversal, relays): only
 	// masters need a public address. "" (direct) is kernel WireGuard between reachable nodes.
 	MeshMode string `json:"mesh_mode,omitempty"`

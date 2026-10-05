@@ -483,6 +483,26 @@ paths:
       summary: Upstream health, active connections and requests per route
       responses:
         "200": { description: Status, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayStatus" } } } }
+  /api/v1/gateway/domain:
+    get:
+      x-ziro-role: viewer
+      tags: [gateway]
+      summary: The base domain of deployed apps, the gateway addresses and the DNS records to create
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    put:
+      x-ziro-role: admin
+      tags: [gateway]
+      summary: Publish deployed apps at <app>.<domain> ({"name":"apps.example.com"}); adds a wildcard record to the built-in DNS
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    delete:
+      x-ziro-role: admin
+      tags: [gateway]
+      summary: Stop publishing apps under a base domain (routes already created stay)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/gateway/ca:
     get:
       x-ziro-role: viewer

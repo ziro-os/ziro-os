@@ -81,6 +81,46 @@ type GatewayACME struct {
 	Directory string `json:"directory,omitempty"`
 }
 
+// GatewayDomain is the base domain of deployed apps: an app without a host of its own is
+// published at <app>.<Name> through the gateway.
+type GatewayDomain struct {
+	Name string `json:"name,omitempty"`
+}
+
+// Host is the hostname app is published at ("" when no domain is set).
+func (d GatewayDomain) Host(app string) string {
+	if d.Name == "" {
+		return ""
+	}
+	return app + "." + d.Name
+}
+
+// privateSuffixes are names no public CA will certify.
+var privateSuffixes = []string{".local", ".internal", ".lan", ".localhost", ".test", ".home.arpa", ".corp", ".intranet"}
+
+// PrivateDomain reports whether name can't get an ACME certificate: it has no dot, or ends in a
+// reserved or private suffix.
+func PrivateDomain(name string) bool {
+	if !strings.Contains(name, ".") {
+		return true
+	}
+	for _, s := range privateSuffixes {
+		if strings.HasSuffix(name, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// TLS is the route TLS mode for apps under the domain: ACME for public names, the gateway's own
+// CA for private ones.
+func (d GatewayDomain) TLS() string {
+	if PrivateDomain(d.Name) {
+		return "internal"
+	}
+	return "auto"
+}
+
 // GatewayCert is an uploaded certificate (PEM chain + key).
 type GatewayCert struct {
 	Cert string `json:"cert"`
