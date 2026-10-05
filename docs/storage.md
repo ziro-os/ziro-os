@@ -17,8 +17,10 @@ ziroctl disk expand
 - **What grows:** the root filesystem and every data disk added below. Only the last partition on a disk can grow
   (the installer puts the root partition last).
 - **How:** the backup GPT header moves to the new end of the disk, the partition is extended with `sfdisk`, the
-  kernel is told with `partx -u` (which works while the partition is mounted), and ext4 grows online with
-  `resize2fs`.
+  kernel is told with `partx -u` (which works while the partition is mounted), and ext4 grows online through the
+  kernel's resize ioctl (no `resize2fs` needed).
+- **Self-healing:** a filesystem smaller than its partition (a growth interrupted half-way) is finished on the next
+  run.
 - **Alerts:** each growth is audited and raises a low-severity `disk` alert. A filesystem 90% or more full raises
   a high-severity `disk` alert.
 

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,37 +135,90 @@ var diskRun = func(stdin string, name string, args ...string) error {
 	return nil
 }
 
-// growPartition grows the last partition to the end of its disk and the filesystem on it, online.
-func growPartition(dev, fstype string, dryRun bool) (int64, error) {
+// growPartition grows the last partition to the end of its disk and the ext2/3/4 filesystem on it
+// (mounted at mnt), online. It also finishes a filesystem that lags behind its partition, e.g. when
+// an older image had no resize2fs and only the partition step succeeded. Returns sectors grown.
+func growPartition(dev, mnt, fstype string, dryRun bool) (int64, error) {
 	part := filepath.Base(dev)
 	g, err := geometry(part)
 	if err != nil {
 		return 0, err
 	}
 	extra := g.growable()
-	if extra == 0 {
+	ext := fstype == "ext4" || fstype == "ext3" || fstype == "ext2"
+	var gap int64 // sectors the filesystem is smaller than its partition
+	var bsize uint64
+	if ext {
+		blocks, bs, err := extSize(dev)
+		if err != nil {
+			return 0, err
+		}
+		bsize = bs
+		if want := uint64(g.Size) * 512 / bsize; want > blocks {
+			if gap = int64((want - blocks) * bsize / 512); gap < minGrowSectors {
+				gap = 0
+			}
+		}
+	}
+	if extra == 0 && gap == 0 {
 		return 0, nil
 	}
-	if fstype != "ext4" && fstype != "ext3" && fstype != "ext2" {
+	if !ext {
 		return 0, fmt.Errorf("%s: %s can't be grown online by ziroctl (only ext2/3/4)", dev, fstype)
 	}
 	if dryRun {
-		return extra, nil
+		return extra + gap, nil
 	}
-	disk := "/dev/" + g.Disk
-	// The backup GPT must move to the new end of the disk before the partition can use the space.
-	_ = diskRun("", "sfdisk", "--relocate", "gpt-bak-std", disk)
-	if err := diskRun(", +\n", "sfdisk", "--force", "--no-reread", "--no-tell-kernel", "-N", strconv.Itoa(g.Number), disk); err != nil {
-		return 0, err
+	if extra > 0 {
+		disk := "/dev/" + g.Disk
+		// The backup GPT must move to the new end of the disk before the partition can use the space.
+		_ = diskRun("", "sfdisk", "--relocate", "gpt-bak-std", disk)
+		if err := diskRun(", +\n", "sfdisk", "--force", "--no-reread", "--no-tell-kernel", "-N", strconv.Itoa(g.Number), disk); err != nil {
+			return 0, err
+		}
+		// partx -u updates the kernel's view of a partition that is in use (BLKPG resize).
+		if err := diskRun("", "partx", "-u", "--nr", strconv.Itoa(g.Number), disk); err != nil {
+			return 0, err
+		}
+		if g.Size, err = readSysInt(filepath.Join(sysBlock, part, "size")); err != nil {
+			return 0, err
+		}
 	}
-	// partx -u updates the kernel's view of a partition that is in use (BLKPG resize).
-	if err := diskRun("", "partx", "-u", "--nr", strconv.Itoa(g.Number), disk); err != nil {
-		return 0, err
+	if err := resizeFS(mnt, uint64(g.Size)*512/bsize); err != nil {
+		return 0, fmt.Errorf("%s: online resize: %w", dev, err)
 	}
-	if err := diskRun("", "resize2fs", dev); err != nil {
-		return 0, err
+	return extra + gap, nil
+}
+
+// extSize returns an ext2/3/4 filesystem's block count and block size from its superblock (statfs
+// can't be used: it leaves out the metadata overhead).
+var extSize = func(dev string) (blocks, bsize uint64, err error) {
+	f, err := os.Open(dev)
+	if err != nil {
+		return 0, 0, err
 	}
-	return extra, nil
+	defer f.Close()
+	sb := make([]byte, 1024)
+	if _, err := f.ReadAt(sb, 1024); err != nil {
+		return 0, 0, fmt.Errorf("%s: superblock: %w", dev, err)
+	}
+	return parseExtSuper(sb)
+}
+
+func parseExtSuper(sb []byte) (blocks, bsize uint64, err error) {
+	le32 := func(o int) uint64 { return uint64(binary.LittleEndian.Uint32(sb[o:])) }
+	if len(sb) < 0x158 || binary.LittleEndian.Uint16(sb[0x38:]) != 0xEF53 {
+		return 0, 0, errors.New("not an ext2/3/4 filesystem")
+	}
+	l := le32(0x18)
+	if l > 6 {
+		return 0, 0, fmt.Errorf("bad block size 2^(10+%d)", l)
+	}
+	bsize, blocks = 1024<<l, le32(0x04)
+	if le32(0x60)&0x80 != 0 { // INCOMPAT_64BIT
+		blocks |= le32(0x150) << 32
+	}
+	return blocks, bsize, nil
 }
 
 func loadDataDisks() []DataDisk {
@@ -201,7 +255,7 @@ func expandAll(dryRun, quiet bool) error {
 			}
 			continue
 		}
-		extra, err := growPartition(dev, fstype, dryRun)
+		extra, err := growPartition(dev, mnt, fstype, dryRun)
 		if err != nil {
 			errs = append(errs, err.Error())
 			continue
