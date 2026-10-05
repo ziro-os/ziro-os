@@ -20,6 +20,7 @@ type fakeCF struct {
 	dns     map[string]cfDNSRecord // name -> record
 	apps    map[string]cfAccessApp // domain -> app
 	auth    string
+	scoped  bool // a least-privilege token: Tunnel Edit only, can't list accounts
 }
 
 func (f *fakeCF) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -33,8 +34,17 @@ func (f *fakeCF) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	p := r.URL.Path
 	switch {
+	case p == "/accounts" && f.scoped:
+		ok([]cfAccount{})
 	case p == "/accounts":
 		ok([]cfAccount{{ID: "acc1", Name: "Acme"}})
+	case strings.HasSuffix(p, "/cfd_tunnel") && r.Method == "GET":
+		if p != "/accounts/0123456789abcdef0123456789abcdef/cfd_tunnel" {
+			w.WriteHeader(403)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []map[string]any{{"code": 10000, "message": "Authentication error"}}})
+			return
+		}
+		ok([]cfTunnel{})
 	case strings.HasSuffix(p, "/configurations") && r.Method == "GET":
 		ok(map[string]any{"config": map[string]any{"ingress": f.ingress}})
 	case strings.HasSuffix(p, "/configurations") && r.Method == "PUT":
@@ -251,5 +261,50 @@ func TestCFTunnelRequest(t *testing.T) {
 	r = req("198.51.100.9:5000") // straight from the internet: spoofed
 	if cfTunnelRequest(r) || r.RemoteAddr != "198.51.100.9:5000" || r.Header.Get("CF-Connecting-IP") != "" {
 		t.Fatal("trusted a spoofed header")
+	}
+}
+
+func TestCFLoginLeastPrivilege(t *testing.T) {
+	f := setupCF(t)
+	f.scoped = true
+	if _, err := cfPickAccount("tok", ""); err == nil || !strings.Contains(err.Error(), "--account") {
+		t.Fatalf("no account and no way to ask: %v", err)
+	}
+	if _, err := cfPickAccount("tok", "not-an-id"); err == nil {
+		t.Fatal("bad account id accepted")
+	}
+	if _, err := cfPickAccount("tok", "ffffffffffffffffffffffffffffffff"); err == nil || !strings.Contains(err.Error(), "can't manage tunnels") {
+		t.Fatalf("account the token can't use: %v", err)
+	}
+	acc, err := cfPickAccount("tok", "0123456789abcdef0123456789abcdef")
+	if err != nil || acc.ID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("%+v %v", acc, err)
+	}
+	f.scoped = false
+	if acc, err := cfPickAccount("tok", ""); err != nil || acc.ID != "acc1" {
+		t.Fatalf("listable account: %+v %v", acc, err)
+	}
+}
+
+func TestTraversableArtifactDirs(t *testing.T) {
+	root := t.TempDir()
+	old := traversableRoot
+	t.Cleanup(func() { traversableRoot = old })
+	traversableRoot = filepath.Join(root, "ziro")
+	bin := filepath.Join(traversableRoot, "plugins", "x", "bin")
+	os.MkdirAll(filepath.Dir(bin), 0700)
+	os.Chmod(traversableRoot, 0700) // created root-only, as an upgrade does
+	os.Chmod(filepath.Join(traversableRoot, "plugins"), 0750)
+	os.WriteFile(bin, nil, 0755)
+	if err := traversable(bin); err != nil {
+		t.Fatal(err)
+	}
+	for d, want := range map[string]os.FileMode{traversableRoot: 0711, filepath.Join(traversableRoot, "plugins"): 0751, filepath.Dir(bin): 0711} {
+		if fi, _ := os.Stat(d); fi.Mode().Perm() != want {
+			t.Errorf("%s: %v, want %v", d, fi.Mode().Perm(), want)
+		}
+	}
+	if err := traversable(filepath.Join(root, "elsewhere", "bin")); err != nil {
+		t.Fatal("paths outside the plugin root must be left alone")
 	}
 }

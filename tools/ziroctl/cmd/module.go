@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ziro-os/ziro-os/sdk/schema"
 )
 
 // Modules (also called plugins): opt-in feature packs (security scanners, audit, S3 storage, ...).
@@ -409,6 +411,36 @@ func fetchArtifacts(m ModuleManifest, st *ModuleState) error {
 			return err
 		}
 		st.Artifacts = uniq(append(st.Artifacts, p))
+		if err := traversable(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// traversable lets an artifact's unprivileged service user reach it: each directory from
+// /var/lib/ziro down gets search (x) permission for group and others, never read. /var/lib/ziro is
+// 0700 on hosts where something created it root-only first (an upgrade, for one); every
+// directory under it keeps protecting its own contents.
+var traversableRoot = filepath.Dir(schema.PluginRoot)
+
+func traversable(p string) error {
+	rel, err := filepath.Rel(traversableRoot, filepath.Dir(p))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return nil
+	}
+	d := traversableRoot
+	for _, part := range append([]string{"."}, strings.Split(rel, string(filepath.Separator))...) {
+		d = filepath.Join(d, part)
+		fi, err := os.Stat(d)
+		if err != nil {
+			return err
+		}
+		if m := fi.Mode().Perm(); m&0o011 != 0o011 {
+			if err := os.Chmod(d, m|0o011); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

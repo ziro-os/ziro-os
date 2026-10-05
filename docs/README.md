@@ -25,6 +25,8 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 - [Smart DNS](dns.md): caching resolver, split DNS, records, blocklists, egress control.
 - [Gateway](gateway.md): HTTP(S), HTTP/3 and TCP routing with automatic TLS.
 - [WireGuard VPN](wireguard.md): remote access to a host.
+- [Cloudflare Tunnel](cloudflare-tunnel.md): publish services without a public IP, with optional Zero Trust
+  Access (`ziroctl cf`, opt-in module).
 - [Global router](router.md): private networks for devices anywhere (zirocd, ACLs, SSO), and
   [running it in production](router-deploy.md).
 
@@ -61,13 +63,3 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 - [Design standard](design/README.md) and [RFCs](design/rfcs/README.md): conventions for APIs, CLIs and extensions.
 - [Project goals](project-goals.md), [contributing](../community/CONTRIBUTING.md) and
   [governance](../GOVERNANCE.md).
-- [Storage](storage.md): automatic disk growth and data disks.
-- [Cloudflare Tunnel](cloudflare-tunnel.md): publish services without a public IP, with optional Zero Trust
-  Access (`ziroctl cf`, opt-in module).
-- [Smart DNS](dns.md): caching resolver, split DNS, cluster records, container egress control.
-- [SDK](sdk.md): Go packages (schemas and validators, catalogs, typed API client) and the OpenAPI spec for building on Ziro OS.
-- [Apps](apps.md): one-command deployments (postgres, mysql, mysql-cluster, valkey) from signed catalogs.
-- [Modules and plugins](modules.md): opt-in plugins (ClamAV, auditd, S3 storage, rclone), signed catalogs, and how to write and publish a plugin.
-- [Upgrades](upgrade.md) and [compliance mapping](compliance.md).
-- [Advanced deployment](advanced-deployment-guide.md) and
-  [first application tutorial](tutorials/01-first-application.md).
