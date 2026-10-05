@@ -462,8 +462,12 @@ func (c *Client) RollbackDeployment(ctx context.Context, app, build string) (map
 }
 
 // PushSource deploys a .tar.gz of source files as app and returns the queued build. It needs a
-// deployer token. The archive is read twice (a digest first, then the upload), hence the Seeker.
+// deployer token. The archive is read twice (a digest first, then the upload), hence the Seeker;
+// it is read from its start, wherever the caller left the position.
 func (c *Client) PushSource(ctx context.Context, app string, spec api.SourceSpec, archive io.ReadSeeker) (map[string]any, error) {
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	h := sha256.New()
 	if _, err := io.Copy(h, archive); err != nil {
 		return nil, err

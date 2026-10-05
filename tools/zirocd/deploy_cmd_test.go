@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -38,6 +40,12 @@ func TestDeployCommand(t *testing.T) {
 			mr, _ := r.MultipartReader()
 			p, _ := mr.NextPart()
 			json.NewDecoder(p).Decode(&spec)
+			p, _ = mr.NextPart()
+			body, _ := io.ReadAll(p)
+			if sum := sha256.Sum256(body); len(body) == 0 || spec.SourceSHA256 != hex.EncodeToString(sum[:]) {
+				http.Error(w, "the archive doesn't match source_sha256", http.StatusBadRequest)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]string{"id": "b1"})
 		case "/api/v1/deployments/site/builds/b1/log":
 			io.WriteString(w, "building\n")

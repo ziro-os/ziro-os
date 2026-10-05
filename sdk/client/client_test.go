@@ -87,7 +87,9 @@ func TestPushSource(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL, "dep")
-	out, err := c.PushSource(context.Background(), "site", api.SourceSpec{Port: 3000}, bytes.NewReader(archive))
+	r := bytes.NewReader(archive)
+	r.Seek(0, io.SeekEnd) // as left by whoever wrote the archive: PushSource reads from the start
+	out, err := c.PushSource(context.Background(), "site", api.SourceSpec{Port: 3000}, r)
 	sum := sha256.Sum256(archive)
 	if err != nil || out["id"] != "b1" || !bytes.Equal(got, archive) || spec.Port != 3000 || spec.SourceSHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatalf("push: %v %v spec=%+v got=%d bytes", out, err, spec, len(got))
