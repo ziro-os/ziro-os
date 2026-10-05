@@ -246,6 +246,9 @@ func pickBuilder(st *ClusterState, arch string) *ClusterNode {
 
 // buildOnCluster runs b on a builder node and waits for its result.
 func buildOnCluster(ctx context.Context, d *Deployment, b *Build, log io.Writer, logf func(string, ...any)) (BuildPlan, error) {
+	if d.Source == deploySourceUpload {
+		return BuildPlan{}, errors.New("uploaded source can't be built on a cluster yet (deploy from a git repository)")
+	}
 	self := clusterNodeID()
 	var node *ClusterNode
 	token, _ := os.ReadFile(filepath.Join(deployTokenDir, d.Name+".token"))

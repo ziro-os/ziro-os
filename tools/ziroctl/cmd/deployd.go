@@ -3,15 +3,19 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,7 +37,10 @@ type DeployRequest struct {
 	Deployment
 	SecretValues map[string]string `json:"secret_values,omitempty"` // input secret values (kept by the app)
 	GitToken     string            `json:"git_token,omitempty"`     // stored 0600, used through GIT_ASKPASS
+	SourceSHA256 string            `json:"source_sha256,omitempty"` // upload: hex SHA-256 of the archive
 }
+
+var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type buildJob struct {
 	app, build string
@@ -150,6 +157,7 @@ func (dd *deployDaemon) routes() *http.ServeMux {
 		b, err := dd.create(req)
 		reply(w, err, b)
 	})
+	mux.HandleFunc("POST /v1/deployments/{app}/source", dd.handleUpload)
 	mux.HandleFunc("GET /v1/deployments/{app}", func(w http.ResponseWriter, r *http.Request) {
 		d, err := loadDeployment(r.PathValue("app"))
 		if err != nil {
@@ -167,6 +175,9 @@ func (dd *deployDaemon) routes() *http.ServeMux {
 			return
 		}
 		d, err := loadDeployment(r.PathValue("app"))
+		if err == nil && req.Ref != "" && d.Source == deploySourceUpload {
+			err = errors.New("an uploaded deployment has no branch (upload again to change it)")
+		}
 		if err == nil && req.Ref != "" && (!gitRefRe.MatchString(req.Ref) || strings.Contains(req.Ref, "..")) {
 			err = fmt.Errorf("invalid branch or tag %q", req.Ref)
 		}
@@ -215,11 +226,106 @@ func (dd *deployDaemon) routes() *http.ServeMux {
 	return mux
 }
 
+// handleUpload is POST /v1/deployments/{app}/source: a multipart body with the deployment spec
+// (a DeployRequest as JSON, part "spec") followed by the source (a .tar.gz, part "source"). The
+// spec comes first so a bad one is refused before the archive is read; the archive is streamed to
+// disk (never held in memory), checked against the spec's source_sha256 and then replaces the
+// app's current source. It is unpacked, safely, when the build runs.
+func (dd *deployDaemon) handleUpload(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("app")
+	r.Body = http.MaxBytesReader(w, r.Body, deployUploadMax+(64<<10))
+	mr, err := r.MultipartReader()
+	if err != nil {
+		apiReply(w, fmt.Errorf("multipart body expected: %w", err), nil)
+		return
+	}
+	var req DeployRequest
+	if err := nextPart(mr, "spec", func(p io.Reader) error {
+		dec := json.NewDecoder(io.LimitReader(p, 64<<10))
+		dec.DisallowUnknownFields()
+		return dec.Decode(&req)
+	}); err != nil {
+		apiReply(w, err, nil)
+		return
+	}
+	req.Name, req.Source, req.Repo, req.Ref, req.GitToken = app, deploySourceUpload, "", "", ""
+	// Pushing source is a deployer's job (a CI token); where traffic goes stays an admin's, so
+	// the gateway name, TLS mode and host port are the deployment's current ones.
+	var cur Deployment
+	if c, err := loadDeployment(app); err == nil {
+		cur = *c
+	}
+	if (req.Expose != "" && req.Expose != cur.Expose) || (req.ExposeTLS != "" && req.ExposeTLS != cur.ExposeTLS) ||
+		(req.Publish != 0 && req.Publish != cur.Publish) {
+		apiReply(w, errors.New("expose, expose_tls and publish need an admin token (ziroctl deploy / POST /api/v1/deployments)"), nil)
+		return
+	}
+	req.Expose, req.ExposeTLS, req.Publish = cur.Expose, cur.ExposeTLS, cur.Publish
+	if err := validateDeployment(&req.Deployment); err != nil {
+		apiReply(w, err, nil)
+		return
+	}
+	if !sha256Re.MatchString(req.SourceSHA256) {
+		apiReply(w, errors.New("source_sha256: the archive's hex SHA-256 is required"), nil)
+		return
+	}
+	if err := nextPart(mr, "source", func(p io.Reader) error { return storeUpload(app, p, req.SourceSHA256) }); err != nil {
+		apiReply(w, err, nil)
+		return
+	}
+	b, err := dd.create(req)
+	apiReply(w, err, b)
+}
+
+// nextPart reads the next multipart part, which must be called name.
+func nextPart(mr *multipart.Reader, name string, read func(io.Reader) error) error {
+	p, err := mr.NextPart()
+	if err != nil || p.FormName() != name {
+		return fmt.Errorf("multipart part %q expected", name)
+	}
+	defer p.Close()
+	return read(p)
+}
+
+// storeUpload streams the archive to <app>/source.tar.gz (0600) if it has the given SHA-256.
+func storeUpload(app string, r io.Reader, want string) error {
+	if err := os.MkdirAll(deployDir(app), 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(deployDir(app), "upload-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name()) // a no-op once renamed
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(f, h), io.LimitReader(r, deployUploadMax+1))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if fi, _ := os.Stat(f.Name()); fi != nil && fi.Size() > deployUploadMax {
+		return fmt.Errorf("the archive is larger than %d MiB", deployUploadMax>>20)
+	}
+	if hex.EncodeToString(h.Sum(nil)) != want {
+		return errors.New("the archive doesn't match source_sha256 (upload corrupted)")
+	}
+	deployMu.Lock()
+	defer deployMu.Unlock()
+	return os.Rename(f.Name(), uploadArchive(app))
+}
+
 // create stores (or updates) a deployment from a request and queues its first build.
 func (dd *deployDaemon) create(req DeployRequest) (*Build, error) {
 	spec := req.Deployment
 	if err := validateDeployment(&spec); err != nil {
 		return nil, err
+	}
+	if spec.Source == deploySourceUpload {
+		if _, err := os.Stat(uploadArchive(spec.Name)); err != nil {
+			return nil, errors.New("no uploaded source (POST /v1/deployments/{app}/source)")
+		}
 	}
 	for k, v := range req.SecretValues {
 		if !slices.Contains(spec.Secrets, k) {

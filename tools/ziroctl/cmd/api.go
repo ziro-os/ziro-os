@@ -74,7 +74,7 @@ var apiStatusCmd = &cobra.Command{
 				return
 			}
 			fmt.Printf("ziro-api running at %s (health: %s/api/v1/health)\n", addr, addr)
-			fmt.Println("tokens: ziroctl api token create <name> --role viewer|operator|admin")
+			fmt.Println("tokens: ziroctl api token create <name> --role viewer|deployer|operator|admin")
 		})
 	},
 }

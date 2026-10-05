@@ -28,10 +28,11 @@ var (
 	deployKeep     = 5 // builds (and their images) kept per app, for rollback
 )
 
-// Deployment is an app deployed from a git repository.
+// Deployment is an app deployed from a git repository or from source a client uploaded.
 type Deployment struct {
 	Name      string            `json:"name"`
-	Repo      string            `json:"repo"`              // https URL
+	Source    string            `json:"source,omitempty"`  // "" (a git repository) or "upload" (an archive pushed by a client)
+	Repo      string            `json:"repo,omitempty"`    // https URL (git source)
 	Ref       string            `json:"ref,omitempty"`     // branch or tag (default: the repository's default branch)
 	Path      string            `json:"path,omitempty"`    // subdirectory to build (monorepos)
 	Port      int               `json:"port,omitempty"`    // container port (default: detected)
@@ -80,20 +81,35 @@ var (
 	localImageRe = regexp.MustCompile(`^ziro\.local/[a-z0-9][a-z0-9_.-]{0,62}:b[0-9]{1,9}@sha256:[0-9a-f]{64}$`)
 )
 
+const deploySourceUpload = "upload"
+
 func deployDir(app string) string { return filepath.Join(deployStateDir, app) }
+
+// uploadArchive is the source archive of an uploaded deployment (the latest upload; builds
+// read it when they run, so a redeploy rebuilds the same files).
+func uploadArchive(app string) string { return filepath.Join(deployDir(app), "source.tar.gz") }
 
 // validateDeployment checks a spec from the CLI or the API (the trust boundary of ziroctld).
 func validateDeployment(d *Deployment) error {
 	if err := validName(d.Name); err != nil {
 		return err
 	}
-	u, err := url.Parse(d.Repo)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
-		!repoPathRe.MatchString(strings.TrimPrefix(u.Path, "/")) || strings.Contains(u.Path, "..") {
-		return errors.New("repo: an https URL without credentials (private repos: --git-token-file)")
-	}
-	if d.Ref != "" && (!gitRefRe.MatchString(d.Ref) || strings.Contains(d.Ref, "..")) {
-		return fmt.Errorf("invalid branch or tag %q", d.Ref)
+	switch d.Source {
+	case "":
+		u, err := url.Parse(d.Repo)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+			!repoPathRe.MatchString(strings.TrimPrefix(u.Path, "/")) || strings.Contains(u.Path, "..") {
+			return errors.New("repo: an https URL without credentials (private repos: --git-token-file)")
+		}
+		if d.Ref != "" && (!gitRefRe.MatchString(d.Ref) || strings.Contains(d.Ref, "..")) {
+			return fmt.Errorf("invalid branch or tag %q", d.Ref)
+		}
+	case deploySourceUpload:
+		if d.Repo != "" || d.Ref != "" {
+			return errors.New("an uploaded deployment has no repo or ref")
+		}
+	default:
+		return fmt.Errorf("invalid source %q", d.Source)
 	}
 	if d.Path != "" && (!subPathRe.MatchString(d.Path) || strings.Contains(d.Path, "..")) {
 		return fmt.Errorf("invalid path %q (a subdirectory of the repository)", d.Path)

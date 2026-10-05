@@ -134,6 +134,10 @@ func (dd *deployDaemon) handleHook(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusUnauthorized, "unauthorized") // same answer whether or not the app exists
 		return
 	}
+	if d.Source == deploySourceUpload {
+		apiAccepted(w, "ignored: an uploaded deployment has no repository")
+		return
+	}
 	if ev := r.Header.Get("X-GitHub-Event"); ev == "ping" {
 		apiAccepted(w, "pong")
 		return

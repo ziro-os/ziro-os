@@ -6,10 +6,10 @@ info:
   description: |
     The API server (`ziroctl api start`) listens on loopback by default (HTTPS optional).
     Authenticate with `Authorization: Bearer <token>` (`ziroctl api token`, or scoped tokens from
-    `ziroctl api token create <name> --role viewer|operator|admin`).
+    `ziroctl api token create <name> --role viewer|deployer|operator|admin`).
 
     Roles: each operation states the role it needs in `x-ziro-role` (the server enforces exactly
-    that). **viewer** reads; **operator** also runs day-to-day changes (services, containers, DNS
+    that). **viewer** reads; **deployer** also pushes source and redeploys or rolls back deployments (CI and agents); **operator** also runs day-to-day changes (services, containers, DNS
     records, scaling, node cordon/drain); **admin** may do everything, including what grants or
     removes access, installs software, deletes data or changes where traffic goes. Requests are
     rate limited (120/min per client, 600/min per token) and every change is audited
@@ -947,9 +947,23 @@ paths:
         - { name: purge, in: query, schema: { type: boolean } }
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/deployments/{app}/source:
+    post:
+      x-ziro-role: deployer
+      tags: [deploy]
+      summary: Deploy source a client uploads (multipart "spec" JSON with source_sha256, then "source" .tar.gz) and queue its build; an admin sets expose and publish
+      parameters:
+        - $ref: "#/components/parameters/App"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { type: object }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/deployments/{app}/redeploy:
     post:
-      x-ziro-role: operator
+      x-ziro-role: deployer
       tags: [deploy]
       summary: Build the latest commit again ({"ref":"<branch>"} switches the branch) and release it
       parameters:
@@ -959,7 +973,7 @@ paths:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/deployments/{app}/rollback:
     post:
-      x-ziro-role: operator
+      x-ziro-role: deployer
       tags: [deploy]
       summary: Release an earlier build's image again ({"build":"b3"}, default the previous one), without rebuilding
       parameters:
