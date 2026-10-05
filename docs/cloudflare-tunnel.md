@@ -66,7 +66,11 @@ Create a token in the Cloudflare dashboard (My Profile › API Tokens) with only
 | Zone › DNS › Edit (your zones) | the hostname records |
 | Account › Access: Apps and Policies › Edit | `--access` (optional) |
 
-Pass it through a prompt, `--token-file` or `$CF_API_TOKEN`, never on the command line. Using a dashboard tunnel
+Pass it through a prompt, `--token-file` or `$CF_API_TOKEN`, never on the command line.
+
+A token with only these permissions can't list your accounts, so `cf login` asks for the account ID (the
+32-character ID in `dash.cloudflare.com/<account-id>`), or takes it from `--account`. It then checks that the token
+can manage tunnels there. Adding Account › Account Settings › Read lets it find the account by itself. Using a dashboard tunnel
 (`cf up --token-file`) needs no API token at all; you then manage hostnames in the dashboard.
 
 ## Security

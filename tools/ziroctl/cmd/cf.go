@@ -222,6 +222,9 @@ func cfRun(def ServiceDef) error {
 	if err := ensureCFUser(); err != nil {
 		return err
 	}
+	if err := traversable(cfBinary); err != nil { // hosts enabled before the artifact fix
+		return err
+	}
 	if err := writeFileAtomic(filepath.Join(servicesDir, def.Name+".conf"), []byte(supervisedConf(def)), 0644); err != nil {
 		return err
 	}
@@ -467,25 +470,9 @@ Account › Access: Apps and Policies: Edit to use --access.`,
 		if err != nil {
 			return err
 		}
-		accs, err := (&cfClient{token: tok}).accounts()
+		acc, err := cfPickAccount(tok, cfAccountID)
 		if err != nil {
 			return err
-		}
-		var acc *cfAccount
-		for i, a := range accs {
-			if cfAccountID == "" && len(accs) == 1 || a.ID == cfAccountID {
-				acc = &accs[i]
-			}
-		}
-		if acc == nil {
-			var ids []string
-			for _, a := range accs {
-				ids = append(ids, a.ID+" ("+a.Name+")")
-			}
-			if len(ids) == 0 {
-				return errors.New("the token can't see any account (give it Account › Cloudflare Tunnel: Edit)")
-			}
-			return fmt.Errorf("choose an account with --account: %s", strings.Join(ids, ", "))
 		}
 		if err := saveCFLogin(tok, *acc); err != nil {
 			return err
@@ -494,6 +481,47 @@ Account › Access: Apps and Policies: Edit to use --access.`,
 		fmt.Printf("✓ Logged in to %s (token stored: %s)\n", acc.Name, l.Provider)
 		return nil
 	},
+}
+
+var accountIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// cfPickAccount finds the account the token manages tunnels in. Listing accounts needs Account
+// Settings: Read, which a least-privilege token (Cloudflare Tunnel: Edit only) doesn't have, so the
+// account ID can also come from --account or a prompt; the token is then checked against it.
+func cfPickAccount(tok, id string) (*cfAccount, error) {
+	c := &cfClient{token: tok}
+	accs, err := c.accounts()
+	if err != nil {
+		return nil, err
+	}
+	for i, a := range accs {
+		if id == "" && len(accs) == 1 || a.ID == id {
+			return &accs[i], nil
+		}
+	}
+	if len(accs) > 1 && id == "" {
+		var ids []string
+		for _, a := range accs {
+			ids = append(ids, a.ID+" ("+a.Name+")")
+		}
+		return nil, fmt.Errorf("choose an account with --account: %s", strings.Join(ids, ", "))
+	}
+	if id == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprint(os.Stderr, "Account ID (dash.cloudflare.com/<account-id>): ")
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		id = strings.TrimSpace(line)
+	}
+	if id == "" {
+		return nil, errors.New("the token can't list accounts: pass --account <id> (dash.cloudflare.com/<id>), or give it Account › Account Settings: Read")
+	}
+	if !accountIDRe.MatchString(id) {
+		return nil, fmt.Errorf("%q is not a Cloudflare account ID (32 hex characters)", id)
+	}
+	c.account = id
+	if err := c.do("GET", c.acct("/cfd_tunnel?per_page=1"), nil, nil); err != nil {
+		return nil, fmt.Errorf("the token can't manage tunnels in account %s (give it Account › Cloudflare Tunnel: Edit): %w", id, err)
+	}
+	return &cfAccount{ID: id, Name: id}, nil
 }
 
 var cfLogoutCmd = &cobra.Command{
@@ -844,6 +872,9 @@ the background with --detach (stop it with --stop).`,
 // cfQuickForeground runs a quick tunnel as the cloudflared user until Ctrl-C.
 func cfQuickForeground(args []string, origin string) error {
 	if err := ensureCFUser(); err != nil {
+		return err
+	}
+	if err := traversable(cfBinary); err != nil {
 		return err
 	}
 	u, err := user.Lookup(cfUser)
