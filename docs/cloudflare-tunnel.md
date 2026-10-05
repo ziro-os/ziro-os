@@ -92,9 +92,9 @@ pinned by sha256 for each architecture.
 
 ```mermaid
 flowchart LR
-  R[cloudflare/cloudflared release] -- daily bump job:<br/>verify sha256, test --> P[ziro-os/pkgs<br/>signed index]
-  P -- cf update --cron, daily --> H[host: download, check sha256,<br/>restart, wait for edge]
-  H -- not ready in 30s --> B[restore previous binary + alert]
+  R[cloudflare/cloudflared release] -->|"daily bump job: verify sha256, test"| P[ziro-os/pkgs<br/>signed index]
+  P -->|"cf update, daily"| H[host: download, check sha256,<br/>restart, wait for edge]
+  H -->|"not ready in 30s"| B[restore previous binary + alert]
 ```
 
 - A daily job upgrades every host, spread over 30 minutes. To turn it off:
