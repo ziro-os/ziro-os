@@ -289,8 +289,10 @@ func TestHealRecordDedupeAndRing(t *testing.T) {
 	if !c.record(HealAction{Kind: "hold"}, now.Add(healReportEvery+time.Minute), true) {
 		t.Fatal("the report returns after the window")
 	}
-	if !c.record(HealAction{Kind: "reschedule", Node: "x"}, now, false) || !c.record(HealAction{Kind: "reschedule", Node: "x"}, now, false) {
-		t.Fatal("events are never deduplicated")
+	for i := 0; i < 2; i++ {
+		if !c.record(HealAction{Kind: "reschedule", Node: "x"}, now, false) {
+			t.Fatalf("events are never deduplicated (repeat %d dropped)", i)
+		}
 	}
 	for i := 0; i < 3*healHistory; i++ {
 		c.record(HealAction{Kind: "cordon", Node: "n"}, now, false)
