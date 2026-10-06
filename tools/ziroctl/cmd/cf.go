@@ -81,20 +81,31 @@ var (
 
 // ---- secrets and state ----
 
-func saveCFLogin(token string, acc cfAccount) error {
+// sealToken wraps a secret with the TPM when there is one, else the root-only key file.
+func sealToken(token string) (provider string, blob []byte, err error) {
 	c := keyProviderConfig{Provider: "file"}
 	if _, err := os.Stat(tpmDevice); err == nil {
 		c.Provider = "tpm"
 	}
-	blob, err := wrapDEK(c, []byte(token))
+	blob, err = wrapDEK(c, []byte(token))
 	if err != nil && c.Provider == "tpm" { // a TPM that can't seal (busy, locked out): still 0600 root-only
 		c.Provider = "file"
 		blob, err = wrapDEK(c, []byte(token))
 	}
+	return c.Provider, blob, err
+}
+
+func unsealToken(provider string, blob []byte) (string, error) {
+	tok, err := unwrapDEK(wrappedDEK{Provider: provider, Blob: blob}, keyProviderConfig{})
+	return string(tok), err
+}
+
+func saveCFLogin(token string, acc cfAccount) error {
+	provider, blob, err := sealToken(token)
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(cfLogin{Account: acc.ID, AccountName: acc.Name, Provider: c.Provider, Blob: blob})
+	b, _ := json.Marshal(cfLogin{Account: acc.ID, AccountName: acc.Name, Provider: provider, Blob: blob})
 	return cfWrite(cfLoginPath(), b)
 }
 

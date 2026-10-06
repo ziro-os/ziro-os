@@ -103,8 +103,10 @@ ziroctl gateway domain rm
 - **Per app.** `ziroctl deploy ... --expose host` still wins over the domain.
 - **DNS.** Setting the domain adds `*.apps.example.com A <gateway address>` to the built-in DNS (see
   [dns.md](dns.md)): on a cluster as a cluster record, one per gateway node, so every node resolves the apps; on a
-  standalone host as a local record. Everyone else needs the same records at your DNS provider, which the command
-  prints. With no gateway node yet on a cluster, it says so and adds nothing.
+  standalone host as a local record. Everyone else needs the same records at your DNS provider: with a provider
+  connected (`ziroctl dns provider add cloudflare`, see [dns.md](dns.md#public-dns-provider-cloudflare)) they are created
+  and kept current automatically, otherwise the command prints them. With no gateway node yet on a cluster, it says
+  so and adds nothing.
 - **Existing apps** take the domain on their next release (`ziroctl deploy redeploy <app>`). Removing the domain
   leaves the routes it created; remove them with `ziroctl gateway route rm`.
 - **API.** `/api/v1/gateway/domain` (see below).
@@ -124,6 +126,7 @@ GET    /api/v1/gateway/domain              the base domain of deployed apps, gat
 PUT    /api/v1/gateway/domain              {"name":"apps.example.com"}
 DELETE /api/v1/gateway/domain
 GET    /api/v1/gateway/ca                  internal CA certificate (PEM)
+       (the public DNS provider is managed under /api/v1/dns/cloud, see dns.md)
 GET    /api/v1/gateway/certs               POST {"name","cert","key"}   DELETE /api/v1/gateway/certs/{name}
 ```
 

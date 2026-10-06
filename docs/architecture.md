@@ -171,6 +171,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labelled gateway | shipped |
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
+| DNS provider | `dns provider`, `dns cloud`; the `dns-cloudflare` module runs `gateway dns-sync`: records for the gateway's names created at Cloudflare, only ever touching records it owns; leader only in a cluster ([dns.md](dns.md#public-dns-provider-cloudflare)) | masters, or a standalone host | shipped (Cloudflare) |
 | Auto-healing | node agent conditions, `healPass` on the Raft leader, flap guard, partition brake, move cap; every action audited and alerted ([clustering.md](clustering.md#auto-healing)) | agent: every node; healing: leader | shipped |
 | HA control plane | Raft (hashicorp/raft + bbolt), cluster CA, mutual-TLS master links | masters | shipped |
 | Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices anywhere ([router.md](router.md)) | every master; `zirocd` on devices | control plane, zirocd (Linux/macOS/Windows), relays + NAT traversal, Ziro OS integration, subnet routers and SSO shipped |

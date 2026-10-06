@@ -26,3 +26,4 @@ not need one.
 | RFC | Title | Status |
 |---|---|---|
 | [0001](0001-stacks-and-host-config.md) | Stacks and declarative host config | Accepted (implemented in #49) |
+| [0002](0002-dns-provider.md) | Public DNS provider for the gateway's names | Draft |
