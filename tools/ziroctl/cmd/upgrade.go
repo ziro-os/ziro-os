@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/ziro-os/ziro-os/sdk/release"
 )
 
 // Host upgrade: the release initramfs is the complete OS image (kernel, modules,
@@ -856,46 +857,26 @@ func parseSums(data []byte) map[string]string {
 	return out
 }
 
-func parseSemver(s string) ([3]int, bool) {
-	var v [3]int
-	s = strings.TrimPrefix(s, "v")
-	s, _, _ = strings.Cut(s, "-")
-	parts := strings.Split(s, ".")
-	if len(parts) != 3 {
-		return v, false
-	}
-	for i, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 {
-			return v, false
-		}
-		v[i] = n
-	}
-	return v, true
+// compareSemver orders OS and tools versions (X.Y.Z and X.Y.Z.N, see sdk/release.Compare).
+func compareSemver(a, b string) int { return release.Compare(a, b) }
+
+// keepNewerTools reports whether the running tools (X.Y.Z.N) are newer than the tools in the OS
+// image about to be installed (the image carries them as plain X.Y.Z): a build made since then
+// is kept across the OS upgrade. 1.0.21.3 survives an upgrade to 1.0.21 and gives way to 1.0.22.
+func keepNewerTools(running, targetOS string) bool {
+	return release.Compare(strings.TrimPrefix(running, "v"), targetOS) > 0
 }
 
-// compareSemver returns -1, 0 or 1. Unparseable versions compare as older.
-func compareSemver(a, b string) int {
-	va, oka := parseSemver(a)
-	vb, okb := parseSemver(b)
-	if !oka || !okb {
-		switch {
-		case oka:
-			return 1
-		case okb:
-			return -1
-		}
-		return 0
-	}
-	for i := 0; i < 3; i++ {
-		if va[i] != vb[i] {
-			if va[i] < vb[i] {
-				return -1
-			}
-			return 1
+// toolsToKeep lists the installed tools an OS upgrade must not downgrade: ziroctl and ziropkg,
+// plus zirocd where the image has it.
+func toolsToKeep() []string {
+	out := append([]string{}, toolsBinaries...)
+	for _, n := range optionalTools {
+		if fileExists(filepath.Join(toolsBinDir, n)) {
+			out = append(out, n)
 		}
 	}
-	return 0
+	return out
 }
 
 func hostArch() string {
@@ -1074,7 +1055,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	}
 	current := readRelease("/etc/ziro-release")["VERSION"]
 	if current == "" {
-		current = Version
+		current = release.OS(Version) // Version is the tools version (X.Y.Z.N); the OS is its X.Y.Z
 	}
 	rel, err := fetchRelease(cmd.Context(), upgradeVersion)
 	if err != nil {
@@ -1201,9 +1182,11 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	// A tools release newer than the image's ziroctl/ziropkg (ziroctl update) is kept.
-	keepTools := compareSemver(strings.TrimPrefix(Version, "v"), latest) > 0
+	keepTools := keepNewerTools(Version, latest)
+	var kept []string
 	if keepTools {
-		for _, n := range toolsBinaries {
+		kept = toolsToKeep()
+		for _, n := range kept {
 			if err := copyFileSync(filepath.Join(toolsBinDir, n), filepath.Join(dir, "keep-"+n)); err != nil {
 				return err
 			}
@@ -1214,13 +1197,13 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if keepTools {
-		for _, n := range toolsBinaries {
+		for _, n := range kept {
 			if err := installTool(n, filepath.Join(dir, "keep-"+n)); err != nil {
 				return fmt.Errorf("restore the newer %s: %w", n, err)
 			}
 		}
-		_ = trustToolHashes(toolsBinaries)
-		fmt.Printf("✓ kept ziroctl/ziropkg %s (newer than the image's)\n", Version)
+		_ = trustToolHashes(kept)
+		fmt.Printf("✓ kept the tools at %s (newer than the image's)\n", Version)
 	}
 	_ = reportUpgrade(state, fmt.Sprintf("✅ Ziro-OS upgraded %s → %s. Rollback: 'ziroctl upgrade rollback'.", state.From, state.To))
 

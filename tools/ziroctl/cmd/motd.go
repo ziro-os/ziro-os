@@ -34,7 +34,8 @@ addresses, workloads, and anything that needs attention with the command that fi
 
 // HostSummary is what an operator needs at a glance; Attention lists only what is wrong.
 type HostSummary struct {
-	Version     string        `json:"version"`
+	Version     string        `json:"version"`              // tools version, X.Y.Z[.N]
+	OSVersion   string        `json:"os_version,omitempty"` // installed Ziro OS, X.Y.Z
 	Hostname    string        `json:"hostname"`
 	Mode        string        `json:"mode"` // installed, live
 	Platform    string        `json:"platform"`
@@ -73,7 +74,7 @@ func (d DiskUse) Percent() int { return int(d.Used * 100 / max(d.Total, 1)) }
 // collectHostSummary gathers the summary from /proc, /sys and local state only (no
 // subprocesses), so it is cheap enough for every login and the boot console.
 func collectHostSummary() HostSummary {
-	s := HostSummary{Version: Version, Mode: "live", Arch: hostArch(), CPUs: runtime.NumCPU(), Addresses: hostAddresses()}
+	s := HostSummary{Version: Version, OSVersion: hostOSVersion(), Mode: "live", Arch: hostArch(), CPUs: runtime.NumCPU(), Addresses: hostAddresses()}
 	s.Hostname, _ = os.Hostname()
 	if fileExists("/etc/ziro-installed") {
 		s.Mode = "installed"
@@ -177,7 +178,11 @@ func renderMOTD(out io.Writer, s HostSummary, st termStyle) {
 	if s.Uptime > 0 {
 		head = append(head, "up "+humanDuration(s.Uptime))
 	}
-	version := st.bold(s.Version)
+	headline := s.Version // the headline is the OS; tools-only builds show in their own row below
+	if s.OSVersion != "" {
+		headline = s.OSVersion
+	}
+	version := st.bold(headline)
 	if s.Mode == "live" {
 		version += "  " + st.warn("LIVE")
 	}
@@ -190,6 +195,9 @@ func renderMOTD(out io.Writer, s HostSummary, st termStyle) {
 	row := func(name, value string) { fmt.Fprintf(out, "  %s %s\n", st.dim(fmt.Sprintf("%-9s", name)), value) }
 	sep := st.sep()
 
+	if s.OSVersion != "" && s.Version != s.OSVersion {
+		row("Tools", "ziroctl "+s.Version)
+	}
 	row("CPU", fmt.Sprintf("%d vCPU  load %.2f %.2f %.2f", s.CPUs, s.Load1, s.Load5, s.Load15))
 	if s.MemTotal > 0 {
 		pct := float64(s.MemUsed) * 100 / float64(s.MemTotal)

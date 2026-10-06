@@ -1,4 +1,5 @@
-// Package update keeps zirocd current from the signed tools release stream (tags tools/vX.Y.Z):
+// Package update keeps zirocd current from the signed tools release stream (tags tools/vX.Y.Z and
+// tools/vX.Y.Z.N):
 // nothing is installed unless SHA256SUMS carries the Ziro release signature and the binary
 // matches it. The swap is atomic, the previous binary is kept, and a new binary that cannot
 // reach "connected" within two starts is rolled back.
@@ -48,7 +49,7 @@ func (u *Updater) markerPath() string { return filepath.Join(u.Dir, "update-pend
 // Target picks the version to run: the admin's pin, else the newest release. "" = stay.
 func (u *Updater) Target(ctx context.Context, pinned string) (string, error) {
 	if pinned != "" {
-		if pinned == u.Current {
+		if release.Compare(pinned, u.Current) == 0 {
 			return "", nil
 		}
 		return pinned, nil // an admin pin may also roll the fleet back

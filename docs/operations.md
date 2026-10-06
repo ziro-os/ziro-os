@@ -159,14 +159,15 @@ handles it in layers.
 
 ## Keeping `ziroctl` current: `ziroctl update`
 
-`ziroctl` and `ziropkg` ship on their own release stream (`tools/vX.Y.Z`), so fixes reach hosts without an OS
-upgrade. Every OS release tag also publishes the matching tools release, and hotfixes can ship as their own
-`tools/vX.Y.Z` tag.
+`ziroctl` and `ziropkg` ship on their own release stream, so fixes reach hosts without an OS upgrade. Tools versions
+are `x.y.z.N`: `x.y.z` is the Ziro OS version and `N` the tools-only build of it (the build in the OS image is plain
+`x.y.z`). Every OS release tag also publishes the matching `tools/vX.Y.Z`; tools-only fixes ship as `tools/vX.Y.Z.N`.
 
 ```sh
 ziroctl update --check     # also runs daily from cron; the login summary shows the result
 ziroctl update             # install the newest compatible release
-ziroctl update --version v1.0.17
+ziroctl update --version v1.0.21.3
+ziroctl update --version v1.0.17 --allow-downgrade   # older than the running version: refused without the flag
 ziroctl update --rollback  # back to the binaries the last update replaced
 ```
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/ziro-os/ziro-os/sdk/release"
 	zr "github.com/ziro-os/ziro-os/sdk/router"
 	"go.yaml.in/yaml/v3"
 )
@@ -259,11 +260,9 @@ var routerNetworkSetCmd = &cobra.Command{
 			return err
 		}
 		cvSet := cmd.Flags().Changed("client-version")
-		cv := strings.TrimPrefix(rtClientVersion, "v")
-		if cv == "latest" {
-			cv = ""
-		} else if _, ok := parseSemver(cv); cvSet && !ok {
-			return fmt.Errorf("invalid --client-version %q (X.Y.Z or latest)", rtClientVersion)
+		cv, err := normalizeClientVersion(rtClientVersion, cvSet)
+		if err != nil {
+			return fmt.Errorf("--client-version: %w", err)
 		}
 		return withState(func(st *ClusterState) error {
 			n, err := mustNetwork(st, args[0])
@@ -786,7 +785,7 @@ func init() {
 
 	routerNetworkCreateCmd.Flags().StringVar(&rtCIDR, "cidr", "", "IPv4 network (default: a free /16 of 100.64.0.0/10)")
 	routerNetworkCreateCmd.Flags().StringVar(&rtPolicy, "policy", "deny", "deny (rules allow traffic) or allow (every device reaches every device)")
-	routerNetworkSetCmd.Flags().StringVar(&rtClientVersion, "client-version", "", "zirocd version the fleet runs (X.Y.Z, or latest)")
+	routerNetworkSetCmd.Flags().StringVar(&rtClientVersion, "client-version", "", "zirocd version the fleet runs (X.Y.Z, X.Y.Z.N, or latest)")
 	routerNetworkCmd.AddCommand(routerNetworkCreateCmd, routerNetworkLsCmd, routerNetworkRmCmd, routerNetworkSetCmd, routerNetworkInviteCmd)
 
 	routerKeyCreateCmd.Flags().BoolVar(&rtReusable, "reusable", false, "admit any number of devices until it expires")
@@ -803,4 +802,18 @@ func init() {
 	routerACLCmd.AddCommand(routerACLGetCmd, routerACLSetCmd, routerACLTestCmd)
 
 	routerRouteCmd.AddCommand(routerRouteLsCmd, routerRouteApproveCmd, routerRouteRevokeCmd)
+}
+
+// normalizeClientVersion validates a network's zirocd pin: a tools version (X.Y.Z, or X.Y.Z.N
+// for a tools-only build) with an optional "v", or "latest" (= unpinned, returned as ""). set
+// says whether the pin was given at all; unset values pass through unchecked.
+func normalizeClientVersion(raw string, set bool) (string, error) {
+	cv := strings.TrimPrefix(raw, "v")
+	if cv == "latest" {
+		return "", nil
+	}
+	if set && !release.ValidTools(cv) {
+		return "", fmt.Errorf("invalid client version %q (X.Y.Z, X.Y.Z.N or latest)", raw)
+	}
+	return cv, nil
 }

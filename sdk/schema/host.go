@@ -64,7 +64,7 @@ type HostRouterNetwork struct {
 	Name          string             `json:"name"`
 	CIDR          string             `json:"cidr,omitempty"`           // at creation (default: a free /16 of 100.64.0.0/10)
 	ACL           *router.ACL        `json:"acl,omitempty"`            // omitted: unchanged (a new network denies all)
-	ClientVersion string             `json:"client_version,omitempty"` // X.Y.Z, or "latest" to unpin
+	ClientVersion string             `json:"client_version,omitempty"` // X.Y.Z or X.Y.Z.N (a tools version), or "latest" to unpin
 	SSO           *router.NetworkSSO `json:"sso,omitempty"`
 }
 

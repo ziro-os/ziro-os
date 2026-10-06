@@ -16,7 +16,11 @@ var (
 )
 
 type VersionInfo struct {
+	// Version is the tools version: X.Y.Z for the build that ships with Ziro OS X.Y.Z, X.Y.Z.N for
+	// the Nth tools-only build since. OSVersion is the Ziro OS installed on this host (from
+	// /etc/ziro-release; omitted where there is none, e.g. a workstation).
 	Version   string `json:"version"`
+	OSVersion string `json:"os_version,omitempty"`
 	BuildDate string `json:"build_date"`
 	GitCommit string `json:"git_commit"`
 	GoVersion string `json:"go_version"`
@@ -26,7 +30,7 @@ type VersionInfo struct {
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Show the Ziro OS and ziroctl versions",
+	Short: "Show the ziroctl and Ziro OS versions",
 	Example: `  ziroctl version
   ziroctl version --json`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -49,6 +53,7 @@ var versionCmd = &cobra.Command{
 
 		info := VersionInfo{
 			Version:   Version,
+			OSVersion: hostOSVersion(),
 			BuildDate: BuildDate,
 			GitCommit: commit,
 			GoVersion: runtime.Version(),
@@ -63,7 +68,11 @@ var versionCmd = &cobra.Command{
 			return
 		}
 
-		fmt.Fprintf(out, "ziroctl version %s (%s/%s)\n", info.Version, info.OS, info.Arch)
+		if info.OSVersion != "" {
+			fmt.Fprintf(out, "ziroctl version %s (os %s, %s/%s)\n", info.Version, info.OSVersion, info.OS, info.Arch)
+		} else {
+			fmt.Fprintf(out, "ziroctl version %s (%s/%s)\n", info.Version, info.OS, info.Arch)
+		}
 		fmt.Fprintf(out, "Git Commit: %s\n", info.GitCommit)
 		fmt.Fprintf(out, "Build Date: %s\n", info.BuildDate)
 		fmt.Fprintf(out, "Go Version: %s\n", info.GoVersion)

@@ -23,38 +23,68 @@ import (
 
 // fakeReleases serves a tools release stream signed with a test key.
 func fakeReleases(t *testing.T, bins map[string][]byte, tamper bool) *release.Source {
+	return fakeStream(t, bins, tamper, []string{"1.0.1", "1.0.9"}, func(v string) string { return v })
+}
+
+// fakeStream serves the given tools tags (plus an OS tag that must be ignored). metaVersion
+// gives the version each release's signed tools.json claims.
+func fakeStream(t *testing.T, bins map[string][]byte, tamper bool, versions []string, metaVersion func(string) string) *release.Source {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	der, _ := x509.MarshalPKIXPublicKey(pub)
-	var sums strings.Builder
+	hashes := map[string]string{}
 	for name, b := range bins {
 		h := sha256.Sum256(b)
-		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+		hashes[name] = hex.EncodeToString(h[:])
 	}
-	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(sums.String())))
 	if tamper {
 		for name := range bins {
 			bins[name] = append(bins[name], '!')
 		}
 	}
+	// per version: tools.json, SHA256SUMS and its signature
+	toolsJSON := func(v string) []byte {
+		return []byte(fmt.Sprintf(`{"version":%q,"min_os":"1.0.16"}`, metaVersion(v)))
+	}
+	sumsFor := func(v string) string {
+		var sums strings.Builder
+		for name, h := range hashes {
+			fmt.Fprintf(&sums, "%s  %s\n", h, name)
+		}
+		mh := sha256.Sum256(toolsJSON(v))
+		fmt.Fprintf(&sums, "%s  tools.json\n", hex.EncodeToString(mh[:]))
+		return sums.String()
+	}
+	var refs []string
+	for _, v := range versions {
+		refs = append(refs, fmt.Sprintf(`{"ref":"refs/tags/tools/v%s"}`, v))
+	}
+	refs = append(refs, `{"ref":"refs/tags/tools/v1.0.21-rc1"}`, `{"ref":"refs/tags/v2.0.0"}`)
 	var srv *httptest.Server
 	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/git/matching-refs/tags/tools/v"):
-			fmt.Fprint(w, `[{"ref":"refs/tags/tools/v1.0.1"},{"ref":"refs/tags/tools/v1.0.9"},{"ref":"refs/tags/v2.0.0"}]`)
+			fmt.Fprintf(w, "[%s]", strings.Join(refs, ","))
 		case strings.Contains(r.URL.Path, "/releases/tags/tools/v"):
 			tag := r.URL.Path[strings.Index(r.URL.Path, "tools/v"):]
+			v := strings.TrimPrefix(tag, "tools/v")
 			fmt.Fprintf(w, `{"tag_name":%q,"assets":[`, tag)
-			fmt.Fprintf(w, `{"name":"SHA256SUMS","browser_download_url":"%s/dl/SHA256SUMS"},{"name":"SHA256SUMS.sig","browser_download_url":"%s/dl/sig"}`, srv.URL, srv.URL)
+			fmt.Fprintf(w, `{"name":"SHA256SUMS","browser_download_url":"%s/dl/%s/SHA256SUMS"},{"name":"SHA256SUMS.sig","browser_download_url":"%s/dl/%s/sig"},{"name":"tools.json","browser_download_url":"%s/dl/%s/tools.json"}`, srv.URL, v, srv.URL, v, srv.URL, v)
 			for name := range bins {
-				fmt.Fprintf(w, `,{"name":%q,"browser_download_url":"%s/dl/%s"}`, name, srv.URL, name)
+				fmt.Fprintf(w, `,{"name":%q,"browser_download_url":"%s/dl/%s/%s"}`, name, srv.URL, v, name)
 			}
 			fmt.Fprint(w, `]}`)
-		case r.URL.Path == "/dl/SHA256SUMS":
-			fmt.Fprint(w, sums.String())
-		case r.URL.Path == "/dl/sig":
-			fmt.Fprint(w, sig)
 		case strings.HasPrefix(r.URL.Path, "/dl/"):
-			w.Write(bins[strings.TrimPrefix(r.URL.Path, "/dl/")])
+			f := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/dl/"), "/", 2)
+			switch f[1] {
+			case "SHA256SUMS":
+				fmt.Fprint(w, sumsFor(f[0]))
+			case "sig":
+				fmt.Fprint(w, base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(sumsFor(f[0])))))
+			case "tools.json":
+				w.Write(toolsJSON(f[0]))
+			default:
+				w.Write(bins[f[1]])
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -130,5 +160,50 @@ func TestUpdateRefusesTamperedBinary(t *testing.T) {
 	u.Source.PublicKey = release.PublicKey
 	if err := u.Install(context.Background(), "1.0.9"); err == nil || !strings.Contains(err.Error(), "signature") {
 		t.Fatalf("foreign signature: %v", err)
+	}
+}
+
+func TestTargetWithBuilderVersions(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "zirocd")
+	os.WriteFile(exe, []byte("old"), 0755)
+	src := fakeStream(t, map[string][]byte{AssetName(): []byte("new")}, false,
+		[]string{"1.0.21", "1.0.21.1", "1.0.21.9", "1.0.21.10", "1.0.9"}, func(v string) string { return v })
+	ctx := context.Background()
+	for _, c := range []struct{ current, pin, want string }{
+		{"1.0.21.3", "", "1.0.21.10"},    // numeric, not lexical: .10 is newer than .9
+		{"1.0.21.10", "", ""},            // already the newest build: stay
+		{"1.0.21", "", "1.0.21.10"},      // the OS-bundled build takes the builder releases
+		{"1.0.22", "", ""},               // a newer OS's tools are not downgraded to a build of the older OS
+		{"1.0.21.3", "1.0.21.3", ""},     // a pin on the running version stays
+		{"1.0.21.3", "1.0.21", "1.0.21"}, // an admin pin may go back
+	} {
+		u := &Updater{Current: c.current, Exe: exe, Dir: dir, Source: src}
+		if got, err := u.Target(ctx, c.pin); err != nil || got != c.want {
+			t.Errorf("Target(current %s, pin %q) = %q, %v; want %q", c.current, c.pin, got, err, c.want)
+		}
+	}
+	// 1.0.21-rc1 and a pin that is not a canonical tools version are never offered.
+	u := &Updater{Current: "1.0.21.3", Exe: exe, Dir: dir, Source: src}
+	if err := u.Install(ctx, "1.0.21.0"); err == nil {
+		t.Fatal("a .0 pin was accepted")
+	}
+	if err := u.Install(ctx, "1.0.21.10"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInstallRefusesRelabelledRelease(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "zirocd")
+	os.WriteFile(exe, []byte("old"), 0755)
+	// every release's signed tools.json claims 1.0.1: a signed old build re-published under a newer tag
+	src := fakeStream(t, map[string][]byte{AssetName(): []byte("new")}, false, []string{"1.0.1", "1.0.21.2"}, func(string) string { return "1.0.1" })
+	u := &Updater{Current: "1.0.1", Exe: exe, Dir: dir, Source: src}
+	if err := u.Install(context.Background(), "1.0.21.2"); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("re-labelled release installed: %v", err)
+	}
+	if b, _ := os.ReadFile(exe); string(b) != "old" {
+		t.Fatal("binary changed")
 	}
 }
