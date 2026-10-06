@@ -11,4 +11,4 @@
 cd tools/ziroctl && go test ./... && CGO_ENABLED=0 go build -o ../../bin/ziroctl .
 ```
 
-Releases ship on their own signed stream (`tools/vX.Y.Z`); hosts update with `ziroctl update`.
+Releases ship on their own signed stream (`tools/vX.Y.Z` and `tools/vX.Y.Z.N`); hosts update with `ziroctl update`.

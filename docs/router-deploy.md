@@ -177,7 +177,7 @@ host:
       client_secret_file: /root/oidc.secret     # read at apply time, stored sealed with the cluster secrets
     networks:
       - name: office
-        client_version: 1.0.30                   # pin the fleet's zirocd version ("latest" unpins)
+        client_version: 1.0.30                   # pin the fleet's zirocd version, X.Y.Z or X.Y.Z.N ("latest" unpins)
         sso: {domains: [example.com], tags: [laptop], key_expiry_hours: 2160}
         acl:
           groups:
