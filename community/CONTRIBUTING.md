@@ -252,7 +252,10 @@ make release-major   # 1.0.0 -> 2.0.0
 ```
 
 The script automatically:
-1. Calculates the next semantic version and UTC build date.
+1. Calculates the next semantic version and UTC build date. An OS release also publishes `tools/vX.Y.Z`, which must
+   be higher than every existing tools version (clients install only the newest tag), so `patch`, `minor` and
+   `major` bump from the newest tools version when it is ahead of `VERSION` (tools-only builds do not bump
+   `VERSION`), and a version at or below it is refused before anything is tagged.
 2. Updates `VERSION`, `rootfs/etc/os-release`, `tools/ziroctl/cmd/version.go`, `tools/ziropkg/cmd/root.go`, and `images/docker/Dockerfile`.
 3. Commits the changes (`chore(release): bump version to vX.Y.Z`).
 4. Creates an annotated Git tag (`vX.Y.Z`) with an automated changelog summary.

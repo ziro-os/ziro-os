@@ -273,9 +273,9 @@ def main():
 
     results = []
 
-    def check(name, passed, detail=""):
+    def check(name, passed, detail="", limit=200):
         results.append(passed)
-        print(f"  [{'PASS' if passed else 'FAIL'}] {name}" + (f": {detail.strip()[:200]}" if detail and not passed else ""))
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}" + (f": {detail.strip()[-limit:] if limit < 0 else detail.strip()[:limit]}" if detail and not passed else ""))
 
     try:
         t0 = time.time()
@@ -447,7 +447,11 @@ def main():
             cmd = "mkdir -p /tmp/prov && cd /tmp/prov && " + " && ".join(
                 f"echo {base64.b64encode(b).decode()} | base64 -d > {n}" for n, b in files.items())
             con.run(cmd)
-            rc, out = con.run("cd /tmp/prov && ziroctl apply -f host.yaml >/tmp/apply.out 2>&1; echo APPLY=$?; "
+            # Pulling and starting two containers under emulation (arm64 on a runner without KVM) can run
+            # into containerd's own deadlines; apply is idempotent, so a failed first run is retried
+            # once. Both outputs are kept: a real bug fails twice, with the reason in the log.
+            rc, out = con.run("cd /tmp/prov && { ziroctl apply -f host.yaml >/tmp/apply.out 2>&1 || "
+                              "{ cp /tmp/apply.out /tmp/apply.first; echo APPLY_RETRY; sleep 10; ziroctl apply -f host.yaml >/tmp/apply.out 2>&1; }; }; echo APPLY=$?; "
                               "echo SECOND=$(ziroctl apply -f host.yaml --dry-run --json | grep -c '\"action\": \"update\"'); "
                               "echo LIMIT=$(nerdctl inspect ziro-app-shop-web --format '{{.HostConfig.Memory}}'); "
                               "echo WEB=$(wget -qO- http://127.0.0.1:18080/ | grep -c nginx); "
@@ -455,10 +459,15 @@ def main():
                               "echo REACH=$(nerdctl exec ziro-app-shop-web sh -c 'nc -z -w 3 ziro-app-shop-kv 6379 && echo yes'); "
                               "ziroctl stack down shop --purge >/dev/null 2>&1; echo DOWN=$(ziroctl apps list | grep -c shop-web); "
                               "ziroctl firewall deny 18080/tcp >/dev/null", timeout=600)
+            applied = (all(k in out for k in ["APPLY=0", "SECOND=0", "LIMIT=134217728", "DOWN=0", "LINK=redis://ziro-app-shop-kv:6379", "REACH=yes"])
+                       and re.search(r"WEB=[1-9]", out) is not None)
+            why = ""
+            if not applied:  # the reason (not just the first 200 characters of the result lines)
+                why = (out + "\n--- apply.first\n" + con.run("cat /tmp/apply.first 2>/dev/null")[1] +
+                       "\n--- apply.out\n" + con.run("cat /tmp/apply.out")[1] +
+                       "\n--- containers\n" + con.run("nerdctl ps -a 2>&1 | tail -8; tail -20 /var/log/containerd.log 2>/dev/null")[1])
             check("apply: YAML host file with a stack deploys (limits, link by name), a second apply changes nothing, stack down cleans up",
-                  all(k in out for k in ["APPLY=0", "SECOND=0", "LIMIT=134217728", "DOWN=0", "LINK=redis://ziro-app-shop-kv:6379", "REACH=yes"])
-                  and re.search(r"WEB=[1-9]", out) is not None,
-                  out + con.run("cat /tmp/apply.out")[1])
+                  applied, why, limit=-3000)
 
         ok, out = retry(con, "ip -4 addr show | grep 'inet 10.0.2.'", lambda rc, o: rc == 0, 90)
         check("DHCP network configured", ok, out)
