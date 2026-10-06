@@ -9,13 +9,15 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     throw 'Run this in an elevated (Administrator) PowerShell.'
 }
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
-$version = $env:ZIROCD_VERSION
+# Tools versions are X.Y.Z (the build shipped with Ziro OS X.Y.Z) or X.Y.Z.N (the Nth tools-only
+# build since); [version] orders both (1.0.21 < 1.0.21.1 < 1.0.21.10 < 1.0.22).
+$version = "$env:ZIROCD_VERSION".TrimStart('v')
 if (-not $version) {
     $refs = Invoke-RestMethod "https://api.github.com/repos/$repo/git/matching-refs/tags/tools/v"
-    $version = ($refs | ForEach-Object { if ($_.ref -match '^refs/tags/tools/v(\d+\.\d+\.\d+)$') { [version]$Matches[1] } } |
+    $version = ($refs | ForEach-Object { if ($_.ref -match '^refs/tags/tools/v(\d+\.\d+\.\d+(\.\d+)?)$') { [version]$Matches[1] } } |
         Sort-Object | Select-Object -Last 1).ToString()
 }
-if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "no zirocd release found" }
+if ($version -notmatch '^(0|[1-9]\d*)(\.(0|[1-9]\d*)){2}(\.[1-9]\d*)?$') { throw "no zirocd release found" }
 $base = "https://github.com/$repo/releases/download/tools/v$version"
 $zip = "zirocd-windows-$arch.zip"
 $tmp = Join-Path $env:TEMP ("zirocd-" + [guid]::NewGuid())

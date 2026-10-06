@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs zirocd (Linux, macOS) from the signed tools release stream and starts its service.
 #   curl -fsSL https://raw.githubusercontent.com/ziro-os/ziro-os/main/scripts/install-zirocd.sh | sh
-#   ZIROCD_VERSION=1.0.21 sh install-zirocd.sh
+#   ZIROCD_VERSION=1.0.21 sh install-zirocd.sh      # or a tools-only build: 1.0.21.3
 # SHA256SUMS must carry the Ziro release signature (checked with openssl when it supports
 # ed25519; the key below is sdk/release/release.pub) and the binary must match it.
 set -eu
@@ -15,13 +15,16 @@ case $(uname -s) in Linux) os=linux ;; Darwin) os=darwin ;; *) echo "unsupported
 case $(uname -m) in x86_64 | amd64) arch=amd64 ;; aarch64 | arm64) arch=arm64 ;; *) echo "unsupported CPU: $(uname -m)" >&2; exit 1 ;; esac
 asset=zirocd-$os-$arch
 
+# Tools versions are X.Y.Z (the build shipped with Ziro OS X.Y.Z) or X.Y.Z.N (the Nth tools-only
+# build since); a missing N sorts as 0, so 1.0.21 < 1.0.21.1 < 1.0.21.10 < 1.0.22.
 version=${ZIROCD_VERSION:-}
+version=${version#v}
 if [ -z "$version" ]; then
 	version=$(curl -fsSL "https://api.github.com/repos/$repo/git/matching-refs/tags/tools/v" |
-		sed -n 's|.*"refs/tags/tools/v\([0-9]*\.[0-9]*\.[0-9]*\)".*|\1|p' |
-		sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+		sed -En 's|.*"refs/tags/tools/v([0-9]+(\.[0-9]+){2,3})".*|\1|p' |
+		sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -1)
 fi
-case $version in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "no zirocd release found" >&2; exit 1 ;; esac
+printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2}(\.[1-9][0-9]*)?$' || { echo "no zirocd release found" >&2; exit 1; }
 base="https://github.com/$repo/releases/download/tools/v$version"
 
 tmp=$(mktemp -d)

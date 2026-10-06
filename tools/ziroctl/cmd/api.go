@@ -410,8 +410,13 @@ func registerCoreRoutes(a *apiRouter) {
 		_, _ = w.Write([]byte(collectMetrics()))
 	})
 	a.get("/api/v1/health", "public", func(w http.ResponseWriter, r *http.Request) {
-		apiReply(w, nil, map[string]any{"status": "healthy", "version": Version, "os": "Ziro OS",
-			"uptime": time.Since(apiStartTime).Round(time.Second).String(), "arch": hostArch()})
+		// version is the tools version (X.Y.Z[.N]); os_version the installed Ziro OS.
+		h := map[string]any{"status": "healthy", "version": Version, "os": "Ziro OS",
+			"uptime": time.Since(apiStartTime).Round(time.Second).String(), "arch": hostArch()}
+		if v := hostOSVersion(); v != "" {
+			h["os_version"] = v
+		}
+		apiReply(w, nil, h)
 	})
 	a.get("/api/v1/system", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		sys := inspectSystem()

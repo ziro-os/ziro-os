@@ -122,11 +122,10 @@ func planRouterNetwork(p *hostPlanner, R *zr.State, n schema.HostRouterNetwork) 
 		}
 		sso = &s
 	}
-	cv, cvSet := strings.TrimPrefix(n.ClientVersion, "v"), n.ClientVersion != ""
-	if cv == "latest" {
-		cv = ""
-	} else if _, ok := parseSemver(cv); cvSet && !ok {
-		return fmt.Errorf("invalid client_version %q (X.Y.Z or latest)", n.ClientVersion)
+	cvSet := n.ClientVersion != ""
+	cv, err := normalizeClientVersion(n.ClientVersion, cvSet)
+	if err != nil {
+		return fmt.Errorf("client_version: %w", err)
 	}
 	set := func(net *zr.Network) {
 		if n.ACL != nil {

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -18,8 +17,8 @@ import (
 	"github.com/ziro-os/ziro-os/sdk/release"
 )
 
-// `ziroctl update`: ziroctl and ziropkg ship on their own release stream (tags tools/vX.Y.Z),
-// independent of OS upgrades. Every release's SHA256SUMS is signed with the Ziro release key
+// `ziroctl update`: ziroctl and ziropkg ship on their own release stream (tags tools/vX.Y.Z and
+// tools/vX.Y.Z.N: the Nth tools-only build of OS version X.Y.Z), independent of OS upgrades. Every release's SHA256SUMS is signed with the Ziro release key
 // (ed25519; the public half is below), and nothing is installed unless the signature and every
 // hash verify. The binaries are replaced atomically, the previous ones kept for --rollback.
 
@@ -28,7 +27,6 @@ import (
 var releasePublicKey = release.PublicKey
 
 var (
-	toolsTagRe    = regexp.MustCompile(`^tools/v([0-9]+\.[0-9]+\.[0-9]+)$`)
 	toolsBinDir   = "/usr/bin"
 	toolsLinkDir  = "/bin"
 	toolsBinaries = []string{"ziroctl", "ziropkg"}
@@ -57,7 +55,7 @@ type UpdateCheck struct {
 }
 
 func (u UpdateCheck) Available() bool {
-	return u.Latest != "" && compareSemver(u.Latest, strings.TrimPrefix(u.Current, "v")) > 0
+	return u.Latest != "" && release.Compare(u.Latest, strings.TrimPrefix(u.Current, "v")) > 0
 }
 
 func readUpdateCheck() UpdateCheck {
@@ -70,7 +68,7 @@ func readUpdateCheck() UpdateCheck {
 	return u
 }
 
-// latestToolsRelease finds the newest tools/vX.Y.Z tag (from the tag refs, so OS releases never
+// latestToolsRelease finds the newest tools/vX.Y.Z[.N] tag (from the tag refs, so OS releases never
 // crowd it out of a page of releases) and fetches its release.
 func latestToolsRelease(ctx context.Context) (*ghRelease, string, error) {
 	var refs []struct {
@@ -82,7 +80,7 @@ func latestToolsRelease(ctx context.Context) (*ghRelease, string, error) {
 	tag, best := "", ""
 	for _, r := range refs {
 		t := strings.TrimPrefix(r.Ref, "refs/tags/")
-		if m := toolsTagRe.FindStringSubmatch(t); m != nil && (best == "" || compareSemver(m[1], best) > 0) {
+		if m := release.ToolsTagRe.FindStringSubmatch(t); m != nil && (best == "" || release.Compare(m[1], best) > 0) {
 			tag, best = t, m[1]
 		}
 	}
@@ -130,16 +128,17 @@ func fetchToolsRelease(rel *ghRelease, dir string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if h := sha256Hex(meta); want["tools.json"] == "" || h != want["tools.json"] {
-		return nil, errors.New("tools.json does not match the signed SHA256SUMS")
+	m := release.ToolsTagRe.FindStringSubmatch(rel.TagName)
+	if m == nil {
+		return nil, fmt.Errorf("%s is not a tools release", rel.TagName)
 	}
-	var tj struct {
-		MinOS string `json:"min_os"`
+	// The signed tools.json must name this very release: a signed older build re-published
+	// under a newer tag (or the reverse) is refused instead of installing as the tag says.
+	tj, err := release.CheckMeta(sums, meta, m[1])
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(meta, &tj); err != nil {
-		return nil, fmt.Errorf("tools.json: %w", err)
-	}
-	if osv := strings.TrimPrefix(readRelease("/etc/ziro-release")["VERSION"], "v"); tj.MinOS != "" && osv != "" && compareSemver(osv, tj.MinOS) < 0 {
+	if osv := hostOSVersion(); tj.MinOS != "" && osv != "" && release.Compare(osv, tj.MinOS) < 0 {
 		return nil, fmt.Errorf("%s needs Ziro OS %s or newer (this host runs %s): run ziroctl upgrade first", rel.TagName, tj.MinOS, osv)
 	}
 	out := map[string]string{}
@@ -166,6 +165,12 @@ func fetchToolsRelease(rel *ghRelease, dir string) (map[string]string, error) {
 	return out, nil
 }
 
+// hostOSVersion is the Ziro OS version of this host ("" when unknown): the tools version
+// (Version) is X.Y.Z.N and says nothing reliable about it.
+func hostOSVersion() string {
+	return strings.TrimPrefix(readRelease("/etc/ziro-release")["VERSION"], "v")
+}
+
 // toolAsset is a tool's file name in a tools release.
 func toolAsset(b string) string {
 	if b == "zirocd" { // the cross-platform client is named <os>-<goarch>
@@ -185,25 +190,80 @@ func installedTools(bins map[string]string) []string {
 	return out
 }
 
-// installTool replaces /usr/bin/<name> atomically (same-filesystem rename), keeping the
-// current binary as <name>.prev; /bin/<name> becomes a symlink to it.
-func installTool(name, src string) error {
-	dst := filepath.Join(toolsBinDir, name)
-	tmp := dst + ".new"
+// stageTool copies src next to the installed binary (same filesystem, so the later rename is
+// atomic) as <name>.new.
+func stageTool(name, src string) (string, error) {
+	tmp := filepath.Join(toolsBinDir, name) + ".new"
 	if err := copyFileSync(src, tmp); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.Chmod(tmp, 0755); err != nil {
-		return err
+		os.Remove(tmp)
+		return "", err
 	}
+	return tmp, nil
+}
+
+// reportedVersion extracts the version a tool's `version` output reports: "ziroctl version X (...)",
+// "ziropkg version X" or zirocd's bare "X".
+func reportedVersion(out string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	f := strings.Fields(line)
+	switch {
+	case len(f) == 1:
+		return strings.TrimPrefix(f[0], "v")
+	case len(f) >= 3 && f[1] == "version":
+		return strings.TrimPrefix(f[2], "v")
+	}
+	return ""
+}
+
+// checkStaged runs a staged binary before it replaces the working one: it must start on this
+// host and report exactly the release's version. A build whose version was not stamped (or a
+// release published under the wrong tag) would otherwise look "available" forever and the
+// daily update would reinstall it in a loop.
+func checkStaged(staged, want string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, staged, "version")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/"}
+	cmd.Dir = "/"
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("the new %s does not run on this host: %w", filepath.Base(strings.TrimSuffix(staged, ".new")), err)
+	}
+	if got := reportedVersion(string(out)); got != want {
+		return fmt.Errorf("the new %s reports version %q, not the release's %s: refusing to install it", filepath.Base(strings.TrimSuffix(staged, ".new")), got, want)
+	}
+	return nil
+}
+
+// commitTool swaps the staged binary in atomically, keeping the current one as <name>.prev;
+// /bin/<name> becomes a symlink to it.
+func commitTool(name, staged string) error {
+	dst := filepath.Join(toolsBinDir, name)
 	_ = os.Remove(dst + ".prev")
 	if err := os.Link(dst, dst+".prev"); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := os.Rename(staged, dst); err != nil {
 		return err
 	}
 	return linkBinCopy(name)
+}
+
+// installTool replaces /usr/bin/<name> atomically (same-filesystem rename), keeping the
+// current binary as <name>.prev.
+func installTool(name, src string) error {
+	tmp, err := stageTool(name, src)
+	if err != nil {
+		return err
+	}
+	if err := commitTool(name, tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // linkBinCopy points /bin/<name> at /usr/bin/<name> (older images shipped two copies).
@@ -313,35 +373,50 @@ func checkForUpdate() UpdateCheck {
 	return u
 }
 
-// runToolsUpdate installs the newest tools release (or tag), returning the version installed.
-func runToolsUpdate(tag string) (string, error) {
+// resolveToolsTarget picks the release to install: the newest (tag "") when it is newer than
+// the running ziroctl, else the given version. A nil release means nothing to do (already up to
+// date, or the requested version is the running one). A requested version older than the
+// running one is refused unless allowDowngrade: only the newest release is ever installed
+// unprompted, so a typo or a stale script cannot walk a host backwards.
+func resolveToolsTarget(ctx context.Context, tag string, allowDowngrade bool) (*ghRelease, string, error) {
+	running := strings.TrimPrefix(Version, "v")
+	if tag == "" {
+		rel, ver, err := latestToolsRelease(ctx)
+		if err != nil || release.Compare(ver, running) <= 0 {
+			return nil, "", err
+		}
+		return rel, ver, nil
+	}
+	ver := strings.TrimPrefix(strings.TrimPrefix(tag, "tools/"), "v")
+	if !release.ValidTools(ver) {
+		return nil, "", fmt.Errorf("invalid version %q (want vX.Y.Z or vX.Y.Z.N)", tag)
+	}
+	switch c := release.Compare(ver, running); {
+	case c == 0:
+		return nil, "", nil
+	case c < 0 && !allowDowngrade:
+		return nil, "", fmt.Errorf("refusing to downgrade ziroctl %s to %s: pass --allow-downgrade to do it (or use --rollback to restore the previous binaries)", running, ver)
+	}
+	tag = "tools/v" + ver
+	rel, err := getRelease(ctx, githubAPI+"/repos/"+upgradeRepo+"/releases/tags/"+tag)
+	if err != nil {
+		return nil, "", err
+	}
+	if rel.TagName != tag || rel.Prerelease {
+		return nil, "", fmt.Errorf("%s is not a published tools release", tag)
+	}
+	return rel, ver, nil
+}
+
+// runToolsUpdate installs the newest tools release (or tag), returning the version installed
+// ("" = nothing to do).
+func runToolsUpdate(tag string, allowDowngrade bool) (string, error) {
 	if os.Geteuid() != 0 {
 		return "", errors.New("ziroctl update must run as root")
 	}
-	var rel *ghRelease
-	var ver string
-	var err error
-	if tag == "" {
-		rel, ver, err = latestToolsRelease(context.Background())
-	} else {
-		if !strings.HasPrefix(tag, "tools/") {
-			tag = "tools/" + tag
-		}
-		if m := toolsTagRe.FindStringSubmatch(tag); m == nil {
-			return "", fmt.Errorf("invalid version %q (want vX.Y.Z)", tag)
-		} else {
-			ver = m[1]
-			rel, err = getRelease(context.Background(), githubAPI+"/repos/"+upgradeRepo+"/releases/tags/"+tag)
-			if err == nil && rel.TagName != tag {
-				err = fmt.Errorf("release has tag %q, want %q", rel.TagName, tag)
-			}
-		}
-	}
-	if err != nil {
+	rel, ver, err := resolveToolsTarget(context.Background(), tag, allowDowngrade)
+	if err != nil || rel == nil {
 		return "", err
-	}
-	if tag == "" && compareSemver(ver, strings.TrimPrefix(Version, "v")) <= 0 {
-		return "", nil // up to date
 	}
 	dir, err := os.MkdirTemp("/var/lib/ziro", ".update-")
 	if err != nil {
@@ -352,11 +427,30 @@ func runToolsUpdate(tag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Stage and run every binary first, then swap: a bad build never replaces a working
+	// one, and a failure on the second tool leaves no mix of old and new.
 	names := installedTools(bins)
+	staged := map[string]string{}
+	defer func() {
+		for _, p := range staged {
+			os.Remove(p)
+		}
+	}()
 	for _, n := range names {
-		if err := installTool(n, bins[n]); err != nil {
+		p, err := stageTool(n, bins[n])
+		if err != nil {
+			return "", fmt.Errorf("stage %s: %w", n, err)
+		}
+		staged[n] = p
+		if err := checkStaged(p, ver); err != nil {
+			return "", err
+		}
+	}
+	for _, n := range names {
+		if err := commitTool(n, staged[n]); err != nil {
 			return "", fmt.Errorf("install %s: %w", n, err)
 		}
+		delete(staged, n)
 	}
 	if err := trustToolHashes(names); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: integrity baselines: %v\n", err)
@@ -400,6 +494,7 @@ type updateConf struct {
 var (
 	updateCheckOnly bool
 	updateVersion   string
+	updateDowngrade bool
 	updateRollback  bool
 	updateCron      bool
 )
@@ -409,10 +504,13 @@ var updateCmd = &cobra.Command{
 	Short: "Update ziroctl and ziropkg",
 	Example: `  ziroctl update --check
   ziroctl update
-  ziroctl update --version v1.0.17
+  ziroctl update --version v1.0.21.3
+  ziroctl update --version v1.0.17 --allow-downgrade
   ziroctl update --rollback`,
-	Long: `Installs the newest ziroctl and ziropkg from the tools release stream (tags tools/vX.Y.Z),
-independently of OS upgrades (ziroctl upgrade). The release's SHA256SUMS must carry a valid Ziro
+	Long: `Installs the newest ziroctl and ziropkg from the tools release stream (tags tools/vX.Y.Z and
+tools/vX.Y.Z.N), independently of OS upgrades (ziroctl upgrade). A tools version is the Ziro OS
+version it was built for plus a build number: 1.0.21.3 is the third tools-only build for Ziro OS
+1.0.21, and the build that ships inside an OS image is just 1.0.21. The release's SHA256SUMS must carry a valid Ziro
 release signature and every binary must match it. The binaries are swapped atomically, the
 previous ones kept (--rollback), and running ziroctl daemons are restarted onto the new version.
 
@@ -454,7 +552,7 @@ A daily check runs from cron; the login summary shows when an update is availabl
 				}
 			})
 		}
-		ver, err := runToolsUpdate(updateVersion)
+		ver, err := runToolsUpdate(updateVersion, updateDowngrade)
 		if err != nil {
 			return err
 		}
@@ -471,10 +569,13 @@ A daily check runs from cron; the login summary shows when an update is availabl
 func init() {
 	f := updateCmd.Flags()
 	f.BoolVar(&updateCheckOnly, "check", false, "Only check whether an update is available")
-	f.StringVar(&updateVersion, "version", "", "Install this tools version (vX.Y.Z) instead of the newest")
+	f.StringVar(&updateVersion, "version", "", "Install this tools version (vX.Y.Z or vX.Y.Z.N) instead of the newest")
+	f.BoolVar(&updateDowngrade, "allow-downgrade", false, "With --version: allow installing a version older than the running one")
 	f.BoolVar(&updateRollback, "rollback", false, "Restore the binaries replaced by the last update")
 	f.BoolVar(&updateCron, "cron", false, "Daily check (cron); installs only when auto-update is enabled")
 	_ = f.MarkHidden("cron")
 	updateCmd.MarkFlagsMutuallyExclusive("check", "rollback", "version", "cron")
+	updateCmd.MarkFlagsMutuallyExclusive("allow-downgrade", "check", "rollback", "cron")
+	updateCmd.MarkFlagsRequiredTogether("allow-downgrade", "version")
 	rootCmd.AddCommand(updateCmd)
 }

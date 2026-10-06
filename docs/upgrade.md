@@ -89,9 +89,16 @@ unless you pass `--upgrade` to keep the data, or `--erase` (`ziro.erase`) to rei
 
 ## Tools-only versions
 
-Some versions change only `ziroctl` and `ziropkg`. They are published as `tools/vX.Y.Z` only, with no new OS
-image or kernel. `ziroctl upgrade` keeps reporting the last OS release; `ziroctl update` installs the new tools.
+The tools (`ziroctl`, `ziropkg`, `zirocd`) have their own version, `x.y.z.N`: `x.y.z` is the Ziro OS version the
+build belongs to and `N` counts the tools-only builds of that same OS version. The build that ships inside an OS
+image is plain `x.y.z` (N = 0), so `1.0.21 < 1.0.21.1 < 1.0.21.10 < 1.0.22`.
 
+A fix to the tools therefore never needs a new OS version: it is published as `tools/v1.0.21.3`, with no new OS image
+or kernel. `ziroctl upgrade` keeps reporting the last OS release (`x.y.z`); `ziroctl update` installs the new tools
+(`x.y.z.N`). `ziroctl version` shows both, and `ziroctl upgrade` keeps tools that are newer than the image's.
+
+`ziroctl update` only moves forward: `--version` with an older version is refused unless you add
+`--allow-downgrade`, and a binary that does not report the release's version when run is never installed.
 ## Rollback
 
 ```sh
