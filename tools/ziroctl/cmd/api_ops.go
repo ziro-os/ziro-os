@@ -287,6 +287,37 @@ func registerClusterRoutes(a *apiRouter) {
 		}
 		apiReply(w, clusterNodeAction(r.PathValue("id"), action), done(action+" done"))
 	})
+	a.get("/api/v1/cluster/heal", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		v, err := clusterHealStatus()
+		apiReply(w, err, v)
+	})
+	a.post("/api/v1/cluster/heal", "admin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Enabled     *bool   `json:"enabled"`
+			RemoveAfter *string `json:"remove_after"` // duration, "0" turns auto-removal off
+		}
+		if !decodeBody(w, r, &req) {
+			return
+		}
+		if req.Enabled == nil {
+			apiReply(w, fmt.Errorf("enabled is required"), nil)
+			return
+		}
+		var after *time.Duration
+		if req.RemoveAfter != nil {
+			d, err := time.ParseDuration(*req.RemoveAfter)
+			if err != nil {
+				apiReply(w, fmt.Errorf("remove_after: %v", err), nil)
+				return
+			}
+			after = &d
+		}
+		err := clusterHealSet(*req.Enabled, after)
+		if err == nil {
+			clusterAudit("api", "cluster heal set", fmt.Sprintf("enabled=%v", *req.Enabled), nil)
+		}
+		apiReply(w, err, done("heal settings saved"))
+	})
 	a.delete("/api/v1/cluster/nodes/{id}", "admin", func(w http.ResponseWriter, r *http.Request) {
 		apiReply(w, clusterNodeAction(r.PathValue("id"), "remove"), done("node removed; its token is revoked"))
 	})

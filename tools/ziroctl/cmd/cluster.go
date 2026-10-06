@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,6 +66,9 @@ type ClusterNode struct {
 	Role        string            `json:"role"`
 	Status      string            `json:"status"` // Ready, NotReady
 	Cordoned    bool              `json:"cordoned,omitempty"`
+	AutoCordon  bool              `json:"auto_cordoned,omitempty"` // Cordoned by the heal pass (lifted when conditions clear); never set on an admin's cordon
+	Conditions  []string          `json:"conditions,omitempty"`    // soft: node problems the agent reports (ContainerdDown, DiskPressure, MeshError)
+	CondSince   time.Time         `json:"cond_since,omitempty"`    // soft: when Conditions became non-empty
 	CPUs        int               `json:"cpus"`
 	MemTotal    uint64            `json:"mem_total_mb"`
 	Containers  int               `json:"containers"`
@@ -151,6 +155,7 @@ type ClusterState struct {
 	// PurgeData: apps whose node-local data every node deletes (app -> when requested). Entries
 	// expire after purgeDataTTL; deploying an app of that name again cancels its entry.
 	PurgeData     map[string]string `json:"purge_data,omitempty"`
+	Heal          HealConfig        `json:"heal,omitempty"` // auto-healing settings and recent actions (see cluster_heal.go)
 	GatewayACME   GatewayACME       `json:"gateway_acme,omitempty"`
 	GatewayDomain GatewayDomain     `json:"gateway_domain,omitempty"`
 	Peers         []RemotePeer      `json:"peers,omitempty"`    // WireGuard remote-access clients
@@ -995,8 +1000,14 @@ var clusterNodesCmd = &cobra.Command{
 				status := n.Status
 				if n.Cordoned {
 					status += ",Cordoned"
+					if n.AutoCordon {
+						status += "(auto)"
+					}
 				}
-				if n.MeshError != "" {
+				for _, c := range n.Conditions {
+					status += "," + c
+				}
+				if n.MeshError != "" && !slices.Contains(n.Conditions, CondMeshError) {
 					status += ",MeshError"
 				}
 				if n.Gateway {

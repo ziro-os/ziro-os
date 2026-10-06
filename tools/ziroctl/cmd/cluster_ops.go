@@ -81,11 +81,11 @@ func clusterNodeAction(id, action string) error {
 	return nodeOp(id, func(st *ClusterState, n *ClusterNode) error {
 		switch action {
 		case "cordon":
-			n.Cordoned = true
+			n.Cordoned, n.AutoCordon = true, false // now the admin's: the heal pass never lifts it
 		case "uncordon":
-			n.Cordoned = false
+			n.Cordoned, n.AutoCordon = false, false
 		case "drain":
-			n.Cordoned = true
+			n.Cordoned, n.AutoCordon = true, false
 			for i := range st.Replicas {
 				if st.Replicas[i].Node == n.ID {
 					st.Replicas[i].Node = ""
