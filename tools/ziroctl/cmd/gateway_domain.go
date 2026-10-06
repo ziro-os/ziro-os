@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/ziro-os/ziro-os/sdk/schema"
 )
 
 // The gateway's base domain: every deployed app that has no host of its own is published at
@@ -128,7 +129,12 @@ func describeDomain(s routeStore, d GatewayDomain) domainInfo {
 }
 
 // setGatewayDomain stores the domain (name "" removes it) and updates the built-in DNS.
-func setGatewayDomain(name string) (domainInfo, error) {
+func setGatewayDomain(name string) (domainInfo, error) { return setGatewayDomainOpts(name, false) }
+
+// setGatewayDomainOpts is setGatewayDomain with the choice of serving the apps with one wildcard
+// certificate (*.name) issued through ACME DNS-01. That needs a DNS provider and a public name. The
+// certificate belongs to the domain: changing or removing the domain drops it.
+func setGatewayDomainOpts(name string, wildcard bool) (domainInfo, error) {
 	s, err := gatewayStore()
 	if err != nil {
 		return domainInfo{}, err
@@ -137,15 +143,39 @@ func setGatewayDomain(name string) (domainInfo, error) {
 	if name != "" && (strings.HasPrefix(name, "*") || !validHost(name) || len(name) > 200) {
 		return domainInfo{}, fmt.Errorf("invalid domain %q (a name like apps.example.com)", name)
 	}
+	if wildcard && (name == "" || schema.PrivateDomain(name)) {
+		return domainInfo{}, errors.New("a wildcard certificate needs a public base domain (a private name uses the gateway's own CA)")
+	}
 	var old GatewayDomain
+	var dropped []string
 	if err := s.update(func(d *gatewayData) error {
-		old, d.Domain = d.Domain, GatewayDomain{Name: name}
+		old, d.Domain = d.Domain, GatewayDomain{Name: name, WildcardCert: wildcard}
+		kept := d.DNSCloud.Certs[:0]
+		for _, c := range d.DNSCloud.Certs { // the previous domain's certificate goes
+			if c.Source == dnsCertSourceDom {
+				dropped = append(dropped, c.Name)
+				continue
+			}
+			kept = append(kept, c)
+		}
+		d.DNSCloud.Certs = kept
+		if wildcard {
+			if _, err := addDNSCertTo(d, []string{wildcardName(name)}, "", "", dnsCertSourceDom); err != nil {
+				return err
+			}
+		}
 		bumpDNS(d)
 		return nil
 	}); err != nil {
 		return domainInfo{}, err
 	}
-	info := describeDomain(s, GatewayDomain{Name: name})
+	for _, n := range dropped {
+		if !wildcard || n != dnsCertName([]string{wildcardName(name)}) { // an unchanged certificate is kept
+			_ = s.rmCert(n)
+			dnsCertForget(n)
+		}
+	}
+	info := describeDomain(s, GatewayDomain{Name: name, WildcardCert: wildcard})
 	var derr error
 	if old.Name != "" && old.Name != name { // the old wildcard is no longer ours
 		_, derr = syncWildcardDNS(s, old.Name, nil)
@@ -224,17 +254,28 @@ func printDomain(info domainInfo) error {
 		if info.TLS == "internal" {
 			fmt.Println("Private name: clients trust the gateway CA from: ziroctl gateway ca")
 		}
+		if info.TLS == "dns01" {
+			fmt.Println("Apps are served with the wildcard certificate *." + info.Domain + " (ACME DNS-01); its status: ziroctl dns cert ls")
+		}
 		fmt.Println("Apps already deployed pick the domain up on their next release: ziroctl deploy redeploy <app>")
 	})
 }
 
+var gwDomainWildcard bool
+
 var gatewayDomainSetCmd = &cobra.Command{
-	Use:     "set <domain>",
-	Short:   "Set the base domain for deployed apps",
-	Example: `  ziroctl gateway domain set apps.example.com`,
-	Args:    cobra.ExactArgs(1),
+	Use:   "set <domain>",
+	Short: "Set the base domain for deployed apps",
+	Long: `Publish deployed apps at <app>.<domain>. With --wildcard-cert they are all served with one
+wildcard certificate (*.<domain>) that the gateway gets through ACME DNS-01 and renews 30 days
+before it expires, instead of one HTTP-01 certificate per app. That needs a DNS provider
+(ziroctl dns provider add) and the dns-cloudflare module, which does the issuing, and a public
+name. Until the certificate is issued the apps are not served.`,
+	Example: `  ziroctl gateway domain set apps.example.com
+  ziroctl gateway domain set apps.example.com --wildcard-cert`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		info, err := setGatewayDomain(args[0])
+		info, err := setGatewayDomainOpts(args[0], gwDomainWildcard)
 		if err != nil {
 			return err
 		}
@@ -257,6 +298,7 @@ var gatewayDomainRmCmd = &cobra.Command{
 }
 
 func init() {
+	gatewayDomainSetCmd.Flags().BoolVar(&gwDomainWildcard, "wildcard-cert", false, "Serve the apps with one wildcard certificate issued through ACME DNS-01")
 	gatewayDomainCmd.AddCommand(gatewayDomainSetCmd, gatewayDomainRmCmd)
 	gatewayCmd.AddCommand(gatewayDomainCmd)
 }
@@ -278,7 +320,8 @@ func registerGatewayDomainRoutes(a *apiRouter) {
 	})
 	a.put("/api/v1/gateway/domain", "admin", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Name string `json:"name"`
+			Name         string `json:"name"`
+			WildcardCert bool   `json:"wildcard_cert"`
 		}
 		if err := decodeStrict(w, r, &req, 4<<10); err != nil {
 			apiReply(w, err, nil)
@@ -288,7 +331,7 @@ func registerGatewayDomainRoutes(a *apiRouter) {
 			apiReply(w, errors.New("name: the base domain, e.g. apps.example.com (DELETE removes it)"), nil)
 			return
 		}
-		info, err := setGatewayDomain(req.Name)
+		info, err := setGatewayDomainOpts(req.Name, req.WildcardCert)
 		apiReply(w, err, info)
 	})
 	a.delete("/api/v1/gateway/domain", "admin", func(w http.ResponseWriter, r *http.Request) {

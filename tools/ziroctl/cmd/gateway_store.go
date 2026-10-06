@@ -47,6 +47,7 @@ type routeStore interface {
 	update(fn func(d *gatewayData) error) error
 	config() (*GatewayConfig, error) // resolved, as a gateway serves it
 	putCert(name string, c GatewayCert) error
+	getCert(name string) (GatewayCert, error)
 	rmCert(name string) error
 	certNames() ([]string, error)
 	internalCA() (string, error) // PEM of the CA for "internal" routes
@@ -119,6 +120,18 @@ func (clusterRouteStore) putCert(name string, c GatewayCert) error {
 		st.Secrets[gatewayCertSecret(name)] = map[string]string{"cert": c.Cert, "key": c.Key}
 		return nil
 	})
+}
+
+func (clusterRouteStore) getCert(name string) (GatewayCert, error) {
+	st, err := readState()
+	if err != nil {
+		return GatewayCert{}, err
+	}
+	c := st.Secrets[gatewayCertSecret(name)]
+	if c == nil {
+		return GatewayCert{}, fmt.Errorf("no certificate %q", name)
+	}
+	return GatewayCert{Cert: c["cert"], Key: c["key"]}, nil
 }
 
 func (clusterRouteStore) rmCert(name string) error {
@@ -249,6 +262,10 @@ func (s localRouteStore) config() (*GatewayConfig, error) {
 	cfg := &GatewayConfig{ACME: d.ACME, Routes: []GatewayRouteState{}}
 	for _, r := range d.Routes {
 		r.Normalize()
+		var serve bool
+		if r, serve = resolveDNSCertRoute(d.DNSCloud, r, func(n string) bool { _, err := s.readCert(n); return err == nil }); !serve {
+			continue // a DNS-01 route waits for its certificate
+		}
 		cfg.Routes = append(cfg.Routes, resolveTargets(r, localAppTargets))
 		if name, ok := strings.CutPrefix(r.TLS, "cert:"); ok {
 			if c, err := s.readCert(name); err == nil {
@@ -295,6 +312,8 @@ func (s localRouteStore) putCert(name string, c GatewayCert) error {
 	}
 	return writeFileAtomic(filepath.Join(s.certDir(), name+".crt"), []byte(c.Cert), 0644)
 }
+
+func (s localRouteStore) getCert(name string) (GatewayCert, error) { return s.readCert(name) }
 
 func (s localRouteStore) rmCert(name string) error {
 	d, err := s.read()
@@ -369,6 +388,9 @@ func putRoute(s routeStore, r GatewayRoute) (GatewayRoute, error) {
 			if !found {
 				return fmt.Errorf("certificate %s is not uploaded (ziroctl gateway cert add ...)", strings.TrimPrefix(r.TLS, "cert:"))
 			}
+		}
+		if err := requireDNSCertFor(d, r); err != nil {
+			return err
 		}
 		d.Routes = append(kept, r)
 		sortRoutes(d.Routes)
@@ -661,7 +683,8 @@ gateway nodes; on a standalone host, by this host.
   ziroctl gateway status          # upstream health, requests per route (this host's gateway)
 
 Hosts need DNS pointing at the gateway and tcp/80 reachable for ACME certificates; use
---tls internal (the gateway's own CA: ziroctl gateway ca) or --tls cert:<name> otherwise.`,
+--tls internal (the gateway's own CA: ziroctl gateway ca), --tls cert:<name> or --tls dns01 (a certificate
+issued through the DNS provider, wildcards included: ziroctl dns cert) otherwise.`,
 }
 
 type routeFlags struct {
@@ -1114,7 +1137,7 @@ func init() {
 	f.StringVar(&gwF.r.Redirect, "redirect", "", "Redirect instead of proxying; {uri} is the request URI")
 	f.IntVar(&gwF.r.RedirectCode, "redirect-code", 0, "301, 302, 307 or 308 (default)")
 	f.StringVar(&gwF.respond, "respond", "", "Answer with a fixed response: status[:body]")
-	f.StringVar(&gwF.r.TLS, "tls", "auto", "auto (ACME), off, internal (gateway CA) or cert:<name>")
+	f.StringVar(&gwF.r.TLS, "tls", "auto", "auto (ACME HTTP-01), dns01 (ACME DNS-01, wildcards), off, internal (gateway CA) or cert:<name>")
 	f.StringSliceVar(&gwF.r.AllowCIDRs, "allow-cidr", nil, "Only clients from these CIDRs (repeatable)")
 	f.IntVar(&gwF.r.RateRPS, "rate", 0, "Requests (or connections) per second per client IP (0 = unlimited)")
 	f.IntVar(&gwF.r.MaxBodyMB, "max-body-mb", 0, "Request body limit in MB (default 10)")
@@ -1126,7 +1149,7 @@ func init() {
 	ef := gatewayExposeCmd.Flags()
 	ef.StringVar(&exposeHost, "host", "", "Hostname to publish on")
 	ef.StringVar(&exposePath, "path", "/", "Path prefix")
-	ef.StringVar(&exposeTLS, "tls", "auto", "auto (ACME), off, internal or cert:<name>")
+	ef.StringVar(&exposeTLS, "tls", "auto", "auto (ACME HTTP-01), dns01 (ACME DNS-01), off, internal or cert:<name>")
 	ef.StringVar(&exposeName, "name", "", "Route name (default: the app name)")
 
 	gatewayCertAddCmd.Flags().StringVar(&certFile, "cert", "", "PEM certificate chain")

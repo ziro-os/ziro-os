@@ -123,7 +123,8 @@ func dnsEnv(t *testing.T, fake DNSProvider, addr string) localRouteStore {
 	root := t.TempDir()
 	oldFactory, oldHost := dnsProviderFactory, hostAddrs
 	oldLocal, oldDir, oldStatus, oldAudit, oldCluster := gatewayLocalDir, dnsProviderDir, dnsStatusDir, auditPath, clusterDir
-	oldAlertCfg, oldSpool, oldDNSConf := alertConfigPath, alertSpoolDir, dnsConfigPath
+	oldAlertCfg, oldSpool, oldDNSConf, oldCerts := alertConfigPath, alertSpoolDir, dnsConfigPath, gatewayCertDir
+	gatewayCertDir = filepath.Join(root, "certs")   // uploaded and DNS-01 certificates of a standalone host
 	dnsConfigPath = filepath.Join(root, "dns.json") // setting a base domain also writes the built-in DNS records
 	gatewayLocalDir, dnsProviderDir, dnsStatusDir = filepath.Join(root, "gw"), filepath.Join(root, "tokens"), filepath.Join(root, "status")
 	auditPath, clusterDir = filepath.Join(root, "audit.log"), filepath.Join(root, "cluster")
@@ -133,7 +134,7 @@ func dnsEnv(t *testing.T, fake DNSProvider, addr string) localRouteStore {
 	t.Cleanup(func() {
 		dnsProviderFactory, hostAddrs = oldFactory, oldHost
 		gatewayLocalDir, dnsProviderDir, dnsStatusDir, auditPath, clusterDir = oldLocal, oldDir, oldStatus, oldAudit, oldCluster
-		alertConfigPath, alertSpoolDir, dnsConfigPath = oldAlertCfg, oldSpool, oldDNSConf
+		alertConfigPath, alertSpoolDir, dnsConfigPath, gatewayCertDir = oldAlertCfg, oldSpool, oldDNSConf, oldCerts
 	})
 	return localRouteStore{dir: gatewayLocalDir}
 }

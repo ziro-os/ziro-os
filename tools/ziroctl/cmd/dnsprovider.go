@@ -78,6 +78,8 @@ type DNSCloud struct {
 	// Addresses are published for the gateway's names instead of the gateway nodes' own
 	// addresses (a NAT, a load balancer).
 	Addresses []string `json:"addresses,omitempty"`
+	// Certs are certificates kept issued through ACME DNS-01 (dnscert.go).
+	Certs []DNSCert `json:"certs,omitempty"`
 	// Epoch is bumped by every route or domain change; the sync loop reconciles when it moves.
 	Epoch int `json:"epoch,omitempty"`
 }

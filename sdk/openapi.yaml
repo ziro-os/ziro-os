@@ -494,7 +494,7 @@ paths:
     put:
       x-ziro-role: admin
       tags: [gateway]
-      summary: Publish deployed apps at <app>.<domain> ({"name":"apps.example.com"}); adds a wildcard record to the built-in DNS
+      summary: 'Publish deployed apps at <app>.<domain> ({"name":"apps.example.com", "wildcard_cert": true}); adds a wildcard record to the built-in DNS; wildcard_cert serves the apps with one *.<domain> certificate issued through ACME DNS-01 (needs a DNS provider)'
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
@@ -561,6 +561,36 @@ paths:
         - { name: type, in: query, required: false, schema: { type: string } }
       responses:
         "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns/cloud/certs:
+    get:
+      x-ziro-role: viewer
+      tags: [dns]
+      summary: Certificates kept issued through ACME DNS-01, with expiry and the last failure
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: 'Keep a certificate issued through ACME DNS-01, {"domains": ["*.example.com", "example.com"], "name": "dns01-…", "provider": "cf"} (name and provider optional; public names only)'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    delete:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: Stop keeping a certificate and delete the stored one (refused while a route needs it)
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns/cloud/certs/renew:
+    post:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: 'Issue the certificates that are missing or due now, {"name": "dns01-…", "force": true} (both optional); on the cluster leader only'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/dns/cloud/addresses:
     put:
       x-ziro-role: admin

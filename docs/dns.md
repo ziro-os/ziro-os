@@ -181,6 +181,48 @@ ziroctl dns cloud rm www.example.com CNAME
 
 Removing a provider (`dns provider rm`) deletes its token, and leaves the records it created in place.
 
+## Wildcard certificates (ACME DNS-01)
+
+HTTP-01, the gateway's default, needs tcp/80 reachable and cannot issue wildcards. ACME **DNS-01** proves control of a
+name with a TXT record at the DNS provider above, so it can issue `*.apps.example.com` and needs no inbound port for
+validation. The gateway gets the certificate, serves it to routes with `--tls dns01`, and renews it 30 days before it
+expires. `tls auto` (HTTP-01) stays the default; DNS-01 is opt-in.
+
+```sh
+ziroctl dns provider add cloudflare --token-file cf.token
+ziroctl gateway acme --email ops@example.com --directory https://acme-staging-v02.api.letsencrypt.org/directory   # try on staging first
+ziroctl gateway domain set apps.example.com --wildcard-cert     # every deployed app is served *.apps.example.com
+ziroctl dns cert add '*.example.com' example.com                # or any certificate you name
+ziroctl gateway route add web --host '*.example.com' --app web --tls dns01
+ziroctl dns cert ls                                             # names, expiry, the last failure
+ziroctl dns cert renew --force                                  # issue now (on the leader)
+```
+
+**How an issuance goes.** The service orders the certificate from the ACME directory (Let's Encrypt, or the one set with
+`gateway acme --directory`), publishes the challenge as a TXT record at `_acme-challenge.<name>` through the provider,
+waits until the provider lists it (it asks the provider, not public resolvers, which cache) and a short pause for its
+name servers, then tells the CA to validate. It finalises with a fresh ECDSA key and stores the chain. The TXT records
+are removed afterwards, **whatever happened**, and any a crashed run left are swept at the start of the next one.
+Challenge records carry the comment `ziro-acme:<cluster id>`, which is never the sync's `ziro:<cluster id>`: the
+record sync can't delete one mid-issuance, and an issuance only deletes records with that exact comment.
+
+**Where it is stored.** In a cluster the certificate and key are a cluster secret (sealed at rest, sent only to gateway
+nodes), issued once by the leader and shared with every gateway node, so there is one certificate per name rather than
+one per node. On a standalone host it is in the gateway's certificate directory, `0600`. The ACME account key is kept
+the same way, one per directory, so staging and production accounts stay apart and a new leader keeps the account.
+
+**Renewal.** The `dns-cloudflare` service checks every 10 seconds and issues a certificate that is missing, names that
+changed, or is within 30 days of expiry. A failure is retried after 5 minutes, then 15, 1 hour, 3 and 6 hours, raises a
+`cert` alert (critical when the certificate in use expires within 7 days or there is none), and the working certificate
+stays in place until a new one has been issued and checked (it must match its key, name every requested name and be
+unexpired). `ziroctl doctor` shows a `DNS-01 certificates` row and `--fix` issues what is due.
+
+**Rules.** Only public names (no `.local`, `.internal`, `.lan`, no dot) can have one; up to 10 names per certificate and
+20 certificates. A `dns01` route needs a certificate that covers all its hosts (a wildcard covers one label), and is
+served only once the certificate is issued. A certificate a route depends on can't be removed, nor the one a base domain
+created with `--wildcard-cert` (it goes with the domain). One issuance runs at a
+time on a host.
+
 ## API
 
 | Route | Role |
@@ -190,5 +232,7 @@ Removing a provider (`dns provider rm`) deletes its token, and leaves the record
 | `GET /api/v1/dns/cloud/plan`, `POST /api/v1/dns/cloud/sync` (`{"force": true}`) | admin |
 | `PUT /api/v1/dns/cloud/providers/{name}` (`{"kind","token","zones"}`), `DELETE …/providers/{name}` | admin |
 | `POST /api/v1/dns/cloud/records`, `DELETE /api/v1/dns/cloud/records?name=&type=`, `PUT /api/v1/dns/cloud/addresses` | admin |
+| `GET /api/v1/dns/cloud/certs` (DNS-01 certificates, expiry, last failure) | viewer |
+| `POST /api/v1/dns/cloud/certs` (`{"domains","name","provider"}`), `DELETE …/certs?name=`, `POST …/certs/renew` (`{"name","force"}`) | admin |
 | `POST /api/v1/dns/records`, `DELETE /api/v1/dns/records?name=&type=`, `PUT /api/v1/dns/block` | operator |
 | `PUT /api/v1/dns/upstreams`, `PUT /api/v1/dns/forwards` (they control where every lookup goes) | admin |

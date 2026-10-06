@@ -43,7 +43,8 @@ type GatewayRoute struct {
 	Timeout         string       `json:"timeout,omitempty"` // upstream response header timeout (default 60s)
 	Compress        bool         `json:"compress,omitempty"`
 
-	// TLS: "auto" (ACME, default), "off", "internal" (the gateway's own CA) or "cert:<name>".
+	// TLS: "auto" (ACME HTTP-01, default), "dns01" (a certificate issued through ACME DNS-01, which
+	// can be a wildcard; needs a DNS provider), "off", "internal" (the gateway's own CA) or "cert:<name>".
 	TLS        string            `json:"tls,omitempty"`
 	AllowCIDRs []string          `json:"allow_cidrs,omitempty"`
 	RateRPS    int               `json:"rate_rps,omitempty"`    // per client IP (requests, or connections for tcp/tls); 0 = unlimited
@@ -85,6 +86,9 @@ type GatewayACME struct {
 // published at <app>.<Name> through the gateway.
 type GatewayDomain struct {
 	Name string `json:"name,omitempty"`
+	// WildcardCert serves the apps with one wildcard certificate (*.Name) issued through ACME
+	// DNS-01 instead of one HTTP-01 certificate per host. Public names only.
+	WildcardCert bool `json:"wildcard_cert,omitempty"`
 }
 
 // Host is the hostname app is published at ("" when no domain is set).
@@ -112,11 +116,14 @@ func PrivateDomain(name string) bool {
 	return false
 }
 
-// TLS is the route TLS mode for apps under the domain: ACME for public names, the gateway's own
-// CA for private ones.
+// TLS is the route TLS mode for apps under the domain: the gateway's own CA for private names;
+// for public ones the wildcard certificate when asked for (ACME DNS-01), else ACME HTTP-01.
 func (d GatewayDomain) TLS() string {
-	if PrivateDomain(d.Name) {
+	switch {
+	case PrivateDomain(d.Name):
 		return "internal"
+	case d.WildcardCert:
+		return "dns01"
 	}
 	return "auto"
 }
@@ -335,15 +342,15 @@ func (r *GatewayRoute) Validate() error {
 	}
 	switch {
 	case r.Kind != "http":
-	case r.TLS == "auto", r.TLS == "off", r.TLS == "internal":
+	case r.TLS == "auto", r.TLS == "dns01", r.TLS == "off", r.TLS == "internal":
 	case strings.HasPrefix(r.TLS, "cert:") && ValidName(strings.TrimPrefix(r.TLS, "cert:")) == nil:
 	default:
-		return fmt.Errorf("tls must be auto, off, internal or cert:<name>")
+		return fmt.Errorf("tls must be auto, dns01, off, internal or cert:<name>")
 	}
 	if r.TLS == "auto" {
 		for _, h := range r.Hosts {
 			if strings.HasPrefix(h, "*.") {
-				return fmt.Errorf("ACME (HTTP-01) can't issue wildcard certificates: use --tls cert:<name> or internal for %s", h)
+				return fmt.Errorf("ACME (HTTP-01) can't issue wildcard certificates: use --tls dns01 (with a DNS provider), cert:<name> or internal for %s", h)
 			}
 		}
 	}
