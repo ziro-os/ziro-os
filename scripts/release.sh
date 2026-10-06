@@ -26,6 +26,7 @@ Usage:
 
 Commands:
   patch                  Bump patch version (e.g., 1.0.0 -> 1.0.1) [DEFAULT]
+                         (from the newest tools version if that is ahead of VERSION)
   minor                  Bump minor version (e.g., 1.0.0 -> 1.1.0)
   major                  Bump major version (e.g., 1.0.0 -> 2.0.0)
   <version>              Specify exact version (e.g., 1.2.0 or v1.2.0)
@@ -137,8 +138,19 @@ if [ -z "$BUMP_TYPE" ]; then
     fi
 fi
 
+# The tools line can be ahead of VERSION: tools-only releases are tools/vX.Y.Z[.N] and do not bump
+# it. An OS release also publishes tools/vX.Y.Z, which must be higher than every tools version
+# (clients install only the newest tag), so bump from the tools line, not from VERSION.
+git fetch --tags --quiet origin 2>/dev/null || true
+TOOLS_TAGS=$(git tag -l 'tools/v*')
+TOOLS_VERSION_SH="$SCRIPT_DIR/release/tools-version.sh"
+BASE_VERSION="$CURRENT_VERSION"
+if [ "$BUMP_TYPE" != "same" ] && FLOOR=$(printf '%s\n' "$TOOLS_TAGS" | sh "$TOOLS_VERSION_SH" floor "${CURRENT_VERSION%%-*}" - 2>/dev/null); then
+    BASE_VERSION="$FLOOR"
+fi
+
 # Parse SemVer components
-IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
 MAJOR="${MAJOR:-1}"
 MINOR="${MINOR:-0}"
 PATCH="${PATCH:-0}"
@@ -173,6 +185,15 @@ case "$BUMP_TYPE" in
         NEW_VERSION="$RAW_VER"
         ;;
 esac
+
+# Refuse a version the tools workflow would reject after the tag is pushed (a release candidate,
+# vX.Y.Z-rc1, does not publish tools).
+if [[ "$NEW_VERSION" != *-* ]]; then
+    if ! printf '%s\n' "$TOOLS_TAGS" | sh "$TOOLS_VERSION_SH" resolve "v${NEW_VERSION}" "" "${CURRENT_VERSION%%-*}" - >/dev/null; then
+        echo -e "${RED}❌ v${NEW_VERSION} cannot be released: see above.${NC}"
+        exit 1
+    fi
+fi
 
 TAG="v${NEW_VERSION}"
 BUILD_DATE=$(date -u +"%Y-%m-%d")

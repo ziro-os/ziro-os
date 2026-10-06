@@ -66,6 +66,27 @@ ok resolve-prerelease-refused fail "$(rc $tv resolve v1.0.26-rc1 '' 1.0.26 "$tmp
 ok resolve-garbage-refused fail "$(rc $tv resolve main latest 1.0.21 "$tmp/t5")"
 ok resolve-first-ever 1.0.21 "$(run $tv resolve v1.0.21 '' 1.0.21 "$tmp/empty")"
 
+# ---- tools-version.sh floor: an OS release must be higher than the tools line --------------
+ok floor-follows-tools-line 1.0.25 "$(run $tv floor 1.0.22 "$tmp/t5")"
+ok floor-version-ahead 1.0.26 "$(run $tv floor 1.0.26 "$tmp/t5")"
+ok floor-no-tags 1.0.22 "$(run $tv floor 1.0.22 "$tmp/empty")"
+# an OS tag below the tools line is refused, with the version to release instead
+ok resolve-os-tag-below-line fail "$(rc $tv resolve v1.0.22 '' 1.0.22 "$tmp/t5")"
+sh $tv resolve v1.0.22 '' 1.0.22 "$tmp/t5" 2>&1 | grep -q 'release.sh 1.0.26' || { echo "FAIL os-tag-hint: no 'release.sh 1.0.26' hint"; fail=1; }
+
+# ---- release.sh bumps from the tools line and refuses what the tools workflow would reject ---
+repo="$tmp/repo"
+mkdir -p "$repo/scripts/release" && cp scripts/release.sh "$repo/scripts/" && cp $tv "$repo/scripts/release/"
+(cd "$repo" && git init -q && git config user.email t@t && git config user.name t && echo 1.0.22 > VERSION &&
+    git add . && git commit -qm init && git tag tools/v1.0.25 && git tag tools/v1.0.25.1)
+rel() { (cd "$repo" && bash scripts/release.sh --dry-run "$@" 2>&1); }
+ok release-patch-from-tools-line 1 "$(rel patch | grep -c 'Target Version:.*1\.0\.26')"
+ok release-default-from-tools-line 1 "$(rel | grep -c 'Target Version:.*1\.0\.26')"
+ok release-minor 1 "$(rel minor | grep -c 'Target Version:.*1\.1\.0')"
+ok release-explicit-ok 1 "$(rel 1.0.27 | grep -c 'Target Version:.*1\.0\.27')"
+ok release-below-line-refused 1 "$(rel 1.0.23 | grep -c 'cannot be released')"
+ok release-rc-not-checked 1 "$(rel 1.0.23-rc1 | grep -c 'Target Version:.*1\.0\.23-rc1')"
+
 # ---- check-tag.sh: only three-part OS tags start an OS release ---------------------------
 ct=scripts/release/check-tag.sh
 for t in v1.1.0 v1.0.21 v10.20.30 v1.1.0-rc1 v1.1.0-beta.2; do ok "tag-ok-$t" ok "$(rc $ct $t)"; done

@@ -7,6 +7,9 @@
 #   tools-version.sh next <VERSION> <tags>
 #       The next build: the newest of the existing tools versions and VERSION, N + 1
 #       (1.0.25.1 -> 1.0.25.2, 1.0.25 -> 1.0.25.1, nothing newer than VERSION 1.0.26 -> 1.0.26.1).
+#   tools-version.sh floor <VERSION> <tags>
+#       The X.Y.Z of the newest tools version (or VERSION, if that is newer): an OS release must
+#       be higher than this, since it publishes tools/vX.Y.Z too. scripts/release.sh bumps from it.
 #   tools-version.sh resolve <ref-name> <input-version> <VERSION> <tags>
 #       The version a workflow run publishes: the input if given, else the pushed tag
 #       (tools/vX.Y.Z[.N] or an OS tag vX.Y.Z), else (a manual run without input) `next`.
@@ -45,6 +48,10 @@ next() {
     echo "$base.$(( ${n:-0} + 1 ))"
 }
 
+floor() {
+    next "$1" "$2" | cut -d. -f1-3
+}
+
 resolve() {
     ref=$1 input=$2 os=$3 tags=$4
     if [ -n "$input" ]; then
@@ -60,7 +67,11 @@ resolve() {
     # the tag being built is itself among the existing ones when it triggered the run
     top=$(existing "$tags" | grep -vxF "$v" | newest || true)
     if [ -n "$top" ] && [ "$(printf '%s\n%s\n' "$top" "$v" | newest)" != "$v" ]; then
-        echo "tools-version: $v is not newer than the existing tools release $top; clients install only the newest tag. Use a higher version, or leave the version empty for the next build." >&2
+        echo "tools-version: $v is not newer than the existing tools release $top; clients install only the newest tag." >&2
+        case $ref in
+            v[0-9]*) echo "An OS release also publishes tools/v$v, so it must be higher than the tools line. Release a higher version: ./scripts/release.sh $(floor "$os" "$tags" | awk -F. '{print $1 "." $2 "." $3 + 1}')" >&2 ;;
+            *) echo "Use a higher version, or leave the version empty for the next build." >&2 ;;
+        esac
         return 1
     fi
     echo "$v"
@@ -73,10 +84,15 @@ case ${1:-} in
         t=$(mktemp); trap 'rm -f "$t"' EXIT
         if [ "$3" = "-" ]; then cat > "$t"; else cat "$3" > "$t"; fi
         next "$2" "$t" ;;
+    floor)
+        [ $# -eq 3 ] || { echo "usage: tools-version.sh floor <VERSION> <tags|->" >&2; exit 2; }
+        t=$(mktemp); trap 'rm -f "$t"' EXIT
+        if [ "$3" = "-" ]; then cat > "$t"; else cat "$3" > "$t"; fi
+        floor "$2" "$t" ;;
     resolve)
         [ $# -eq 5 ] || { echo "usage: tools-version.sh resolve <ref> <input> <VERSION> <tags|->" >&2; exit 2; }
         t=$(mktemp); trap 'rm -f "$t"' EXIT
         if [ "$5" = "-" ]; then cat > "$t"; else cat "$5" > "$t"; fi
         resolve "$2" "$3" "$4" "$t" ;;
-    *) echo "usage: tools-version.sh next|resolve ..." >&2; exit 2 ;;
+    *) echo "usage: tools-version.sh next|floor|resolve ..." >&2; exit 2 ;;
 esac
