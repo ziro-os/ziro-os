@@ -621,6 +621,20 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/cluster/heal:
+    get:
+      x-ziro-role: viewer
+      tags: [cluster]
+      summary: Auto-healing state, unhealthy nodes and recent heal actions
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      x-ziro-role: admin
+      tags: [cluster]
+      summary: 'Enable or disable auto-healing, {"enabled": true, "remove_after": "2h"} (remove_after optional, "0" turns it off)'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
   /api/v1/cluster/nodes/{id}:
     delete:
       x-ziro-role: admin

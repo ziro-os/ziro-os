@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,7 @@ type heartbeatRequest struct {
 	WGPubKey    string            `json:"wg_pubkey,omitempty"`
 	WGPort      int               `json:"wg_port,omitempty"`
 	MeshError   string            `json:"mesh_error,omitempty"`   // mesh/policy apply failure on the node
+	Conditions  []string          `json:"conditions,omitempty"`   // problems the node could not repair itself (Cond* names)
 	Caps        []string          `json:"caps,omitempty"`         // features this node's ziroctl supports
 	RotateToken string            `json:"rotate_token,omitempty"` // a new node token (64 hex), replacing the one this request uses
 	Keys        []string          `json:"keys,omitempty"`         // data key IDs held by this node's master
@@ -227,14 +229,22 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 		st.History = map[string][]ClusteredApp{}
 	}
 	ready, eligible := map[string]bool{}, map[string]bool{}
+	// Healing on: replicas stay on a NotReady node through the flap grace, and while the partition
+	// brake holds (see cluster_heal.go); dead is every NotReady node still in the cluster.
+	heal := st.Heal.enabled()
+	brake := heal && partitioned(st, now)
+	hold, dead := map[string]bool{}, map[string]bool{}
 	var gone []string
 	for i := range st.Nodes {
 		n := &st.Nodes[i]
 		if now.Sub(n.LastSeen) > nodeTimeout {
 			n.Status = "NotReady"
-			if n.Role != "master" && now.Sub(n.LastSeen) > nodeGCAfter {
+			if n.Role != "master" && now.Sub(n.LastSeen) > nodeGCAfter && !brake {
 				gone = append(gone, n.ID)
+				continue
 			}
+			dead[n.ID] = true
+			hold[n.ID] = heal && (brake || now.Sub(n.LastSeen) <= nodeTimeout+healGrace)
 			continue
 		}
 		n.Status = "Ready"
@@ -268,6 +278,7 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 	}
 
 	var out []Replica
+	moves, moved, held := 0, map[string]int{}, map[string]int{}
 	for _, r := range st.Replicas {
 		a, ok := apps[r.App]
 		if !ok || r.Index < 1 || r.Index > a.Replicas || have[r.App][r.Index] {
@@ -279,7 +290,14 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 		if r.Fails >= maxReplicaFails && r.Node != "" {
 			r.Avoid, r.Node, r.Fails = r.Node, "", 0
 		}
-		if r.Node != "" && (!ready[r.Node] || !free(r.Node, portOf(r)) || !st.fits(r, r.Node)) {
+		switch {
+		case dead[r.Node] && (hold[r.Node] || (heal && moves >= healMaxMoves)):
+			held[r.Node]++ // stays assigned: flap guard, partition brake or the per-pass move cap
+		case r.Node != "" && (!ready[r.Node] || !free(r.Node, portOf(r)) || !st.fits(r, r.Node)):
+			if dead[r.Node] {
+				moves++
+				moved[r.Node]++
+			}
 			r.Node = ""
 		}
 		if r.Node != "" {
@@ -299,6 +317,9 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 		}
 	}
 	sortReplicas(out)
+	if heal {
+		recordMoves(st, now, brake, moved, held)
+	}
 
 	pick := func(r Replica, exclude string) string {
 		best, fallback := "", ""
@@ -759,6 +780,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		req.Failed[k] = sanitizeLabel(v, 200)
 	}
 	req.MeshError = sanitizeLabel(req.MeshError, 300)
+	req.Conditions = cleanConditions(req.Conditions)
 	if (req.DiscoKey != "" && !validWGKey(req.DiscoKey)) || len(req.MeshEPs) > zr.MaxEndpoints || len(req.Relays) > zr.MaxRelays ||
 		(req.NAT != "" && req.NAT != "easy" && req.NAT != "hard") || len(req.NodeCSR) > 4096 {
 		return nil, httpError{http.StatusBadRequest, "invalid heartbeat"}
@@ -813,6 +835,15 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 			return httpError{http.StatusServiceUnavailable, errSecretsLocked.Error()}
 		}
 		n.LastSeen, n.Containers, n.Running, n.Failed, n.MeshError = time.Now(), req.Containers, req.Running, req.Failed, req.MeshError
+		if !slices.Equal(n.Conditions, req.Conditions) {
+			if len(n.Conditions) == 0 || len(req.Conditions) == 0 {
+				n.CondSince = now // set when the first condition appears, cleared with the last
+				if len(req.Conditions) == 0 {
+					n.CondSince = time.Time{}
+				}
+			}
+			n.Conditions = req.Conditions
+		}
 		if strings.Join(n.Caps, ",") != strings.Join(req.Caps, ",") {
 			n.Caps = req.Caps
 		}
@@ -1023,18 +1054,29 @@ var clusterServeCmd = &cobra.Command{
 		// without traffic). Every master: renew its certificate; a joined master asks to become a
 		// voter once it has caught up.
 		go func() {
+			healSeq := -1 // actions recorded before this leader's first pass were announced by its predecessor
 			for range time.Tick(agentInterval) {
 				if !rs.isLeader() {
+					healSeq = -1
 					continue
 				}
+				var heal HealConfig
 				if err := withState(func(st *ClusterState) error {
-					scheduleReplicas(st, time.Now())
+					now := time.Now()
+					if healSeq < 0 {
+						healSeq = st.Heal.Next
+					}
+					healPass(st, now) // cordons first, so scheduling already sees them
+					scheduleReplicas(st, now)
+					heal = st.Heal
 					if err := maybeSealSecrets(st); err != nil {
 						return err
 					}
 					return maybeRotateDEK(st)
 				}); err != nil && !errors.Is(err, errNotLeader) {
 					fmt.Printf("[cluster] schedule: %v\n", err)
+				} else if err == nil {
+					healSeq = emitHealActions(heal, healSeq) // only what was committed
 				}
 			}
 		}()

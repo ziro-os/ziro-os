@@ -245,6 +245,23 @@ func (c *Client) RemoveClusterApp(ctx context.Context, name string) (api.Message
 	return c.del(ctx, "/api/v1/cluster/apps/"+esc(name))
 }
 
+// ClusterHeal returns the auto-healing state: enabled, the partition brake, unhealthy nodes and
+// recent heal actions.
+func (c *Client) ClusterHeal(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/cluster/heal", &out)
+}
+
+// SetClusterHeal turns auto-healing on or off. removeAfter ("2h"; "0" turns it off; "" leaves it
+// as it is) removes workers NotReady that long.
+func (c *Client) SetClusterHeal(ctx context.Context, enabled bool, removeAfter string) (api.Message, error) {
+	body := map[string]any{"enabled": enabled}
+	if removeAfter != "" {
+		body["remove_after"] = removeAfter
+	}
+	return c.post(ctx, "/api/v1/cluster/heal", body)
+}
+
 // NodeAction cordons, uncordons or drains a node.
 func (c *Client) NodeAction(ctx context.Context, id, action string) (api.Message, error) {
 	return c.post(ctx, "/api/v1/cluster/nodes/"+esc(id)+"/"+esc(action), nil)

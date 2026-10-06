@@ -126,15 +126,11 @@ func hostChecks() []doctorCheck {
 			out = append(out, c)
 		case "master":
 			if st, err := readState(); err == nil {
-				ready := 0
-				for _, n := range st.Nodes {
-					if n.Status == "Ready" {
-						ready++
-					}
-				}
-				out = append(out, doctorCheck{Name: "Cluster nodes ready", Passed: ready == len(st.Nodes),
-					Details: fmt.Sprintf("%d/%d ready", ready, len(st.Nodes)), Fix: "ziroctl cluster nodes"})
+				out = append(out, clusterDoctorChecks(cfg, st, time.Now())...)
 			}
+		}
+		if c, ok := agentDoctorCheck(time.Now()); ok {
+			out = append(out, c)
 		}
 	}
 
@@ -234,9 +230,8 @@ func runDoctor() []doctorCheck {
 
 	// 5. containerd answers on its socket
 	c := doctorCheck{Name: "containerd responds", Fix: "start containerd", fix: func() error { return restartDown("containerd") }}
-	if conn, err := net.DialTimeout("unix", "/run/containerd/containerd.sock", 2*time.Second); err == nil {
-		conn.Close()
-		c.Passed, c.Details = true, "/run/containerd/containerd.sock"
+	if err := containerdResponds(); err == nil {
+		c.Passed, c.Details = true, containerdSocket
 	} else {
 		c.Details = err.Error()
 	}
@@ -270,6 +265,17 @@ func runDoctor() []doctorCheck {
 	check("Internet reachable", err == nil, "https://1.1.1.1", true)
 
 	return checks
+}
+
+const containerdSocket = "/run/containerd/containerd.sock"
+
+// containerdResponds dials containerd's socket (the node agent's health probe too).
+func containerdResponds() error {
+	conn, err := net.DialTimeout("unix", containerdSocket, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 func printDoctor(checks []doctorCheck) {

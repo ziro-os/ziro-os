@@ -108,9 +108,13 @@ supervised by ziro-init:
 
 ```sh
 ziroctl doctor          # kernel, storage, containerd, network, every enabled service, cluster link, disk, firewall
-ziroctl doctor --fix    # start services that are down, restart the cluster agent, prune logs and temp files; check again
+ziroctl doctor --fix    # start services that are down, restart the cluster agent, prune logs and temp files; run a cluster heal pass; check again
 ziroctl doctor --json
 ```
+
+On a cluster master, `doctor` shows `Cluster nodes ready` and one row per unhealthy node (NotReady time, conditions,
+a cordon set by auto-healing; see [auto-healing](clustering.md#auto-healing)). Every cluster node also shows
+`Cluster heartbeat`, from the agent's own record of its last heartbeat to the master.
 
 Rows are `ok`, `warn` or `fail`, plus `fixed` after `--fix`. A failing row shows what `--fix` does, or the command
 to run. The exit status is non-zero only when a critical check fails (`ziroctl upgrade` gates on those).

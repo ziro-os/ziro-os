@@ -37,6 +37,7 @@ The join token expires after 24 hours (`--token-ttl`, `0` = never). Print the jo
 | Maintenance | `ziroctl cluster node cordon\|uncordon\|drain <node>` |
 | Split builder, runner and gateway work | `ziroctl cluster node role <node> builder\|runner\|gateway on\|off` ([deploy.md](deploy.md#roles)) |
 | Remove a dead worker and revoke its token | `ziroctl cluster node rm <node>` |
+| See what auto-healing sees and did, or turn it off | `ziroctl cluster heal status\|enable\|disable` ([auto-healing](#auto-healing)) |
 | Secrets (names and keys are listed, never values) | `ziroctl cluster secret set\|rm\|ls` |
 | Network policy: who may reach an app over the mesh | `ziroctl cluster deploy --name api --allow-from web,worker` (`'*'` = any app), `cluster policy ls`, `cluster policy default deny\|allow` |
 | Expose apps over HTTP(S) with TLS, rate limits and IP allowlists | `ziroctl gateway node enable <node>`, `gateway route add <name> --host … --app …`; see [gateway.md](gateway.md) |
@@ -281,6 +282,47 @@ ziroctl cluster mesh mode anywhere
 - **Soft state.** Endpoints, relays and NAT type travel in heartbeats as soft state. They never cause a Raft commit.
 - **MTU.** The mesh MTU becomes 1280, so pod MTUs follow. Switching modes recreates pod-network containers one replica at a time; switch back with `ziroctl cluster mesh mode direct`.
 - **Requirement.** Relays must be enabled first (the command refuses otherwise).
+
+## Auto-healing
+
+The leader repairs the cluster on its own, from the least to the most invasive step. Every action is audited
+(`cluster heal <kind>` in the audit log), raised as a `heal` alert, and kept in `ziroctl cluster heal status`.
+It is on by default and is part of the replicated cluster state.
+
+1. **The node repairs itself.** Every agent heartbeat checks the host. A dead containerd is restarted (at most every
+   2 minutes), and at 85% disk it prunes rotated logs, temp files and caches (at most every 30 minutes). What it
+   cannot fix is reported as a **condition** in the heartbeat: `ContainerdDown`, `DiskPressure` (clears below 80%)
+   or `MeshError`. `cluster nodes` lists them next to the node's status.
+2. **The leader cordons a sick node.** A condition that lasts 30 seconds cordons the node, so nothing new is
+   scheduled on it, and running replicas are left alone. The cordon lifts by itself when the conditions clear.
+   A cordon you set with `cluster node cordon|drain` is never lifted automatically.
+3. **Replicas leave a dead node carefully.**
+   - *Flap guard:* a node is NotReady after 30 seconds, and its replicas move 20 seconds after that, so a node that
+     comes right back keeps them.
+   - *Move cap:* at most 5 replicas are taken off dead nodes per scheduling pass (every 10 s and every heartbeat).
+   - *Partition brake:* in a cluster of at least 3 nodes, when **half or more are NotReady** nothing is moved,
+     forgotten or removed. That pattern is the master's own network failing, not several nodes dying at once.
+     Replicas stay where they are (they keep running on the nodes that are fine), and the brake is reported.
+4. **Masters are reported, not demoted.** A master NotReady for more than 3 minutes raises `master-down`. When one
+   more master down would lose the Raft quorum, `quorum-risk` is raised (critical), and `quorum-lost` if it is
+   already gone. Removing a voter on a guess can lose data, so that stays a decision for you
+   (`ziroctl cluster member rm <master>`).
+5. **Optional: forget dead workers sooner.** `ziroctl cluster heal enable --remove-after 2h` removes a worker that has
+   been NotReady that long and revokes its token (never a master, never while the brake holds; minimum 10 minutes).
+   Without it, workers are forgotten after 24 hours, as before.
+
+```sh
+ziroctl cluster heal status                       # what it sees: unhealthy nodes, the brake, recent actions
+ziroctl cluster heal enable --remove-after 2h     # also remove workers dead for 2 hours
+ziroctl cluster heal disable                      # back to plain failover at NotReady (no grace, no cap, no brake)
+```
+
+`ziroctl doctor --fix` on the master runs one heal pass and restarts this node's agent if it is down. It lists each
+unhealthy node as its own row. A remote node's agent cannot be restarted from the master, so that row names the host
+to run `doctor --fix` on. Every node also checks its own heartbeat to the master (`Cluster heartbeat`).
+
+The API: `GET /api/v1/cluster/heal` (viewer) and `POST /api/v1/cluster/heal` (admin,
+`{"enabled": true, "remove_after": "2h"}`).
 
 ## Limits (by design, for now)
 

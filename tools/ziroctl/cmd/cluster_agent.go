@@ -427,6 +427,8 @@ var clusterAgentCmd = &cobra.Command{
 
 		lastErr, lastMesh, lastPolicy, active := "", "", "", ""
 		wantRotate := false
+		healer := newNodeHealer()
+		var lastOK time.Time
 		var policyAt time.Time
 		for {
 			actual, _ := listClusterContainers()
@@ -448,9 +450,15 @@ var clusterAgentCmd = &cobra.Command{
 			}
 			ag.mu.Unlock()
 
+			// Repair what this host can (containerd, disk) and report what is still wrong: the
+			// master cordons a node whose condition persists.
+			conds, did := healer.check(time.Now(), lastMesh)
+			for _, d := range did {
+				fmt.Printf("[agent] heal: %s\n", d)
+			}
 			var resp heartbeatResponse
 			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh,
-				Caps: builderCaps(nodeCaps), Keys: storedKeyIDs(), Arch: runtime.GOARCH, Builds: ag.builds.report()}
+				Conditions: conds, Caps: builderCaps(nodeCaps), Keys: storedKeyIDs(), Arch: runtime.GOARCH, Builds: ag.builds.report()}
 			if ag.mode == "anywhere" { // path discovery key, endpoints, relays, NAT type; node cert for relays
 				if _, disco, err := meshDiscoKey(); err == nil {
 					hb.DiscoKey = disco
@@ -473,6 +481,10 @@ var clusterAgentCmd = &cobra.Command{
 					break
 				}
 			}
+			if err == nil {
+				lastOK = time.Now()
+			}
+			writeAgentStatus(lastOK, err)
 			if err == nil {
 				if pending != "" {
 					adoptNodeToken(cfg, pending)
