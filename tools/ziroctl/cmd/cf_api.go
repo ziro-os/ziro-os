@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +26,10 @@ var (
 
 type cfClient struct {
 	token, account string
+	// retries > 0 retries 429 and 5xx answers (and transport errors, for idempotent requests) with
+	// jittered exponential backoff; the `cf` commands leave it 0.
+	retries int
+	sleep   func(time.Duration) // test seam; nil: time.Sleep
 }
 
 type cfAccount struct {
@@ -52,6 +58,9 @@ type cfDNSRecord struct {
 	Type    string `json:"type"`
 	Name    string `json:"name"`
 	Content string `json:"content"`
+	TTL     int    `json:"ttl,omitempty"`     // 1 = automatic
+	Proxied bool   `json:"proxied,omitempty"` // A/AAAA/CNAME only
+	Comment string `json:"comment,omitempty"`
 }
 
 type cfAccessApp struct {
@@ -60,26 +69,59 @@ type cfAccessApp struct {
 	Domain string `json:"domain"`
 }
 
+// retryWait is how long to wait before attempt+1: Retry-After when Cloudflare sent one (capped),
+// else 1s doubling to 30s, plus up to 50% jitter.
+func retryWait(resp *http.Response, attempt int) time.Duration {
+	if resp != nil {
+		if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s >= 0 {
+			return min(time.Duration(s)*time.Second, time.Minute)
+		}
+	}
+	d := min(time.Second<<attempt, 30*time.Second)
+	return d + rand.N(d/2+1)
+}
+
 func (c *cfClient) do(method, path string, body, out any) error {
-	var rd io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		rd = bytes.NewReader(b)
+		payload = b
 	}
-	req, err := http.NewRequest(method, cfAPIBase+path, rd)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := cfHTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("cloudflare: %w", err)
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		var rd io.Reader
+		if payload != nil {
+			rd = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequest(method, cfAPIBase+path, rd)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err = cfHTTP.Do(req)
+		// A POST is retried only when Cloudflare says it did not process it (429); anything else could
+		// have been applied.
+		again := attempt < c.retries
+		switch {
+		case err != nil && again && method != http.MethodPost:
+			c.wait(retryWait(nil, attempt))
+			continue
+		case err != nil:
+			return fmt.Errorf("cloudflare: %w", err)
+		case again && (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && method != http.MethodPost)):
+			w := retryWait(resp, attempt)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			c.wait(w)
+			continue
+		}
+		break
 	}
 	defer resp.Body.Close()
 	var env struct {
@@ -107,6 +149,14 @@ func (c *cfClient) do(method, path string, body, out any) error {
 		return json.Unmarshal(env.Result, out)
 	}
 	return nil
+}
+
+func (c *cfClient) wait(d time.Duration) {
+	if c.sleep != nil {
+		c.sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 func (c *cfClient) acct(p string) string { return "/accounts/" + url.PathEscape(c.account) + p }
@@ -193,6 +243,59 @@ func (c *cfClient) dnsRecord(zone, host string) (*cfDNSRecord, error) {
 func (c *cfClient) createCNAME(zone, host, target string) error {
 	rec := map[string]any{"type": "CNAME", "name": host, "content": target, "proxied": true, "comment": "ziroctl cf"}
 	return c.do("POST", "/zones/"+url.PathEscape(zone)+"/dns_records", rec, nil)
+}
+
+// cfMaxPages bounds every paginated listing (100 per page).
+const cfMaxPages = 100
+
+// zones lists every zone the token can see.
+func (c *cfClient) zones() ([]cfZone, error) {
+	var all []cfZone
+	for page := 1; page <= cfMaxPages; page++ {
+		var zs []cfZone
+		if err := c.do("GET", fmt.Sprintf("/zones?per_page=50&page=%d", page), nil, &zs); err != nil {
+			return nil, err
+		}
+		all = append(all, zs...)
+		if len(zs) < 50 {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("cloudflare: more than %d zones", 50*cfMaxPages)
+}
+
+// listDNS lists every record of a zone.
+func (c *cfClient) listDNS(zone string) ([]cfDNSRecord, error) {
+	var all []cfDNSRecord
+	for page := 1; page <= cfMaxPages; page++ {
+		var rs []cfDNSRecord
+		if err := c.do("GET", fmt.Sprintf("/zones/%s/dns_records?per_page=100&page=%d", url.PathEscape(zone), page), nil, &rs); err != nil {
+			return nil, err
+		}
+		all = append(all, rs...)
+		if len(rs) < 100 {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("cloudflare: more than %d records in one zone", 100*cfMaxPages)
+}
+
+// dnsBody is a record as Cloudflare takes it on create and replace. The proxied flag is always
+// sent: omitting it on a replace would silently turn proxying off.
+func dnsBody(r cfDNSRecord) map[string]any {
+	ttl := r.TTL
+	if ttl <= 0 || r.Proxied {
+		ttl = 1 // automatic; a proxied record can have no other
+	}
+	return map[string]any{"type": r.Type, "name": r.Name, "content": r.Content, "ttl": ttl, "proxied": r.Proxied, "comment": r.Comment}
+}
+
+func (c *cfClient) createDNS(zone string, r cfDNSRecord) error {
+	return c.do("POST", "/zones/"+url.PathEscape(zone)+"/dns_records", dnsBody(r), nil)
+}
+
+func (c *cfClient) updateDNS(zone string, r cfDNSRecord) error {
+	return c.do("PUT", "/zones/"+url.PathEscape(zone)+"/dns_records/"+url.PathEscape(r.ID), dnsBody(r), nil)
 }
 
 func (c *cfClient) deleteDNS(zone, id string) error {

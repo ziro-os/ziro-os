@@ -23,6 +23,7 @@ type domainInfo struct {
 	Example   string   `json:"example,omitempty"`   // the URL an app would get
 	Addresses []string `json:"addresses,omitempty"` // where the gateway answers
 	Records   []string `json:"records,omitempty"`   // what to create at a public DNS provider
+	Managed   []string `json:"managed,omitempty"`   // DNS providers that create them automatically
 	DNS       string   `json:"dns,omitempty"`       // what was done in the built-in DNS
 }
 
@@ -118,6 +119,11 @@ func describeDomain(s routeStore, d GatewayDomain) domainInfo {
 	for _, a := range info.Addresses {
 		info.Records = append(info.Records, fmt.Sprintf("%s. A %s", wildcardName(d.Name), a))
 	}
+	if gd, err := s.read(); err == nil {
+		for _, p := range gd.DNSCloud.Providers {
+			info.Managed = append(info.Managed, p.Name)
+		}
+	}
 	return info
 }
 
@@ -132,7 +138,11 @@ func setGatewayDomain(name string) (domainInfo, error) {
 		return domainInfo{}, fmt.Errorf("invalid domain %q (a name like apps.example.com)", name)
 	}
 	var old GatewayDomain
-	if err := s.update(func(d *gatewayData) error { old, d.Domain = d.Domain, GatewayDomain{Name: name}; return nil }); err != nil {
+	if err := s.update(func(d *gatewayData) error {
+		old, d.Domain = d.Domain, GatewayDomain{Name: name}
+		bumpDNS(d)
+		return nil
+	}); err != nil {
 		return domainInfo{}, err
 	}
 	info := describeDomain(s, GatewayDomain{Name: name})
@@ -199,6 +209,12 @@ func printDomain(info domainInfo) error {
 		}
 		if len(info.Records) == 0 {
 			fmt.Println("! No gateway address yet: enable a gateway node (ziroctl gateway node enable <node>)")
+			return
+		}
+		// A private name (.local, .internal, ...) is never published to a public provider.
+		if len(info.Managed) > 0 && info.TLS != "internal" {
+			fmt.Printf("✓ DNS records are created automatically at %s (ziroctl dns cloud plan shows what)\n", strings.Join(info.Managed, ", "))
+			fmt.Println("Apps already deployed pick the domain up on their next release: ziroctl deploy redeploy <app>")
 			return
 		}
 		fmt.Println("DNS records to create at your DNS provider (or use these addresses behind a load balancer):")

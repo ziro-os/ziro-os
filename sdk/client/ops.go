@@ -221,6 +221,53 @@ func (c *Client) DNS(ctx context.Context) (map[string]any, error) {
 	return out, c.Get(ctx, "/api/v1/dns", &out)
 }
 
+// ---- public DNS provider ----
+
+// DNSCloud returns the DNS providers (never their tokens), explicit records and the last sync.
+func (c *Client) DNSCloud(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/dns/cloud", &out)
+}
+
+// DNSCloudPlan returns what a sync would create, update and delete (it changes nothing).
+func (c *Client) DNSCloudPlan(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/dns/cloud/plan", &out)
+}
+
+// DNSCloudSync reconciles the provider now (on the cluster leader). force allows deleting most of
+// the records the cluster owns.
+func (c *Client) DNSCloudSync(ctx context.Context, force bool) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/dns/cloud/sync", map[string]bool{"force": force}, &out)
+}
+
+// SetDNSProvider connects or replaces a DNS provider. The token is checked, stored sealed and
+// never returned.
+func (c *Client) SetDNSProvider(ctx context.Context, name, kind, token string, zones []string) (map[string]any, error) {
+	var out map[string]any
+	body := map[string]any{"kind": kind, "token": token, "zones": zones}
+	return out, c.Do(ctx, http.MethodPut, "/api/v1/dns/cloud/providers/"+esc(name), body, &out)
+}
+
+func (c *Client) RemoveDNSProvider(ctx context.Context, name string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/dns/cloud/providers/"+esc(name))
+}
+
+// AddDNSCloudRecord keeps an explicit record (A, AAAA, CNAME or TXT) at the provider.
+func (c *Client) AddDNSCloudRecord(ctx context.Context, rec map[string]any) (api.Message, error) {
+	return c.post(ctx, "/api/v1/dns/cloud/records", rec)
+}
+
+// RemoveDNSCloudRecord stops keeping the explicit records of name (and typ, when set).
+func (c *Client) RemoveDNSCloudRecord(ctx context.Context, name, typ string) (api.Message, error) {
+	q := "?name=" + url.QueryEscape(name)
+	if typ != "" {
+		q += "&type=" + url.QueryEscape(typ)
+	}
+	return c.del(ctx, "/api/v1/dns/cloud/records"+q)
+}
+
 // ---- cluster (on a master) ----
 
 func (c *Client) Cluster(ctx context.Context) (map[string]any, error) {

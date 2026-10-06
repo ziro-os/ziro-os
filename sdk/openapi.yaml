@@ -31,6 +31,7 @@ tags:
   - name: modules
   - name: apps
   - name: gateway
+  - name: dns
   - name: cluster
   - name: stacks
 
@@ -503,6 +504,71 @@ paths:
       summary: Stop publishing apps under a base domain (routes already created stay)
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/dns/cloud:
+    get:
+      x-ziro-role: viewer
+      tags: [dns]
+      summary: DNS providers (never their tokens), explicit records, published addresses and the last sync on this host
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/dns/cloud/plan:
+    get:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: What a sync would create, update and delete at the provider (changes nothing)
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/dns/cloud/sync:
+    post:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: 'Reconcile the provider now ({"force": true} allows deleting most owned records); on the cluster leader only'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/dns/cloud/providers/{name}:
+    put:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: 'Connect or replace a DNS provider, {"kind": "cloudflare", "token": "…", "zones": ["example.com"]}; the token is checked and stored root-only (sealed in the TPM when there is one; a cluster secret in a cluster), never returned'
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    delete:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: Disconnect a DNS provider (records it created stay at the provider)
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns/cloud/records:
+    post:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: 'Keep an explicit record at the provider, {"name": "www.example.com", "type": "CNAME", "content": "app.example.com", "proxied": false}'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+    delete:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: Stop keeping explicit records of a name (and type); the sync deletes them at the provider
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+        - { name: type, in: query, required: false, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/dns/cloud/addresses:
+    put:
+      x-ziro-role: admin
+      tags: [dns]
+      summary: 'Publish these addresses for the gateway''s names instead of the gateway nodes'' own, {"addresses": ["203.0.113.10"]} ([] goes back to the default)'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
   /api/v1/gateway/ca:
     get:
       x-ziro-role: viewer

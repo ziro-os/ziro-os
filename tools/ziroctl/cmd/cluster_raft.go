@@ -769,6 +769,10 @@ func (rs *raftStore) localHandler(cfg *ClusterConfig, forward func(path string, 
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		}
 	})
+	// Whether this master leads: separate daemons (the DNS sync) that must run on one master only ask here.
+	mux.HandleFunc("/leader", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]bool{"leader": rs.isLeader()})
+	})
 	mux.HandleFunc("/members", func(w http.ResponseWriter, r *http.Request) {
 		m, err := rs.members()
 		if err != nil {

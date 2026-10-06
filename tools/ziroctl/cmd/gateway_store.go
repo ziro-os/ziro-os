@@ -37,6 +37,8 @@ type gatewayData struct {
 	Routes []GatewayRoute `json:"routes"`
 	ACME   GatewayACME    `json:"acme"`
 	Domain GatewayDomain  `json:"domain,omitempty"` // base domain of deployed apps
+	// DNSCloud publishes the gateway's names at a public DNS provider (dnsprovider.go).
+	DNSCloud DNSCloud `json:"dns_cloud,omitempty"`
 }
 
 type routeStore interface {
@@ -74,16 +76,16 @@ func (clusterRouteStore) read() (*gatewayData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &gatewayData{Routes: st.Routes, ACME: st.GatewayACME, Domain: st.GatewayDomain}, nil
+	return &gatewayData{Routes: st.Routes, ACME: st.GatewayACME, Domain: st.GatewayDomain, DNSCloud: st.DNSCloud}, nil
 }
 
 func (clusterRouteStore) update(fn func(d *gatewayData) error) error {
 	return withState(func(st *ClusterState) error {
-		d := &gatewayData{Routes: append([]GatewayRoute(nil), st.Routes...), ACME: st.GatewayACME, Domain: st.GatewayDomain}
+		d := &gatewayData{Routes: append([]GatewayRoute(nil), st.Routes...), ACME: st.GatewayACME, Domain: st.GatewayDomain, DNSCloud: st.DNSCloud}
 		if err := fn(d); err != nil {
 			return err
 		}
-		st.Routes, st.GatewayACME, st.GatewayDomain = d.Routes, d.ACME, d.Domain
+		st.Routes, st.GatewayACME, st.GatewayDomain, st.DNSCloud = d.Routes, d.ACME, d.Domain, d.DNSCloud
 		for _, r := range d.Routes {
 			if r.TLS == "internal" && st.Secrets[gatewayInternalCASecret] == nil {
 				c, k, err := newInternalCA()
@@ -370,6 +372,7 @@ func putRoute(s routeStore, r GatewayRoute) (GatewayRoute, error) {
 		}
 		d.Routes = append(kept, r)
 		sortRoutes(d.Routes)
+		bumpDNS(d)
 		return nil
 	})
 	return r, err
@@ -414,6 +417,7 @@ func deleteRoute(s routeStore, name string) error {
 		for i, r := range d.Routes {
 			if r.Name == name {
 				d.Routes = append(d.Routes[:i], d.Routes[i+1:]...)
+				bumpDNS(d)
 				return nil
 			}
 		}

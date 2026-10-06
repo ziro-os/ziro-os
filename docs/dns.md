@@ -118,10 +118,77 @@ ziroctl cluster deploy --name billing --egress ''    # unrestricted again
   rules never drops addresses already learned.
 - **Limits:** pod-network apps only. IPv4 (the pod network is IPv4).
 
+## Public DNS provider (Cloudflare)
+
+The resolver above answers for your own hosts. For everyone else, the names the gateway serves must exist at a
+public DNS provider. `ziroctl dns provider` and `ziroctl dns cloud` publish them there automatically, so you stop
+creating records by hand in the provider's dashboard.
+
+```sh
+ziroctl dns provider add cloudflare --token-file cf.token   # checks the token, stores it root-only
+ziroctl gateway domain set apps.example.com                 # the sync creates the wildcard record for it
+ziroctl dns cloud plan                                      # what a sync would create, update and delete
+ziroctl module enable dns-cloudflare                        # the sync service: every 5 minutes and on every change
+```
+
+**The token.** Create it at Cloudflare under My Profile › API Tokens with only **Zone › DNS › Edit** and
+**Zone › Zone › Read**, restricted to the zones to manage. `--zones example.com,example.org` limits what ziroctl
+manages further. The token is read from a file, a hidden prompt or stdin (never argv or an environment variable),
+refused if Cloudflare rejects it, and stored root-only: sealed in the TPM when the host has one, else a `0600`
+file in a `0700` directory (as for `ziroctl cf login`; without a TPM it is only as private as that file). In a
+cluster it is a cluster secret, sealed at rest by the cluster data key and replicated to the masters, so a new
+Raft leader keeps syncing. Several providers (several accounts) can be added, each with a `--name`.
+
+**What is published.** Every record is derived from the gateway, so it stays true to it:
+
+| Record | When |
+|---|---|
+| `*.<domain>` A/AAAA, one per gateway address | a base domain is set (public names only) |
+| `<host>` A/AAAA | each http or tls route host the wildcard does not cover (including `*.shop.example.com`) |
+| what you add with `ziroctl dns cloud add <name> <type> <content> [--proxied]` | always (A, AAAA, CNAME, TXT) |
+
+Names no public resolver knows (`.local`, `.internal`, `.lan`, no dot) are left to the built-in DNS. The
+address is the gateway nodes' own; behind a NAT or load balancer, publish the one clients reach with
+`ziroctl dns cloud addresses 203.0.113.10` (a private address is published with a warning). Records are
+DNS-only (not proxied) unless you add them with `--proxied`, so ACME HTTP-01 still reaches the gateway; point a
+tunnel at a hostname with `ziroctl dns cloud add app.example.com CNAME <id>.cfargotunnel.com --proxied`.
+
+**Only its own records are ever touched.** Each record is created with the comment `ziro:<cluster id>` (`ziro:host-<hostname>` on a standalone host: renaming
+the host leaves the records it made behind as ones it no longer owns) and only
+records carrying exactly that comment are updated or deleted. A record you made yourself, one without a comment,
+one from another cluster sharing the zone, an ACME challenge record: none is ever changed. If a record you
+made already sits at a name ziroctl wants, the plan shows it as `skip` and leaves it alone.
+
+**Safe by default.** A sync that would delete most of what the cluster owns (an empty route list after a bad
+restore, say) is refused: `ziroctl dns cloud sync --force` goes ahead, the service never does. A provider
+that cannot be read (token revoked, API down) leaves its records exactly as they are and raises a `dns` alert. Calls
+that are throttled (429) or fail with 5xx are retried with jittered backoff (a create is repeated only after a 429,
+which means it was not processed). A steady-state sync only reads: the zone list, then each managed zone's records
+once. Every create, update and delete is in the audit log (`dns create|update|delete`).
+
+**When it runs.** The service reconciles every 5 minutes and within about 10 seconds of any route or domain change.
+In a cluster only the Raft leader writes, so there is exactly one writer. `ziroctl dns cloud sync` runs it by
+hand (on the leader). `ziroctl doctor` shows a `DNS provider` row (tokens readable, last sync ok and recent) and
+`--fix` runs one sync.
+
+```sh
+ziroctl dns provider ls | rm <name>
+ziroctl dns cloud ls          # providers, explicit records, last sync
+ziroctl dns cloud status      # the last sync on this host
+ziroctl dns cloud add www.example.com CNAME app.example.com
+ziroctl dns cloud rm www.example.com CNAME
+```
+
+Removing a provider (`dns provider rm`) deletes its token, and leaves the records it created in place.
+
 ## API
 
 | Route | Role |
 |---|---|
 | `GET /api/v1/dns` (config, stats, cluster records, enabled) | viewer |
+| `GET /api/v1/dns/cloud` (providers without tokens, explicit records, addresses, last sync) | viewer |
+| `GET /api/v1/dns/cloud/plan`, `POST /api/v1/dns/cloud/sync` (`{"force": true}`) | admin |
+| `PUT /api/v1/dns/cloud/providers/{name}` (`{"kind","token","zones"}`), `DELETE …/providers/{name}` | admin |
+| `POST /api/v1/dns/cloud/records`, `DELETE /api/v1/dns/cloud/records?name=&type=`, `PUT /api/v1/dns/cloud/addresses` | admin |
 | `POST /api/v1/dns/records`, `DELETE /api/v1/dns/records?name=&type=`, `PUT /api/v1/dns/block` | operator |
 | `PUT /api/v1/dns/upstreams`, `PUT /api/v1/dns/forwards` (they control where every lookup goes) | admin |

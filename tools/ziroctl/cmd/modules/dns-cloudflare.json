@@ -1,0 +1,19 @@
+{
+  "name": "dns-cloudflare",
+  "version": "1.0",
+  "description": "Publish the gateway's names at Cloudflare DNS automatically (records for the base domain and route hosts; only records it created are ever changed)",
+  "services": [
+    {
+      "name": "dns-sync",
+      "description": "DNS provider sync: keeps the gateway's DNS records at the provider current (leader only in a cluster)",
+      "exec": "/usr/bin/ziroctl",
+      "args": "gateway dns-sync",
+      "pidfile": "/run/ziro-dns-sync.pid",
+      "logfile": "/var/log/dns-sync.log",
+      "resources": {
+        "memory": "64Mi",
+        "pids": 64
+      }
+    }
+  ]
+}
