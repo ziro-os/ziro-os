@@ -160,8 +160,9 @@ handles it in layers.
 ## Keeping `ziroctl` current: `ziroctl update`
 
 `ziroctl` and `ziropkg` ship on their own release stream, so fixes reach hosts without an OS upgrade. Tools versions
-are `x.y.z.N`: `x.y.z` is the Ziro OS version and `N` the tools-only build of it (the build in the OS image is plain
-`x.y.z`). Every OS release tag also publishes the matching `tools/vX.Y.Z`; tools-only fixes ship as `tools/vX.Y.Z.N`.
+are `x.y.z` or `x.y.z.N`, where `N` counts the tools-only builds of `x.y.z` (see
+[upgrade.md](upgrade.md#tools-only-versions)). Every OS release tag also publishes the matching `tools/vX.Y.Z`;
+tools-only fixes ship as `tools/vX.Y.Z.N` and never need a new OS version.
 
 ```sh
 ziroctl update --check     # also runs daily from cron; the login summary shows the result

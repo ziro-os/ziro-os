@@ -58,7 +58,7 @@ jobs:
           curl -fsSLo /tmp/sc.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
           echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/sc.tar.xz" | sha256sum -c -
           tar -xJf /tmp/sc.tar.xz -C /tmp
-          /tmp/shellcheck-v0.11.0/shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh tests/router/*.sh
+          /tmp/shellcheck-v0.11.0/shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh tests/router/*.sh tests/release/*.sh
 
   unit-tests:
     name: Unit & Audit Tests
@@ -103,6 +103,9 @@ jobs:
           (cd tools/ziropkg && govulncheck ./...)
           for os in linux darwin windows; do (cd tools/zirocd && GOOS=$os govulncheck ./...); done
           (cd packages/cni-dhcp && GOOS=linux govulncheck github.com/containernetworking/plugins/plugins/ipam/dhcp)
+
+      - name: Test release scripts (tools version numbering, OS tag guard)
+        run: sh tests/release/test-release-scripts.sh
 
       - name: Test installer bootstrap transport
         run: python3 tests/security/test-userdata-transport.py

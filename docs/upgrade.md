@@ -89,13 +89,15 @@ unless you pass `--upgrade` to keep the data, or `--erase` (`ziro.erase`) to rei
 
 ## Tools-only versions
 
-The tools (`ziroctl`, `ziropkg`, `zirocd`) have their own version, `x.y.z.N`: `x.y.z` is the Ziro OS version the
-build belongs to and `N` counts the tools-only builds of that same OS version. The build that ships inside an OS
-image is plain `x.y.z` (N = 0), so `1.0.21 < 1.0.21.1 < 1.0.21.10 < 1.0.22`.
+The tools (`ziroctl`, `ziropkg`, `zirocd`) have their own version, `x.y.z` or `x.y.z.N`. `x.y.z` is the base
+version (the one an OS release ships with, or the newest tools-only version since) and `N` counts the tools-only
+builds of that base. A build without `N` is `N = 0`: each version has exactly one spelling, `.0` and leading zeros
+are invalid, and the order is numeric, so `1.0.25 < 1.0.25.1 < 1.0.25.10 < 1.0.26`.
 
-A fix to the tools therefore never needs a new OS version: it is published as `tools/v1.0.21.3`, with no new OS image
-or kernel. `ziroctl upgrade` keeps reporting the last OS release (`x.y.z`); `ziroctl update` installs the new tools
-(`x.y.z.N`). `ziroctl version` shows both, and `ziroctl upgrade` keeps tools that are newer than the image's.
+A fix to the tools therefore never needs a new OS version: it is published as `tools/v1.0.25.2`, with no new OS image
+or kernel. `ziroctl upgrade` keeps reporting the last OS release (`x.y.z`); `ziroctl update` installs the new tools.
+`ziroctl version` shows both (`ziroctl version 1.0.25.2 (os 1.0.21, linux/amd64)`), and `ziroctl upgrade` keeps tools
+that are newer than the image's.
 
 `ziroctl update` only moves forward: `--version` with an older version is refused unless you add
 `--allow-downgrade`, and a binary that does not report the release's version when run is never installed.
@@ -123,8 +125,8 @@ Upgrade one node at a time. Drain it first, upgrade and reboot it, check
 
 ## Limitations
 
-- The release `SHA256SUMS` protects against corruption and tampering in transit (HTTPS).
-  It is **not signed**, so it does not protect against a compromised release. Signed
-  checksums are planned.
+- Release `SHA256SUMS` files are signed with the Ziro release key (`SHA256SUMS.sig`, ed25519). A release
+  published before signing existed is refused unless you pass `--allow-unsigned` (the checksums are still
+  verified), and a compromised release key is not detected by the signature alone.
 - Files that a new release removes are left in place, and old kernel module trees
   accumulate under `/lib/modules`.

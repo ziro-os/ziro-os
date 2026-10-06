@@ -18,7 +18,7 @@ invited to become maintainers by the existing maintainers.
 ## Releases
 
 - **OS releases** are tagged `vX.Y.Z` with `scripts/release.sh` ([CONTRIBUTING](community/CONTRIBUTING.md#-release-management--automation)).
-- **Tools** (`ziroctl`, `ziropkg`) release on their own stream, tagged `tools/vX.Y.Z`.
+- **Tools** (`ziroctl`, `ziropkg`, `zirocd`) release on their own stream, tagged `tools/vX.Y.Z` or `tools/vX.Y.Z.N` (the Nth tools-only build, so a CLI fix never needs a new OS version).
 - **The SDK** is tagged `sdk/vX.Y.Z` and follows semantic versioning.
 - Release artifacts are built and signed in CI ([SECURITY.md](SECURITY.md#signing-keys)). Only the latest release
   receives fixes.

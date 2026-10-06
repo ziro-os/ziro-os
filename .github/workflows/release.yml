@@ -2,8 +2,9 @@ name: Ziro-OS Release & Image Publishing
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: # vX.Y.Z and vX.Y.Z-rc1; a four-part v1.1.0.3 is a tools build (tools/v1.1.0.3), never an OS release
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
     inputs:
       version:
@@ -41,6 +42,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Manual runs bypass the tag filter above, so check the version here too.
+      - name: Check the OS release tag
+        env:
+          TAG: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+          scripts/release/check-tag.sh "$TAG"
 
       - name: Compare with the last OS release
         id: diff

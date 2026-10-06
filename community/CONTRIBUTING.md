@@ -259,6 +259,24 @@ The script automatically:
 5. Pushes the branch and tag to the remote repository.
 6. Triggers GitHub Actions to build multi-arch images, publish release assets, push container images to GitHub Container Registry (`ghcr.io`), and deploy the release catalog to GitHub Pages.
 
+### Tools-only releases (`x.y.z.N`)
+
+A fix that touches only `ziroctl`, `ziropkg`, `zirocd` or the SDK does not need an OS release. It is published as
+the next **tools build**, `tools/vX.Y.Z.N`: `X.Y.Z` is the newest tools version and `N` counts the builds of it
+(`1.0.25` → `1.0.25.1` → `1.0.25.2`). `N` starts at 1, `.0`, leading zeros and a fifth part are invalid, and the order
+is numeric (`.10` is newer than `.9`).
+
+- **Automatic number:** run the *Tools Release* workflow by hand on `main` with the version left empty. It takes
+  the next `N` of the newest `tools/v*` tag (`scripts/release/tools-version.sh`).
+- **Or push the tag yourself:** `git tag tools/v1.0.25.2 && git push origin tools/v1.0.25.2`. The workflow refuses
+  a version that is not higher than every existing tools tag, because clients install only the newest one.
+- **OS tags stay three parts.** `vX.Y.Z.N` never starts an OS release (`scripts/release/check-tag.sh`); the OS
+  workflow ignores it.
+- **Compatibility:** a build must stay wire- and state-compatible with the other builds of its `X.Y.Z`. Nodes of a
+  cluster can run different tools builds, and `ziroctl update --rollback` restores the previous binary. A change to the
+  cluster protocol or to state that needs a migration needs a new OS release.
+- Hosts never go backwards by themselves: `ziroctl update --version <older>` needs `--allow-downgrade`.
+
 ---
 
 ## 🔒 Security Vulnerability Reporting

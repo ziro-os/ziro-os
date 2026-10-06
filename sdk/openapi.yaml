@@ -40,7 +40,7 @@ paths:
     get:
       x-ziro-role: public
       tags: [host]
-      summary: Liveness (no token needed)
+      summary: Liveness (no token needed); version is the tools version (X.Y.Z or X.Y.Z.N), os_version the installed Ziro OS
       security: []
       responses:
         "200": { $ref: "#/components/responses/Object" }

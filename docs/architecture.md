@@ -56,11 +56,14 @@ flowchart TB
   client and per token), the audit record of every change and JSON errors come from that table. Handlers call the
   same operation functions as the CLI commands, never the CLI binary or copied logic, and the OpenAPI spec is
   checked against the table.
-- **Tools releases:** `ziroctl`/`ziropkg` ship on their own signed stream (`tools/vX.Y.Z`); `ziroctl update` swaps
-  them atomically and updates the integrity baselines. Each OS tag `vX.Y.Z` also publishes `tools/vX.Y.Z`;
+- **Tools releases:** `ziroctl`/`ziropkg`/`zirocd` ship on their own signed stream (`tools/vX.Y.Z` and
+  `tools/vX.Y.Z.N`, the Nth tools-only build of X.Y.Z; numeric order, one spelling per version); `ziroctl update`
+  swaps them atomically, runs each new binary and installs it only if it reports the release version, refuses
+  older versions unless `--allow-downgrade`, and updates the integrity baselines. Each OS tag `vX.Y.Z` also publishes `tools/vX.Y.Z`;
   hosts find the newest one from the tag refs, so OS releases never push it off a page of releases. OS releases sign their `SHA256SUMS` with the same key.
-  A version whose changes since the last OS release touch only the tools stream (`tools/`, `sdk/`, docs) is
-  released as `tools/vX.Y.Z` alone. `release.yml` skips the kernels and images, decided by
+  Changes that touch only the tools stream (`tools/`, `sdk/`, docs) are released as the next
+  `tools/vX.Y.Z.N` and do not need an OS version; an OS tag must have exactly three parts
+  (`scripts/release/check-tag.sh`). `release.yml` skips the kernels and images, decided by
   `scripts/release/os-changed.sh`; `force_os` on a manual run overrides that.
 - **Deploy from git (ziroctld):** `ziroctl` run as `/usr/bin/ziroctld` (one binary, so `ziroctl update` keeps it
   current) is the deploy daemon. It clones over https, detects the build or uses the repo's Dockerfile, builds with

@@ -16,8 +16,8 @@ var (
 )
 
 type VersionInfo struct {
-	// Version is the tools version: X.Y.Z for the build that ships with Ziro OS X.Y.Z, X.Y.Z.N for
-	// the Nth tools-only build since. OSVersion is the Ziro OS installed on this host (from
+	// Version is the tools version: X.Y.Z, or X.Y.Z.N for the Nth tools-only build of X.Y.Z (the
+	// base can be ahead of the installed OS: tools-only releases do not bump it). OSVersion is the Ziro OS installed on this host (from
 	// /etc/ziro-release; omitted where there is none, e.g. a workstation).
 	Version   string `json:"version"`
 	OSVersion string `json:"os_version,omitempty"`

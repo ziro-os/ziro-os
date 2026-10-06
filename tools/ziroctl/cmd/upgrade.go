@@ -1055,7 +1055,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	}
 	current := readRelease("/etc/ziro-release")["VERSION"]
 	if current == "" {
-		current = release.OS(Version) // Version is the tools version (X.Y.Z.N); the OS is its X.Y.Z
+		current = release.OS(Version) // no /etc/ziro-release (not a Ziro OS host): the tools version's X.Y.Z is the best guess
 	}
 	rel, err := fetchRelease(cmd.Context(), upgradeVersion)
 	if err != nil {

@@ -1,10 +1,14 @@
 name: Tools Release (ziroctl, ziropkg & zirocd)
 
-# Publishes ziroctl and ziropkg on their own release stream (tags tools/vX.Y.Z), independent of
-# OS releases. Hosts install them with `ziroctl update`, which accepts a release only if
+# Publishes ziroctl and ziropkg on their own release stream (tags tools/vX.Y.Z and
+# tools/vX.Y.Z.N), independent of OS releases. Hosts install them with `ziroctl update`, which accepts a release only if
 # SHA256SUMS carries a valid signature from the Ziro release key (secret ZIRO_RELEASE_KEY,
 # ed25519; public half in tools/ziroctl/cmd/update.go) and every binary matches it.
 # Every OS release tag (vX.Y.Z) also publishes tools/vX.Y.Z, so the stream never falls behind.
+# A tools-only fix never needs a new OS version: it is the next build, tools/vX.Y.Z.N (N >= 1,
+# assigned by scripts/release/tools-version.sh: run this workflow by hand with the version left
+# empty, or push tools/vX.Y.Z.N yourself). Clients install only the newest tag, so a version
+# that is not higher than every existing tools release is refused.
 # zirocd (the router client, Linux/macOS/Windows) ships here too and updates itself from it with
 # the same signature check; Windows zips add the signed Wintun driver, pinned by SHA-256.
 # The same Linux zirocd binaries are published as the container image ghcr.io/<owner>/zirocd
@@ -12,23 +16,32 @@ name: Tools Release (ziroctl, ziropkg & zirocd)
 on:
   push:
     tags:
-      - 'tools/v*'
-      - 'v*'
+      - 'tools/v[0-9]+.[0-9]+.[0-9]+'
+      - 'tools/v[0-9]+.[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+' # an OS release also publishes its tools (4 parts and -rc tags never match)
   workflow_dispatch:
     inputs:
       version:
-        description: 'Tools version (e.g. v1.0.17)'
-        required: true
+        description: 'Tools version X.Y.Z or X.Y.Z.N; leave empty for the next build (N + 1 of the newest)'
+        required: false
+        default: ''
       min_os:
-        description: 'Oldest Ziro OS version these binaries run on'
-        required: true
-        default: '1.0.16'
+        description: 'Oldest Ziro OS version these binaries run on; empty = tools/MIN_OS'
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
+# One release at a time: two runs would both compute the same "next" version.
+concurrency:
+  group: tools-release
+  cancel-in-progress: false
+
 jobs:
   release:
+    # Manual runs build the branch they run on; only main may publish.
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -44,14 +57,17 @@ jobs:
       - name: Version
         id: v
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
           INPUT_MIN_OS: ${{ github.event.inputs.min_os }}
         run: |
-          v="${INPUT_VERSION:-${GITHUB_REF_NAME#tools/}}"
-          v="${v#v}"
-          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version $v"; exit 1; }
+          # The existing tools tags decide the build number; the checkout is shallow, so ask the API.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/tools/v" --jq '.[].ref' > "$RUNNER_TEMP/tools-tags"
+          ref=""; [ "$GITHUB_REF_TYPE" = tag ] && ref="$GITHUB_REF_NAME"
+          v=$(scripts/release/tools-version.sh resolve "$ref" "$INPUT_VERSION" "$(cat VERSION)" "$RUNNER_TEMP/tools-tags") || { echo "::error::bad or non-newest tools version (see above)"; exit 1; }
           min_os="${INPUT_MIN_OS:-$(cat tools/MIN_OS)}"
-          [[ "$min_os" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad min_os $min_os"; exit 1; }
+          [[ "$min_os" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad min_os $min_os (an OS version, X.Y.Z)"; exit 1; }
+          echo "Tools release $v (min OS $min_os)"
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "min_os=$min_os" >> "$GITHUB_OUTPUT"
 
@@ -60,12 +76,14 @@ jobs:
         with:
           go-version: '1.27.x'
           cache-dependency-path: |
+            sdk/go.sum
             tools/ziroctl/go.sum
             tools/ziropkg/go.sum
             tools/zirocd/go.sum
 
       - name: Test
         run: |
+          (cd sdk && go test ./...)
           (cd tools/ziroctl && go test ./...)
           (cd tools/zirocd && go test ./...)
 
@@ -90,6 +108,17 @@ jobs:
           done
           printf '{"version":"%s","min_os":"%s"}\n' "$VERSION" "$MIN_OS" > out/tools.json
           (cd out && sha256sum ziroctl-* ziropkg-* zirocd-* tools.json > SHA256SUMS && cat SHA256SUMS)
+
+      # ziroctl update runs a new binary and installs it only if it reports the release version
+      # (a build that does not would look "available" forever); fail here, before publishing.
+      - name: Check the binaries report the release version
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          check() { [ "$2" = "$VERSION" ] || { echo "::error::$1 reports version '$2', not $VERSION"; exit 1; }; }
+          check ziroctl "$(out/ziroctl-x86_64 version --json | jq -r .version)"
+          check ziropkg "$(out/ziropkg-x86_64 version | awk 'NR==1 {print $3}')"
+          check zirocd "$(out/zirocd-linux-amd64 version | head -1)"
 
       - name: Sign SHA256SUMS
         env:
@@ -137,11 +166,24 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
+      # Someone may have published a newer version while this run built: do not publish below it.
+      - name: Re-check the version is still the newest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/tools/v" --jq '.[].ref' > "$RUNNER_TEMP/tools-tags"
+          scripts/release/tools-version.sh resolve "tools/v$VERSION" "" "$(cat VERSION)" "$RUNNER_TEMP/tools-tags" > /dev/null
+
+      # Published as a draft first: clients take the newest tools/v* tag, so it must carry every
+      # asset (SHA256SUMS and its signature included) the moment it becomes visible.
       - name: Publish
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: tools/v${{ steps.v.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: "ziroctl, ziropkg & zirocd v${{ steps.v.outputs.version }}"
+          draft: true
           make_latest: false # OS releases stay "latest"; ziroctl update lists tools/v* itself
           generate_release_notes: true
           files: |
@@ -151,3 +193,9 @@ jobs:
             out/tools.json
             out/SHA256SUMS
             out/SHA256SUMS.sig
+
+      - name: Make the release visible
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: gh release edit "tools/v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

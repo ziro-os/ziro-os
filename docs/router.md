@@ -78,7 +78,7 @@ sudo zirocd logout                               # disconnect and delete the key
 
 ### Updates
 
-zirocd follows the tools release stream (`tools/vX.Y.Z`), which is built for all six targets by `.github/workflows/tools-release.yml` with build-provenance attestations.
+zirocd follows the tools release stream (`tools/vX.Y.Z` and `tools/vX.Y.Z.N`), which is built for all six targets by `.github/workflows/tools-release.yml` with build-provenance attestations.
 
 - Every 6 hours (with jitter) it checks for a newer version, or for the version the network admin pinned (`ziroctl router network set office --client-version X.Y.Z`).
 - It installs only if `SHA256SUMS` carries the Ziro release signature (ed25519) and the binary matches. The swap is atomic, and the previous binary is kept.
@@ -292,7 +292,7 @@ Selectors are `*`, `tag:<t>`, `group:<g>`, `member:<name>`, `user:<email>` (devi
 
 **Subnet routes.** See [Subnet routers](#subnet-routers).
 
-**Client version.** `ziroctl router network set office --client-version 1.0.21` pins the fleet's zirocd version (`latest` unpins it). Devices update to it through the signed release stream.
+**Client version.** `ziroctl router network set office --client-version 1.0.21` pins the fleet's zirocd version, `X.Y.Z` or a tools-only build `X.Y.Z.N` (`latest` unpins it). A pin stops automatic updates, including the builds after it. Devices update to it through the signed release stream.
 
 ## How it works
 
