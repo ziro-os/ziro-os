@@ -114,15 +114,6 @@ func (f *fakeCA) jws(r *http.Request) (hdr map[string]any, payload []byte) {
 	return hdr, payload
 }
 
-func (f *fakeCA) thumb(hdr map[string]any) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if kid, ok := hdr["kid"].(string); ok {
-		return f.accounts[kid]
-	}
-	return ""
-}
-
 func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Replay-Nonce", fmt.Sprintf("n%d", time.Now().UnixNano()))
 	reply := func(code int, v any) {
@@ -140,7 +131,11 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 		jwk, _ := hdr["jwk"].(map[string]any)
 		x, _ := base64.RawURLEncoding.DecodeString(fmt.Sprint(jwk["x"]))
 		y, _ := base64.RawURLEncoding.DecodeString(fmt.Sprint(jwk["y"]))
-		pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
+		pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, x...), y...))
+		if err != nil {
+			reply(400, map[string]string{"type": "urn:ietf:params:acme:error:malformed"})
+			return
+		}
 		th, err := acme.JWKThumbprint(pub)
 		if err != nil {
 			reply(400, map[string]string{"type": "urn:ietf:params:acme:error:malformed"})
