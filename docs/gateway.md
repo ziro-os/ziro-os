@@ -77,6 +77,9 @@ ziroctl gateway status                     # upstream health, active connections
 - `auto` (default): ACME HTTP-01 or TLS-ALPN-01, with HTTP redirected to HTTPS by a 308.
 - `internal`: the gateway's own CA, for private hosts. Trust it with `ziroctl gateway ca`.
 - `cert:<name>`: an uploaded certificate (`gateway cert add <name> --cert chain.pem --key key.pem`), for wildcards and corporate CAs.
+- `dns01`: a certificate the gateway gets through ACME DNS-01 and renews by itself, wildcards included, with no inbound port needed
+  for validation. It needs a DNS provider and a certificate covering the route's hosts
+  (`ziroctl dns cert add '*.example.com'`); see [dns.md](dns.md#wildcard-certificates-acme-dns-01).
 - `off`: plain HTTP.
 
 **L4**
@@ -98,7 +101,7 @@ ziroctl gateway domain                         # the domain, the gateway address
 ziroctl gateway domain rm
 ```
 
-- **TLS.** Public names get ACME certificates. Private names (`.local`, `.internal`, `.lan`, `.test`, `.home.arpa`,
+- **TLS.** Public names get ACME certificates (`--wildcard-cert` below makes it one wildcard certificate through DNS-01). Private names (`.local`, `.internal`, `.lan`, `.test`, `.home.arpa`,
   or no dot) use the gateway's own CA; trust it with `ziroctl gateway ca`.
 - **Per app.** `ziroctl deploy ... --expose host` still wins over the domain.
 - **DNS.** Setting the domain adds `*.apps.example.com A <gateway address>` to the built-in DNS (see
@@ -107,6 +110,10 @@ ziroctl gateway domain rm
   connected (`ziroctl dns provider add cloudflare`, see [dns.md](dns.md#public-dns-provider-cloudflare)) they are created
   and kept current automatically, otherwise the command prints them. With no gateway node yet on a cluster, it says
   so and adds nothing.
+- **Wildcard certificate.** `ziroctl gateway domain set apps.example.com --wildcard-cert` serves every app with one
+  `*.apps.example.com` certificate issued through ACME DNS-01 instead of one HTTP-01 certificate per app. It needs a
+  [DNS provider](dns.md#public-dns-provider-cloudflare) and a public name. Setting the domain again without the flag goes back to HTTP-01
+  and drops the certificate.
 - **Existing apps** take the domain on their next release (`ziroctl deploy redeploy <app>`). Removing the domain
   leaves the routes it created; remove them with `ziroctl gateway route rm`.
 - **API.** `/api/v1/gateway/domain` (see below).
@@ -188,7 +195,8 @@ flowchart LR
 - **TLS:**
   - TLS 1.2 minimum (1.3 for HTTP/3). ACME certificates are cached in `/var/lib/ziro/gateway/certs` (0700).
   - Only hosts of `tls auto` routes can trigger issuance, so a random SNI can't make the gateway request certificates.
-  - ACME can't issue wildcards over HTTP-01, so wildcard hosts need `cert:<name>` or `internal`.
+  - ACME can't issue wildcards over HTTP-01, so wildcard hosts need `dns01` (with a DNS provider), `cert:<name>` or `internal`.
+  - A `dns01` route is served only once its certificate exists; until then the gateway does not serve its host.
   - The internal CA (ECDSA P-256) signs 30-day leaf certificates on demand. Its key is 0600, or a cluster secret.
 - **Private ACME CA:** `gateway acme --directory https://ca.internal/acme/directory` (for example step-ca). Restart the `gateway` service after changing ACME settings.
 - **Timeouts:**
@@ -197,7 +205,7 @@ flowchart LR
 - **Firewall:** the gateway opens exactly what it serves, under the comment `Ziro gateway`:
   - tcp/80, tcp/443, udp/443 (HTTP/3), and each TCP route's port
   - it closes a TCP route's port when the route is removed
-- **Certificates on several gateway nodes:** with ACME, each node gets its own certificate, which counts against Let's Encrypt's 50 per domain per week. For many gateways, use `cert:<name>`, `internal`, or a private ACME CA.
+- **Certificates on several gateway nodes:** with ACME, each node gets its own certificate, which counts against Let's Encrypt's 50 per domain per week. For many gateways, use `dns01` (one certificate, issued by the leader and shared with every gateway node as a cluster secret), `cert:<name>`, `internal`, or a private ACME CA.
 - **Behind a load balancer:** the client IP used for `--allow-cidr`, `--rate` and `ip_hash` is the TCP peer. There is no PROXY-protocol support yet.
 
 ## Remote access (WireGuard peers)

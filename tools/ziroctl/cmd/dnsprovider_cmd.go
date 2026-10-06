@@ -394,7 +394,35 @@ var dnsSyncServeCmd = &cobra.Command{
 				alertf("high", "dns", "DNS provider sync failed", map[string]any{"error": err.Error()})
 			},
 		}
-		fmt.Printf("[dns] provider sync running (every %s and on route changes)\n", dnsSyncEvery)
+		// Certificates are issued on their own goroutine: an issuance takes minutes and must not delay
+		// the record sync.
+		cl := &certLoop{
+			store:  gatewayStore,
+			leader: l.leader,
+			issue:  issueAndStore,
+			now:    time.Now,
+			announce: func(c DNSCert, why string, err error) {
+				details := map[string]any{"certificate": c.Name, "names": c.Domains, "reason": why}
+				if err != nil {
+					details["error"] = err.Error()
+					fmt.Printf("[dns] certificate %s (%s) failed: %v\n", c.Name, why, err)
+					sev := "high"
+					if s, serr := gatewayStore(); serr == nil {
+						sev = certAlertSeverity(s, c, time.Now())
+					}
+					alertf(sev, "cert", "DNS-01 certificate "+c.Name+" could not be issued", details)
+					return
+				}
+				fmt.Printf("[dns] certificate %s issued (%s)\n", c.Name, why)
+				alertf("info", "cert", "DNS-01 certificate "+c.Name+" issued", details)
+			},
+		}
+		go func() {
+			for range time.Tick(dnsPollEvery) {
+				cl.tick()
+			}
+		}()
+		fmt.Printf("[dns] provider sync running (every %s and on route changes); DNS-01 certificates renewed %s before expiry\n", dnsSyncEvery, dnsCertRenewBefore)
 		for range time.Tick(dnsPollEvery) {
 			l.tick()
 		}

@@ -132,3 +132,31 @@ func TestPluginManifestRejectsUnsafe(t *testing.T) {
 		t.Error("unknown field accepted")
 	}
 }
+
+func TestDNS01TLSMode(t *testing.T) {
+	r := GatewayRoute{Name: "w", Hosts: []string{"*.example.com"}, To: []GatewayUpstream{{Address: "127.0.0.1:80"}}, TLS: "dns01"}
+	r.Normalize()
+	if err := r.Validate(); err != nil {
+		t.Fatalf("a wildcard host is valid with dns01: %v", err)
+	}
+	r.TLS = "auto"
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "dns01") {
+		t.Fatalf("HTTP-01 still refuses wildcards, and points at dns01: %v", err)
+	}
+	r.TLS = "nonsense"
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "dns01") {
+		t.Fatalf("the list of modes names dns01: %v", err)
+	}
+	for _, c := range []struct {
+		d    GatewayDomain
+		want string
+	}{
+		{GatewayDomain{Name: "apps.example.com"}, "auto"},
+		{GatewayDomain{Name: "apps.example.com", WildcardCert: true}, "dns01"},
+		{GatewayDomain{Name: "apps.internal", WildcardCert: true}, "internal"}, // no public CA for a private name
+	} {
+		if got := c.d.TLS(); got != c.want {
+			t.Errorf("%+v: TLS() = %q, want %q", c.d, got, c.want)
+		}
+	}
+}

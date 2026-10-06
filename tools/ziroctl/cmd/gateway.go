@@ -99,6 +99,10 @@ func gatewayConfigFor(st *ClusterState) *GatewayConfig {
 	eps, pods := appEndpoints(st), podEndpoints(st)
 	for _, r := range st.Routes {
 		r.Normalize()
+		var serve bool
+		if r, serve = resolveDNSCertRoute(st.DNSCloud, r, func(n string) bool { return st.Secrets[gatewayCertSecret(n)] != nil }); !serve {
+			continue // a DNS-01 route waits for its certificate
+		}
 		cfg.Routes = append(cfg.Routes, resolveTargets(r, func(app string) []string {
 			return clusterAppTargets(st, eps, pods, app)
 		}))

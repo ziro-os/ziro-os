@@ -268,6 +268,31 @@ func (c *Client) RemoveDNSCloudRecord(ctx context.Context, name, typ string) (ap
 	return c.del(ctx, "/api/v1/dns/cloud/records"+q)
 }
 
+// DNSCerts lists the certificates kept issued through ACME DNS-01, with expiry and last failure.
+func (c *Client) DNSCerts(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/dns/cloud/certs", &out)
+}
+
+// AddDNSCert keeps a certificate for these names issued through ACME DNS-01 (public names; a
+// wildcard such as "*.example.com" is allowed). name and provider may be empty.
+func (c *Client) AddDNSCert(ctx context.Context, domains []string, name, provider string) (map[string]any, error) {
+	var out map[string]any
+	body := map[string]any{"domains": domains, "name": name, "provider": provider}
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/dns/cloud/certs", body, &out)
+}
+
+func (c *Client) RemoveDNSCert(ctx context.Context, name string) (api.Message, error) {
+	return c.del(ctx, "/api/v1/dns/cloud/certs?name="+url.QueryEscape(name))
+}
+
+// RenewDNSCerts issues what is missing or due now (name "" = all; force = even if not due), on the
+// cluster leader.
+func (c *Client) RenewDNSCerts(ctx context.Context, name string, force bool) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/dns/cloud/certs/renew", map[string]any{"name": name, "force": force}, &out)
+}
+
 // ---- cluster (on a master) ----
 
 func (c *Client) Cluster(ctx context.Context) (map[string]any, error) {
