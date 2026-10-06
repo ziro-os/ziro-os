@@ -1,6 +1,6 @@
 # RFC 0002: Public DNS provider for the gateway's names
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Pull request:** the pull request that adds this file
 - **Follow-up:** ACME DNS-01 (wildcard certificates, no inbound :80) builds on this and is a separate RFC section in its own pull request.
 
