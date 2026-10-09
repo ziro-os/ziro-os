@@ -532,6 +532,8 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 						def.Check = v
 					case "user":
 						def.User = v
+					case "caps":
+						def.Caps = parseCapList(v)
 					case "env_file":
 						def.EnvFile = v
 					case "memory", "cpus", "pids":
@@ -561,6 +563,9 @@ func loadServiceDef(name string) (*ServiceDef, error) {
 				return nil, fmt.Errorf("%s: %w", confPath, err)
 			}
 			if err := def.Resources.Validate(); err != nil {
+				return nil, fmt.Errorf("%s: %w", confPath, err)
+			}
+			if err := def.ValidateCaps(); err != nil {
 				return nil, fmt.Errorf("%s: %w", confPath, err)
 			}
 			return def, nil
@@ -879,9 +884,11 @@ func spawnDaemon(def *ServiceDef) (*exec.Cmd, *os.File, error) {
 	_ = os.MkdirAll(filepath.Dir(def.PIDFile), 0755)
 	_ = os.MkdirAll(filepath.Dir(def.LogFile), 0755)
 
-	args := strings.Fields(def.Args)
 	// deepcode ignore CommandInjection: def.Exec comes from a root-owned, non-group/world-writable definition and passed trustedExecutable (absolute, root-owned, not writable by others); args are argv, no shell
-	cmd := exec.Command(def.Exec, args...)
+	cmd, err := serviceCommand(def)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	rotateLog(def.LogFile)
 	logF, err := os.OpenFile(def.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -890,7 +897,13 @@ func spawnDaemon(def *ServiceDef) (*exec.Cmd, *os.File, error) {
 		cmd.Stderr = logF
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := applyServiceIdentity(cmd, def); err != nil {
+	// A service with caps changes its own identity in "service exec" (it needs root to drop the
+	// bounding set), so the child starts as root and the user is not applied here.
+	identity := def
+	if len(def.Caps) > 0 {
+		identity = &ServiceDef{Name: def.Name}
+	}
+	if err := applyServiceIdentity(cmd, identity); err != nil {
 		if logF != nil {
 			logF.Close()
 		}
@@ -1135,7 +1148,7 @@ func init() {
 	serviceCmd.AddCommand(serviceStartCmd)
 	serviceCmd.AddCommand(serviceStopCmd)
 	serviceCmd.AddCommand(serviceRestartCmd)
-	serviceCmd.AddCommand(serviceSpawnCmd)
+	serviceCmd.AddCommand(serviceSpawnCmd, serviceExecCmd)
 	serviceCmd.AddCommand(serviceEnableCmd)
 	serviceCmd.AddCommand(serviceDisableCmd)
 	serviceCmd.AddCommand(serviceLogsCmd)
@@ -1200,6 +1213,9 @@ func supervisedConf(d ServiceDef) string {
 	fmt.Fprintf(&b, "name=%s\ndescription=%s\nexec=%s\nargs=%s\npidfile=%s\nlogfile=%s\n", d.Name, d.Description, d.Exec, d.Args, d.PIDFile, d.LogFile)
 	if d.User != "" {
 		fmt.Fprintf(&b, "user=%s\n", d.User)
+	}
+	if len(d.Caps) > 0 {
+		fmt.Fprintf(&b, "caps=%s\n", strings.Join(d.Caps, ","))
 	}
 	if d.EnvFile != "" {
 		fmt.Fprintf(&b, "env_file=%s\n", d.EnvFile)
