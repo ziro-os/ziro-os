@@ -27,6 +27,7 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 - [WireGuard VPN](wireguard.md): remote access to a host.
 - [Cloudflare Tunnel](cloudflare-tunnel.md): publish services without a public IP, with optional Zero Trust
   Access (`ziroctl cf`, opt-in module).
+- [Tailscale](tailscale.md): reach a host over your tailnet (`ziroctl tailscale`, opt-in module, closed by default).
 - [Global router](router.md): private networks for devices anywhere (zirocd, ACLs, SSO), and
   [running it in production](router-deploy.md).
 

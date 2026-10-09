@@ -172,6 +172,7 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | App network policy | `allow_from` per app → `inet ziro_cluster` nft table per node | every node | shipped |
 | Audit log | hash-chained JSONL, `/var/log/ziro/audit.log` | every host | shipped |
 | Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labelled gateway | shipped |
+| Tailscale | `ziroctl tailscale`; the `tailscale` module (signed catalog, daily update with rollback) runs `tailscaled` as its own user with only `CAP_NET_ADMIN`/`CAP_NET_RAW` (service `caps`, RFC 0003); ports open to the tailnet are interface-bound firewall rules ([tailscale.md](tailscale.md)) | any host, opt-in | shipped |
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
 | DNS provider | `dns provider`, `dns cloud`, `dns cert`; the `dns-cloudflare` module runs `gateway dns-sync`: records for the gateway's names created at Cloudflare, only ever touching records it owns, and ACME DNS-01 wildcard certificates issued and renewed; leader only in a cluster ([dns.md](dns.md#public-dns-provider-cloudflare)) | masters, or a standalone host | shipped (Cloudflare) |
