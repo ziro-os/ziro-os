@@ -826,6 +826,35 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/tailscale:
+    get:
+      x-ziro-role: viewer
+      tags: [network]
+      summary: 'Tailscale: {"enabled": false} when the module is off, else the node state (Running, NeedsLogin, …), tailnet, addresses, and peers online, direct and relayed'
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/tailscale/up:
+    post:
+      x-ziro-role: admin
+      tags: [network]
+      summary: 'Join a tailnet, {"auth_key": "tskey-…", "hostname": "web1", "tags": ["tag:server"], "login_server": "https://…", "accept_routes": false, "open_port": false}; the key (an auth key, or an OAuth client secret with a tag) is required here, handed to Tailscale as a 0600 file and never stored, logged or returned; the browser login is CLI only'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/tailscale/down:
+    post:
+      x-ziro-role: admin
+      tags: [network]
+      summary: Disconnect from the tailnet and keep this node's identity
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/tailscale/logout:
+    post:
+      x-ziro-role: admin
+      tags: [network]
+      summary: Leave the tailnet and remove this node from it
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/firewall/block:
     post:
       x-ziro-role: admin

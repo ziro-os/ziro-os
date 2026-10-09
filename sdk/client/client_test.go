@@ -95,3 +95,38 @@ func TestPushSource(t *testing.T) {
 		t.Fatalf("push: %v %v spec=%+v got=%d bytes", out, err, spec, len(got))
 	}
 }
+
+func TestTailscaleAndInterfaceRuleCalls(t *testing.T) {
+	var gotPath, gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotPath, gotMethod, gotBody = r.URL.Path, r.Method, string(b)
+		w.Write([]byte(`{"enabled":true,"state":"Running","status":"ok"}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if st, err := c.Tailscale(ctx); err != nil || st["state"] != "Running" || gotMethod != "GET" || gotPath != "/api/v1/tailscale" {
+		t.Fatalf("status: %v %v %s %s", st, err, gotMethod, gotPath)
+	}
+	if _, err := c.TailscaleJoin(ctx, TailscaleUp{AuthKey: "tskey-auth-abc", Hostname: "web1", Tags: []string{"tag:server"}}); err != nil ||
+		gotMethod != "POST" || gotPath != "/api/v1/tailscale/up" ||
+		gotBody != `{"auth_key":"tskey-auth-abc","hostname":"web1","tags":["tag:server"]}` {
+		t.Fatalf("join: %v %s %s %s", err, gotMethod, gotPath, gotBody)
+	}
+	for path, call := range map[string]func() error{
+		"/api/v1/tailscale/down":   func() error { _, err := c.TailscaleDown(ctx); return err },
+		"/api/v1/tailscale/logout": func() error { _, err := c.TailscaleLogout(ctx); return err },
+	} {
+		if err := call(); err != nil || gotPath != path || gotMethod != "POST" {
+			t.Errorf("%s: %v %s %s", path, err, gotMethod, gotPath)
+		}
+	}
+	if _, err := c.FirewallPortOn(ctx, "allow", "22/tcp", "tailnet ssh", "tailscale0"); err != nil ||
+		gotPath != "/api/v1/firewall/allow" || gotBody != `{"comment":"tailnet ssh","iface":"tailscale0","port":"22/tcp"}` {
+		t.Errorf("firewall on an interface: %v %s %s", err, gotPath, gotBody)
+	}
+}
