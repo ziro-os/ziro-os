@@ -382,7 +382,10 @@ def main():
         # Tailscale module wiring (no tailnet in CI): a stand-in module plus fake binaries exercise what the real
         # one does on enable: its own user, state/socket directories, tun device, tailscaled as that user with
         # only net_admin+net_raw, and the tailnet-only firewall rule.
-        ts_stub = '{"name":"tailscale","version":"1","description":"smoke stand-in"}'
+        # The stand-in declares the plugin directory so the framework records (and purge removes) it, as it
+        # does for the real module's artifacts.
+        ts_stub = ('{"name":"tailscale","version":"1","description":"smoke stand-in",'
+                   '"dirs":[{"path":"/var/lib/ziro/plugins/tailscale","mode":"0755"}]}')
         con.run(f"printf '%s' '{ts_stub}' > /tmp/ts.json && ziroctl plugin install -f /tmp/ts.json >/dev/null 2>&1; "
                 "mkdir -p /var/lib/ziro/plugins/tailscale && chmod 755 /var/lib/ziro/plugins/tailscale && "
                 "printf '#!/bin/sh\\nexec /usr/bin/tail -f /dev/null\\n' > /var/lib/ziro/plugins/tailscale/tailscaled && "
