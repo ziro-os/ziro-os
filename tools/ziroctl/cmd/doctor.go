@@ -151,6 +151,9 @@ func hostChecks() []doctorCheck {
 	if c, ok := dnsCertDoctorCheck(time.Now()); ok {
 		out = append(out, c)
 	}
+	if c, ok := tsDoctorCheck(); ok {
+		out = append(out, c)
+	}
 
 	fw := loadFirewallConfig().Enabled
 	out = append(out, doctorCheck{Name: "Firewall", Passed: fw, Details: map[bool]string{true: "enabled", false: "disabled"}[fw],

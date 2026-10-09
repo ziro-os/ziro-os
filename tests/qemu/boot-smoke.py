@@ -379,6 +379,38 @@ def main():
               and all(st.get(k) == "0000000000003000" for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")), out)
         con.run("ziroctl plugin disable capsvc --purge >/dev/null 2>&1; rm -f /tmp/capsvc.json", timeout=120)
 
+        # Tailscale module wiring (no tailnet in CI): a stand-in module plus fake binaries exercise what the real
+        # one does on enable: its own user, state/socket directories, tun device, tailscaled as that user with
+        # only net_admin+net_raw, and the tailnet-only firewall rule.
+        # The stand-in declares the plugin directory so the framework records (and purge removes) it, as it
+        # does for the real module's artifacts.
+        ts_stub = ('{"name":"tailscale","version":"1","description":"smoke stand-in",'
+                   '"dirs":[{"path":"/var/lib/ziro/plugins/tailscale","mode":"0755"}]}')
+        con.run(f"printf '%s' '{ts_stub}' > /tmp/ts.json && ziroctl plugin install -f /tmp/ts.json >/dev/null 2>&1; "
+                "mkdir -p /var/lib/ziro/plugins/tailscale && chmod 755 /var/lib/ziro/plugins/tailscale && "
+                "printf '#!/bin/sh\\nexec /usr/bin/tail -f /dev/null\\n' > /var/lib/ziro/plugins/tailscale/tailscaled && "
+                "printf '#!/bin/sh\\nexit 0\\n' > /var/lib/ziro/plugins/tailscale/tailscale && "
+                "chmod 755 /var/lib/ziro/plugins/tailscale/tailscaled /var/lib/ziro/plugins/tailscale/tailscale", timeout=120)
+        rc, out = con.run("ziroctl tailscale setup 2>&1; echo SETUP=$?; sleep 2; P=$(cat /run/ziro-tailscaled.pid); "
+                          "grep -E '^(Name|Uid|CapEff|CapBnd|NoNewPrivs):' /proc/$P/status; "
+                          "echo TSUID=$(id -u tailscale); "
+                          "echo MODES=$(stat -c '%a:%U' /var/lib/ziro/tailscale /run/tailscale /etc/ziro/tailscale/tailscaled.env | tr '\\n' ' '); "
+                          "echo TUN=$([ -c /dev/net/tun ] && echo yes); echo ENV=$(grep -c TS_NO_LOGS_NO_SUPPORT /etc/ziro/tailscale/tailscaled.env)", timeout=120)
+        st = {k: " ".join(v.split()) for k, _, v in (l.partition(":") for l in out.splitlines())}
+        uid = re.search(r"TSUID=(\d+)", out)
+        check("tailscale setup: own user, 0700 state, 0750 socket dir, tun device, tailscaled with only net_admin+net_raw",
+              "SETUP=0" in out and uid is not None and st.get("Name") == "tail" and st.get("Uid", "").split(" ")[0] == uid.group(1) and uid.group(1) != "0"
+              and st.get("CapEff") == "0000000000003000" and st.get("CapBnd") == "0000000000003000" and st.get("NoNewPrivs") == "1"
+              and "700:tailscale" in out and "750:tailscale" in out and "600:root" in out and "TUN=yes" in out and "ENV=1" in out, out)
+        rc, out = con.run("ziroctl tailscale allow ssh >/dev/null 2>&1; "
+                          "echo RULE=$(nft list chain inet ziro input | grep -c 'iifname \"tailscale0\" tcp dport 22 accept'); "
+                          "ziroctl tailscale ls; ziroctl tailscale deny ssh >/dev/null 2>&1; "
+                          "echo GONE=$(nft list chain inet ziro input | grep -c 'iifname \"tailscale0\"')")
+        check("tailscale allow ssh opens 22/tcp for tailscale0 only; deny closes it", "RULE=1" in out and "22/tcp" in out and "GONE=0" in out, out)
+        con.run("ziroctl tailscale teardown >/dev/null 2>&1; ziroctl plugin disable tailscale --purge >/dev/null 2>&1; rm -f /tmp/ts.json", timeout=120)
+        rc, out = con.run("echo CONF=$([ -e /etc/ziro/services/tailscaled.conf ] && echo kept || echo gone); echo PLUGIN=$([ -e /var/lib/ziro/plugins/tailscale ] && echo kept || echo gone)")
+        check("tailscale disable --purge removes the service and the binaries", "CONF=gone" in out and "PLUGIN=gone" in out, out)
+
         # Login summary: each address once (no container veths), nothing hardcoded.
         rc, out = con.run("ziroctl motd; echo JSONADDR=$(ziroctl motd --json | grep -c '\"addresses\"')")
         addrs = re.findall(r"\b\d+\.\d+\.\d+\.\d+\b", out.split("Network", 1)[-1].split("\n")[0]) if "Network" in out else []

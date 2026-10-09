@@ -83,6 +83,7 @@ ziroctl plugin repo rm acme
 | `security` | The security pack: `clamav` + `auditd` + `integrity`. |
 | `s3-ziro` (pkgs) | S3-compatible object storage ([Garage](https://garagehq.deuxfleurs.fr)) for backups, snapshots and apps. Runs as `garage`, S3 API on `127.0.0.1:3900` (`--set bind=0.0.0.0` to expose it; the firewall still applies), RPC and admin API on loopback. Creates the bucket `ziro-backups` and the rclone remote `ziro_s3`. Settings: `capacity` (10G), `bind`, `port`. |
 | `cloudflared` (pkgs) | Cloudflare Tunnel: publish hostnames without a public IP, optional Zero Trust Access. Runs as `cloudflared`; the static upstream binary is sha256-pinned and upgraded daily (`--set auto_update=false` to stop). Managed with `ziroctl cf`: see [cloudflare-tunnel.md](cloudflare-tunnel.md). |
+| `tailscale` (pkgs) | Tailscale: reach the host over your tailnet. Runs as the `tailscale` user with only `CAP_NET_ADMIN` and `CAP_NET_RAW`; the static upstream binaries are sha256-pinned and upgraded daily with rollback. Closed by default: nothing is reachable from the tailnet until `ziroctl tailscale allow`. Managed with `ziroctl tailscale`: see [tailscale.md](tailscale.md). |
 | `rclone-ziro` (pkgs) | rclone for S3, GCS, Azure Blob, B2, SFTP and more. Enables `ziroctl backup create --remote` and `backup restore remote:path`. Your remotes go in `/etc/ziro/rclone.conf` (`rclone --config /etc/ziro/rclone.conf config`). |
 
 ### Off-host backups

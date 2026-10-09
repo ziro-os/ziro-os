@@ -207,13 +207,17 @@ func tunnelIDFromToken(tok string) (account, id string, err error) {
 
 // ---- services ----
 
-func ensureCFUser() error {
-	if _, err := user.Lookup(cfUser); err == nil {
+func ensureCFUser() error { return ensureServiceUser(cfUser, "Cloudflare Tunnel") }
+
+// ensureServiceUser creates an unprivileged system account (no home, no shell, no login) for a
+// module's daemon, once.
+func ensureServiceUser(name, gecos string) error {
+	if _, err := user.Lookup(name); err == nil {
 		return nil
 	}
 	for _, c := range [][]string{
-		{"addgroup", "-S", cfUser},
-		{"adduser", "-S", "-D", "-H", "-h", "/var/empty", "-s", "/sbin/nologin", "-G", cfUser, "-g", "Cloudflare Tunnel", cfUser},
+		{"addgroup", "-S", name},
+		{"adduser", "-S", "-D", "-H", "-h", "/var/empty", "-s", "/sbin/nologin", "-G", name, "-g", gecos, name},
 	} {
 		if out, err := exec.Command(c[0], c[1:]...).CombinedOutput(); err != nil && !strings.Contains(string(out), "in use") {
 			return fmt.Errorf("%s: %v: %s", c[0], err, strings.TrimSpace(string(out)))
@@ -992,89 +996,23 @@ with --cron unless the module was enabled with --set auto_update=false.`,
   ziroctl cf update --check`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		st := enabledModules()[cfModule]
-		if cfCron {
-			if st.Settings["auto_update"] == "false" {
-				return nil
-			}
-			time.Sleep(time.Duration(time.Now().UnixNano() % int64(30*time.Minute))) // spread hosts out
-		}
-		repos, err := catalogRepos("module")
-		if err != nil {
-			return err
-		}
-		for _, r := range repos {
-			if r.Official {
-				if _, err := refreshRepo(r); err != nil {
-					return fmt.Errorf("refresh catalog %s: %w", r.Name, err)
-				}
-			}
-		}
-		all, err := loadManifests()
-		if err != nil {
-			return err
-		}
-		cur, _ := installedManifest(all, cfModule)
-		next, ok := all[cfModule]
-		if !ok {
-			return errors.New("cloudflared is no longer in the catalog")
-		}
-		avail := next.Version != cur.Version
-		if cfCheck {
-			return printResult(map[string]any{"current": cur.Version, "available": next.Version, "update": avail}, func() {
-				if avail {
-					fmt.Printf("cloudflared %s → %s available: ziroctl cf update\n", cur.Version, next.Version)
-				} else {
-					fmt.Printf("= cloudflared is up to date (%s)\n", cur.Version)
-				}
-			})
-		}
-		if !avail {
-			if !cfCron {
-				fmt.Printf("= cloudflared is up to date (%s)\n", cur.Version)
-			}
-			return nil
-		}
-		prev := cfBinary + ".prev"
-		if b, err := os.ReadFile(cfBinary); err == nil {
-			_ = writeFileAtomic(prev, b, 0755)
-		}
-		if err := upgradeModule(cfModule, false); err != nil {
-			return err
-		}
-		return cfRestartChecked(prev, next.Version)
+		return updateModuleBinaries(binaryUpdate{
+			Module: cfModule, Title: "cloudflared", Binaries: []string{cfBinary},
+			AuditSource: "cf", AuditAction: "cf update", Check: cfCheck, Cron: cfCron,
+			AutoSetting: "auto_update", AlertOnError: "cloudflared", Restart: cfRestartOnto,
+		})
 	},
 }
 
-// cfRestartChecked restarts running connectors onto the new binary and puts prev back when the
-// named tunnel doesn't reconnect.
-// ponytail: after a rollback the next boot fetches the pinned binary again (one more try); a
-// held version would need state in the module.
-func cfRestartChecked(prev, version string) error {
+// cfRestartOnto restarts running connectors onto the new binary and reports whether the named
+// tunnel reconnected (a quick tunnel alone has nothing to wait for).
+func cfRestartOnto() bool {
 	for _, s := range []string{cfService, cfQuickSvc} {
 		if cfRunning(s) {
 			_ = restartSupervised(s)
 		}
 	}
-	if !cfRunning(cfService) || cfWaitReady(cfMetrics, 30*time.Second) > 0 {
-		_ = os.Remove(prev)
-		_ = auditLog("ziroctl", "cf", "cf update", "cloudflared "+version, nil)
-		fmt.Printf("✓ cloudflared %s\n", version)
-		return nil
-	}
-	b, err := os.ReadFile(prev)
-	if err == nil {
-		err = writeFileAtomic(cfBinary, b, 0755)
-	}
-	if err == nil {
-		err = restartSupervised(cfService)
-	}
-	msg := fmt.Sprintf("cloudflared %s did not reconnect; previous version restored", version)
-	if err != nil {
-		msg = fmt.Sprintf("cloudflared %s did not reconnect and the rollback failed: %v", version, err)
-	}
-	alertf("high", "cloudflared", msg, nil)
-	return errors.New(msg)
+	return !cfRunning(cfService) || cfWaitReady(cfMetrics, 30*time.Second) > 0
 }
 
 func init() {
