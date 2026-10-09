@@ -185,6 +185,9 @@ func (m ModuleManifest) Validate() error {
 		if err := s.Resources.Validate(); err != nil {
 			return fmt.Errorf("service %s: %w", s.Name, err)
 		}
+		if err := s.ValidateCaps(); err != nil {
+			return err
+		}
 		if s.EnvFile != "" {
 			if err := abs(s.EnvFile); err != nil {
 				return err

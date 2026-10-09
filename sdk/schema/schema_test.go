@@ -123,6 +123,11 @@ func TestPluginManifestRejectsUnsafe(t *testing.T) {
 		{Name: "p", Files: []ModuleFile{{Path: "/etc/p.conf", Mode: "0644", Content: "{{setting.undefined}}"}}},
 		{Name: "p", Packages: []string{"x; rm -rf /"}},
 		{Name: "p", Services: []ModuleService{{Name: "s", Exec: "/bin/s", User: "root:0", PIDFile: "/run/s.pid", LogFile: "/var/log/s.log"}}},
+		// capabilities: only the reviewed names, only for an unprivileged user, no duplicates
+		{Name: "p", Services: []ModuleService{{Name: "s", Exec: "/bin/s", PIDFile: "/run/s.pid", LogFile: "/var/log/s.log", Caps: []string{"net_admin"}}}},
+		{Name: "p", Services: []ModuleService{{Name: "s", Exec: "/bin/s", User: "root", PIDFile: "/run/s.pid", LogFile: "/var/log/s.log", Caps: []string{"net_admin"}}}},
+		{Name: "p", Services: []ModuleService{{Name: "s", Exec: "/bin/s", User: "s", PIDFile: "/run/s.pid", LogFile: "/var/log/s.log", Caps: []string{"sys_admin"}}}},
+		{Name: "p", Services: []ModuleService{{Name: "s", Exec: "/bin/s", User: "s", PIDFile: "/run/s.pid", LogFile: "/var/log/s.log", Caps: []string{"net_raw", "net_raw"}}}},
 	} {
 		if err := m.Validate(); err == nil {
 			t.Errorf("accepted %+v", m)
@@ -130,6 +135,17 @@ func TestPluginManifestRejectsUnsafe(t *testing.T) {
 	}
 	if _, err := ParseManifest([]byte(`{"name":"p","version":"1","servces":[]}`)); err == nil {
 		t.Error("unknown field accepted")
+	}
+}
+
+func TestPluginManifestAcceptsServiceCaps(t *testing.T) {
+	m := ModuleManifest{Name: "p", Services: []ModuleService{{Name: "s", Exec: "/bin/s", User: "s", PIDFile: "/run/s.pid", LogFile: "/var/log/s.log", Caps: []string{"net_admin", "net_raw"}}}}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("a service with reviewed caps and a user: %v", err)
+	}
+	m2, err := ParseManifest([]byte(`{"name":"p","version":"1","services":[{"name":"s","exec":"/bin/s","pidfile":"/run/s.pid","logfile":"/var/log/s.log","user":"s","caps":["net_admin"]}]}`))
+	if err != nil || len(m2.Services[0].Caps) != 1 {
+		t.Fatalf("caps did not decode: %v %+v", err, m2)
 	}
 }
 
