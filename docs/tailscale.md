@@ -47,8 +47,10 @@ tailnet's own access rules still apply on top. `ziroctl tailscale ls` shows what
   0600 file in a 0700 directory that is removed when the command ends. It is not stored, not in the environment, not
   logged. The node's own identity lives in the state directory.
 - **Always the newest release, verified.** The binaries come from the signed module catalog: a daily job there takes the
-  newest stable Tailscale, checks Tailscale's own signature, pins the sha256 and re-signs the catalog. The host checks the
-  catalog signature and the sha256 (again at every boot). `ziroctl tailscale update` runs daily from cron, restarts
+  newest stable Tailscale (an even-minor release that is also an upstream tag), checks the tarball against the checksum
+  Tailscale publishes, checks that the binaries are static, of the right architecture and report that version, pins each
+  sha256 and re-signs the catalog. It does not yet verify Tailscale's own package signature (`distsign`). The host checks
+  the catalog signature and the sha256 (again at every boot). `ziroctl tailscale update` runs daily from cron, restarts
   Tailscale and, if the node does not come back connected within 30 seconds, puts the previous version back and raises an
   alert. `ziroctl tailscale update --check` shows what is available; `--set auto_update=false` turns the daily job off.
 - **No port clash.** `tailscaled` listens on UDP 41642 (not its default 41641, which `zirocd` uses). `--set port=…`
