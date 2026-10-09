@@ -74,11 +74,9 @@ echo "✓ Initramfs: $INITRAMFS_FILE"
 cp "$KERNEL_FILE" "$ISO_STAGING/boot/vmlinuz"
 cp "$INITRAMFS_FILE" "$ISO_STAGING/boot/initramfs.cpio.gz"
 
-# Bundle minimal rootfs archive on ISO if available for container extraction
+# The minimal container rootfs (ziro-rootfs-<arch>.tar.gz) is its own release asset: the ISO used to
+# carry a second copy (~16 MB) that nothing read, so it no longer does.
 mkdir -p "$ISO_STAGING/ziro"
-if [ -f "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" ]; then
-    cp "$BUILD_DIR/ziro-rootfs-$TARGET_ARCH.tar.gz" "$ISO_STAGING/ziro/rootfs.tar.gz"
-fi
 
 # GRUB configuration for UEFI & BIOS (SeaBIOS, OVMF, VMware, VirtualBox, Proxmox)
 cat > "$ISO_STAGING/boot/grub/grub.cfg" << EOF
