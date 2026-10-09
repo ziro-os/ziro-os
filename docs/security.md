@@ -8,6 +8,7 @@ Security is a foundational design pillar of Ziro-OS. Unlike general-purpose dist
 ziroctl ssh key import gh:alice               # keys from GitHub, GitLab (gl:) or Launchpad (lp:)
 ziroctl firewall enable                       # default drop; SSH (22), WireGuard (51820/udp), ICMP stay open
 ziroctl firewall allow 443/tcp --comment web
+ziroctl firewall allow 22 --iface tailscale0    # only traffic arriving on that interface
 ziroctl firewall block-ip 198.51.100.0/24 --comment scanner
 ziroctl firewall status
 ziroctl security audit                        # check the hardening

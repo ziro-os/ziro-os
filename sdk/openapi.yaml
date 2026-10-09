@@ -822,7 +822,7 @@ paths:
     post:
       x-ziro-role: admin
       tags: [security]
-      summary: 'Allow inbound traffic on a port, {"port": "443/tcp"}'
+      summary: 'Allow inbound traffic on a port, {"port": "443/tcp"}; "iface" limits it to traffic arriving on one interface'
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }

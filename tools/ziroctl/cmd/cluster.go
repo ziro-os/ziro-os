@@ -763,10 +763,10 @@ func allowFirewall(rules []FirewallRule, trust string) {
 	fw := loadFirewallConfig()
 	have := map[string]bool{}
 	for _, r := range fw.AllowedPorts {
-		have[fmt.Sprintf("%d/%s/%s", r.Port, r.Protocol, r.Source)] = true
+		have[fmt.Sprintf("%d/%s/%s/%s", r.Port, r.Protocol, r.Source, r.Iface)] = true
 	}
 	for _, r := range rules {
-		if !have[fmt.Sprintf("%d/%s/%s", r.Port, r.Protocol, r.Source)] {
+		if !have[fmt.Sprintf("%d/%s/%s/%s", r.Port, r.Protocol, r.Source, r.Iface)] {
 			fw.AllowedPorts = append(fw.AllowedPorts, r)
 		}
 	}

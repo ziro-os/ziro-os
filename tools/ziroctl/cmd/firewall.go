@@ -22,6 +22,12 @@ type FirewallRule struct {
 	Protocol string `json:"protocol"` // "tcp", "udp"
 	Comment  string `json:"comment"`
 	Source   string `json:"source,omitempty"` // IPv4 CIDR the rule is limited to (managed rules, e.g. pod DNS)
+	Iface    string `json:"iface,omitempty"`  // interface the rule applies to (tailscale0): only traffic arriving there matches
+}
+
+// sameRule reports whether two rules open the same thing (comments don't matter).
+func (r FirewallRule) sameRule(o FirewallRule) bool {
+	return r.Port == o.Port && r.Protocol == o.Protocol && r.Source == o.Source && r.Iface == o.Iface
 }
 
 type BlockedIP struct {
@@ -42,6 +48,7 @@ type FirewallConfig struct {
 
 var (
 	fwComment string
+	fwIface   string
 )
 
 var firewallCmd = &cobra.Command{
@@ -107,37 +114,66 @@ func setFirewallEnabled(on bool) error {
 
 // firewallAllow opens a port (e.g. 8443, 80/tcp, 51820/udp); added is false when already open.
 func firewallAllow(spec, comment string) (added bool, err error) {
+	return firewallAllowOn(spec, comment, "")
+}
+
+// firewallAllowOn opens a port for traffic arriving on one interface only (iface "" = any
+// interface). The match is on the interface, not on a source address: an address can be spoofed
+// from another interface (rp_filter is loose), the interface a packet arrived on cannot.
+func firewallAllowOn(spec, comment, iface string) (added bool, err error) {
 	port, proto := parsePortProto(spec)
 	if port <= 0 {
 		return false, fmt.Errorf("invalid port specification: %s", spec)
 	}
+	if err := checkRuleIface(iface); err != nil {
+		return false, err
+	}
+	want := FirewallRule{Port: port, Protocol: proto, Iface: iface}
 	cfg := loadFirewallConfig()
 	for _, r := range cfg.AllowedPorts {
-		if r.Port == port && r.Protocol == proto && r.Source == "" {
+		if r.sameRule(want) {
 			return false, nil
 		}
 	}
-	cfg.AllowedPorts = append(cfg.AllowedPorts, FirewallRule{Port: port, Protocol: proto, Comment: comment})
+	want.Comment = comment
+	cfg.AllowedPorts = append(cfg.AllowedPorts, want)
 	return true, commitFirewall(cfg)
 }
 
-func firewallDeny(spec string) error {
+// firewallDenyOn closes a rule opened with firewallAllowOn (same port, protocol and interface).
+func firewallDenyOn(spec, iface string) error {
 	port, proto := parsePortProto(spec)
 	if port <= 0 {
 		return fmt.Errorf("invalid port specification: %s", spec)
 	}
+	if err := checkRuleIface(iface); err != nil {
+		return err
+	}
+	want := FirewallRule{Port: port, Protocol: proto, Iface: iface}
 	cfg := loadFirewallConfig()
 	kept := cfg.AllowedPorts[:0]
 	for _, r := range cfg.AllowedPorts {
-		if !(r.Port == port && r.Protocol == proto && r.Source == "") {
+		if !r.sameRule(want) {
 			kept = append(kept, r)
 		}
 	}
 	if len(kept) == len(cfg.AllowedPorts) {
-		return errNotFound(fmt.Sprintf("port %d/%s is not in the allow list", port, proto))
+		on := ""
+		if iface != "" {
+			on = " on " + iface
+		}
+		return errNotFound(fmt.Sprintf("port %d/%s%s is not in the allow list", port, proto, on))
 	}
 	cfg.AllowedPorts = kept
 	return commitFirewall(cfg)
+}
+
+// checkRuleIface validates a rule's interface name ("" = any interface).
+func checkRuleIface(iface string) error {
+	if iface != "" && (!ifaceNameRe.MatchString(iface) || iface == "lo") {
+		return fmt.Errorf("invalid interface %q", iface)
+	}
+	return nil
 }
 
 // firewallBlock quarantines an IP or CIDR (idempotent); it returns the canonical target.
@@ -207,10 +243,11 @@ var fwAllowCmd = &cobra.Command{
 	Use:   "allow <port[/proto]>",
 	Short: "Allow inbound traffic to a port",
 	Example: `  ziroctl firewall allow 443
-  ziroctl firewall allow 51820/udp --comment wireguard`,
+  ziroctl firewall allow 51820/udp --comment wireguard
+  ziroctl firewall allow 22 --iface tailscale0`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		added, err := firewallAllow(args[0], fwComment)
+		added, err := firewallAllowOn(args[0], fwComment, fwIface)
 		if err != nil {
 			return err
 		}
@@ -224,12 +261,13 @@ var fwAllowCmd = &cobra.Command{
 }
 
 var fwDenyCmd = &cobra.Command{
-	Use:     "deny <port[/proto]>",
-	Short:   "Close a port opened with allow",
-	Example: `  ziroctl firewall deny 8080/tcp`,
-	Args:    cobra.ExactArgs(1),
+	Use:   "deny <port[/proto]>",
+	Short: "Close a port opened with allow",
+	Example: `  ziroctl firewall deny 8080/tcp
+  ziroctl firewall deny 22 --iface tailscale0`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := firewallDeny(args[0]); err != nil {
+		if err := firewallDenyOn(args[0], fwIface); err != nil {
 			return err
 		}
 		fmt.Printf("✓ Removed %s from the allow list\n", args[0])
@@ -286,6 +324,9 @@ var fwListCmd = &cobra.Command{
 				c := r.Comment
 				if r.Source != "" {
 					c += " (from " + r.Source + ")"
+				}
+				if r.Iface != "" {
+					c += " (on " + r.Iface + ")"
 				}
 				fmt.Printf("  %-12d %-8s %s\n", r.Port, strings.ToUpper(r.Protocol), c)
 			}
@@ -448,15 +489,22 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 		if r.Port < 1 || r.Port > 65535 || (r.Protocol != "tcp" && r.Protocol != "udp") {
 			return "", fmt.Errorf("invalid port rule %d/%s", r.Port, r.Protocol)
 		}
+		if err := checkRuleIface(r.Iface); err != nil {
+			return "", err
+		}
+		match := ""
+		if r.Iface != "" {
+			match = fmt.Sprintf("iifname %q ", r.Iface)
+		}
 		if r.Source != "" {
 			p, err := netip.ParsePrefix(r.Source)
 			if err != nil || !p.Addr().Is4() {
 				return "", fmt.Errorf("invalid rule source %q", r.Source)
 			}
-			sb.WriteString(fmt.Sprintf("    ip saddr %s %s dport %d accept\n", p.Masked(), r.Protocol, r.Port))
+			sb.WriteString(fmt.Sprintf("    %sip saddr %s %s dport %d accept\n", match, p.Masked(), r.Protocol, r.Port))
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("    %s dport %d accept\n", r.Protocol, r.Port))
+		sb.WriteString(fmt.Sprintf("    %s%s dport %d accept\n", match, r.Protocol, r.Port))
 	}
 	sb.WriteString("  }\n}\n")
 	return sb.String(), nil
@@ -513,12 +561,17 @@ func applyIptables(cfg FirewallConfig) error {
 		}
 		run("-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 		for _, r := range cfg.AllowedPorts {
-			switch {
-			case r.Source == "":
-				run("-A", "INPUT", "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")
-			case bin == "iptables": // sources are IPv4 (validated by buildNftScript above)
-				run("-A", "INPUT", "-s", r.Source, "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")
+			if r.Source != "" && bin != "iptables" { // sources are IPv4 (validated by buildNftScript above)
+				continue
 			}
+			a := []string{"-A", "INPUT"}
+			if r.Iface != "" {
+				a = append(a, "-i", r.Iface)
+			}
+			if r.Source != "" {
+				a = append(a, "-s", r.Source)
+			}
+			run(append(a, "-p", r.Protocol, "--dport", strconv.Itoa(r.Port), "-j", "ACCEPT")...)
 		}
 		run("-P", "INPUT", policy)
 		if ruleErr != nil {
@@ -543,6 +596,8 @@ func flushFirewallRules() {
 func init() {
 	fwAllowCmd.Flags().StringVarP(&fwComment, "comment", "m", "", "Rule description or purpose")
 	fwBlockIPCmd.Flags().StringVarP(&fwComment, "comment", "m", "", "Reason for blocking IP")
+	fwAllowCmd.Flags().StringVar(&fwIface, "iface", "", "Only traffic arriving on this interface (e.g. tailscale0)")
+	fwDenyCmd.Flags().StringVar(&fwIface, "iface", "", "The rule for this interface")
 
 	firewallCmd.AddCommand(fwStatusCmd)
 	firewallCmd.AddCommand(fwEnableCmd)

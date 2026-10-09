@@ -207,6 +207,7 @@ func registerFirewallRoutes(a *apiRouter) {
 	type portReq struct {
 		Port    string `json:"port"` // 8443, 80/tcp, 51820/udp
 		Comment string `json:"comment,omitempty"`
+		Iface   string `json:"iface,omitempty"` // only traffic arriving on this interface (tailscale0)
 	}
 	type targetReq struct {
 		Target  string `json:"target"` // IP or CIDR
@@ -216,14 +217,14 @@ func registerFirewallRoutes(a *apiRouter) {
 	a.post("/api/v1/firewall/allow", "admin", func(w http.ResponseWriter, r *http.Request) {
 		var req portReq
 		if decodeBody(w, r, &req) {
-			_, err := firewallAllow(req.Port, sanitizeComment(req.Comment))
+			_, err := firewallAllowOn(req.Port, sanitizeComment(req.Comment), req.Iface)
 			apiReply(w, err, ok("allowed "+req.Port))
 		}
 	})
 	a.post("/api/v1/firewall/deny", "admin", func(w http.ResponseWriter, r *http.Request) {
 		var req portReq
 		if decodeBody(w, r, &req) {
-			apiReply(w, firewallDeny(req.Port), ok("removed "+req.Port))
+			apiReply(w, firewallDenyOn(req.Port, req.Iface), ok("removed "+req.Port))
 		}
 	})
 	a.post("/api/v1/firewall/block", "admin", func(w http.ResponseWriter, r *http.Request) {
