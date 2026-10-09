@@ -167,6 +167,12 @@ func (c *Client) FirewallPort(ctx context.Context, action, port, comment string)
 	return c.post(ctx, "/api/v1/firewall/"+esc(action), map[string]string{"port": port, "comment": comment})
 }
 
+// FirewallPortOn is FirewallPort limited to traffic arriving on one interface (iface "tailscale0"
+// opens a port to the tailnet only).
+func (c *Client) FirewallPortOn(ctx context.Context, action, port, comment, iface string) (api.Message, error) {
+	return c.post(ctx, "/api/v1/firewall/"+esc(action), map[string]string{"port": port, "comment": comment, "iface": iface})
+}
+
 // FirewallBlock blocks (block=true) or unblocks an IP or CIDR.
 func (c *Client) FirewallBlock(ctx context.Context, target string, block bool) (api.Message, error) {
 	action := "unblock"
@@ -632,4 +638,41 @@ func (c *Client) RemoveDeployment(ctx context.Context, app string, purge bool) e
 		q = "?purge=true"
 	}
 	return c.Do(ctx, http.MethodDelete, "/api/v1/deployments/"+esc(app)+q, nil, nil)
+}
+
+// ---- Tailscale ----
+
+// TailscaleUp is the request to join a tailnet. AuthKey is required through the API: it is handed
+// to Tailscale as a 0600 file, never stored, logged or returned.
+type TailscaleUp struct {
+	AuthKey        string   `json:"auth_key"`
+	Hostname       string   `json:"hostname,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	LoginServer    string   `json:"login_server,omitempty"`
+	AcceptRoutes   bool     `json:"accept_routes,omitempty"`
+	OpenPort       bool     `json:"open_port,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+}
+
+// Tailscale returns the node: {"enabled": false} when the module is off, else its state, tailnet,
+// addresses and how peers connect.
+func (c *Client) Tailscale(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/tailscale", &out)
+}
+
+// TailscaleJoin joins a tailnet with an auth key (or an OAuth client secret and a tag).
+func (c *Client) TailscaleJoin(ctx context.Context, req TailscaleUp) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/tailscale/up", req, &out)
+}
+
+// TailscaleDown disconnects and keeps the node's identity; TailscaleLogout also removes the node
+// from the tailnet.
+func (c *Client) TailscaleDown(ctx context.Context) (api.Message, error) {
+	return c.post(ctx, "/api/v1/tailscale/down", nil)
+}
+
+func (c *Client) TailscaleLogout(ctx context.Context) (api.Message, error) {
+	return c.post(ctx, "/api/v1/tailscale/logout", nil)
 }

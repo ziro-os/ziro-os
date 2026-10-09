@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -230,6 +231,17 @@ func tsRunning() bool {
 	return err == nil && getServicePID(d) > 0
 }
 
+// tsEnsureRunning prepares and starts tailscaled when it is not running (tests replace it).
+var tsEnsureRunning = func() error {
+	if tsRunning() {
+		return nil
+	}
+	return tsSetup()
+}
+
+// tsIsRunning reports whether tailscaled runs (tests replace it).
+var tsIsRunning = tsRunning
+
 // ---- the tailscale CLI ----
 
 // tsEnv is the environment for the tailscale CLI: nothing of ours leaks in, nothing of the
@@ -239,7 +251,7 @@ func tsEnv() []string {
 }
 
 // tsExec runs the tailscale CLI against tailscaled's socket. Its arguments never contain a secret.
-func tsExec(ctx context.Context, args []string, stdout, stderr *os.File) error {
+func tsExec(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	// deepcode ignore CommandInjection: tsCLI is a fixed root-owned path from the signed module; args are argv, no shell
 	cmd := exec.CommandContext(ctx, tsCLI, append([]string{"--socket=" + tsSocket}, args...)...)
 	cmd.Env = tsEnv()
@@ -437,7 +449,7 @@ func parseTSStatus(b []byte) (TailscaleStatus, error) {
 }
 
 func tsStatus(ctx context.Context) (TailscaleStatus, error) {
-	if !tsRunning() {
+	if !tsIsRunning() {
 		return TailscaleStatus{}, errors.New("tailscaled is not running: ziroctl service start tailscaled")
 	}
 	b, err := tsOutput(ctx, "status", "--json")
@@ -559,31 +571,12 @@ Tailscale as a 0600 file that is removed when the command ends.`,
 		if err != nil {
 			return err
 		}
-		if !tsRunning() {
-			if err := tsSetup(); err != nil {
-				return err
-			}
-		}
-		if c := tsRangeConflict(readRoutes()); c != "" && !tsForce {
-			return fmt.Errorf("%s already uses 100.64.0.0/10, the range Tailscale assigns addresses from (the router mesh?); use --force to join anyway", c)
-		}
-		opts := tsUpOptions{Hostname: tsHostname, Tags: tsTags, LoginServer: tsLogin, AcceptRoutes: tsAcceptRoutes, Timeout: tsUpTimeout}
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
-		if err := tsJoin(ctx, opts, key, os.Stdout, os.Stderr); err != nil {
-			return err
-		}
-		if tsOpenPort {
-			if p, err := tsPort(); err == nil {
-				if _, err := firewallAllow(fmt.Sprintf("%d/udp", p), "Tailscale direct connections"); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: firewall: %v\n", err)
-				}
-			}
-		}
-		_ = auditLog("ziroctl", "tailscale", "tailscale up", opts.Hostname, nil)
-		st, err := tsStatus(ctx)
+		st, err := tsUp(ctx, TailscaleUp{AuthKey: key, Hostname: tsHostname, Tags: tsTags, LoginServer: tsLogin,
+			AcceptRoutes: tsAcceptRoutes, OpenPort: tsOpenPort, Force: tsForce, TimeoutSeconds: int(tsUpTimeout.Seconds())}, os.Stdout, os.Stderr)
 		if err != nil {
-			return nil
+			return err
 		}
 		fmt.Printf("✓ %s: %s %s\n", st.State, st.Name, strings.Join(st.IPs, " "))
 		fmt.Println("  Nothing on this host is reachable from the tailnet yet: ziroctl tailscale allow ssh")
@@ -591,9 +584,57 @@ Tailscale as a 0600 file that is removed when the command ends.`,
 	},
 }
 
+// TailscaleUp is a request to join a tailnet (the CLI's `tailscale up` and the API's POST
+// /api/v1/tailscale/up).
+type TailscaleUp struct {
+	AuthKey        string   `json:"auth_key,omitempty"` // empty: interactive login (CLI only)
+	Hostname       string   `json:"hostname,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	LoginServer    string   `json:"login_server,omitempty"`
+	AcceptRoutes   bool     `json:"accept_routes,omitempty"`
+	OpenPort       bool     `json:"open_port,omitempty"` // open the UDP port for direct connections
+	Force          bool     `json:"force,omitempty"`     // join although 100.64.0.0/10 is in use here
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+}
+
+// tsUp joins the tailnet: the one operation behind the CLI and the API. The key is checked
+// here, whoever sent it, and goes to the tailscale CLI only as a 0600 file.
+func tsUp(ctx context.Context, req TailscaleUp, stdout, stderr io.Writer) (TailscaleStatus, error) {
+	key := strings.TrimSpace(req.AuthKey)
+	if key != "" && !tsKeyRe.MatchString(key) {
+		return TailscaleStatus{}, errors.New("that is not a Tailscale auth key (tskey-auth-… or an OAuth client secret tskey-client-…)")
+	}
+	if st := enabledModules()[tsModule]; st == nil || st.Status != "enabled" {
+		return TailscaleStatus{}, errors.New("tailscale is not enabled: ziroctl module enable tailscale")
+	}
+	if err := tsEnsureRunning(); err != nil {
+		return TailscaleStatus{}, err
+	}
+	if c := tsRangeConflict(readRoutes()); c != "" && !req.Force {
+		return TailscaleStatus{}, fmt.Errorf("%s already uses 100.64.0.0/10, the range Tailscale assigns addresses from (the router mesh?); use --force to join anyway", c)
+	}
+	timeout := time.Duration(req.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	opts := tsUpOptions{Hostname: req.Hostname, Tags: req.Tags, LoginServer: req.LoginServer, AcceptRoutes: req.AcceptRoutes, Timeout: timeout}
+	if err := tsJoin(ctx, opts, key, stdout, stderr); err != nil {
+		return TailscaleStatus{}, err
+	}
+	if req.OpenPort {
+		if p, err := tsPort(); err == nil {
+			if _, err := firewallAllow(fmt.Sprintf("%d/udp", p), "Tailscale direct connections"); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: firewall: %v\n", err)
+			}
+		}
+	}
+	_ = auditLog("ziroctl", "tailscale", "tailscale up", req.Hostname, nil)
+	return tsStatus(ctx)
+}
+
 // tsJoin runs `tailscale up` with the key (if any) in a 0600 file that exists only while the CLI
 // runs; the key is never in its arguments or environment.
-func tsJoin(ctx context.Context, opts tsUpOptions, key string, stdout, stderr *os.File) error {
+func tsJoin(ctx context.Context, opts tsUpOptions, key string, stdout, stderr io.Writer) error {
 	opts.KeyKind, _, _ = strings.Cut(key, "?")
 	keyPath := ""
 	if key != "" {
@@ -678,6 +719,24 @@ var tsPingCmd = &cobra.Command{
 
 var tsPeerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.:-]{0,100}$`)
 
+// tsDown disconnects from the tailnet and keeps this node's identity; tsLogout also removes the
+// node from the tailnet. Shared by the CLI and the API.
+func tsDown(ctx context.Context, stdout, stderr io.Writer) error {
+	if err := tsExec(ctx, []string{"down"}, stdout, stderr); err != nil {
+		return err
+	}
+	_ = auditLog("ziroctl", "tailscale", "tailscale down", "", nil)
+	return nil
+}
+
+func tsLogout(ctx context.Context, stdout, stderr io.Writer) error {
+	if err := tsExec(ctx, []string{"logout"}, stdout, stderr); err != nil {
+		return err
+	}
+	_ = auditLog("ziroctl", "tailscale", "tailscale logout", "", nil)
+	return nil
+}
+
 var tsDownCmd = &cobra.Command{
 	Use:     "down",
 	Short:   "Disconnect from the tailnet and keep this node's identity",
@@ -686,10 +745,9 @@ var tsDownCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
-		if err := tsExec(ctx, []string{"down"}, os.Stdout, os.Stderr); err != nil {
+		if err := tsDown(ctx, os.Stdout, os.Stderr); err != nil {
 			return err
 		}
-		_ = auditLog("ziroctl", "tailscale", "tailscale down", "", nil)
 		fmt.Println("✓ disconnected (ziroctl tailscale up reconnects)")
 		return nil
 	},
@@ -703,10 +761,9 @@ var tsLogoutCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
-		if err := tsExec(ctx, []string{"logout"}, os.Stdout, os.Stderr); err != nil {
+		if err := tsLogout(ctx, os.Stdout, os.Stderr); err != nil {
 			return err
 		}
-		_ = auditLog("ziroctl", "tailscale", "tailscale logout", "", nil)
 		fmt.Println("✓ logged out: this node is removed from your tailnet")
 		return nil
 	},

@@ -73,6 +73,15 @@ tailnet's own access rules still apply on top. `ziroctl tailscale ls` shows what
 
 `ziroctl doctor` reports the node (joined, peers online, Tailscale's own health warnings).
 
+## API and SDK
+
+The same operations over the [REST API](api.md): `GET /api/v1/tailscale` (viewer; `{"enabled": false}` when the module is
+off), `POST /api/v1/tailscale/up` (admin), `/down` and `/logout` (admin). Ports are opened to the tailnet with
+`POST /api/v1/firewall/allow` and `"iface": "tailscale0"`. Through the API `up` needs an auth key (or an OAuth client
+secret and a tag) in the request body; it is handed to Tailscale as a 0600 file and is never stored, logged or returned.
+The browser login is CLI only. Go clients: `Tailscale`, `TailscaleJoin`, `TailscaleDown`, `TailscaleLogout` and
+`FirewallPortOn` in `sdk/client`.
+
 ## Settings
 
 `ziroctl module enable tailscale --set key=value`:
