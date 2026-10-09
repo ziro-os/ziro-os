@@ -233,6 +233,15 @@ jobs:
           test -f build/ziro-os-x86_64.iso
           test -f build/ziro-rootfs-x86_64.tar.gz
           test -f build/ziro-initramfs-x86_64.cpio.gz
+          # The size of every artifact on the run's summary page, so growth shows up in review.
+          {
+            echo "### Image sizes (x86_64)"
+            echo "| Artifact | MB |"
+            echo "|---|---|"
+            for f in build/ziro-os-x86_64.iso build/ziro-initramfs-x86_64.cpio.gz build/ziro-rootfs-x86_64.tar.gz; do
+              printf '| %s | %s |\n' "$(basename "$f")" "$(( $(stat -c %s "$f") / 1000000 ))"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify archive security metadata
         run: python3 tests/security/test-artifact-metadata.py build/ziro-rootfs-x86_64.tar.gz build/ziro-initramfs-x86_64.cpio.gz

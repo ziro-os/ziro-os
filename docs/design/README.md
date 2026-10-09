@@ -120,3 +120,5 @@ See [security.md](../security.md) for the controls in detail and their known lim
    changes.
 
 Before opening the pull request, run the [lint gate](../../community/CONTRIBUTING.md#lint-gate).
+
+See also the [base OS review](os-minimality-review.md): size, boot cost and attack surface, with what to measure first.
