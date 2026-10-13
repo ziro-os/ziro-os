@@ -62,6 +62,11 @@ binary nor a file capability can add to them. Services without `caps` start as b
   Capabilities that load code, read memory or disks raw, override permissions or become root are not available.
 - The launcher is root only until it execs; it re-checks the executable (root-owned, not group- or world-writable) and
   reads the env file as root before dropping privileges.
+- tailscaled is told `--netfilter-mode=off`: it adds no iptables chains, accept rules or connmark rules and writes no
+  global sysctl, so the host firewall has one owner (`inet ziro`, default drop, interface-bound allow rules). This
+  narrows what a normally behaving daemon does; it does not take away `CAP_NET_ADMIN`, which the tun device and routes
+  need, so the user, cgroup and `no_new_privs` limits above are still what bound a compromised one. Found on a real
+  host: with netfilter on, the daemon's connmark rules need kernel modules this OS does not ship and `status` warned.
 - An auth key can be used to join the host to a tailnet: it is treated like any secret (file, stdin or prompt, scrubbed
   from the environment, not logged, not part of backups).
 

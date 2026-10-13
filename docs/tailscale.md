@@ -43,6 +43,13 @@ tailnet's own access rules still apply on top. `ziroctl tailscale ls` shows what
   other capability dropped and `no_new_privs` set ([service capabilities](modules.md)), inside a cgroup (256 MiB, 256
   processes). Its state, including the node key, is a 0700 directory it owns, never part of a
   [backup](operations.md); its control socket is in a 0750 directory.
+- **It does not touch the host firewall.** `tailscaled` is told `--netfilter-mode=off`, so it adds no iptables chains or
+  rules and writes no global sysctl (on, it runs `iptables` as its own user and adds an accept rule for `tailscale0` plus
+  "connmark" rules, an `rp_filter` workaround for exit nodes and subnet routers that this OS's kernel has no modules for).
+  The firewall (`inet ziro`) is yours alone: it drops by default and opens only what `ziroctl tailscale allow` names. A
+  node joined before this was the default is fixed by `ziroctl tailscale setup` or the next boot or `update`, which run
+  `tailscale set --netfilter-mode=off` and leave the node's name and tags as they are. (The old symptom was a warning in
+  `ziroctl tailscale status`: *enabling connmark rules … Extension connmark revision 0 not supported*.)
 - **No key on a command line.** An auth key is read from a file, stdin or a hidden prompt and handed to Tailscale as a
   0600 file in a 0700 directory that is removed when the command ends. It is not stored, not in the environment, not
   logged. The node's own identity lives in the state directory.

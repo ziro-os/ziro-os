@@ -168,7 +168,7 @@ func TestTailscaleUpArgsAreClosedByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(args, " ")
-	for _, want := range []string{"up", "--reset", "--accept-dns=false", "--accept-routes=false", "--ssh=false", "--advertise-exit-node=false", "--timeout=5m0s"} {
+	for _, want := range []string{"up", "--reset", "--accept-dns=false", "--accept-routes=false", "--ssh=false", "--advertise-exit-node=false", "--netfilter-mode=off", "--timeout=5m0s"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("args lack %s: %s", want, got)
 		}
@@ -262,6 +262,56 @@ func TestTailscaleJoinKeepsTheKeyOffTheCommandLine(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(dir, "ziro-ts-*")); len(left) != 0 {
 		t.Errorf("leftover key directories: %v", left)
+	}
+}
+
+// tailscaled must leave the host firewall alone, also on a node joined before that was the default. The
+// preference is set on its own (`tailscale set`), so the node's hostname and tags are not reset the way
+// `up --reset` would. The daemon needs a moment after a restart, so the call is repeated until it answers.
+func TestTailscaleLeavesTheHostFirewallAlone(t *testing.T) {
+	dir := tsStub(t)
+	log, count := filepath.Join(dir, "cli.log"), filepath.Join(dir, "count")
+	script := `#!/bin/sh
+echo "ARGS: $*" >> ` + log + `
+n=$(cat ` + count + ` 2>/dev/null || echo 0); n=$((n + 1)); echo $n > ` + count + `
+[ "$n" -ge 3 ] || { echo "failed to connect to local tailscaled" >&2; exit 1; }
+`
+	if err := os.WriteFile(tsCLI, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	old := tsRetryEvery
+	tsRetryEvery = 5 * time.Millisecond
+	t.Cleanup(func() { tsRetryEvery = old })
+
+	if err := tsApplyHostPrefs(context.Background(), 5*time.Second); err != nil {
+		t.Fatalf("not retried until tailscaled answered: %v", err)
+	}
+	b, _ := os.ReadFile(log)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want 3 attempts (2 refused, 1 accepted), got %d:\n%s", len(lines), b)
+	}
+	for _, l := range lines {
+		if l != "ARGS: --socket="+tsSocket+" set --netfilter-mode=off" {
+			t.Errorf("unexpected call %q", l)
+		}
+		if strings.Contains(l, "--reset") || strings.Contains(l, "hostname") || strings.Contains(l, "tags") {
+			t.Errorf("must change only the netfilter preference: %q", l)
+		}
+	}
+
+	// a daemon that never answers is an error with tailscale's own message, after the wait
+	os.WriteFile(tsCLI, []byte("#!/bin/sh\necho 'failed to connect to local tailscaled' >&2\nexit 1\n"), 0755)
+	err := tsApplyHostPrefs(context.Background(), 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "failed to connect to local tailscaled") || !strings.Contains(err.Error(), "--netfilter-mode=off") {
+		t.Errorf("want a clear error, got %v", err)
+	}
+	// and a cancelled context stops the retries at once
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if err := tsApplyHostPrefs(ctx, time.Hour); err == nil || time.Since(start) > 2*time.Second {
+		t.Errorf("a cancelled context must stop at once, err=%v after %v", err, time.Since(start))
 	}
 }
 
