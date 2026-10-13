@@ -184,10 +184,21 @@ func tsSetup() error {
 	if err := writeFileAtomic(filepath.Join(servicesDir, def.Name+".conf"), []byte(supervisedConf(def)), 0o644); err != nil {
 		return err
 	}
-	if d, err := loadServiceDef(def.Name); err == nil && getServicePID(d) > 0 {
-		return restartSupervised(def.Name)
+	var startErr error
+	if d, lerr := loadServiceDef(def.Name); lerr == nil && getServicePID(d) > 0 {
+		startErr = restartSupervised(def.Name)
+	} else {
+		startErr = startService(def.Name)
 	}
-	return startService(def.Name)
+	if startErr != nil {
+		return startErr
+	}
+	// A node joined by an older ziroctl keeps netfilter on in its saved preferences; a failure here is
+	// noise in `tailscale status`, not a reason to fail the module's start.
+	if err := tsApplyHostPrefs(context.Background(), 20*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	return nil
 }
 
 func b2i(b bool) int {
@@ -273,6 +284,42 @@ func tsOutput(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// tsNetfilterMode is the only mode in which tailscaled leaves the host firewall alone. Left on, it runs
+// iptables as its unprivileged user to add chains, an accept rule for tailscale0 and "connmark" rules (an
+// rp_filter workaround for exit nodes and subnet routers), and it writes a global sysctl. None of that is
+// needed here: Ziro's nft table (inet ziro) owns the firewall, drops by default and opens only what
+// `ziroctl tailscale allow` names, bound to tailscale0; rp_filter is loose; exit nodes and subnet routers
+// are out of scope. The connmark rules also need kernel modules this OS does not ship, so with it on
+// `tailscale status` carries a health warning.
+const tsNetfilterMode = "off"
+
+// tsRetryEvery is how often tsApplyHostPrefs asks again while tailscaled is still starting (tests shorten it).
+var tsRetryEvery = 500 * time.Millisecond
+
+// tsApplyHostPrefs makes a node that is already joined (or joined before this setting existed) leave the host
+// firewall alone, without touching its hostname, tags or anything else: `tailscale set`, not `up --reset`.
+// It is idempotent, and asks again until tailscaled answers, as it needs a moment after a (re)start.
+func tsApplyHostPrefs(ctx context.Context, wait time.Duration) error {
+	end := time.Now().Add(wait)
+	for {
+		var stderr strings.Builder
+		err := tsExec(ctx, []string{"set", "--netfilter-mode=" + tsNetfilterMode}, io.Discard, &stderr)
+		if err == nil {
+			return nil
+		}
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			err = errors.New(msg)
+		}
+		if time.Now().After(end) || ctx.Err() != nil {
+			return fmt.Errorf("tailscale set --netfilter-mode=%s: %w", tsNetfilterMode, err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(tsRetryEvery):
+		}
+	}
+}
+
 // tsKeyFile writes an auth key for `tailscale up --auth-key=file:…`: a 0600 file in a 0700
 // directory that exists only while the CLI runs. A key on the command line would show in
 // /proc/<pid>/cmdline for every local user.
@@ -330,6 +377,7 @@ func tsUpArgs(o tsUpOptions, keyFile string) ([]string, error) {
 		"--ssh=false", // sshd keeps port 22 and its hardening
 		"--shields-up=false",
 		"--advertise-exit-node=false",
+		"--netfilter-mode=" + tsNetfilterMode, // the host firewall is Ziro's alone (see tsApplyHostPrefs)
 		"--timeout=" + o.Timeout.String(),
 	}
 	if o.Hostname != "" {
@@ -874,6 +922,7 @@ with --set auto_update=false.`,
 			Restart: func() bool {
 				if tsRunning() {
 					_ = restartSupervised(tsService)
+					_ = tsApplyHostPrefs(context.Background(), 20*time.Second)
 				}
 				return !tsRunning() || tsHealthy(was, 30*time.Second)
 			},
