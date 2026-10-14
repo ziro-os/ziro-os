@@ -198,6 +198,8 @@ func tsSetup() error {
 	if err := tsApplyHostPrefs(context.Background(), 20*time.Second); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
+	// And for a node that joined before tailnet names were forwarded to MagicDNS.
+	tsApplyDNSWhenReady(15 * time.Second)
 	return nil
 }
 
@@ -228,6 +230,7 @@ func ensureTunDevice(gid int) error {
 // tsTeardown stops tailscaled and removes its service so it does not start at boot (the module's
 // stop command, run on disable). The node key stays in the state directory until a purge.
 func tsTeardown() error {
+	_ = tsSyncDNS("") // no tailnet resolver once the daemon is gone
 	if _, err := loadServiceDef(tsService); err != nil {
 		return nil
 	}
@@ -444,7 +447,9 @@ type tsStatusJSON struct {
 	Self           tsNode
 	Peer           map[string]tsNode
 	CurrentTailnet struct {
-		Name string
+		Name            string
+		MagicDNSSuffix  string
+		MagicDNSEnabled bool
 	}
 }
 
@@ -472,6 +477,8 @@ type TailscaleStatus struct {
 	Relayed  int      `json:"peers_relayed"`
 	Health   []string `json:"health,omitempty"`
 	Port     int      `json:"port,omitempty"`
+	// MagicDNS is the suffix tailnet names live under (mynet.ts.net) when the tailnet has MagicDNS.
+	MagicDNS string `json:"magic_dns,omitempty"`
 }
 
 func parseTSStatus(b []byte) (TailscaleStatus, error) {
@@ -481,6 +488,9 @@ func parseTSStatus(b []byte) (TailscaleStatus, error) {
 	}
 	st := TailscaleStatus{State: j.BackendState, Version: j.Version, Tailnet: j.CurrentTailnet.Name,
 		Name: strings.TrimSuffix(j.Self.DNSName, "."), IPs: j.Self.TailscaleIPs, LoginURL: j.AuthURL, Peers: len(j.Peer), Health: j.Health}
+	if j.CurrentTailnet.MagicDNSEnabled {
+		st.MagicDNS = strings.Trim(strings.ToLower(j.CurrentTailnet.MagicDNSSuffix), ".")
+	}
 	for _, p := range j.Peer {
 		if !p.Online {
 			continue
@@ -677,7 +687,14 @@ func tsUp(ctx context.Context, req TailscaleUp, stdout, stderr io.Writer) (Tails
 		}
 	}
 	_ = auditLog("ziroctl", "tailscale", "tailscale up", req.Hostname, nil)
-	return tsStatus(ctx)
+	st, err := tsStatus(ctx)
+	if err != nil {
+		return st, err
+	}
+	for _, n := range tsApplyDNS(st) {
+		fmt.Fprintf(stderr, "note: %s\n", n)
+	}
+	return st, nil
 }
 
 // tsJoin runs `tailscale up` with the key (if any) in a 0600 file that exists only while the CLI
@@ -723,6 +740,16 @@ var tsStatusCmd = &cobra.Command{
 			}
 			if st.LoginURL != "" {
 				fmt.Printf("Login:    %s\n", st.LoginURL)
+			}
+			if dom, err := tsDNSDomain(st.MagicDNS); err == nil && dom != "" && st.State == "Running" {
+				switch {
+				case tsDNSActive(dom) && dnsEnabled():
+					fmt.Printf("Names:    *.%s resolve through smart DNS\n", dom)
+				case dnsEnabled():
+					fmt.Printf("Names:    *.%s are not forwarded yet: ziroctl tailscale setup\n", dom)
+				default:
+					fmt.Printf("Names:    *.%s need smart DNS: ziroctl dns enable\n", dom)
+				}
 			}
 			fmt.Printf("Peers:    %d online of %d (%d direct, %d relayed)\n", st.Online, st.Peers, st.Direct, st.Relayed)
 			fmt.Printf("Version:  %s (udp port %d)\n", st.Version, st.Port)
@@ -774,6 +801,7 @@ func tsDown(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	_ = auditLog("ziroctl", "tailscale", "tailscale down", "", nil)
+	_ = tsSyncDNS("") // the names are unreachable now; `up` brings the rule back
 	return nil
 }
 
@@ -782,6 +810,7 @@ func tsLogout(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	_ = auditLog("ziroctl", "tailscale", "tailscale logout", "", nil)
+	_ = tsSyncDNS("")
 	return nil
 }
 
@@ -923,6 +952,7 @@ with --set auto_update=false.`,
 				if tsRunning() {
 					_ = restartSupervised(tsService)
 					_ = tsApplyHostPrefs(context.Background(), 20*time.Second)
+					tsApplyDNSWhenReady(15 * time.Second)
 				}
 				return !tsRunning() || tsHealthy(was, 30*time.Second)
 			},

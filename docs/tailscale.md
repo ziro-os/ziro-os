@@ -28,7 +28,7 @@ A host joined to a tailnet is reachable by every device on it, so nothing is ope
 |---|---|---|
 | Ports reachable from the tailnet | none | `ziroctl tailscale allow ssh` or `allow 5432/tcp` (the `tailscale0` interface only) |
 | Tailscale SSH | off (sshd keeps port 22 and its hardening) | not offered |
-| DNS (MagicDNS) | not accepted: the host's [smart DNS](dns.md) keeps `/etc/resolv.conf` | not offered yet |
+| DNS (MagicDNS) | not accepted: the host's [smart DNS](dns.md) keeps `/etc/resolv.conf`. Tailnet names (`host.mynet.ts.net`) still resolve, see below | not offered |
 | Routes other nodes advertise | not accepted | `ziroctl tailscale up --accept-routes` |
 | Exit node, subnet router | off | not offered yet |
 | Log upload to Tailscale | off | `ziroctl module enable tailscale --set telemetry=on` |
@@ -50,6 +50,16 @@ tailnet's own access rules still apply on top. `ziroctl tailscale ls` shows what
   node joined before this was the default is fixed by `ziroctl tailscale setup` or the next boot or `update`, which run
   `tailscale set --netfilter-mode=off` and leave the node's name and tags as they are. (The old symptom was a warning in
   `ziroctl tailscale status`: *enabling connmark rules … Extension connmark revision 0 not supported*.)
+- **Tailnet names resolve, nothing else changes.** Tailscale answers tailnet names itself on `100.100.100.100`, but the
+  module never lets it rewrite `/etc/resolv.conf`. Instead, once the node is up, one [smart DNS](dns.md) forward rule
+  sends your tailnet's suffix (`mynet.ts.net`) to `100.100.100.100`; every other name goes where it went before.
+  `ping host.mynet.ts.net` works once smart DNS is on (`ziroctl dns enable`; `ziroctl tailscale status` says when it
+  isn't). The rule is removed on `down`, `logout` and when the module is disabled, and `ziroctl tailscale setup`
+  (every boot) adds it for a node that joined earlier. Only a rule whose single upstream is `100.100.100.100` is
+  treated as the module's: a rule of yours for the same domain is left alone (and reported), and a suffix of fewer
+  than three labels (`com`, `example.com`) is refused, because the control server picks the suffix and it must not
+  capture the host's own names. Use full names: there is no search domain, so `ping host` alone does not resolve. For
+  a Headscale `base_domain` of two labels, add the rule yourself: `ziroctl dns forward add example.com 100.100.100.100`.
 - **No key on a command line.** An auth key is read from a file, stdin or a hidden prompt and handed to Tailscale as a
   0600 file in a 0700 directory that is removed when the command ends. It is not stored, not in the environment, not
   logged. The node's own identity lives in the state directory.
