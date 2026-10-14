@@ -67,6 +67,11 @@ binary nor a file capability can add to them. Services without `caps` start as b
   narrows what a normally behaving daemon does; it does not take away `CAP_NET_ADMIN`, which the tun device and routes
   need, so the user, cgroup and `no_new_privs` limits above are still what bound a compromised one. Found on a real
   host: with netfilter on, the daemon's connmark rules need kernel modules this OS does not ship and `status` warned.
+- Tailnet names are made to resolve without giving tailscaled the system resolver: it keeps `--accept-dns=false`, and
+  one smart DNS forward rule sends the tailnet's MagicDNS suffix to its resolver on `100.100.100.100`. tailscaled
+  answers peers' full names from its own peer list whatever `--accept-dns` says. The rule is scoped to the suffix, owned
+  by the module only when its single upstream is `100.100.100.100`, never replaces an operator's rule, and is refused
+  for a suffix of fewer than three labels, so a hostile control server cannot capture the host's own names.
 - An auth key can be used to join the host to a tailnet: it is treated like any secret (file, stdin or prompt, scrubbed
   from the environment, not logged, not part of backups).
 

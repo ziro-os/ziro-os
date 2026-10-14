@@ -409,7 +409,18 @@ def main():
                           "ziroctl tailscale ls; ziroctl tailscale deny ssh >/dev/null 2>&1; "
                           "echo GONE=$(nft list chain inet ziro input | grep -c 'iifname \"tailscale0\"')")
         check("tailscale allow ssh opens 22/tcp for tailscale0 only; deny closes it", "RULE=1" in out and "22/tcp" in out and "GONE=0" in out, out)
-        con.run("ziroctl tailscale teardown >/dev/null 2>&1; ziroctl plugin disable tailscale --purge >/dev/null 2>&1; rm -f /tmp/ts.json /tmp/ts-cli.log", timeout=120)
+        # The rule `setup`/`up` adds for a joined node (the unit tests cover that step: ziroctl does not count this
+        # stand-in daemon as running, it turns into tail) and a rule of the operator's: teardown removes ours only.
+        rc, out = con.run("ziroctl dns forward add smoke.ts.net 100.100.100.100 >/dev/null 2>&1; "
+                          "ziroctl dns forward add corp.example 10.0.0.53 >/dev/null 2>&1; "
+                          "echo BEFORE=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); "
+                          "ziroctl tailscale teardown >/dev/null 2>&1; "
+                          "echo OURS=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); "
+                          "echo THEIRS=$(grep -c -e 'corp.example' /etc/ziro/dns.json 2>/dev/null); "
+                          "ziroctl dns forward remove corp.example >/dev/null 2>&1; "
+                          "ziroctl plugin disable tailscale --purge >/dev/null 2>&1; rm -f /tmp/ts.json /tmp/ts-cli.log", timeout=120)
+        check("tailscale teardown removes its tailnet forward and leaves the operator's rules",
+              "BEFORE=1" in out and "OURS=0" in out and "THEIRS=1" in out, out)
         rc, out = con.run("echo CONF=$([ -e /etc/ziro/services/tailscaled.conf ] && echo kept || echo gone); echo PLUGIN=$([ -e /var/lib/ziro/plugins/tailscale ] && echo kept || echo gone)")
         check("tailscale disable --purge removes the service and the binaries", "CONF=gone" in out and "PLUGIN=gone" in out, out)
 
