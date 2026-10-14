@@ -399,9 +399,7 @@ def main():
                           "echo TSUID=$(id -u tailscale); "
                           "echo MODES=$(stat -c '%a:%U' /var/lib/ziro/tailscale /run/tailscale /etc/ziro/tailscale/tailscaled.env | tr '\\n' ' '); "
                           "echo TUN=$([ -c /dev/net/tun ] && echo yes); echo ENV=$(grep -c TS_NO_LOGS_NO_SUPPORT /etc/ziro/tailscale/tailscaled.env); "
-                          "echo NF=$(grep -c -e 'set --netfilter-mode=off' /tmp/ts-cli.log 2>/dev/null || true); "
-                          "n=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); echo FWD=${n:-0}; "
-                          "m=$(grep -c -e '100.100.100.100' /etc/ziro/dns.json 2>/dev/null); echo RES=${m:-0}", timeout=120)
+                          "echo NF=$(grep -c -e 'set --netfilter-mode=off' /tmp/ts-cli.log 2>/dev/null || true)", timeout=120)
         st = {k: " ".join(v.split()) for k, _, v in (l.partition(":") for l in out.splitlines())}
         uid = re.search(r"TSUID=(\d+)", out)
         check("tailscale setup: own user, 0700 state, 0750 socket dir, tun device, tailscaled with only net_admin+net_raw, host firewall left alone",
@@ -409,8 +407,13 @@ def main():
               and st.get("CapEff") == "0000000000003000" and st.get("CapBnd") == "0000000000003000" and st.get("NoNewPrivs") == "1"
               and "700:tailscale" in out and "750:tailscale" in out and "600:root" in out and "TUN=yes" in out and "ENV=1" in out
               and re.search(r"NF=[1-9]", out) is not None, out)
+        # The fake CLI reports a running node on smoke.ts.net: setup must have pointed smart DNS's rule for that
+        # suffix, and only that suffix, at tailscaled's resolver.
+        rc, out = con.run("ziroctl tailscale status 2>&1 | head -8; echo ---; cat /etc/ziro/dns.json 2>&1 | head -30; echo ---; "
+                          "n=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); echo FWD=${n:-0}; "
+                          "m=$(grep -c -e '100.100.100.100' /etc/ziro/dns.json 2>/dev/null); echo RES=${m:-0}")
         check("tailscale names: smart DNS forwards only the tailnet suffix to MagicDNS (100.100.100.100)",
-              re.search(r"FWD=[1-9]", out) is not None and re.search(r"RES=[1-9]", out) is not None, out)
+              re.search(r"FWD=[1-9]", out) is not None and re.search(r"RES=[1-9]", out) is not None, out, limit=1500)
         rc, out = con.run("ziroctl tailscale allow ssh >/dev/null 2>&1; "
                           "echo RULE=$(nft list chain inet ziro input | grep -c 'iifname \"tailscale0\" tcp dport 22 accept'); "
                           "ziroctl tailscale ls; ziroctl tailscale deny ssh >/dev/null 2>&1; "
