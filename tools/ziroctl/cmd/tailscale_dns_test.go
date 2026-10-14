@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func dnsStub(t *testing.T) string {
@@ -178,4 +179,52 @@ func editDNSQuiet(edit func(*DNSConfig)) error {
 	}
 	edit(cfg)
 	return saveDNSConfig(cfg)
+}
+
+// The boot sequence of `tailscale setup`: tailscaled has just been (re)started, its CLI answers with the node's
+// status, and smart DNS gets the tailnet's rule. The fake CLI is the one the QEMU smoke test installs.
+func TestTailscaleSetupPointsSmartDNSAtTheTailnet(t *testing.T) {
+	dir := tsStub(t)
+	dnsStub(t)
+	status := `{"BackendState":"Running","Self":{"DNSName":"smoke-node.smoke.ts.net."},"CurrentTailnet":{"Name":"smoke","MagicDNSSuffix":"smoke.ts.net","MagicDNSEnabled":true}}`
+	script := "#!/bin/sh\ncase \"$*\" in *status*) cat " + filepath.Join(dir, "status.json") + ";; esac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "status.json"), []byte(status), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tsCLI, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	old := tsIsRunning
+	tsIsRunning = func() bool { return true }
+	t.Cleanup(func() { tsIsRunning = old })
+
+	tsApplyDNSWhenReady(3 * time.Second)
+	if got := forwardsOf(t); got["smoke.ts.net"] != "100.100.100.100" || len(got) != 1 {
+		t.Fatalf("forwards = %v", got)
+	}
+	if err := tsTeardownDNSOnly(); err != nil {
+		t.Fatal(err)
+	}
+	if got := forwardsOf(t); len(got) != 0 {
+		t.Errorf("forwards after teardown = %v", got)
+	}
+}
+
+func tsTeardownDNSOnly() error { return tsSyncDNS("") }
+
+// A daemon that is not running is not waited for.
+func TestTailscaleApplyDNSDoesNotWaitForAMissingDaemon(t *testing.T) {
+	tsStub(t)
+	dnsStub(t)
+	old := tsIsRunning
+	tsIsRunning = func() bool { return false }
+	t.Cleanup(func() { tsIsRunning = old })
+	start := time.Now()
+	tsApplyDNSWhenReady(time.Minute)
+	if d := time.Since(start); d > 6*time.Second {
+		t.Errorf("waited %v for a daemon that is not running", d)
+	}
+	if got := forwardsOf(t); len(got) != 0 {
+		t.Errorf("forwards = %v", got)
+	}
 }

@@ -130,7 +130,13 @@ func tsStatusOnce() (TailscaleStatus, error) {
 // tsApplyDNSWhenReady is tsApplyDNS for the module's start hook: tailscaled needs a moment after a
 // (re)start before it reports its state, so wait a little for it to settle.
 func tsApplyDNSWhenReady(wait time.Duration) {
+	absent := 0
 	for end := time.Now().Add(wait); ; time.Sleep(time.Second) {
+		if tsIsRunning() {
+			absent = 0
+		} else if absent++; absent >= 3 {
+			return // not running: nothing to ask, and no use waiting for it
+		}
 		st, err := tsStatusOnce()
 		if err == nil && st.State != "" && st.State != "Starting" && st.State != "NoState" {
 			for _, n := range tsApplyDNS(st) {

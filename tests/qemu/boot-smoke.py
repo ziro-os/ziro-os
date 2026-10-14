@@ -386,13 +386,10 @@ def main():
         # does for the real module's artifacts.
         ts_stub = ('{"name":"tailscale","version":"1","description":"smoke stand-in",'
                    '"dirs":[{"path":"/var/lib/ziro/plugins/tailscale","mode":"0755"}]}')
-        ts_status = ('{"BackendState":"Running","Self":{"DNSName":"smoke-node.smoke.ts.net."},'
-                     '"CurrentTailnet":{"Name":"smoke","MagicDNSSuffix":"smoke.ts.net","MagicDNSEnabled":true}}')
-        con.run(f"printf '%s' '{ts_status}' > /tmp/ts-status.json; "
-                f"printf '%s' '{ts_stub}' > /tmp/ts.json && ziroctl plugin install -f /tmp/ts.json >/dev/null 2>&1; "
+        con.run(f"printf '%s' '{ts_stub}' > /tmp/ts.json && ziroctl plugin install -f /tmp/ts.json >/dev/null 2>&1; "
                 "mkdir -p /var/lib/ziro/plugins/tailscale && chmod 755 /var/lib/ziro/plugins/tailscale && "
                 "printf '#!/bin/sh\\nexec /usr/bin/tail -f /dev/null\\n' > /var/lib/ziro/plugins/tailscale/tailscaled && "
-                "printf '#!/bin/sh\\necho \"$@\" >> /tmp/ts-cli.log\\ncase \"$*\" in *status*) cat /tmp/ts-status.json;; esac\\nexit 0\\n' > /var/lib/ziro/plugins/tailscale/tailscale && "
+                "printf '#!/bin/sh\\necho \"$@\" >> /tmp/ts-cli.log\\nexit 0\\n' > /var/lib/ziro/plugins/tailscale/tailscale && "
                 "chmod 755 /var/lib/ziro/plugins/tailscale/tailscaled /var/lib/ziro/plugins/tailscale/tailscale", timeout=120)
         rc, out = con.run("ziroctl tailscale setup 2>&1; echo SETUP=$?; sleep 2; P=$(cat /run/ziro-tailscaled.pid); "
                           "grep -E '^(Name|Uid|CapEff|CapBnd|NoNewPrivs):' /proc/$P/status; "
@@ -407,21 +404,23 @@ def main():
               and st.get("CapEff") == "0000000000003000" and st.get("CapBnd") == "0000000000003000" and st.get("NoNewPrivs") == "1"
               and "700:tailscale" in out and "750:tailscale" in out and "600:root" in out and "TUN=yes" in out and "ENV=1" in out
               and re.search(r"NF=[1-9]", out) is not None, out)
-        # The fake CLI reports a running node on smoke.ts.net: setup must have pointed smart DNS's rule for that
-        # suffix, and only that suffix, at tailscaled's resolver.
-        rc, out = con.run("ziroctl tailscale status 2>&1 | head -8; echo ---; cat /etc/ziro/dns.json 2>&1 | head -30; echo ---; "
-                          "n=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); echo FWD=${n:-0}; "
-                          "m=$(grep -c -e '100.100.100.100' /etc/ziro/dns.json 2>/dev/null); echo RES=${m:-0}")
-        check("tailscale names: smart DNS forwards only the tailnet suffix to MagicDNS (100.100.100.100)",
-              re.search(r"FWD=[1-9]", out) is not None and re.search(r"RES=[1-9]", out) is not None, out, limit=1500)
         rc, out = con.run("ziroctl tailscale allow ssh >/dev/null 2>&1; "
                           "echo RULE=$(nft list chain inet ziro input | grep -c 'iifname \"tailscale0\" tcp dport 22 accept'); "
                           "ziroctl tailscale ls; ziroctl tailscale deny ssh >/dev/null 2>&1; "
                           "echo GONE=$(nft list chain inet ziro input | grep -c 'iifname \"tailscale0\"')")
         check("tailscale allow ssh opens 22/tcp for tailscale0 only; deny closes it", "RULE=1" in out and "22/tcp" in out and "GONE=0" in out, out)
-        rc, out = con.run("ziroctl tailscale teardown >/dev/null 2>&1; n=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); echo FWD=${n:-0}; "
-                          "ziroctl plugin disable tailscale --purge >/dev/null 2>&1; rm -f /tmp/ts.json /tmp/ts-cli.log /tmp/ts-status.json", timeout=120)
-        check("tailscale teardown removes the tailnet forward", "FWD=0" in out, out)
+        # The rule `setup`/`up` adds for a joined node (the unit tests cover that step: ziroctl does not count this
+        # stand-in daemon as running, it turns into tail) and a rule of the operator's: teardown removes ours only.
+        rc, out = con.run("ziroctl dns forward add smoke.ts.net 100.100.100.100 >/dev/null 2>&1; "
+                          "ziroctl dns forward add corp.example 10.0.0.53 >/dev/null 2>&1; "
+                          "echo BEFORE=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); "
+                          "ziroctl tailscale teardown >/dev/null 2>&1; "
+                          "echo OURS=$(grep -c -e 'smoke.ts.net' /etc/ziro/dns.json 2>/dev/null); "
+                          "echo THEIRS=$(grep -c -e 'corp.example' /etc/ziro/dns.json 2>/dev/null); "
+                          "ziroctl dns forward remove corp.example >/dev/null 2>&1; "
+                          "ziroctl plugin disable tailscale --purge >/dev/null 2>&1; rm -f /tmp/ts.json /tmp/ts-cli.log", timeout=120)
+        check("tailscale teardown removes its tailnet forward and leaves the operator's rules",
+              "BEFORE=1" in out and "OURS=0" in out and "THEIRS=1" in out, out)
         rc, out = con.run("echo CONF=$([ -e /etc/ziro/services/tailscaled.conf ] && echo kept || echo gone); echo PLUGIN=$([ -e /var/lib/ziro/plugins/tailscale ] && echo kept || echo gone)")
         check("tailscale disable --purge removes the service and the binaries", "CONF=gone" in out and "PLUGIN=gone" in out, out)
 
