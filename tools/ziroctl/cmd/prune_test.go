@@ -52,3 +52,83 @@ func TestPruneKeepsImagesInUse(t *testing.T) {
 		t.Errorf("runtime message lost: %v", errs)
 	}
 }
+
+// An image pulled pinned by digest is stored as docker.io/library/postgres:18.6@sha256:… but listed as
+// postgres:18.6, and `nerdctl rmi postgres:18.6` answers "no such image" for it. The prune removes by the
+// stored name, copes with a plain and a pinned name that show alike, and does not fail on an image that
+// went away since the plan.
+func TestPruneRemovesImagesByTheirStoredName(t *testing.T) {
+	old := runNerdctl
+	defer func() { runNerdctl = old }()
+	dig := "sha256:" + strings.Repeat("a", 64)
+	stored := map[string]bool{ // what the runtime holds
+		"docker.io/library/postgres:18.6@" + dig: true,
+		"docker.io/n8nio/n8n:2.41.6":             true,
+		"docker.io/valkey/valkey:9.1.2":          true,
+		"docker.io/valkey/valkey:9.1.2@" + dig:   true, // the same image shown twice: plain and pinned
+	}
+	var removed []string
+	runNerdctl = func(args ...string) ([]byte, error) {
+		switch args[0] {
+		case "images":
+			return []byte("postgres:18.6\tdocker.io/library/postgres:18.6@" + dig + "\n" +
+				"n8nio/n8n:2.41.6\tdocker.io/n8nio/n8n:2.41.6\n" +
+				"valkey/valkey:9.1.2\tdocker.io/valkey/valkey:9.1.2\n" +
+				"valkey/valkey:9.1.2\tdocker.io/valkey/valkey:9.1.2@" + dig + "\n" +
+				"valkey/valkey:9.1.2\tdocker.io/valkey/valkey:9.1.2@" + dig + "\n"), nil // one row per platform
+		case "rmi":
+			if !stored[args[1]] {
+				return nil, &exec.ExitError{Stderr: []byte(`time="2026-10-14T09:14:38Z" level=fatal msg="1 errors:\nno such image: ` + args[1] + `"`)}
+			}
+			delete(stored, args[1])
+			removed = append(removed, args[1])
+			return nil, nil
+		}
+		return nil, nil
+	}
+	items := []PruneItem{
+		{"images", "postgres:18.6", 700 << 20},
+		{"images", "n8nio/n8n:2.41.6", 900 << 20},
+		{"images", "valkey/valkey:9.1.2", 150 << 20},
+		{"images", "valkey/valkey:9.1.2", 0}, // listed twice: already removed by the first
+	}
+	freed, errs := applyPrune(items)
+	if len(errs) != 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if want := int64(700+900+150) << 20; freed != want {
+		t.Errorf("freed %d, want %d", freed, want)
+	}
+	if len(stored) != 0 {
+		t.Errorf("still stored: %v (removed %v)", stored, removed)
+	}
+	for _, r := range removed {
+		if r == "postgres:18.6" {
+			t.Errorf("removed by the shown name: %v", removed)
+		}
+	}
+
+	// A target the runtime lists under no name (a dangling image shown by its ID) is passed through as it is;
+	// when the runtime does not know it either, the operator is told what to look at.
+	runNerdctl = func(args ...string) ([]byte, error) {
+		if args[0] == "images" {
+			return []byte(""), nil
+		}
+		return nil, &exec.ExitError{Stderr: []byte("no such image: abc123def456")}
+	}
+	freed, errs = applyPrune([]PruneItem{{"images", "abc123def456", 10}})
+	if freed != 0 || len(errs) != 1 || !strings.Contains(errs[0].Error(), "nerdctl images --names") || strings.Contains(errs[0].Error(), "already gone") {
+		t.Errorf("unknown image: freed %d, errs %v", freed, errs)
+	}
+
+	// An image a container started using since the plan is kept, also when found by its stored name.
+	runNerdctl = func(args ...string) ([]byte, error) {
+		if args[0] == "images" {
+			return []byte("nginx:1.27\tdocker.io/library/nginx:1.27@" + dig + "\n"), nil
+		}
+		return nil, &exec.ExitError{Stderr: []byte("conflict: unable to delete: image is being used by running container c1")}
+	}
+	if freed, errs = applyPrune([]PruneItem{{"images", "nginx:1.27", 70 << 20}}); freed != 0 || len(errs) != 0 {
+		t.Errorf("in-use image: freed %d, errs %v", freed, errs)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -189,6 +190,59 @@ func imageInUse(used map[string]bool, ref, id, digest string) bool {
 // started since the plan): kept, not an error.
 var errPruneInUse = errors.New("in use")
 
+// errPruneGone marks an image the runtime no longer has under an exact name it just listed: removed
+// meanwhile (another prune, the same image listed twice), so there is nothing left to do.
+var errPruneGone = errors.New("already gone")
+
+// imageNameIndex maps what `nerdctl images` shows for an image (repo:tag) to the exact names the runtime
+// stores for it. They differ: an image pulled pinned by digest is stored as
+// docker.io/library/postgres:18.6@sha256:… but shown as postgres:18.6, and `nerdctl rmi postgres:18.6`
+// does not match it ("no such image"). Removing by the stored name always does.
+func imageNameIndex() map[string][]string {
+	idx := map[string][]string{}
+	out, err := runNerdctl("images", "--format", "{{.Repository}}:{{.Tag}}\t{{.Name}}")
+	if err != nil {
+		return idx // an older runtime without {{.Name}}: fall back to the shown name
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		shown, name, ok := strings.Cut(line, "\t")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" || slices.Contains(idx[shown], name) {
+			continue
+		}
+		idx[shown] = append(idx[shown], name)
+	}
+	return idx
+}
+
+// removeImage removes the image `nerdctl images` showed as target, by every exact name behind it (a plain
+// and a digest-pinned name can show alike). A target with no known name (a dangling image shown by its ID)
+// is passed to the runtime as it is.
+func removeImage(target string, names []string) error {
+	known := len(names) > 0
+	if !known {
+		names = []string{target}
+	}
+	removed := false
+	for _, name := range names {
+		if _, err := runNerdctl("rmi", name); err != nil { // refuses an image in use
+			err = nerdctlError(err)
+			if errors.Is(err, errPruneGone) {
+				if known {
+					continue
+				}
+				return fmt.Errorf("the runtime has no image named %q (see: nerdctl images --names)", name)
+			}
+			return err
+		}
+		removed = true
+	}
+	if !removed {
+		return errPruneGone
+	}
+	return nil
+}
+
 // nerdctlError adds the runtime's own message to a failed nerdctl command.
 func nerdctlError(err error) error {
 	var ee *exec.ExitError
@@ -196,6 +250,9 @@ func nerdctlError(err error) error {
 		msg := strings.TrimSpace(string(ee.Stderr))
 		if strings.Contains(msg, "in use") || strings.Contains(msg, "being used") || strings.Contains(msg, "is running") {
 			return fmt.Errorf("%w: %s", errPruneInUse, lastLines(msg, 1))
+		}
+		if strings.Contains(msg, "no such image") {
+			return fmt.Errorf("%w: %s", errPruneGone, lastLines(msg, 1))
 		}
 		return fmt.Errorf("%v: %s", err, lastLines(msg, 2))
 	}
@@ -223,6 +280,7 @@ func parseHumanSize(s string) int64 {
 // applyPrune removes the planned items; it re-checks each one (a temp file opened since the
 // plan, a container restarted) and reports what failed.
 func applyPrune(items []PruneItem) (freed int64, errs []error) {
+	var names map[string][]string // exact image names, read once if an image is to be removed
 	for _, it := range items {
 		var err error
 		switch it.Category {
@@ -232,9 +290,10 @@ func applyPrune(items []PruneItem) (freed int64, errs []error) {
 				err = nerdctlError(err)
 			}
 		case "images":
-			if _, err = runNerdctl("rmi", it.Target); err != nil { // refuses an image in use
-				err = nerdctlError(err)
+			if names == nil {
+				names = imageNameIndex()
 			}
+			err = removeImage(it.Target, names[it.Target])
 		case "logs", "tmp":
 			if it.Category == "tmp" && openFiles()[it.Target] {
 				continue
@@ -253,6 +312,9 @@ func applyPrune(items []PruneItem) (freed int64, errs []error) {
 		}
 		if errors.Is(err, errPruneInUse) {
 			continue
+		}
+		if err != nil && errors.Is(err, errPruneGone) && len(names[it.Target]) > 0 {
+			continue // listed by its exact name a moment ago, removed since: nothing left to do
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s %s: %w", it.Category, it.Target, err))
