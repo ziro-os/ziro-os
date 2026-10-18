@@ -39,7 +39,20 @@ var (
 	sbxRenew   string
 	sbxExec    sdkapi.SandboxExecRequest
 	sbxExecEnv []string
+	sbxNet     schema.SandboxNetwork
 )
+
+// netFlags reads --net/--allow: nil when neither is set (no network).
+func netFlags() *schema.SandboxNetwork {
+	n := sbxNet
+	if n.Mode == "" && len(n.Allow) > 0 {
+		n.Mode = schema.SandboxNetAllowlist
+	}
+	if n.Mode == "" {
+		return nil
+	}
+	return &n
+}
 
 func kvFlags(list []string, what string) (map[string]string, error) {
 	if len(list) == 0 {
@@ -60,7 +73,8 @@ var sandboxCreateCmd = &cobra.Command{
 	Use:   "create <image> [-- command...]",
 	Short: "Create a sandbox and wait until it runs",
 	Example: `  ziroctl sandbox create python:3.13-slim
-  ziroctl sandbox create node:22 --memory 2Gi --cpus 2 --timeout 2h --idle-timeout 15m --meta agent=claude`,
+  ziroctl sandbox create node:22 --memory 2Gi --cpus 2 --timeout 2h --idle-timeout 15m --meta agent=claude
+  ziroctl sandbox create python:3.13-slim --allow pypi.org --allow files.pythonhosted.org`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		spec := sbxSpec
@@ -72,6 +86,7 @@ var sandboxCreateCmd = &cobra.Command{
 		if spec.Metadata, err = kvFlags(sbxMeta, "meta"); err != nil {
 			return err
 		}
+		spec.Network = netFlags()
 		if sbxMemory != "" || sbxCPUs != 0 || sbxPIDs != 0 {
 			spec.Resources = &schema.Resources{Memory: sbxMemory, CPUs: sbxCPUs, PIDs: sbxPIDs}
 		}
@@ -98,9 +113,13 @@ var sandboxLsCmd = &cobra.Command{
 			return err
 		}
 		return printResult(list, func() {
-			fmt.Printf("%-13s %-8s %-7s %-28s %-12s %s\n", "ID", "STATE", "RUNTIME", "IMAGE", "OWNER", "EXPIRES")
+			fmt.Printf("%-13s %-8s %-7s %-28s %-10s %-12s %s\n", "ID", "STATE", "RUNTIME", "IMAGE", "NETWORK", "OWNER", "EXPIRES")
 			for _, sb := range list {
-				fmt.Printf("%-13s %-8s %-7s %-28s %-12s %s\n", sb.ID, sb.State, sb.Spec.Runtime, sb.Spec.Image, sb.Owner,
+				net := "none"
+				if sb.Spec.Network != nil && sb.Spec.Network.Mode != "" {
+					net = sb.Spec.Network.Mode
+				}
+				fmt.Printf("%-13s %-8s %-7s %-28s %-10s %-12s %s\n", sb.ID, sb.State, sb.Spec.Runtime, sb.Spec.Image, net, sb.Owner,
 					time.Until(sb.Expires).Round(time.Second))
 			}
 		})
@@ -148,6 +167,29 @@ func sandboxAction(use, verb, short string) *cobra.Command {
 }
 
 var sandboxRenewCmd = sandboxAction("renew", "renew", "Extend a sandbox's lifetime from now")
+
+var sandboxNetworkCmd = &cobra.Command{
+	Use:   "network <id>",
+	Short: "Change a sandbox's egress policy now",
+	Example: `  ziroctl sandbox network <id> --allow pypi.org --allow '*.github.com'
+  ziroctl sandbox network <id> --net open
+  ziroctl sandbox network <id> --net none`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		n := netFlags()
+		if n == nil {
+			return errors.New("set --net or --allow")
+		}
+		if err := n.Validate(); err != nil {
+			return err
+		}
+		var sb sdkapi.Sandbox
+		if err := sandboxCall("PUT", "/v1/sandboxes/"+args[0]+"/network", n, &sb); err != nil {
+			return err
+		}
+		return printResult(sb, func() { fmt.Printf("✓ %s: network %s %s\n", sb.ID, n.Mode, strings.Join(n.Allow, " ")) })
+	},
+}
 
 var sandboxExecCmd = &cobra.Command{
 	Use:   "exec <id> -- <command>...",
@@ -237,6 +279,10 @@ func init() {
 	f.StringVar(&sbxSpec.Timeout, "timeout", "", "Lifetime, e.g. 30m (default 1h)")
 	f.StringVar(&sbxSpec.IdleTimeout, "idle-timeout", "", "Delete after this long without an exec")
 	f.StringArrayVar(&sbxMeta, "meta", nil, "Metadata key=value (repeatable)")
+	for _, fs := range []*cobra.Command{sandboxCreateCmd, sandboxNetworkCmd} {
+		fs.Flags().StringVar(&sbxNet.Mode, "net", "", "Network: none (default), allowlist or open (public internet only)")
+		fs.Flags().StringArrayVar(&sbxNet.Allow, "allow", nil, "Allowed domain (subdomains included), IPv4 address or CIDR; implies --net allowlist")
+	}
 	sandboxRenewCmd.Flags().StringVar(&sbxRenew, "timeout", "", "New lifetime from now (default: the sandbox's own timeout)")
 	e := sandboxExecCmd.Flags()
 	e.StringArrayVarP(&sbxExecEnv, "env", "e", nil, "Environment variable KEY=VALUE (repeatable)")
@@ -244,7 +290,7 @@ func init() {
 	e.StringVarP(&sbxExec.User, "user", "u", "", "Run as uid[:gid]")
 	e.StringVar(&sbxExec.Timeout, "timeout", "", "Stop the command after this long (default 5m, max 1h)")
 	e.BoolP("stdin", "i", false, "Send this command's stdin (up to 1 MiB)")
-	sandboxCmd.AddCommand(sandboxCreateCmd, sandboxLsCmd, sandboxGetCmd, sandboxExecCmd, sandboxRenewCmd,
+	sandboxCmd.AddCommand(sandboxCreateCmd, sandboxLsCmd, sandboxGetCmd, sandboxExecCmd, sandboxRenewCmd, sandboxNetworkCmd,
 		sandboxAction("rm", "", "Delete sandboxes and their workspaces"),
 		sandboxAction("pause", "pause", "Freeze a sandbox's processes"),
 		sandboxAction("resume", "resume", "Thaw a paused sandbox"),

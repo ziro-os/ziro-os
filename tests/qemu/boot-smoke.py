@@ -256,6 +256,19 @@ def sandbox_checks(con, check):
                       f"wget -q -T 3 -O- http://1.1.1.1 >/dev/null 2>&1; echo NET=$?'", timeout=120)
     check("sandbox: reduced capabilities, loopback only, no network",
           "00000000000004fb" in out and "NET=0" not in out and "eth0" not in out, out)
+    # Network policy: an allowlisted name works, anything else is refused; open never reaches private ranges.
+    rc, out = con.run("ziroctl sandbox create alpine --timeout 10m --allow dl-cdn.alpinelinux.org 2>&1 | tail -2", timeout=300)
+    nid = out.split()[0] if out.split() else ""
+    rc, out = con.run(f"ziroctl sandbox exec {nid} -- sh -c 'wget -q -T 10 -O /dev/null https://dl-cdn.alpinelinux.org/alpine/ && echo ALLOWED; "
+                      f"nslookup example.com >/dev/null 2>&1 || echo NXDOMAIN; wget -q -T 5 -O /dev/null http://1.1.1.1 || echo IPBLOCKED'", timeout=120)
+    check("sandbox allowlist: the allowed name works, other names and addresses are refused",
+          "ALLOWED" in out and "NXDOMAIN" in out and "IPBLOCKED" in out, out)
+    rc, out = con.run(f"ziroctl sandbox network {nid} --net open >/dev/null && ziroctl sandbox exec {nid} -- sh -c "
+                      f"'wget -q -T 10 -O /dev/null http://example.com && echo OPEN; wget -q -T 5 -O /dev/null http://169.254.169.254 || echo META; "
+                      f"wget -q -T 5 -O /dev/null http://10.0.2.2 || echo LAN; wget -q -T 5 -O /dev/null http://10.250.0.1:8443 || echo HOST'", timeout=120)
+    check("sandbox open: the internet, never metadata, the LAN or the host",
+          "OPEN" in out and "META" in out and "LAN" in out and "HOST" in out, out)
+    con.run(f"ziroctl sandbox rm {nid}", timeout=60)
     rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
                       "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
     check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)

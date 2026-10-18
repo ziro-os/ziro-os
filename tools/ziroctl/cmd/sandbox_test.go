@@ -66,13 +66,26 @@ func (f *fakeNerdctl) run(_ context.Context, args ...string) ([]byte, error) {
 func stubSandboxes(t *testing.T) (*sandboxManager, *fakeNerdctl, *time.Time) {
 	t.Helper()
 	dir := t.TempDir()
-	oldRoot, oldCfg, oldN, oldAudit := sandboxRoot, sandboxConfigFile, sandboxNerdctl, auditPath
+	oldRoot, oldCfg, oldN, oldAudit, oldNft := sandboxRoot, sandboxConfigFile, sandboxNerdctl, auditPath, sandboxNft
 	sandboxRoot, sandboxConfigFile, auditPath = filepath.Join(dir, "sbx"), filepath.Join(dir, "sandbox.json"), filepath.Join(dir, "audit.log")
 	f := &fakeNerdctl{ps: map[string]string{}, sticky: map[string]int{}}
 	sandboxNerdctl = f.run
-	t.Cleanup(func() { sandboxRoot, sandboxConfigFile, sandboxNerdctl, auditPath = oldRoot, oldCfg, oldN, oldAudit })
+	sandboxNft = func(script string) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.calls = append(f.calls, []string{"nft", script})
+		if f.fail == "nft" {
+			return errors.New("nft: boom")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		sandboxRoot, sandboxConfigFile, sandboxNerdctl, auditPath, sandboxNft = oldRoot, oldCfg, oldN, oldAudit, oldNft
+	})
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-	return &sandboxManager{st: loadSandboxStore(), now: func() time.Time { return now }}, f, &now
+	net := newSandboxNet(sandboxDefSubnet)
+	net.ready = true
+	return &sandboxManager{st: loadSandboxStore(), net: net, now: func() time.Time { return now }}, f, &now
 }
 
 var (
@@ -84,7 +97,7 @@ var (
 func TestSandboxRunArgsAreLockedDown(t *testing.T) {
 	sb := &sdkapi.Sandbox{ID: "abcdefghijkl", Spec: schema.SandboxSpec{Image: "python:3", Runtime: "gvisor", Workdir: "/workspace",
 		Resources: &schema.Resources{Memory: "1Gi", CPUs: 1, PIDs: 512}, Env: map[string]string{"B": "2", "A": "1"}, User: "1000"}}
-	args := sandboxRunArgs(sb, "python:3")
+	args := sandboxRunArgs(sb, "python:3", "10.250.0.1")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{"--runtime " + sandboxRunsc, "--cap-drop ALL", "--security-opt no-new-privileges", "--network none",
 		"--memory 1073741824", "--pids-limit 512", "--restart no", "-u 1000", "-e A=1 -e B=2",
@@ -112,7 +125,7 @@ func TestSandboxRunArgsAreLockedDown(t *testing.T) {
 	}
 	// A command is passed after the image, never as flags; runc drops the gVisor runtime.
 	sb.Spec.Command, sb.Spec.Runtime = []string{"--privileged", "x"}, "runc"
-	args = sandboxRunArgs(sb, "python:3")
+	args = sandboxRunArgs(sb, "python:3", "10.250.0.1")
 	if i := slices.Index(args, "--"); i < 0 || !slices.Equal(args[i+1:], []string{"python:3", "--privileged", "x"}) || slices.Contains(args, sandboxRunsc) {
 		t.Errorf("command args: %v", args)
 	}

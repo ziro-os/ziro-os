@@ -228,8 +228,8 @@ func (ag *agent) setupPods(resp heartbeatResponse) error {
 	if ag.dns == nil {
 		clients, _ := netip.ParsePrefix(resp.PodCIDR)
 		gw := podGateway(resp.PodCIDR)
-		ag.dns = &podDNS{clients: clients, upstreams: hostResolvers("/etc/resolv.conf", gw),
-			egress: &egressLearner{add: nftAddLearned}}
+		ag.egress = &egressLearner{add: nftAddLearned}
+		ag.dns = &podDNS{clients: clients, upstreams: hostResolvers("/etc/resolv.conf", gw), policy: ag.egress}
 		go func(d *podDNS) {
 			for { // the address can briefly be missing while the link is (re)created: retry
 				fmt.Printf("[agent] pod dns: %v\n", d.serve(net.JoinHostPort(gw, "53"))) // serve returns only on error
@@ -299,6 +299,7 @@ func adoptClusterCA(cfg *ClusterConfig, caPEM string, masters []string) {
 // agent holds what the heartbeat loop learned and what the reconcile loop reports back.
 type agent struct {
 	dns     *podDNS
+	egress  *egressLearner // the pod DNS fills egress-controlled apps' allow sets from its answers
 	podAt   time.Time
 	mu      sync.Mutex
 	desired []Assignment
@@ -568,7 +569,7 @@ var clusterAgentCmd = &cobra.Command{
 						merr = eerr
 					}
 					if ag.dns != nil {
-						ag.dns.egress.set(resp.Egress, resp.Assignments)
+						ag.egress.set(resp.Egress, resp.Assignments)
 					}
 				}
 				if podOK {

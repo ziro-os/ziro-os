@@ -62,6 +62,12 @@ func (c *Client) SetSandboxMetadata(ctx context.Context, id string, md map[strin
 	return out, c.Do(ctx, http.MethodPut, "/api/v1/sandboxes/"+esc(id)+"/metadata", md, &out)
 }
 
+// SetSandboxNetwork replaces a sandbox's egress policy; it applies at once.
+func (c *Client) SetSandboxNetwork(ctx context.Context, id string, n schema.SandboxNetwork) (api.Sandbox, error) {
+	var out api.Sandbox
+	return out, c.Do(ctx, http.MethodPut, "/api/v1/sandboxes/"+esc(id)+"/network", n, &out)
+}
+
 // ExecResult is a finished command: its exit code and output.
 type ExecResult struct {
 	ExitCode       int

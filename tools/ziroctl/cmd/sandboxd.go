@@ -47,11 +47,25 @@ func runSandboxDaemon(ctx context.Context) error {
 		l.Close()
 		return err
 	}
-	m := &sandboxManager{st: loadSandboxStore(), now: time.Now}
+	cfg, err := loadSandboxConfig()
+	if err != nil {
+		l.Close()
+		return err
+	}
+	m := &sandboxManager{st: loadSandboxStore(), net: newSandboxNet(cfg.Subnet), now: time.Now}
 	for _, sb := range m.st.all { // a create the last daemon didn't finish
 		if sb.State == "pending" {
 			sb.State, sb.Error = "failed", "interrupted: ziro-sandboxd restarted while it was starting"
 			_ = m.st.save(sb)
+		}
+	}
+	// The network comes up before anything runs; sandboxes without one work even if it can't.
+	if err := sandboxNetSetup(m.net); err != nil {
+		fmt.Printf("[sandboxd] sandbox network: %v (sandboxes with a network will fail to start)\n", err)
+	} else {
+		m.net.ready = true
+		if err := m.applyNet(); err != nil {
+			fmt.Printf("[sandboxd] sandbox network rules: %v\n", err)
 		}
 	}
 	go func() {
@@ -147,6 +161,15 @@ func (m *sandboxManager) routes() *http.ServeMux {
 			return
 		}
 		sb, err := m.setMetadata(id, c, md)
+		apiReply(w, err, sb)
+	}))
+	mux.HandleFunc("PUT /v1/sandboxes/{id}/network", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		var n schema.SandboxNetwork
+		if err := decodeStrict(w, r, &n, 64<<10); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		sb, err := m.setNetwork(r.Context(), id, c, n)
 		apiReply(w, err, sb)
 	}))
 	mux.HandleFunc("POST /v1/sandboxes/{id}/exec", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {

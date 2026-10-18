@@ -182,6 +182,7 @@ type Sandbox struct {
 	Owner      string             `json:"owner"` // the API token that created it ("root" from the host CLI)
 	State      string             `json:"state"` // pending, running, paused, failed
 	Error      string             `json:"error,omitempty"`
+	IP         string             `json:"ip,omitempty"` // on the sandbox network (network mode allowlist or open)
 	Spec       schema.SandboxSpec `json:"spec"`
 	Created    time.Time          `json:"created"`
 	Expires    time.Time          `json:"expires"`

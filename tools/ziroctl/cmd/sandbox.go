@@ -31,7 +31,8 @@ import (
 //     not the host's. runc only when the host config allows it and an operator asks.
 //   - every capability dropped but a short list (which, under gVisor, apply to its kernel),
 //     no-new-privileges, memory/cpu/pids limits, no host mounts, no devices, no privileged mode.
-//   - no network (--network none) until a network policy exists (phase 2).
+//   - no network unless the spec asks for one; then egress is default-deny with an allowlist
+//     or the public internet only, never the host, the LAN or other sandboxes (sandbox_net.go).
 //   - a per-sandbox /workspace directory and a size-limited /tmp; the image's rootfs is the
 //     container's own copy-on-write layer.
 //   - a lifetime (default 1h, max 24h) and an optional idle timeout; the reaper deletes
@@ -68,6 +69,7 @@ type sandboxConfig struct {
 	DefaultTimeout string           `json:"default_timeout"`
 	MaxTimeout     string           `json:"max_timeout"`
 	AllowRunc      bool             `json:"allow_runc,omitempty"` // let operators pick the runc runtime (weaker isolation)
+	Subnet         string           `json:"subnet"`               // the sandbox network
 	ImagePolicy    ImagePolicy      `json:"image_policy,omitempty"`
 }
 
@@ -79,6 +81,7 @@ func defaultSandboxConfig() sandboxConfig {
 		Limits:         schema.Resources{Memory: "8Gi", CPUs: 4, PIDs: 4096},
 		DefaultTimeout: "1h",
 		MaxTimeout:     "24h",
+		Subnet:         sandboxDefSubnet,
 	}
 }
 
@@ -105,6 +108,9 @@ func loadSandboxConfig() (sandboxConfig, error) {
 		if _, err := time.ParseDuration(d); err != nil {
 			return c, fmt.Errorf("%s: bad timeout %q", sandboxConfigFile, d)
 		}
+	}
+	if err := validateSandboxSubnet(c.Subnet); err != nil {
+		return c, fmt.Errorf("%s: %w", sandboxConfigFile, err)
 	}
 	if c.MaxMemory != "" {
 		if _, err := schema.ParseSize(c.MaxMemory); err != nil {
@@ -138,6 +144,9 @@ func resolveSandboxSpec(s *schema.SandboxSpec, cfg sandboxConfig, caller sandbox
 	}
 	if s.Workdir == "" {
 		s.Workdir = "/workspace"
+	}
+	if e := privilegedAllow(s.Network); e != "" && !caller.seesAll() {
+		return 0, fmt.Errorf("network: allowing %s (a private or reserved range) needs the operator role", e)
 	}
 	r := schema.Resources{}
 	if s.Resources != nil {
@@ -182,8 +191,8 @@ func sandboxContainer(id string) string { return "ziro-sbx-" + id }
 func sandboxDir(id string) string       { return filepath.Join(sandboxRoot, id) }
 
 // sandboxRunArgs is the nerdctl command line that starts a sandbox. Nothing in the spec can add
-// a mount, a device, a capability or a network.
-func sandboxRunArgs(sb *sdkapi.Sandbox, image string) []string {
+// a mount, a device or a capability; its network is the sandbox network, policed by the host.
+func sandboxRunArgs(sb *sdkapi.Sandbox, image, gateway string) []string {
 	s := sb.Spec
 	args := []string{"run", "-d", "--name", sandboxContainer(sb.ID), "--hostname", "sandbox",
 		"--label", sandboxLabel + "=" + sb.ID, "--restart", "no"}
@@ -195,8 +204,12 @@ func sandboxRunArgs(sb *sdkapi.Sandbox, image string) []string {
 		args = append(args, "--cap-add", c)
 	}
 	args = append(args, containerResourceArgs(s.Resources)...)
-	args = append(args, "--network", "none",
-		"--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+	if sb.IP != "" {
+		args = append(args, "--network", sandboxNetName, "--ip", sb.IP, "--dns", gateway)
+	} else {
+		args = append(args, "--network", "none")
+	}
+	args = append(args, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
 		"-v", filepath.Join(sandboxDir(sb.ID), "workspace")+":/workspace",
 		"-w", s.Workdir)
 	if s.User != "" {
@@ -290,7 +303,13 @@ func (st *sandboxStore) update(id string, f func(sb *sdkapi.Sandbox)) error {
 
 type sandboxManager struct {
 	st  *sandboxStore
+	net *sandboxNet
 	now func() time.Time
+}
+
+// applyNet converges the sandbox network to the records.
+func (m *sandboxManager) applyNet() error {
+	return m.net.apply(m.st.list(sandboxCaller{Owner: "root", Role: "admin"}))
 }
 
 func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c sandboxCaller) (sdkapi.Sandbox, error) {
@@ -315,7 +334,12 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 		m.st.mu.Unlock()
 		return sdkapi.Sandbox{}, err
 	}
-	err = os.MkdirAll(filepath.Join(sandboxDir(sb.ID), "workspace"), 0755)
+	if networked(spec) {
+		sb.IP, err = allocSandboxIP(m.net.subnet, m.st.all)
+	}
+	if err == nil {
+		err = os.MkdirAll(filepath.Join(sandboxDir(sb.ID), "workspace"), 0755)
+	}
 	if err == nil {
 		err = m.st.save(sb)
 	}
@@ -332,9 +356,19 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 		_ = os.Chown(filepath.Join(sandboxDir(sb.ID), "workspace"), uid, gid)
 	}
 
+	var out []byte
+	var runErr error
+	if sb.IP != "" {
+		// The rules for its address go in before the container exists: fail closed.
+		if runErr = m.applyNet(); runErr != nil {
+			runErr = fmt.Errorf("network policy: %w", runErr)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // the first run pulls the image
 	defer cancel()
-	out, runErr := sandboxNerdctl(ctx, sandboxRunArgs(sb, image)...)
+	if runErr == nil {
+		out, runErr = sandboxNerdctl(ctx, sandboxRunArgs(sb, image, sandboxGateway(m.net.subnet))...)
+	}
 	var view sdkapi.Sandbox
 	uerr := m.st.update(sb.ID, func(x *sdkapi.Sandbox) {
 		if runErr != nil {
@@ -407,7 +441,11 @@ func (m *sandboxManager) remove(id string, c sandboxCaller) error {
 	m.st.mu.Lock()
 	delete(m.st.all, id)
 	m.st.mu.Unlock()
-	return m.destroy(id)
+	err := m.destroy(id)
+	if nerr := m.applyNet(); nerr != nil {
+		fmt.Printf("[sandboxd] network after deleting %s: %v\n", id, nerr)
+	}
+	return err
 }
 
 // destroy removes a sandbox's container and files (its record is already gone from the store).
@@ -488,6 +526,44 @@ func (m *sandboxManager) setMetadata(id string, c sandboxCaller, md map[string]s
 	return sb, err
 }
 
+// setNetwork replaces a sandbox's network policy and applies it now. A sandbox created without
+// a network can't get one (it has no interface). If the rules can't be applied, the sandbox is
+// paused and marked failed: it never keeps running under a policy other than the one asked for.
+func (m *sandboxManager) setNetwork(ctx context.Context, id string, c sandboxCaller, n schema.SandboxNetwork) (sdkapi.Sandbox, error) {
+	sb, err := m.st.get(id, c)
+	if err != nil {
+		return sb, err
+	}
+	if err := n.Validate(); err != nil {
+		return sb, err
+	}
+	if e := privilegedAllow(&n); e != "" && !c.seesAll() {
+		return sb, fmt.Errorf("network: allowing %s (a private or reserved range) needs the operator role", e)
+	}
+	if n.Mode == "" {
+		n.Mode = schema.SandboxNetNone
+	}
+	if sb.IP == "" && n.Mode != schema.SandboxNetNone {
+		return sb, errors.New("this sandbox was created without a network; create a new one with a network mode")
+	}
+	if sb.State != "running" && sb.State != "paused" {
+		return sb, fmt.Errorf("sandbox %s is %s", id, sb.State)
+	}
+	if err := m.st.update(id, func(x *sdkapi.Sandbox) { x.Spec.Network = &n; sb = *x }); err != nil {
+		return sb, err
+	}
+	if sb.IP == "" {
+		return sb, nil
+	}
+	if err := m.applyNet(); err != nil {
+		_, _ = sandboxNerdctl(ctx, "pause", sandboxContainer(id))
+		msg := "network policy could not be applied, sandbox paused: " + err.Error()
+		_ = m.st.update(id, func(x *sdkapi.Sandbox) { x.State, x.Error = "failed", msg; sb = *x })
+		return sb, errors.New(msg)
+	}
+	return sb, nil
+}
+
 func (m *sandboxManager) touch(id string) {
 	_ = m.st.update(id, func(x *sdkapi.Sandbox) { x.LastActive = m.now().UTC() })
 }
@@ -530,6 +606,11 @@ func (m *sandboxManager) reap(ctx context.Context) {
 		id := strings.Fields(e)[0]
 		err := m.destroy(id)
 		_ = auditLog("ziro-sandboxd", "local", "sandbox expire", e, err)
+	}
+	if len(expired) > 0 {
+		if err := m.applyNet(); err != nil {
+			fmt.Printf("[sandboxd] network after expiry: %v\n", err)
+		}
 	}
 	for name := range status { // containers without a record
 		if strings.HasPrefix(name, "ziro-sbx-") {
