@@ -278,6 +278,17 @@ def sandbox_checks(con, check):
                       f"ziroctl sandbox exec {sid} -- cat /workspace/d/up.txt && ziroctl sandbox exec {sid} -- sh -c 'ln -s /etc/shadow /workspace/s' && "
                       f"ziroctl sandbox cp {sid}:/workspace/s - 2>&1 | head -1", timeout=120)
     check("sandbox files: upload lands in /workspace; a planted symlink can't read the host", "hello" in out and "root:" not in out, out)
+    # Port previews through the gateway (a private domain: the gateway's own CA).
+    rc, out = con.run("ziroctl gateway domain set sbx.internal >/dev/null 2>&1; "
+                      "ziroctl sandbox create alpine --timeout 10m --net open 2>&1 | tail -2", timeout=300)
+    pid = out.split()[0] if out.split() else ""
+    rc, out = con.run(f"ziroctl sandbox exec {pid} -- sh -c 'apk add -q busybox-extras && mkdir -p /w && echo preview-ok > /w/index.html && "
+                      f"(httpd -p 8080 -h /w >/dev/null 2>&1 &)' && url=$(ziroctl sandbox expose {pid} 8080) && sleep 3 && "
+                      f"curl -sk -o /dev/null -w 'NOTOKEN=%{{http_code}}\\n' --resolve 8080-{pid}.sbx.internal:443:127.0.0.1 https://8080-{pid}.sbx.internal/ && "
+                      f"curl -sk -L -c /tmp/cj -b /tmp/cj --resolve 8080-{pid}.sbx.internal:443:127.0.0.1 \"$url\"", timeout=300)
+    check("sandbox preview: https://<port>-<id>.<domain> needs its token, then serves the sandbox's port",
+          "NOTOKEN=401" in out and "preview-ok" in out, out)
+    con.run(f"ziroctl sandbox rm {pid}; ziroctl gateway domain rm >/dev/null 2>&1", timeout=120)
     rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
                       "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
     check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)

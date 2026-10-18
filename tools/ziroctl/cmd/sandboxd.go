@@ -74,6 +74,22 @@ func runSandboxDaemon(ctx context.Context) error {
 			fmt.Printf("[sandboxd] sandbox network rules: %v\n", err)
 		}
 	}
+	if cfg.PreviewPort > 0 {
+		key, err := loadPreviewKey()
+		if err != nil {
+			l.Close()
+			return fmt.Errorf("preview key: %w", err)
+		}
+		m.previewKey, m.previewPort = key, cfg.PreviewPort
+		ps := &http.Server{Addr: net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.PreviewPort)), Handler: m.previewHandler(),
+			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+		go func() { <-ctx.Done(); _ = ps.Close() }()
+		go func() {
+			if err := ps.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Printf("[sandboxd] preview proxy: %v\n", err)
+			}
+		}()
+	}
 	if cfg.SSHPort > 0 {
 		signer, err := sandboxHostKey()
 		if err != nil {
@@ -218,6 +234,22 @@ func (m *sandboxManager) routes() *http.ServeMux {
 	for _, method := range []string{"GET", "PUT", "DELETE"} {
 		mux.HandleFunc(method+" /v1/sandboxes/{id}/files", with(m.serveFiles))
 	}
+	mux.HandleFunc("POST /v1/sandboxes/{id}/previews", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		var req sdkapi.SandboxPreviewRequest
+		if err := decodeStrict(w, r, &req, 4<<10); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		pv, err := m.expose(id, c, req)
+		apiReply(w, err, pv)
+	}))
+	mux.HandleFunc("DELETE /v1/sandboxes/{id}/previews/{port}", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		port, err := strconv.Atoi(r.PathValue("port"))
+		if err == nil {
+			err = m.unexpose(id, c, port)
+		}
+		apiReply(w, err, APIMessage{Status: "ok", Message: "preview removed"})
+	}))
 	mux.HandleFunc("POST /v1/sandboxes/{id}/exec", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
 		var req sdkapi.SandboxExecRequest
 		if err := decodeStrict(w, r, &req, sandboxExecMaxStdin+(64<<10)); err != nil {

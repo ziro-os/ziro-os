@@ -28,6 +28,8 @@ func registerSandboxRoutes(a *apiRouter) {
 	a.post("/api/v1/sandboxes/{id}/renew", "deployer", fwd)
 	a.put("/api/v1/sandboxes/{id}/metadata", "deployer", fwd)
 	a.put("/api/v1/sandboxes/{id}/network", "deployer", fwd)
+	a.post("/api/v1/sandboxes/{id}/previews", "deployer", fwd)
+	a.delete("/api/v1/sandboxes/{id}/previews/{port}", "deployer", fwd)
 	a.post("/api/v1/sandboxes/{id}/access", "deployer", fwd)
 	a.get("/api/v1/sandboxes/{id}/access", "deployer", fwd)
 	a.delete("/api/v1/sandboxes/{id}/access/{aid}", "deployer", fwd)
