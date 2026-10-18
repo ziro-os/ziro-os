@@ -292,7 +292,7 @@ var sandboxServeCmd = &cobra.Command{
 
 func init() {
 	f := sandboxCreateCmd.Flags()
-	f.StringVar(&sbxSpec.Runtime, "runtime", "", "gvisor (default) or runc (operators, when the host allows it)")
+	f.StringVar(&sbxSpec.Runtime, "runtime", "", "gvisor (default), gvisor-kvm (hardware virtualization, needs /dev/kvm) or runc (operators, when the host allows it)")
 	f.StringArrayVarP(&sbxEnv, "env", "e", nil, "Environment variable KEY=VALUE (repeatable)")
 	f.StringVarP(&sbxSpec.User, "user", "u", "", "Run as uid[:gid] (default: the image's user)")
 	f.StringVarP(&sbxSpec.Workdir, "workdir", "w", "", "Working directory (default /workspace)")

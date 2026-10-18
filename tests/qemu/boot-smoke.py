@@ -299,6 +299,13 @@ def sandbox_checks(con, check):
     check("sandbox secrets: a placeholder inside, the value only for its host",
           "IN=zsec_" in out and "Bearer s3cr3t-value" in out and "s3cr3t-value" not in out.split("IN=")[1].split()[0], out)
     con.run(f"ziroctl sandbox rm {kid}", timeout=60)
+    # gvisor-kvm: runs where /dev/kvm exists, and says why not elsewhere (QEMU without nested KVM).
+    rc, out = con.run("if [ -e /dev/kvm ] || modprobe kvm_intel 2>/dev/null || modprobe kvm_amd 2>/dev/null; then "
+                      "k=$(ziroctl sandbox create alpine --runtime gvisor-kvm --timeout 5m 2>&1 | tail -2 | head -1) && "
+                      "ziroctl sandbox exec $k -- dmesg | head -1 && ziroctl sandbox rm $k >/dev/null; "
+                      "else ziroctl sandbox create alpine --runtime gvisor-kvm 2>&1 | tail -1; fi", timeout=300)
+    check("sandbox gvisor-kvm: runs on KVM hosts, or refuses clearly without /dev/kvm",
+          "Starting gVisor" in out or "needs /dev/kvm" in out, out)
     rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
                       "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
     check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)

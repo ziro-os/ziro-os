@@ -1460,7 +1460,7 @@ components:
       additionalProperties: false
       properties:
         image: { type: string, description: "registry/name[:tag][@sha256:...]; checked against the host's image policy" }
-        runtime: { type: string, enum: [gvisor, runc], description: "gvisor (default); runc needs operator and allow_runc on the host" }
+        runtime: { type: string, enum: [gvisor, gvisor-kvm, runc], description: "gvisor (default, or the host's default_runtime); gvisor-kvm needs /dev/kvm; runc needs operator and allow_runc on the host" }
         command: { type: array, items: { type: string }, description: "default: keep the sandbox up (sleep infinity)" }
         env: { type: object, additionalProperties: { type: string } }
         user: { type: string, pattern: "^[0-9]{1,10}(:[0-9]{1,10})?$" }

@@ -16,7 +16,7 @@ import (
 // here; the spec only picks what runs and how big it may get.
 type SandboxSpec struct {
 	Image       string            `json:"image"`
-	Runtime     string            `json:"runtime,omitempty"`      // gvisor (default) or runc (operator + host opt-in)
+	Runtime     string            `json:"runtime,omitempty"`      // gvisor (default), gvisor-kvm (hardware virtualization) or runc (operator + host opt-in)
 	Command     []string          `json:"command,omitempty"`      // default: keep the sandbox up (sleep infinity)
 	Env         map[string]string `json:"env,omitempty"`          // plain values: visible to anyone who can inspect the sandbox
 	User        string            `json:"user,omitempty"`         // uid[:gid] inside the sandbox (default: the image's user)
@@ -55,8 +55,9 @@ const (
 
 // Sandbox runtimes.
 const (
-	SandboxGVisor = "gvisor"
-	SandboxRunc   = "runc"
+	SandboxGVisor    = "gvisor"     // gVisor, systrap platform: works anywhere
+	SandboxGVisorKVM = "gvisor-kvm" // gVisor on its KVM platform: the sandbox kernel behind hardware virtualization
+	SandboxRunc      = "runc"
 )
 
 var (
@@ -72,9 +73,9 @@ func (s *SandboxSpec) Validate() error {
 		return fmt.Errorf("bad image %q", s.Image)
 	}
 	switch s.Runtime {
-	case "", SandboxGVisor, SandboxRunc:
+	case "", SandboxGVisor, SandboxGVisorKVM, SandboxRunc:
 	default:
-		return fmt.Errorf("runtime must be %s or %s", SandboxGVisor, SandboxRunc)
+		return fmt.Errorf("runtime must be %s, %s or %s", SandboxGVisor, SandboxGVisorKVM, SandboxRunc)
 	}
 	if len(s.Command) > 64 {
 		return errors.New("command: at most 64 arguments")

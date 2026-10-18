@@ -18,7 +18,7 @@ ziroctl sandbox rm <id>
 
 | | Default | Can the caller change it? |
 |---|---|---|
-| Kernel | gVisor (systrap: no KVM needed, works in cloud VMs and on arm64) | `runtime: runc` only for operators, and only if the host allows it |
+| Kernel | gVisor (systrap: no KVM needed, works in cloud VMs and on arm64) | `--runtime gvisor-kvm` puts gVisor's kernel behind hardware virtualization ([below](#hardware-isolation-gvisor-kvm)); `runc` only for operators, and only if the host allows it |
 | Privileges | every capability dropped except chown, dac_override, fowner, fsetid, kill, net_bind_service, setgid, setuid (inside gVisor); `no-new-privileges` | no |
 | Files | the image's own copy-on-write root, a `/workspace` directory, a 256 MiB `/tmp` | no host mounts, no devices |
 | Network | none: no interface at all | `--net open` (the public internet) or `--allow` entries (default-deny); never the host, other sandboxes, cloud metadata or private networks ([below](#network-policy)) |
@@ -43,6 +43,21 @@ ziroctl sandbox renew <id> --timeout 1h    # expires one hour from now
 
 `exec` streams the command's output as it runs and exits with the command's exit code. A command may run for up to
 1 hour, and its output is capped at 64 MiB.
+
+## Hardware isolation (gvisor-kvm)
+
+On hosts with KVM (bare metal, or VMs with nested virtualization), `--runtime gvisor-kvm` runs gVisor on its KVM
+platform. The sandbox's kernel then runs inside a hardware virtual machine context, so escaping it would also need a
+CPU virtualization escape. It is a microVM-grade boundary without a guest kernel or image to download: it is the same
+`runsc`, and it usually runs syscall-heavy workloads faster than the default platform.
+
+```sh
+ziroctl sandbox create python:3.13-slim --runtime gvisor-kvm
+```
+
+- Make it the host's default with `"default_runtime": "gvisor-kvm"` in `/etc/ziro/sandbox.json`.
+- Without `/dev/kvm`, create fails with a clear error and asks for `gvisor` instead. On x86_64 the KVM module is
+  loaded on first use. Both Ziro kernels ship KVM (built in on arm64).
 
 ## Network policy
 
@@ -258,6 +273,7 @@ as `sandbox expire`.
   "default_timeout": "1h",
   "max_timeout": "24h",
   "allow_runc": false,
+  "default_runtime": "gvisor",
   "subnet": "10.250.0.0/16",
   "ssh_port": 22998,
   "preview_port": 22997,
@@ -286,6 +302,5 @@ Logs are in `/var/log/ziro-sandboxd.log`.
 
 These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
 
-- **Kata microVMs:** an option on hosts with KVM.
 - **For agents:** templates, warm pools, snapshots and an MCP server (`ziroctl sandbox mcp`).
 - **Clusters:** sandboxes spread across a cluster's runner nodes.

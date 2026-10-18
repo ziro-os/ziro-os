@@ -1,6 +1,6 @@
 # RFC 0004: Sandboxes for untrusted code and AI agents
 
-- **Status:** Draft (phases 1–5 implemented; later phases follow, one pull request each)
+- **Status:** Draft (phases 1–6 implemented; later phases follow, one pull request each)
 - **Pull request:** sandbox core (phase 1), then one per phase below
 
 ## Summary
@@ -146,8 +146,11 @@ Each phase is one pull request.
    - the sandbox sees `zsec_…` placeholders
    - a transparent egress proxy enforces the allowlist by SNI/Host and swaps placeholders only for the hosts a
      secret is bound to (MITM with a per-sandbox CA)
-6. **Kata microVMs**: `runtime: kata` (cloud-hypervisor) where KVM exists, with one batched kernel change (vhost,
-   vsock).
+6. **Hardware isolation**: `runtime: gvisor-kvm`, gVisor on its KVM platform, where `/dev/kvm` exists.
+   Kata was the first plan. Its official static bundle is about 1 GB (amd64) and 650 MB (arm64), which is out of
+   proportion for this OS, while gVisor's KVM platform gives a hardware boundary with the binary already installed
+   and no kernel change (both Ziro kernels have KVM). A slim Kata bundle can still be added later as another
+   runtime.
 7. **Agent platform**: templates, warm pools, snapshots (`nerdctl commit`), an MCP server (`ziroctl sandbox mcp`).
 8. **Cluster**:
    - placement on runner nodes, with records in Raft
