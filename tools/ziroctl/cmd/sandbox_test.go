@@ -97,7 +97,7 @@ var (
 func TestSandboxRunArgsAreLockedDown(t *testing.T) {
 	sb := &sdkapi.Sandbox{ID: "abcdefghijkl", Spec: schema.SandboxSpec{Image: "python:3", Runtime: "gvisor", Workdir: "/workspace",
 		Resources: &schema.Resources{Memory: "1Gi", CPUs: 1, PIDs: 512}, Env: map[string]string{"B": "2", "A": "1"}, User: "1000"}}
-	args := sandboxRunArgs(sb, "python:3", "10.250.0.1")
+	args := sandboxRunArgs(sb, "python:3", "10.250.0.1", nil)
 	joined := strings.Join(args, " ")
 	for _, want := range []string{"--runtime " + sandboxRunsc, "--cap-drop ALL", "--security-opt no-new-privileges", "--network none",
 		"--memory 1073741824", "--pids-limit 512", "--restart no", "-u 1000", "-e A=1 -e B=2",
@@ -125,7 +125,7 @@ func TestSandboxRunArgsAreLockedDown(t *testing.T) {
 	}
 	// A command is passed after the image, never as flags; runc drops the gVisor runtime.
 	sb.Spec.Command, sb.Spec.Runtime = []string{"--privileged", "x"}, "runc"
-	args = sandboxRunArgs(sb, "python:3", "10.250.0.1")
+	args = sandboxRunArgs(sb, "python:3", "10.250.0.1", nil)
 	if i := slices.Index(args, "--"); i < 0 || !slices.Equal(args[i+1:], []string{"python:3", "--privileged", "x"}) || slices.Contains(args, sandboxRunsc) {
 		t.Errorf("command args: %v", args)
 	}

@@ -289,6 +289,16 @@ def sandbox_checks(con, check):
     check("sandbox preview: https://<port>-<id>.<domain> needs its token, then serves the sandbox's port",
           "NOTOKEN=401" in out and "preview-ok" in out, out)
     con.run(f"ziroctl sandbox rm {pid}; ziroctl gateway domain rm >/dev/null 2>&1", timeout=120)
+    # Credential injection: the sandbox holds a placeholder; the bound host gets the value, another host is refused.
+    rc, out = con.run("SMOKE_TOKEN=s3cr3t-value ziroctl sandbox create alpine --timeout 10m --net open "
+                      "--secret SMOKE_TOKEN@httpbin.org 2>&1 | tail -2", timeout=300)
+    kid = out.split()[0] if out.split() else ""
+    rc, out = con.run(f"ziroctl sandbox exec {kid} -- sh -c 'echo IN=$SMOKE_TOKEN; "
+                      f"wget -q -T 15 -O- --header \"Authorization: Bearer $SMOKE_TOKEN\" https://httpbin.org/headers; "
+                      f"wget -q -T 15 -O- --header \"Host: example.org\" --header \"Authorization: Bearer $SMOKE_TOKEN\" https://httpbin.org/headers 2>&1 | head -2'", timeout=180)
+    check("sandbox secrets: a placeholder inside, the value only for its host",
+          "IN=zsec_" in out and "Bearer s3cr3t-value" in out and "s3cr3t-value" not in out.split("IN=")[1].split()[0], out)
+    con.run(f"ziroctl sandbox rm {kid}", timeout=60)
     rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
                       "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
     check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)

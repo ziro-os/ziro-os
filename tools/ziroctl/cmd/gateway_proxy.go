@@ -976,13 +976,18 @@ func localInternalCA() ([]byte, []byte, error) {
 
 // newInternalCA creates the gateway's private CA (10 years; signs only server certificates).
 func newInternalCA() (certPEM, keyPEM []byte, err error) {
+	return newCA("Ziro gateway internal CA", time.Now().AddDate(10, 0, 0))
+}
+
+// newCA creates a private CA (ECDSA P-256) that signs only server certificates.
+func newCA(name string, notAfter time.Time) (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
-	tpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "Ziro gateway internal CA", Organization: []string{"Ziro OS"}},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(10, 0, 0), IsCA: true, BasicConstraintsValid: true,
+	tpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: name, Organization: []string{"Ziro OS"}},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: notAfter, IsCA: true, BasicConstraintsValid: true,
 		MaxPathLenZero: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
 	if err != nil {
@@ -1005,6 +1010,16 @@ func (g *gatewayServer) internalLeaf(host string) (*tls.Certificate, error) {
 	if c := g.leafs[host]; c != nil && time.Until(c.Leaf.NotAfter) > 10*24*time.Hour {
 		return c, nil
 	}
+	c, err := issueLeaf(g.ca, host)
+	if err != nil {
+		return nil, err
+	}
+	g.leafs[host] = c
+	return c, nil
+}
+
+// issueLeaf signs a 30-day server certificate for host with ca (whose Leaf is parsed).
+func issueLeaf(ca *tls.Certificate, host string) (*tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -1013,14 +1028,12 @@ func (g *gatewayServer) internalLeaf(host string) (*tls.Certificate, error) {
 	tpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(30 * 24 * time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, g.ca.Leaf, &key.PublicKey, g.ca.PrivateKey)
+	der, err := x509.CreateCertificate(rand.Reader, tpl, ca.Leaf, &key.PublicKey, ca.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
 	leaf, _ := x509.ParseCertificate(der)
-	c := &tls.Certificate{Certificate: [][]byte{der, g.ca.Certificate[0]}, PrivateKey: key, Leaf: leaf}
-	g.leafs[host] = c
-	return c, nil
+	return &tls.Certificate{Certificate: [][]byte{der, ca.Certificate[0]}, PrivateKey: key, Leaf: leaf}, nil
 }
 
 // ---- L4: TCP routes and TLS passthrough ----
