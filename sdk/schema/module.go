@@ -46,6 +46,9 @@ type ModuleArtifact struct {
 	Path   string `json:"path"`
 	Mode   string `json:"mode"`
 	Arch   string `json:"arch,omitempty"` // x86_64 or aarch64; empty for any
+	// Extract names one file inside a .tar.gz or .tar.bz2 download: the sha256 pins the archive,
+	// and only that member is kept at Path (for projects that ship binaries only in tarballs).
+	Extract string `json:"extract,omitempty"`
 }
 
 type ModuleManifest struct {
@@ -127,6 +130,9 @@ func (m ModuleManifest) Validate() error {
 		}
 		if a.Arch != "" && a.Arch != "x86_64" && a.Arch != "aarch64" {
 			return fmt.Errorf("artifact %s: arch must be x86_64 or aarch64", a.Path)
+		}
+		if a.Extract != "" && (filepath.IsAbs(a.Extract) || filepath.Clean(a.Extract) != a.Extract || strings.HasPrefix(a.Extract, "..") || len(a.Extract) > 256) {
+			return fmt.Errorf("artifact %s: extract must be a clean relative path inside the archive", a.Path)
 		}
 	}
 	vars := m.PlaceholderNames()

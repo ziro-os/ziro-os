@@ -74,6 +74,7 @@ func apiRoutes() *apiRouter {
 	registerOpsRoutes(a)
 	registerStackRoutes(a)
 	registerDeployRoutes(a)
+	registerSandboxRoutes(a)
 	return a
 }
 
@@ -161,11 +162,18 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 // ---- server ----
 
 type apiRoleKey struct{}
+type apiNameKey struct{}
 
 // apiRole is the caller's role (set by the middleware).
 func apiRole(r *http.Request) string {
 	role, _ := r.Context().Value(apiRoleKey{}).(string)
 	return role
+}
+
+// apiTokenName is the name of the caller's token (set by the middleware).
+func apiTokenName(r *http.Request) string {
+	name, _ := r.Context().Value(apiNameKey{}).(string)
+	return name
 }
 
 // statusRecorder captures the status and an error message for the audit trail.
@@ -234,7 +242,7 @@ func newAPIHandler(a *apiRouter, c apiServerConfig) http.Handler {
 			caller := "anonymous"
 			if rt.Role != "public" {
 				auth := r.Header.Get("Authorization")
-				name, role, ok := apiIdentity(trimBearer(auth), c.legacyToken, c.now())
+				name, role, scopes, ok := apiIdentity(trimBearer(auth), c.legacyToken, c.now())
 				if !ok || !strings.HasPrefix(auth, "Bearer ") {
 					apiError(w, http.StatusUnauthorized, "invalid or missing bearer token")
 					return
@@ -247,8 +255,14 @@ func newAPIHandler(a *apiRouter, c apiServerConfig) http.Handler {
 					apiError(w, http.StatusForbidden, "requires the "+rt.Role+" role")
 					return
 				}
+				if !scopeAllows(scopes, rt.Path) {
+					apiError(w, http.StatusForbidden, "this token is limited to: "+strings.Join(scopes, ", "))
+					return
+				}
 				caller = "api-token:" + name + "(" + role + ")"
-				r = r.WithContext(context.WithValue(context.WithValue(r.Context(), apiCallerKey{}, caller), apiRoleKey{}, role))
+				ctx := context.WithValue(r.Context(), apiCallerKey{}, caller)
+				ctx = context.WithValue(ctx, apiRoleKey{}, role)
+				r = r.WithContext(context.WithValue(ctx, apiNameKey{}, name))
 			}
 			if rt.Method == http.MethodGet || rt.Method == http.MethodHead {
 				rt.Handler(w, r)

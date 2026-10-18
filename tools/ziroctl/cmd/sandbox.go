@@ -1,0 +1,560 @@
+package cmd
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base32"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
+	"github.com/ziro-os/ziro-os/sdk/schema"
+)
+
+// Sandboxes: disposable, strongly isolated containers for untrusted code (AI agents, code
+// interpreters). The `sandbox` module runs ziro-sandboxd, which owns them; the CLI and the REST
+// API (/api/v1/sandboxes) are its clients. Design: docs/design/rfcs/0004-sandboxes.md.
+//
+// Isolation is decided here, never by the caller:
+//   - gVisor (runsc, systrap platform): the workload's syscalls go to gVisor's user-space kernel,
+//     not the host's. runc only when the host config allows it and an operator asks.
+//   - every capability dropped but a short list (which, under gVisor, apply to its kernel),
+//     no-new-privileges, memory/cpu/pids limits, no host mounts, no devices, no privileged mode.
+//   - no network (--network none) until a network policy exists (phase 2).
+//   - a per-sandbox /workspace directory and a size-limited /tmp; the image's rootfs is the
+//     container's own copy-on-write layer.
+//   - a lifetime (default 1h, max 24h) and an optional idle timeout; the reaper deletes
+//     sandboxes that are over either.
+//
+// Ownership: a sandbox belongs to the API token that created it ("root" from the host CLI);
+// deployers see only their own, operators and admins see all.
+
+var (
+	sandboxSocket     = "/run/ziro/sandboxd.sock"
+	sandboxRoot       = "/var/lib/ziro/sandbox"
+	sandboxConfigFile = "/etc/ziro/sandbox.json"
+	sandboxRunsc      = "/var/lib/ziro/plugins/sandbox/runsc-ziro" // runsc with Ziro's flags (modules/sandbox.json)
+	sandboxNerdctl    = func(ctx context.Context, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, "nerdctl", args...).CombinedOutput()
+	}
+)
+
+const sandboxLabel = "ziro.sandbox"
+
+// sandboxCaps are the capabilities a sandbox keeps (Docker's default set minus NET_RAW, MKNOD,
+// AUDIT_WRITE, SETFCAP and SYS_CHROOT): enough to install packages as root inside it.
+var sandboxCaps = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "NET_BIND_SERVICE", "SETGID", "SETUID"}
+
+var sandboxIDRe = regexp.MustCompile(`^[a-z2-7]{12}$`)
+
+// sandboxConfig is the host's policy for sandboxes (/etc/ziro/sandbox.json, all optional).
+type sandboxConfig struct {
+	MaxSandboxes   int              `json:"max_sandboxes"`
+	MaxPerOwner    int              `json:"max_per_owner"`
+	MaxMemory      string           `json:"max_memory,omitempty"` // all sandboxes together (default: no cap beyond the count)
+	Defaults       schema.Resources `json:"defaults"`
+	Limits         schema.Resources `json:"limits"`
+	DefaultTimeout string           `json:"default_timeout"`
+	MaxTimeout     string           `json:"max_timeout"`
+	AllowRunc      bool             `json:"allow_runc,omitempty"` // let operators pick the runc runtime (weaker isolation)
+	ImagePolicy    ImagePolicy      `json:"image_policy,omitempty"`
+}
+
+func defaultSandboxConfig() sandboxConfig {
+	return sandboxConfig{
+		MaxSandboxes:   32,
+		MaxPerOwner:    8,
+		Defaults:       schema.Resources{Memory: "1Gi", CPUs: 1, PIDs: 512},
+		Limits:         schema.Resources{Memory: "8Gi", CPUs: 4, PIDs: 4096},
+		DefaultTimeout: "1h",
+		MaxTimeout:     "24h",
+	}
+}
+
+func loadSandboxConfig() (sandboxConfig, error) {
+	c := defaultSandboxConfig()
+	b, err := os.ReadFile(sandboxConfigFile)
+	if os.IsNotExist(err) {
+		return c, nil
+	}
+	if err != nil {
+		return c, err
+	}
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return c, fmt.Errorf("%s: %w", sandboxConfigFile, err)
+	}
+	for _, r := range []*schema.Resources{&c.Defaults, &c.Limits} {
+		if err := r.Validate(); err != nil {
+			return c, fmt.Errorf("%s: %w", sandboxConfigFile, err)
+		}
+	}
+	for _, d := range []string{c.DefaultTimeout, c.MaxTimeout} {
+		if _, err := time.ParseDuration(d); err != nil {
+			return c, fmt.Errorf("%s: bad timeout %q", sandboxConfigFile, d)
+		}
+	}
+	if c.MaxMemory != "" {
+		if _, err := schema.ParseSize(c.MaxMemory); err != nil {
+			return c, fmt.Errorf("%s: max_memory: %w", sandboxConfigFile, err)
+		}
+	}
+	return c, nil
+}
+
+// sandboxCaller is who asks: the token name and role the API passed on, or root (the host CLI).
+type sandboxCaller struct{ Owner, Role string }
+
+func (c sandboxCaller) seesAll() bool { return apiRoleRank[c.Role] >= apiRoleRank["operator"] }
+
+// resolveSandboxSpec fills in the host defaults and checks the spec against the host limits.
+// It returns the lifetime.
+func resolveSandboxSpec(s *schema.SandboxSpec, cfg sandboxConfig, caller sandboxCaller) (time.Duration, error) {
+	if err := s.Validate(); err != nil {
+		return 0, err
+	}
+	if s.Runtime == "" {
+		s.Runtime = schema.SandboxGVisor
+	}
+	if s.Runtime == schema.SandboxRunc {
+		if !cfg.AllowRunc {
+			return 0, errors.New("the runc runtime is disabled on this host (allow_runc in " + sandboxConfigFile + ")")
+		}
+		if !caller.seesAll() {
+			return 0, errors.New("the runc runtime needs the operator role")
+		}
+	}
+	if s.Workdir == "" {
+		s.Workdir = "/workspace"
+	}
+	r := schema.Resources{}
+	if s.Resources != nil {
+		r = *s.Resources
+	}
+	if r.Memory == "" {
+		r.Memory = cfg.Defaults.Memory
+	}
+	if r.CPUs == 0 {
+		r.CPUs = cfg.Defaults.CPUs
+	}
+	if r.PIDs == 0 {
+		r.PIDs = cfg.Defaults.PIDs
+	}
+	if lim := cfg.Limits.MemoryBytes(); lim > 0 && r.MemoryBytes() > lim {
+		return 0, fmt.Errorf("memory %s is over this host's limit of %s", r.Memory, cfg.Limits.Memory)
+	}
+	if cfg.Limits.CPUs > 0 && r.CPUs > cfg.Limits.CPUs {
+		return 0, fmt.Errorf("cpus %v is over this host's limit of %v", r.CPUs, cfg.Limits.CPUs)
+	}
+	if cfg.Limits.PIDs > 0 && r.PIDs > cfg.Limits.PIDs {
+		return 0, fmt.Errorf("pids %d is over this host's limit of %d", r.PIDs, cfg.Limits.PIDs)
+	}
+	s.Resources = &r
+	if s.Timeout == "" {
+		s.Timeout = cfg.DefaultTimeout
+	}
+	ttl, _ := time.ParseDuration(s.Timeout)
+	if maxTTL, _ := time.ParseDuration(cfg.MaxTimeout); ttl > maxTTL {
+		return 0, fmt.Errorf("timeout %s is over this host's maximum of %s", s.Timeout, cfg.MaxTimeout)
+	}
+	return ttl, nil
+}
+
+func newSandboxID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return strings.ToLower(base32.StdEncoding.EncodeToString(b))[:12]
+}
+
+func sandboxContainer(id string) string { return "ziro-sbx-" + id }
+func sandboxDir(id string) string       { return filepath.Join(sandboxRoot, id) }
+
+// sandboxRunArgs is the nerdctl command line that starts a sandbox. Nothing in the spec can add
+// a mount, a device, a capability or a network.
+func sandboxRunArgs(sb *sdkapi.Sandbox, image string) []string {
+	s := sb.Spec
+	args := []string{"run", "-d", "--name", sandboxContainer(sb.ID), "--hostname", "sandbox",
+		"--label", sandboxLabel + "=" + sb.ID, "--restart", "no"}
+	if s.Runtime != schema.SandboxRunc {
+		args = append(args, "--runtime", sandboxRunsc)
+	}
+	args = append(args, "--security-opt", "no-new-privileges", "--cap-drop", "ALL")
+	for _, c := range sandboxCaps {
+		args = append(args, "--cap-add", c)
+	}
+	args = append(args, containerResourceArgs(s.Resources)...)
+	args = append(args, "--network", "none",
+		"--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+		"-v", filepath.Join(sandboxDir(sb.ID), "workspace")+":/workspace",
+		"-w", s.Workdir)
+	if s.User != "" {
+		args = append(args, "-u", s.User)
+	}
+	keys := make([]string, 0, len(s.Env))
+	for k := range s.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "-e", k+"="+s.Env[k])
+	}
+	if len(s.Command) == 0 {
+		// Keep the sandbox up for exec and SSH, whatever the image would run.
+		return append(args, "--entrypoint", "sleep", "--", image, "infinity")
+	}
+	return append(append(args, "--", image), s.Command...)
+}
+
+// ---- the store: one JSON record per sandbox, next to its workspace ----
+
+type sandboxStore struct {
+	mu  sync.Mutex
+	all map[string]*sdkapi.Sandbox
+}
+
+func loadSandboxStore() *sandboxStore {
+	st := &sandboxStore{all: map[string]*sdkapi.Sandbox{}}
+	ents, _ := os.ReadDir(sandboxRoot)
+	for _, e := range ents {
+		b, err := os.ReadFile(filepath.Join(sandboxRoot, e.Name(), "sandbox.json"))
+		if err != nil {
+			continue
+		}
+		var sb sdkapi.Sandbox
+		if json.Unmarshal(b, &sb) == nil && sb.ID == e.Name() {
+			st.all[sb.ID] = &sb
+		}
+	}
+	return st
+}
+
+// save writes a record; the caller holds mu.
+func (st *sandboxStore) save(sb *sdkapi.Sandbox) error {
+	b, err := json.MarshalIndent(sb, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(sandboxDir(sb.ID), "sandbox.json"), b, 0600)
+}
+
+// get returns a copy of a sandbox the caller may see; anyone else's is "not found", so ids
+// can't be probed.
+func (st *sandboxStore) get(id string, c sandboxCaller) (sdkapi.Sandbox, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	sb, ok := st.all[id]
+	if !ok || (!c.seesAll() && sb.Owner != c.Owner) {
+		return sdkapi.Sandbox{}, errNotFound("no sandbox " + id)
+	}
+	return *sb, nil
+}
+
+func (st *sandboxStore) list(c sandboxCaller) []sdkapi.Sandbox {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := []sdkapi.Sandbox{}
+	for _, sb := range st.all {
+		if c.seesAll() || sb.Owner == c.Owner {
+			out = append(out, *sb)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
+	return out
+}
+
+// update changes a sandbox under the lock and saves it.
+func (st *sandboxStore) update(id string, f func(sb *sdkapi.Sandbox)) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	sb, ok := st.all[id]
+	if !ok {
+		return errNotFound("no sandbox " + id)
+	}
+	f(sb)
+	return st.save(sb)
+}
+
+// ---- lifecycle ----
+
+type sandboxManager struct {
+	st  *sandboxStore
+	now func() time.Time
+}
+
+func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c sandboxCaller) (sdkapi.Sandbox, error) {
+	cfg, err := loadSandboxConfig()
+	if err != nil {
+		return sdkapi.Sandbox{}, err
+	}
+	ttl, err := resolveSandboxSpec(&spec, cfg, c)
+	if err != nil {
+		return sdkapi.Sandbox{}, err
+	}
+	image, err := enforceImagePolicy(cfg.ImagePolicy, spec.Image)
+	if err != nil {
+		return sdkapi.Sandbox{}, err
+	}
+	now := m.now().UTC()
+	sb := &sdkapi.Sandbox{ID: newSandboxID(), Owner: c.Owner, State: "pending", Spec: spec,
+		Created: now, Expires: now.Add(ttl), LastActive: now}
+
+	m.st.mu.Lock()
+	if err := checkSandboxQuota(m.st.all, cfg, c.Owner, spec.Resources.MemoryBytes()); err != nil {
+		m.st.mu.Unlock()
+		return sdkapi.Sandbox{}, err
+	}
+	err = os.MkdirAll(filepath.Join(sandboxDir(sb.ID), "workspace"), 0755)
+	if err == nil {
+		err = m.st.save(sb)
+	}
+	if err == nil {
+		m.st.all[sb.ID] = sb
+	}
+	m.st.mu.Unlock()
+	if err != nil {
+		_ = os.RemoveAll(sandboxDir(sb.ID))
+		return sdkapi.Sandbox{}, err
+	}
+	if spec.User != "" {
+		uid, gid := sandboxUIDGID(spec.User)
+		_ = os.Chown(filepath.Join(sandboxDir(sb.ID), "workspace"), uid, gid)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // the first run pulls the image
+	defer cancel()
+	out, runErr := sandboxNerdctl(ctx, sandboxRunArgs(sb, image)...)
+	var view sdkapi.Sandbox
+	uerr := m.st.update(sb.ID, func(x *sdkapi.Sandbox) {
+		if runErr != nil {
+			x.State, x.Error = "failed", cmdError(out, runErr)
+		} else {
+			x.State = "running"
+		}
+		view = *x
+	})
+	if uerr != nil { // deleted while it was starting
+		_, _ = sandboxNerdctl(context.Background(), "rm", "-f", sandboxContainer(sb.ID))
+		return sdkapi.Sandbox{}, errors.New("the sandbox was deleted while it was starting")
+	}
+	if runErr != nil {
+		return view, fmt.Errorf("start sandbox: %s", view.Error)
+	}
+	return view, nil
+}
+
+// checkSandboxQuota applies the host's count and memory caps; the caller holds the store lock.
+func checkSandboxQuota(all map[string]*sdkapi.Sandbox, cfg sandboxConfig, owner string, mem int64) error {
+	n, mine, used := 0, 0, int64(0)
+	for _, sb := range all {
+		n++
+		if sb.Owner == owner {
+			mine++
+		}
+		used += sb.Spec.Resources.MemoryBytes()
+	}
+	if cfg.MaxSandboxes > 0 && n >= cfg.MaxSandboxes {
+		return fmt.Errorf("this host runs its maximum of %d sandboxes", cfg.MaxSandboxes)
+	}
+	if cfg.MaxPerOwner > 0 && mine >= cfg.MaxPerOwner {
+		return fmt.Errorf("%s already has its maximum of %d sandboxes", owner, cfg.MaxPerOwner)
+	}
+	if cfg.MaxMemory != "" {
+		if lim, _ := schema.ParseSize(cfg.MaxMemory); used+mem > lim {
+			return fmt.Errorf("not enough sandbox memory left on this host (max_memory %s)", cfg.MaxMemory)
+		}
+	}
+	return nil
+}
+
+func sandboxUIDGID(user string) (int, int) {
+	u, g, _ := strings.Cut(user, ":")
+	uid, _ := strconv.Atoi(u)
+	gid := uid
+	if g != "" {
+		gid, _ = strconv.Atoi(g)
+	}
+	return uid, gid
+}
+
+// cmdError is the last line of a failed command's output, or its error.
+func cmdError(out []byte, err error) string {
+	msg := strings.TrimSpace(string(out))
+	if i := strings.LastIndex(msg, "\n"); i >= 0 {
+		msg = msg[i+1:]
+	}
+	if msg == "" {
+		return err.Error()
+	}
+	return msg
+}
+
+func (m *sandboxManager) remove(id string, c sandboxCaller) error {
+	if _, err := m.st.get(id, c); err != nil {
+		return err
+	}
+	m.st.mu.Lock()
+	delete(m.st.all, id)
+	m.st.mu.Unlock()
+	return m.destroy(id)
+}
+
+// destroy removes a sandbox's container and files (its record is already gone from the store).
+// nerdctl rm -f of a gVisor container can report success after a kill error and leave it
+// exited, so it is checked and removed again.
+func (m *sandboxManager) destroy(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	name := sandboxContainer(id)
+	for attempt := 0; ; attempt++ {
+		out, err := sandboxNerdctl(ctx, "rm", "-f", name)
+		if err != nil && !strings.Contains(string(out), "no such container") {
+			return fmt.Errorf("remove sandbox %s: %s", id, cmdError(out, err))
+		}
+		ps, err := sandboxNerdctl(ctx, "ps", "-a", "--format", "{{.Names}}")
+		if err != nil || !slices.Contains(strings.Fields(string(ps)), name) {
+			break
+		}
+		if attempt == 2 {
+			return fmt.Errorf("remove sandbox %s: the container is still there (the reaper retries)", id)
+		}
+		time.Sleep(time.Second)
+	}
+	return os.RemoveAll(sandboxDir(id))
+}
+
+// setPaused freezes (pause) or thaws (resume) a sandbox's processes.
+func (m *sandboxManager) setPaused(ctx context.Context, id string, c sandboxCaller, pause bool) (sdkapi.Sandbox, error) {
+	sb, err := m.st.get(id, c)
+	if err != nil {
+		return sb, err
+	}
+	from, to, verb := "running", "paused", "pause"
+	if !pause {
+		from, to, verb = "paused", "running", "unpause"
+	}
+	if sb.State != from {
+		return sb, fmt.Errorf("sandbox %s is %s, not %s", id, sb.State, from)
+	}
+	if out, err := sandboxNerdctl(ctx, verb, sandboxContainer(id)); err != nil {
+		return sb, fmt.Errorf("%s sandbox %s: %s", verb, id, cmdError(out, err))
+	}
+	err = m.st.update(id, func(x *sdkapi.Sandbox) { x.State, x.LastActive = to, m.now().UTC(); sb = *x })
+	return sb, err
+}
+
+// renew moves the expiry to now + ttl ("" = the sandbox's own timeout), within the host maximum.
+func (m *sandboxManager) renew(id string, c sandboxCaller, ttl string) (sdkapi.Sandbox, error) {
+	sb, err := m.st.get(id, c)
+	if err != nil {
+		return sb, err
+	}
+	if ttl == "" {
+		ttl = sb.Spec.Timeout
+	}
+	cfg, err := loadSandboxConfig()
+	if err != nil {
+		return sb, err
+	}
+	d, err := time.ParseDuration(ttl)
+	maxTTL, _ := time.ParseDuration(cfg.MaxTimeout)
+	if err != nil || d < time.Minute || d > maxTTL {
+		return sb, fmt.Errorf("timeout must be between 1m and %s", cfg.MaxTimeout)
+	}
+	err = m.st.update(id, func(x *sdkapi.Sandbox) { x.Expires = m.now().UTC().Add(d); sb = *x })
+	return sb, err
+}
+
+func (m *sandboxManager) setMetadata(id string, c sandboxCaller, md map[string]string) (sdkapi.Sandbox, error) {
+	sb, err := m.st.get(id, c)
+	if err != nil {
+		return sb, err
+	}
+	if err := schema.ValidateSandboxMetadata(md); err != nil {
+		return sb, err
+	}
+	err = m.st.update(id, func(x *sdkapi.Sandbox) { x.Spec.Metadata = md; sb = *x })
+	return sb, err
+}
+
+func (m *sandboxManager) touch(id string) {
+	_ = m.st.update(id, func(x *sdkapi.Sandbox) { x.LastActive = m.now().UTC() })
+}
+
+// ---- the reaper ----
+
+// reap deletes sandboxes past their lifetime or idle timeout, marks sandboxes whose container
+// is gone or exited as failed, and removes sandbox containers nobody owns (a crash between
+// starting a container and saving its record).
+func (m *sandboxManager) reap(ctx context.Context) {
+	out, err := sandboxNerdctl(ctx, "ps", "-a", "--filter", "label="+sandboxLabel, "--format", "{{.Names}}\t{{.Status}}")
+	if err != nil {
+		fmt.Printf("[sandboxd] list containers: %s\n", cmdError(out, err))
+		return
+	}
+	status := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name, st, ok := strings.Cut(l, "\t"); ok {
+			status[name] = strings.ToLower(st)
+		}
+	}
+	now := m.now().UTC()
+	var expired []string
+	m.st.mu.Lock()
+	for id, sb := range m.st.all {
+		delete(status, sandboxContainer(id))
+		idle, _ := time.ParseDuration(sb.Spec.IdleTimeout)
+		switch {
+		case now.After(sb.Expires):
+			expired = append(expired, id+" (lifetime over)")
+		case idle > 0 && sb.State == "running" && now.Sub(sb.LastActive) > idle:
+			expired = append(expired, id+" (idle)")
+		}
+	}
+	for _, e := range expired {
+		delete(m.st.all, strings.Fields(e)[0])
+	}
+	m.st.mu.Unlock()
+	for _, e := range expired {
+		id := strings.Fields(e)[0]
+		err := m.destroy(id)
+		_ = auditLog("ziro-sandboxd", "local", "sandbox expire", e, err)
+	}
+	for name := range status { // containers without a record
+		if strings.HasPrefix(name, "ziro-sbx-") {
+			_, _ = sandboxNerdctl(ctx, "rm", "-f", name)
+		}
+	}
+}
+
+// markExited flags running sandboxes whose container stopped (the command exited, OOM, a host
+// restart). It asks nerdctl once for all of them.
+func (m *sandboxManager) markExited(ctx context.Context) {
+	out, err := sandboxNerdctl(ctx, "ps", "--filter", "label="+sandboxLabel, "--format", "{{.Names}}")
+	if err != nil {
+		return
+	}
+	up := map[string]bool{}
+	for _, n := range strings.Fields(string(out)) {
+		up[n] = true
+	}
+	m.st.mu.Lock()
+	defer m.st.mu.Unlock()
+	for id, sb := range m.st.all {
+		if (sb.State == "running" || sb.State == "paused") && !up[sandboxContainer(id)] {
+			sb.State, sb.Error = "failed", "the sandbox stopped (its command exited, it ran out of memory, or the host restarted)"
+			_ = m.st.save(sb)
+		}
+	}
+}

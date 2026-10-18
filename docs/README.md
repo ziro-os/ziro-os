@@ -14,6 +14,7 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 ## Run workloads
 
 - [Containers, Compose and cron](containers.md): `ziroctl container`, `compose`, scheduled jobs.
+- [Sandboxes](sandbox.md): isolated gVisor sandboxes for untrusted code and AI agents (`ziroctl sandbox`, opt-in module).
 - [Apps](apps.md): one-command databases and services from signed catalogs.
 - [Deploy from git](deploy.md): build and release your code, with rollback and webhooks.
 - [Stacks and host provisioning](provisioning.md): YAML for apps and whole hosts, `stack up`, `apply`,

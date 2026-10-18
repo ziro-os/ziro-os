@@ -25,7 +25,10 @@ func checkDocCommand(root *cobra.Command, args []string) error {
 		return nil
 	}
 	for _, a := range rest {
-		if !strings.HasPrefix(a, "-") || a == "-" || a == "--" {
+		if a == "--" { // the rest is the command a sandbox or container runs
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
 			continue
 		}
 		name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")

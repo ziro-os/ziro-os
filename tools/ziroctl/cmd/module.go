@@ -1,12 +1,17 @@
 package cmd
 
 import (
+	"archive/tar"
+	"bufio"
+	"compress/bzip2"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -384,27 +389,52 @@ func serviceConf(s ModuleService) string { return supervisedConf(s) }
 // fetchArtifacts downloads the artifacts for this host's architecture unless a file with the
 // pinned sha256 is already in place.
 func fetchArtifacts(m ModuleManifest, st *ModuleState) error {
+	archives := map[string]string{} // sha256 -> a downloaded archive several files come from
+	defer func() {
+		for _, f := range archives {
+			_ = os.Remove(f)
+		}
+	}()
 	for _, a := range m.Artifacts {
 		if a.Arch != "" && a.Arch != strings.Replace(hostArch(), "arm64", "aarch64", 1) {
 			continue
 		}
 		p := modPath(a.Path)
-		if b, err := os.ReadFile(p); err != nil || sha256Hex(b) != a.SHA256 {
+		if !artifactCurrent(p, a) {
 			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 				return err
 			}
-			fmt.Printf("  downloading %s\n", filepath.Base(a.Path))
-			sum, err := artifactDownload(a.URL, p+".dl", 512<<20)
-			if err == nil && sum != a.SHA256 {
-				err = fmt.Errorf("%s: sha256 mismatch", a.URL)
+			dl := archives[a.SHA256]
+			if dl == "" {
+				dl = p + ".dl"
+				fmt.Printf("  downloading %s\n", filepath.Base(a.URL))
+				sum, err := artifactDownload(a.URL, dl, 512<<20)
+				if err == nil && sum != a.SHA256 {
+					err = fmt.Errorf("%s: sha256 mismatch", a.URL)
+				}
+				if err != nil {
+					_ = os.Remove(dl)
+					return err
+				}
+				if a.Extract != "" {
+					archives[a.SHA256] = dl
+				}
+			}
+			var err error
+			if a.Extract != "" {
+				err = extractTarMember(dl, a.Extract, p)
+				if err == nil {
+					err = os.WriteFile(p+".src", []byte(a.SHA256+"\n"), 0644)
+				}
+			} else {
+				err = os.Rename(dl, p)
 			}
 			if err != nil {
-				_ = os.Remove(p + ".dl")
 				return err
 			}
-			if err := os.Rename(p+".dl", p); err != nil {
-				return err
-			}
+		}
+		if a.Extract != "" {
+			st.Artifacts = uniq(append(st.Artifacts, p+".src"))
 		}
 		mode, _ := strconv.ParseUint(a.Mode, 8, 32)
 		if err := os.Chmod(p, os.FileMode(mode)); err != nil {
@@ -416,6 +446,73 @@ func fetchArtifacts(m ModuleManifest, st *ModuleState) error {
 		}
 	}
 	return nil
+}
+
+// artifactCurrent reports whether an artifact is already in place: the file has the pinned
+// sha256 or, for a file extracted from an archive, the archive's sha256 is recorded next to it.
+func artifactCurrent(p string, a ModuleArtifact) bool {
+	if a.Extract != "" {
+		src, err := os.ReadFile(p + ".src")
+		return err == nil && strings.TrimSpace(string(src)) == a.SHA256 && fileExists(p)
+	}
+	b, err := os.ReadFile(p)
+	return err == nil && sha256Hex(b) == a.SHA256
+}
+
+// extractTarMember writes one regular file of a .tar.gz/.tar.bz2 archive (verified by the
+// caller) to dst.
+func extractTarMember(archive, member, dst string) error {
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	magic, _ := br.Peek(3)
+	var r io.Reader
+	switch {
+	case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return err
+		}
+		r = gz
+	case string(magic) == "BZh":
+		r = bzip2.NewReader(br)
+	default:
+		return fmt.Errorf("%s: not a .tar.gz or .tar.bz2 archive", filepath.Base(dst))
+	}
+	tr := tar.NewReader(r)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return fmt.Errorf("%s is not in the archive", member)
+		}
+		if err != nil {
+			return err
+		}
+		if strings.TrimPrefix(h.Name, "./") != member {
+			continue
+		}
+		if h.Typeflag != tar.TypeReg || h.Size > 512<<20 {
+			return fmt.Errorf("%s: not a regular file under 512 MiB", member)
+		}
+		out, err := os.OpenFile(dst+".x", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(out, io.LimitReader(tr, h.Size))
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil {
+			err = os.Rename(dst+".x", dst)
+		}
+		if err != nil {
+			_ = os.Remove(dst + ".x")
+		}
+		return err
+	}
 }
 
 // traversable lets an artifact's unprivileged service user reach it: each directory from

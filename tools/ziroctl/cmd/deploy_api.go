@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"net/http"
-	"net/http/httputil"
-	"strings"
 	"time"
 )
 
@@ -30,18 +28,7 @@ func (d *deadlineWriter) Unwrap() http.ResponseWriter { return d.ResponseWriter 
 // code from a repository, so it needs admin (like apps deploy); rebuilding or rolling back an
 // existing one, or pushing source to a deployment that is already set up, is a deployer's job (a CI token).
 func registerDeployRoutes(a *apiRouter) {
-	proxy := &httputil.ReverseProxy{
-		Transport: deployHTTP.Transport,
-		Rewrite: func(r *httputil.ProxyRequest) {
-			r.Out.URL.Scheme, r.Out.URL.Host, r.Out.Host = "http", "ziroctld", "ziroctld"
-			r.Out.URL.Path = "/v1" + strings.TrimPrefix(r.In.URL.Path, "/api/v1")
-			r.Out.Header.Del("Authorization") // the API token stays with the API
-		},
-		FlushInterval: -1, // stream build logs
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			apiError(w, http.StatusServiceUnavailable, "ziroctld isn't running (ziroctl module enable builder)")
-		},
-	}
+	proxy := daemonProxy(deployHTTP, "ziroctld", "ziroctld isn't running (ziroctl module enable builder)")
 	fwd := func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		proxy.ServeHTTP(w, r)

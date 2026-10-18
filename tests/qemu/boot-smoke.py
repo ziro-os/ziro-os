@@ -244,6 +244,23 @@ def apps_checks(con, check):
     check("mysql-cluster: 3 members ONLINE (group replication over pod DNS)", ok, out)
 
 
+def sandbox_checks(con, check):
+    rc, out = con.run("ziroctl module enable sandbox 2>&1 | tail -2", timeout=900)
+    check("module enable sandbox: gVisor runsc + ziro-sandboxd", "Module sandbox enabled" in out, out)
+    rc, out = con.run("ziroctl sandbox create alpine --timeout 10m --meta smoke=1 2>&1 | tail -2", timeout=600)
+    sid = out.split()[0] if out.split() else ""
+    check("sandbox create (gVisor) runs", "running" in out and len(sid) == 12, out)
+    rc, out = con.run(f"ziroctl sandbox exec {sid} -- dmesg | head -1; ziroctl sandbox exec {sid} -- sh -c 'exit 7'; echo RC=$?", timeout=120)
+    check("sandbox exec runs under gVisor's kernel and passes the exit code", "gVisor" in out and "RC=7" in out, out)
+    rc, out = con.run(f"ziroctl sandbox exec {sid} -- sh -c 'grep CapEff /proc/self/status; ls /sys/class/net; "
+                      f"wget -q -T 3 -O- http://1.1.1.1 >/dev/null 2>&1; echo NET=$?'", timeout=120)
+    check("sandbox: reduced capabilities, loopback only, no network",
+          "00000000000004fb" in out and "NET=0" not in out and "eth0" not in out, out)
+    rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
+                      "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
+    check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     default_arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
@@ -254,6 +271,7 @@ def main():
     ap.add_argument("--no-pull", action="store_true", help="skip the container run check (no internet)")
     ap.add_argument("--installed", action="store_true", help="also install to a disk and boot it (tiny initramfs)")
     ap.add_argument("--modules", action="store_true", help="also test the clamav module (downloads ~250 MB of signatures)")
+    ap.add_argument("--sandbox", action="store_true", help="also test the sandbox module (gVisor, downloads ~170 MB)")
     ap.add_argument("--apps", action="store_true",
                     help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
     args = ap.parse_args()
@@ -689,6 +707,8 @@ def main():
                 check("clamav-onaccess blocks opening EICAR", "Module clamav-onaccess enabled" in out and "CAT_RC=1" in out, out)
             rc, out = con.run("ziroctl module disable clamav 2>&1 | tail -1; netstat -tln | grep -c 3310", timeout=300)
             check("module disable clamav", "Module clamav disabled" in out, out)
+        if args.sandbox and not args.no_pull:
+            sandbox_checks(con, check)
         if args.apps:
             apps_checks(con, check)
         # Logging out of a console clears it (screen + scrollback) before the next login prompt.

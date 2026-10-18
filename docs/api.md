@@ -54,6 +54,9 @@ ziroctl api token revoke grafana
 - Only the token's SHA-256 is stored (`/etc/ziro/api-tokens.json`, `0600`). A lost token can't be recovered:
   revoke it and create a new one.
 - Give each client its own token, with the lowest role that works. A Prometheus scraper needs only `viewer`.
+- `--scope` limits a token to API areas, whatever its role. An AI agent's token only needs sandboxes:
+  `ziroctl api token create agent --role deployer --scope sandboxes` gets `403` everywhere else
+  ([sandbox.md](sandbox.md)).
 
 ## Endpoints
 
