@@ -306,6 +306,23 @@ def sandbox_checks(con, check):
                       "else ziroctl sandbox create alpine --runtime gvisor-kvm 2>&1 | tail -1; fi", timeout=300)
     check("sandbox gvisor-kvm: runs on KVM hosts, or refuses clearly without /dev/kvm",
           "Starting gVisor" in out or "needs /dev/kvm" in out, out)
+    # Templates, a warm pool (create = resume), snapshots.
+    rc, out = con.run("echo '{\"image\":\"alpine\"}' > /tmp/t.json && ziroctl sandbox template add tiny /tmp/t.json >/dev/null && "
+                      "echo '{\"pools\":{\"tiny\":1}}' > /etc/ziro/sandbox.json && "
+                      "for i in $(seq 60); do ziroctl sandbox ls | grep -q 'paused.*pool:tiny' && break; sleep 2; done; "
+                      "s=$(date +%s%N); w=$(ziroctl sandbox create --template tiny 2>/dev/null | head -1); e=$(date +%s%N); "
+                      "echo CLAIM_MS=$(( (e - s) / 1000000 )); ziroctl sandbox get $w --json | grep -c '\"owner\": \"root\"'; "
+                      "ziroctl sandbox exec $w -- sh -c 'echo snap > /etc/marker' && img=$(ziroctl sandbox snapshot create $w marker) && "
+                      "f=$(ziroctl sandbox create $img 2>/dev/null | head -1) && ziroctl sandbox exec $f -- cat /etc/marker; "
+                      "ziroctl sandbox rm $w $f >/dev/null; echo '{}' > /etc/ziro/sandbox.json", timeout=600)
+    check("sandbox pool + snapshot: a warm create is a resume; a snapshot carries the filesystem", "snap" in out and "CLAIM_MS=" in out, out)
+    # MCP over stdio, through the REST API with a scoped token.
+    rc, out = con.run("ziroctl service start ziro-api >/dev/null 2>&1; sleep 3; t=$(ziroctl api token create mcp --role deployer --scope sandboxes 2>/dev/null) && "
+                      "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' "
+                      "'{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"sandbox_create\",\"arguments\":{\"image\":\"alpine\",\"timeout\":\"5m\"}}}' "
+                      "| ZIRO_API_TOKEN=$t ziroctl sandbox mcp | tail -1 | grep -o 'running' | head -1; "
+                      "for i in $(ziroctl sandbox ls --json | grep -o '\"id\": \"[a-z2-7]*\"' | cut -d'\"' -f4); do ziroctl sandbox get $i --json | grep -q '\"owner\": \"mcp\"' && ziroctl sandbox rm $i >/dev/null && echo MCP_OWNED; done", timeout=300)
+    check("sandbox mcp: an agent creates a sandbox over MCP, owned by its scoped token", "running" in out and "MCP_OWNED" in out, out)
     rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
                       "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
     check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)

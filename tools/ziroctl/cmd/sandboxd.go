@@ -123,6 +123,9 @@ func runSandboxDaemon(ctx context.Context) error {
 			m.markExited(rctx)
 			m.reap(rctx)
 			cancel()
+			if cfg, err := loadSandboxConfig(); err == nil {
+				m.fillPools(cfg)
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -179,6 +182,27 @@ func (m *sandboxManager) routes() *http.ServeMux {
 		sb, err := m.create(r.Context(), spec, sandboxCallerOf(r))
 		apiReply(w, err, sb)
 	})
+	mux.HandleFunc("GET /v1/sandboxes/templates", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, listTemplates())
+	})
+	mux.HandleFunc("GET /v1/sandboxes/snapshots", func(w http.ResponseWriter, r *http.Request) {
+		list, err := m.snapshots(r.Context(), sandboxCallerOf(r))
+		apiReply(w, err, list)
+	})
+	mux.HandleFunc("DELETE /v1/sandboxes/snapshots", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, m.removeSnapshot(r.Context(), sandboxCallerOf(r), r.URL.Query().Get("image")), APIMessage{Status: "ok", Message: "snapshot removed"})
+	})
+	mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := decodeStrict(w, r, &req, 4<<10); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		s, err := m.snapshot(r.Context(), id, c, req.Name)
+		apiReply(w, err, s)
+	}))
 	mux.HandleFunc("GET /v1/sandboxes/{id}", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
 		sb, err := m.st.get(id, c)
 		apiReply(w, err, sb)

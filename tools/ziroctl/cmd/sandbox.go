@@ -84,6 +84,7 @@ type sandboxConfig struct {
 	MaxTimeout     string           `json:"max_timeout"`
 	AllowRunc      bool             `json:"allow_runc,omitempty"` // let operators pick the runc runtime (weaker isolation)
 	DefaultRuntime string           `json:"default_runtime"`      // gvisor or gvisor-kvm
+	Pools          map[string]int   `json:"pools,omitempty"`      // template -> paused sandboxes kept ready
 	Subnet         string           `json:"subnet"`               // the sandbox network
 	SSHPort        int              `json:"ssh_port"`             // the SSH gateway (0: off)
 	SSHHost        string           `json:"ssh_host,omitempty"`   // the name clients reach the gateway by (default: the API's host name)
@@ -137,6 +138,9 @@ func loadSandboxConfig() (sandboxConfig, error) {
 	}
 	if c.SecretPort < 0 || c.SecretPort > 65535 || (c.SecretPort != 0 && (c.SecretPort == c.SSHPort || c.SecretPort == c.PreviewPort)) {
 		return c, fmt.Errorf("%s: bad secret_proxy_port %d", sandboxConfigFile, c.SecretPort)
+	}
+	if err := validatePools(c.Pools, c.MaxPerOwner); err != nil {
+		return c, fmt.Errorf("%s: %w", sandboxConfigFile, err)
 	}
 	if c.DefaultRuntime != schema.SandboxGVisor && c.DefaultRuntime != schema.SandboxGVisorKVM {
 		return c, fmt.Errorf("%s: default_runtime must be gvisor or gvisor-kvm", sandboxConfigFile)
@@ -382,13 +386,27 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 	if err != nil {
 		return sdkapi.Sandbox{}, err
 	}
+	if !strings.HasPrefix(c.Owner, poolOwnerPrefix) {
+		if sb, ok := m.claim(ctx, spec, c, cfg); ok { // a warm one
+			return sb, nil
+		}
+	}
+	if spec, err = applyTemplate(spec); err != nil {
+		return sdkapi.Sandbox{}, err
+	}
 	ttl, err := resolveSandboxSpec(&spec, cfg, c)
 	if err != nil {
 		return sdkapi.Sandbox{}, err
 	}
-	image, err := enforceImagePolicy(cfg.ImagePolicy, spec.Image)
+	image := spec.Image
+	snap, err := snapshotAllowed(image, c)
 	if err != nil {
 		return sdkapi.Sandbox{}, err
+	}
+	if !snap { // snapshots come from this host; anything else meets the image policy
+		if image, err = enforceImagePolicy(cfg.ImagePolicy, spec.Image); err != nil {
+			return sdkapi.Sandbox{}, err
+		}
 	}
 	secrets := spec.Secrets // values go to secrets.json only
 	if len(secrets) > 0 {

@@ -256,3 +256,12 @@ type SandboxPreview struct {
 	Token    string `json:"token,omitempty"`     // header X-Ziro-Preview-Token, or ?ziro_token= once (sets a cookie)
 	TokenURL string `json:"token_url,omitempty"` // the URL with the token, to open in a browser
 }
+
+// SandboxSnapshot is a sandbox's filesystem committed to a local image; create a sandbox with it
+// as the image to start from it.
+type SandboxSnapshot struct {
+	Image   string    `json:"image"`             // ziro.local/sandbox/<owner>/<name>:<unix time>
+	Sandbox string    `json:"sandbox,omitempty"` // the sandbox it was taken from (when created)
+	Size    string    `json:"size,omitempty"`
+	Created time.Time `json:"created"`
+}
