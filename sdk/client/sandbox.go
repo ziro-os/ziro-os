@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/ziro-os/ziro-os/sdk/api"
 	"github.com/ziro-os/ziro-os/sdk/schema"
@@ -66,6 +67,76 @@ func (c *Client) SetSandboxMetadata(ctx context.Context, id string, md map[strin
 func (c *Client) SetSandboxNetwork(ctx context.Context, id string, n schema.SandboxNetwork) (api.Sandbox, error) {
 	var out api.Sandbox
 	return out, c.Do(ctx, http.MethodPut, "/api/v1/sandboxes/"+esc(id)+"/network", n, &out)
+}
+
+// CreateSandboxAccess issues an SSH session token; the answer carries the ssh command and the
+// gateway's known_hosts line (the token is shown only here).
+func (c *Client) CreateSandboxAccess(ctx context.Context, id string, req api.SandboxAccessRequest) (api.SandboxAccess, error) {
+	var out api.SandboxAccess
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/sandboxes/"+esc(id)+"/access", req, &out)
+}
+
+// SandboxAccesses lists a sandbox's SSH session tokens (without secrets).
+func (c *Client) SandboxAccesses(ctx context.Context, id string) ([]api.SandboxAccess, error) {
+	var out []api.SandboxAccess
+	return out, c.Get(ctx, "/api/v1/sandboxes/"+esc(id)+"/access", &out)
+}
+
+// RevokeSandboxAccess revokes an SSH session token.
+func (c *Client) RevokeSandboxAccess(ctx context.Context, id, accessID string) error {
+	return c.Do(ctx, http.MethodDelete, "/api/v1/sandboxes/"+esc(id)+"/access/"+esc(accessID), nil, nil)
+}
+
+// ReadSandboxFile returns a file of the sandbox's /workspace.
+func (c *Client) ReadSandboxFile(ctx context.Context, id, path string) ([]byte, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+esc(id)+"/files?path="+url.QueryEscape(path), nil, "")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.longHTTP().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Type") != "application/octet-stream" {
+		return nil, errors.New(path + " is a directory")
+	}
+	var b []byte
+	return b, decodeReply(resp, &b)
+}
+
+// WriteSandboxFile writes r to a file of the sandbox's /workspace (mode "" = 0644), creating
+// its directories.
+func (c *Client) WriteSandboxFile(ctx context.Context, id, path string, r io.Reader, mode string) error {
+	q := "path=" + url.QueryEscape(path)
+	if mode != "" {
+		q += "&mode=" + url.QueryEscape(mode)
+	}
+	req, err := c.newRequest(ctx, http.MethodPut, "/api/v1/sandboxes/"+esc(id)+"/files?"+q, r, "application/octet-stream")
+	if err != nil {
+		return err
+	}
+	resp, err := c.longHTTP().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return decodeReply(resp, nil)
+}
+
+// ListSandboxFiles lists a directory of the sandbox's /workspace.
+func (c *Client) ListSandboxFiles(ctx context.Context, id, path string) ([]api.SandboxFile, error) {
+	var out []api.SandboxFile
+	return out, c.Get(ctx, "/api/v1/sandboxes/"+esc(id)+"/files?path="+url.QueryEscape(path), &out)
+}
+
+// DeleteSandboxFile removes a file (or, recursive, a directory) of the sandbox's /workspace.
+func (c *Client) DeleteSandboxFile(ctx context.Context, id, path string, recursive bool) error {
+	q := "path=" + url.QueryEscape(path)
+	if recursive {
+		q += "&recursive=true"
+	}
+	return c.Do(ctx, http.MethodDelete, "/api/v1/sandboxes/"+esc(id)+"/files?"+q, nil, nil)
 }
 
 // ExecResult is a finished command: its exit code and output.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,6 +71,8 @@ type sandboxConfig struct {
 	MaxTimeout     string           `json:"max_timeout"`
 	AllowRunc      bool             `json:"allow_runc,omitempty"` // let operators pick the runc runtime (weaker isolation)
 	Subnet         string           `json:"subnet"`               // the sandbox network
+	SSHPort        int              `json:"ssh_port"`             // the SSH gateway (0: off)
+	SSHHost        string           `json:"ssh_host,omitempty"`   // the name clients reach the gateway by (default: the API's host name)
 	ImagePolicy    ImagePolicy      `json:"image_policy,omitempty"`
 }
 
@@ -82,6 +85,7 @@ func defaultSandboxConfig() sandboxConfig {
 		DefaultTimeout: "1h",
 		MaxTimeout:     "24h",
 		Subnet:         sandboxDefSubnet,
+		SSHPort:        22998,
 	}
 }
 
@@ -107,6 +111,14 @@ func loadSandboxConfig() (sandboxConfig, error) {
 	for _, d := range []string{c.DefaultTimeout, c.MaxTimeout} {
 		if _, err := time.ParseDuration(d); err != nil {
 			return c, fmt.Errorf("%s: bad timeout %q", sandboxConfigFile, d)
+		}
+	}
+	if c.SSHPort < 0 || c.SSHPort > 65535 {
+		return c, fmt.Errorf("%s: bad ssh_port %d", sandboxConfigFile, c.SSHPort)
+	}
+	if c.SSHHost != "" && !validDomain(c.SSHHost) {
+		if _, err := netip.ParseAddr(c.SSHHost); err != nil {
+			return c, fmt.Errorf("%s: ssh_host must be a host name or an address", sandboxConfigFile)
 		}
 	}
 	if err := validateSandboxSubnet(c.Subnet); err != nil {
@@ -302,9 +314,11 @@ func (st *sandboxStore) update(id string, f func(sb *sdkapi.Sandbox)) error {
 // ---- lifecycle ----
 
 type sandboxManager struct {
-	st  *sandboxStore
-	net *sandboxNet
-	now func() time.Time
+	st     *sandboxStore
+	net    *sandboxNet
+	access *accessStore
+	ssh    *sshGateway // nil when ssh_port is 0
+	now    func() time.Time
 }
 
 // applyNet converges the sandbox network to the records.
@@ -441,6 +455,7 @@ func (m *sandboxManager) remove(id string, c sandboxCaller) error {
 	m.st.mu.Lock()
 	delete(m.st.all, id)
 	m.st.mu.Unlock()
+	m.access.drop(id)
 	err := m.destroy(id)
 	if nerr := m.applyNet(); nerr != nil {
 		fmt.Printf("[sandboxd] network after deleting %s: %v\n", id, nerr)
@@ -604,6 +619,7 @@ func (m *sandboxManager) reap(ctx context.Context) {
 	m.st.mu.Unlock()
 	for _, e := range expired {
 		id := strings.Fields(e)[0]
+		m.access.drop(id)
 		err := m.destroy(id)
 		_ = auditLog("ziro-sandboxd", "local", "sandbox expire", e, err)
 	}

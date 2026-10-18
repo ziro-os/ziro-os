@@ -207,3 +207,33 @@ type SandboxExecEvent struct {
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
+
+// SandboxAccessRequest is the body of POST /api/v1/sandboxes/{id}/access: an SSH session token.
+type SandboxAccessRequest struct {
+	TTL       string `json:"ttl,omitempty"`        // default 1h, at most 24h
+	PublicKey string `json:"public_key,omitempty"` // authorized_keys line: the client must also prove this key
+	SingleUse bool   `json:"single_use,omitempty"` // valid for one connection
+}
+
+// SandboxAccess is an SSH session token, without its secret except in the answer that creates it.
+type SandboxAccess struct {
+	ID             string    `json:"id"`
+	Created        time.Time `json:"created"`
+	Expires        time.Time `json:"expires"`
+	KeyFingerprint string    `json:"key_fingerprint,omitempty"` // SHA256 fingerprint of the bound key
+	SingleUse      bool      `json:"single_use,omitempty"`
+	Used           bool      `json:"used,omitempty"`
+	// Only when created:
+	Username string `json:"username,omitempty"` // the token itself (zsbx_...): the SSH user name
+	SSH      string `json:"ssh,omitempty"`      // ready-to-run command
+	HostKey  string `json:"host_key,omitempty"` // known_hosts line for the gateway
+}
+
+// SandboxFile is an entry of a sandbox's /workspace listing.
+type SandboxFile struct {
+	Name     string    `json:"name"`
+	Size     int64     `json:"size"`
+	Mode     string    `json:"mode"`
+	Dir      bool      `json:"dir,omitempty"`
+	Modified time.Time `json:"modified"`
+}

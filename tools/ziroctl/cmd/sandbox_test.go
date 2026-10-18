@@ -85,7 +85,7 @@ func stubSandboxes(t *testing.T) (*sandboxManager, *fakeNerdctl, *time.Time) {
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	net := newSandboxNet(sandboxDefSubnet)
 	net.ready = true
-	return &sandboxManager{st: loadSandboxStore(), net: net, now: func() time.Time { return now }}, f, &now
+	return &sandboxManager{st: loadSandboxStore(), net: net, access: loadAccessStore(nil), now: func() time.Time { return now }}, f, &now
 }
 
 var (

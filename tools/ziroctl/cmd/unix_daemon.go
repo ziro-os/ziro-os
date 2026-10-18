@@ -22,6 +22,7 @@ import (
 const (
 	hdrOwner = "X-Ziro-Owner"
 	hdrRole  = "X-Ziro-Role"
+	hdrHost  = "X-Ziro-Host" // the host name the client reached the API by
 )
 
 func unixClient(sock *string) *http.Client {
@@ -121,6 +122,11 @@ func daemonProxy(c *http.Client, name, down string) *httputil.ReverseProxy {
 			r.Out.Header.Del("Authorization") // the API token stays with the API
 			r.Out.Header.Set(hdrOwner, apiTokenName(r.In))
 			r.Out.Header.Set(hdrRole, apiRole(r.In))
+			host := r.In.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			r.Out.Header.Set(hdrHost, strings.Trim(host, "[]"))
 		},
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

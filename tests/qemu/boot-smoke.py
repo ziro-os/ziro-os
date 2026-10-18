@@ -269,6 +269,15 @@ def sandbox_checks(con, check):
     check("sandbox open: the internet, never metadata, the LAN or the host",
           "OPEN" in out and "META" in out and "LAN" in out and "HOST" in out, out)
     con.run(f"ziroctl sandbox rm {nid}", timeout=60)
+    # SSH gateway (token in the user name) and the files API.
+    rc, out = con.run(f"ziroctl sandbox ssh {sid} -- 'echo via-ssh; exit 5'; echo RC=$?; "
+                      f"ziroctl sandbox access create {sid} --ttl 5m | grep -c 'ssh -p 22998 zsbx_'", timeout=120)
+    check("sandbox ssh: a session through the gateway passes output and exit status; access prints the ssh command",
+          "via-ssh" in out and "RC=5" in out and out.split()[-1] == "1", out)
+    rc, out = con.run(f"echo hello > /tmp/up.txt && ziroctl sandbox cp /tmp/up.txt {sid}:/workspace/d/up.txt && "
+                      f"ziroctl sandbox exec {sid} -- cat /workspace/d/up.txt && ziroctl sandbox exec {sid} -- sh -c 'ln -s /etc/shadow /workspace/s' && "
+                      f"ziroctl sandbox cp {sid}:/workspace/s - 2>&1 | head -1", timeout=120)
+    check("sandbox files: upload lands in /workspace; a planted symlink can't read the host", "hello" in out and "root:" not in out, out)
     rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
                       "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
     check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)

@@ -154,7 +154,10 @@ Ziro-OS implements standard OCI specifications:
   host mounts and no devices, resources are limited, and every sandbox has a lifetime. A sandbox has no network
   unless its policy asks for one. Then it gets a routed (CNI ptp) address, and egress is filtered on the host by
   `inet ziro_sandbox`: default-deny, a domain allowlist learned by the sandbox DNS resolver, and never the host,
-  the LAN, metadata or other sandboxes. The spec only
+  the LAN, metadata or other sandboxes. The same daemon runs the SSH gateway (`:22998`). Its session token
+  is the SSH user name: the token is hashed at rest, expires, and can be single-use or bound to a key. A session is
+  `nerdctl exec` in that token's sandbox; `ssh -L` reaches only the sandbox's address. A files API reads and writes
+  `/workspace` from the host through `os.Root`. The spec only
   picks the image, the command and sizes within the host limits.
 
 ---
