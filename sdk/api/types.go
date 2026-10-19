@@ -2,7 +2,11 @@
 // (ziroctl api) and the client (package client) use these same types; sdk/openapi.yaml documents them.
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/ziro-os/ziro-os/sdk/schema"
+)
 
 type Message struct {
 	Status  string      `json:"status"`         // ok, accepted, error
@@ -132,12 +136,13 @@ type AuditRecord struct {
 
 // Token describes an API token (never the token itself, except Secret once on creation).
 type Token struct {
-	Name    string `json:"name"`
-	Role    string `json:"role"`
-	ID      string `json:"id,omitempty"`
-	Created string `json:"created,omitempty"`
-	Expires string `json:"expires,omitempty"`
-	Secret  string `json:"token,omitempty"`
+	Name    string   `json:"name"`
+	Role    string   `json:"role"`
+	ID      string   `json:"id,omitempty"`
+	Created string   `json:"created,omitempty"`
+	Expires string   `json:"expires,omitempty"`
+	Secret  string   `json:"token,omitempty"`
+	Scopes  []string `json:"scopes,omitempty"` // API areas the token is limited to (empty: all its role allows)
 }
 
 // SourceSpec is the "spec" part of POST /api/v1/deployments/{app}/source: how to run the
@@ -169,4 +174,35 @@ type DeployRequest struct {
 	GitToken     string            `json:"git_token,omitempty"`
 	Expose       string            `json:"expose,omitempty"`
 	ExposeTLS    string            `json:"expose_tls,omitempty"`
+}
+
+// Sandbox is a sandbox as the API reports it (GET/POST /api/v1/sandboxes).
+type Sandbox struct {
+	ID         string             `json:"id"`
+	Owner      string             `json:"owner"` // the API token that created it ("root" from the host CLI)
+	State      string             `json:"state"` // pending, running, paused, failed
+	Error      string             `json:"error,omitempty"`
+	Spec       schema.SandboxSpec `json:"spec"`
+	Created    time.Time          `json:"created"`
+	Expires    time.Time          `json:"expires"`
+	LastActive time.Time          `json:"last_active"`
+}
+
+// SandboxExecRequest is the body of POST /api/v1/sandboxes/{id}/exec.
+type SandboxExecRequest struct {
+	Command []string          `json:"command"`
+	Env     map[string]string `json:"env,omitempty"`
+	Workdir string            `json:"workdir,omitempty"`
+	User    string            `json:"user,omitempty"`    // uid[:gid]
+	Stdin   string            `json:"stdin,omitempty"`   // at most 1 MiB
+	Timeout string            `json:"timeout,omitempty"` // default 5m, at most 1h
+}
+
+// SandboxExecEvent is one line of an exec's NDJSON answer: output as it comes ("stdout" or
+// "stderr", with data), then one final line with the exit code (or an error).
+type SandboxExecEvent struct {
+	Stream   string `json:"stream,omitempty"`
+	Data     string `json:"data,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Error    string `json:"error,omitempty"`
 }

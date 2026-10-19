@@ -438,9 +438,10 @@ func registerOpsRoutes(a *apiRouter) {
 	})
 	a.post("/api/v1/tokens", "admin", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Name string `json:"name"`
-			Role string `json:"role"`
-			TTL  string `json:"ttl,omitempty"` // Go duration; default 90 days, "0" = no expiry
+			Name   string   `json:"name"`
+			Role   string   `json:"role"`
+			TTL    string   `json:"ttl,omitempty"` // Go duration; default 90 days, "0" = no expiry
+			Scopes []string `json:"scopes,omitempty"`
 		}
 		if !decodeBody(w, r, &req) {
 			return
@@ -454,8 +455,8 @@ func registerOpsRoutes(a *apiRouter) {
 			}
 			ttl = d
 		}
-		tok, t, err := createAPIToken(req.Name, req.Role, ttl)
-		apiReply(w, err, sdkapi.Token{Name: t.Name, Role: t.Role, ID: t.ID, Created: t.Created, Expires: t.Expires, Secret: tok})
+		tok, t, err := createAPIToken(req.Name, req.Role, ttl, req.Scopes...)
+		apiReply(w, err, sdkapi.Token{Name: t.Name, Role: t.Role, ID: t.ID, Created: t.Created, Expires: t.Expires, Secret: tok, Scopes: t.Scopes})
 	})
 	a.delete("/api/v1/tokens/{name}", "admin", func(w http.ResponseWriter, r *http.Request) {
 		apiReply(w, revokeAPIToken(r.PathValue("name")), APIMessage{Status: "ok", Message: "token revoked"})

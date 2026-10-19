@@ -55,12 +55,12 @@ func TestAPITokens(t *testing.T) {
 		{"", "", "", false},
 	}
 	for _, c := range cases {
-		name, role, ok := apiIdentity(c.tok, "legacy-secret", now)
+		name, role, _, ok := apiIdentity(c.tok, "legacy-secret", now)
 		if ok != c.ok || name != c.name || role != c.role {
 			t.Errorf("%q: got %q %q %v", c.tok, name, role, ok)
 		}
 	}
-	if _, _, ok := apiIdentity("", "", now); ok {
+	if _, _, _, ok := apiIdentity("", "", now); ok {
 		t.Error("an empty legacy token must not match an empty bearer")
 	}
 }

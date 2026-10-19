@@ -6,7 +6,8 @@ info:
   description: |
     The API server (`ziroctl api start`) listens on loopback by default (HTTPS optional).
     Authenticate with `Authorization: Bearer <token>` (`ziroctl api token`, or scoped tokens from
-    `ziroctl api token create <name> --role viewer|deployer|operator|admin`).
+    `ziroctl api token create <name> --role viewer|deployer|operator|admin`). A token can also be
+    limited to API areas with `--scope` (e.g. `--scope sandboxes` for an AI agent's token).
 
     Roles: each operation states the role it needs in `x-ziro-role` (the server enforces exactly
     that). **viewer** reads; **deployer** also pushes source and redeploys or rolls back deployments (CI and agents); **operator** also runs day-to-day changes (services, containers, DNS
@@ -34,6 +35,7 @@ tags:
   - name: dns
   - name: cluster
   - name: stacks
+  - name: sandboxes
 
 paths:
   /api/v1/health:
@@ -982,7 +984,7 @@ paths:
     post:
       x-ziro-role: admin
       tags: [security]
-      summary: 'Create a token, {"name","role","ttl"}; the token is returned once'
+      summary: 'Create a token, {"name","role","ttl","scopes"}; scopes (e.g. ["sandboxes"]) limit it to those API areas; the token is returned once'
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
@@ -1162,6 +1164,105 @@ paths:
         - { name: follow, in: query, schema: { type: boolean } }
       responses:
         "200": { description: The log, content: { text/plain: { schema: { type: string } } } }
+  /api/v1/sandboxes:
+    get:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: The caller's sandboxes (operators and admins see all)
+      responses:
+        "200":
+          description: Sandboxes, oldest first
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Sandbox" } }
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Create a sandbox (gVisor, no network, host limits) and wait until it runs; the first use of an image pulls it
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SandboxSpec" }
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}:
+    get:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: A sandbox (404 for another owner's, unless operator)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+    delete:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Delete a sandbox and its workspace
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/sandboxes/{id}/pause:
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Freeze a running sandbox's processes (memory is kept)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}/resume:
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Thaw a paused sandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}/renew:
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: 'Move the expiry to now + timeout ({"timeout":"1h"}; default: the sandbox''s own), within the host maximum'
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}/metadata:
+    put:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Replace a sandbox's metadata (string map)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}/exec:
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Run a command in a running sandbox and stream its output as NDJSON (SandboxExecEvent lines, the last one has exit_code or error)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SandboxExecRequest" }
+      responses:
+        "200":
+          description: Output events, then the exit code
+          content:
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/SandboxExecEvent" }
 components:
   securitySchemes:
     bearer:
@@ -1178,6 +1279,11 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: "^[a-z0-9][a-z0-9_.-]{0,62}$" }
+    SandboxID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z2-7]{12}$" }
   requestBodies:
     Stack:
       required: true
@@ -1204,7 +1310,61 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Message" }
+    Sandbox:
+      description: The sandbox
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Sandbox" }
   schemas:
+    SandboxSpec:
+      type: object
+      required: [image]
+      additionalProperties: false
+      properties:
+        image: { type: string, description: "registry/name[:tag][@sha256:...]; checked against the host's image policy" }
+        runtime: { type: string, enum: [gvisor, runc], description: "gvisor (default); runc needs operator and allow_runc on the host" }
+        command: { type: array, items: { type: string }, description: "default: keep the sandbox up (sleep infinity)" }
+        env: { type: object, additionalProperties: { type: string } }
+        user: { type: string, pattern: "^[0-9]{1,10}(:[0-9]{1,10})?$" }
+        workdir: { type: string, description: default /workspace }
+        resources:
+          type: object
+          properties:
+            memory: { type: string, example: 2Gi }
+            cpus: { type: number }
+            pids: { type: integer }
+        timeout: { type: string, description: "lifetime, e.g. 30m (default 1h, host maximum 24h)" }
+        idle_timeout: { type: string, description: delete after this long without an exec }
+        metadata: { type: object, additionalProperties: { type: string } }
+    Sandbox:
+      type: object
+      properties:
+        id: { type: string }
+        owner: { type: string, description: the token that created it (root from the host CLI) }
+        state: { type: string, enum: [pending, running, paused, failed] }
+        error: { type: string }
+        spec: { $ref: "#/components/schemas/SandboxSpec" }
+        created: { type: string, format: date-time }
+        expires: { type: string, format: date-time }
+        last_active: { type: string, format: date-time }
+    SandboxExecRequest:
+      type: object
+      required: [command]
+      additionalProperties: false
+      properties:
+        command: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        workdir: { type: string }
+        user: { type: string }
+        stdin: { type: string, description: at most 1 MiB }
+        timeout: { type: string, description: "default 5m, at most 1h" }
+    SandboxExecEvent:
+      type: object
+      properties:
+        stream: { type: string, enum: [stdout, stderr] }
+        data: { type: string }
+        exit_code: { type: integer }
+        error: { type: string }
     DeployRequest:
       type: object
       required: [name, repo]

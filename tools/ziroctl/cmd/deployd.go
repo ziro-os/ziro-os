@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -473,11 +472,7 @@ func streamBuildLog(w http.ResponseWriter, r *http.Request, app, id string, foll
 
 // ---- client (ziroctl deploy, the REST API) ----
 
-var deployHTTP = &http.Client{Transport: &http.Transport{
-	DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", deploySocket)
-	},
-}}
+var deployHTTP = unixClient(&deploySocket)
 
 // deployCall sends a request to ziroctld and decodes the JSON reply into out.
 func deployCall(method, path string, body, out any) error {
@@ -496,21 +491,7 @@ func deployCallTimeout(method, path string, body, out any, timeout time.Duration
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if resp.StatusCode >= 300 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(raw, &e) == nil && e.Error != "" {
-			return errors.New(e.Error)
-		}
-		return fmt.Errorf("ziroctld: HTTP %d", resp.StatusCode)
-	}
-	if out == nil {
-		return nil
-	}
-	return json.Unmarshal(raw, out)
+	return daemonDecode("ziroctld", resp, out)
 }
 
 func deployRaw(method, path string, body any) (*http.Response, error) {
@@ -518,61 +499,12 @@ func deployRaw(method, path string, body any) (*http.Response, error) {
 }
 
 func deployRawCtx(ctx context.Context, method, path string, body any) (*http.Response, error) {
-	var payload []byte
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		payload = b
-	}
-	do := func() (*http.Response, error) {
-		var rd io.Reader
-		if payload != nil {
-			rd = bytes.NewReader(payload)
-		}
-		req, err := http.NewRequestWithContext(ctx, method, "http://ziroctld"+path, rd)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		return deployHTTP.Do(req)
-	}
-	resp, err := do()
-	if err == nil {
-		return resp, nil
-	}
-	// ziroctld is a supervised service of the builder module: if it is down (crashed, or not up
-	// yet after a boot), start it once and retry instead of sending the operator away.
-	if serr := startDeployDaemon(ctx); serr != nil {
-		return nil, serr
-	}
-	if resp, err = do(); err != nil {
-		return nil, fmt.Errorf("ziroctld isn't answering on %s (log: /var/log/ziroctld.log): %w", deploySocket, err)
-	}
-	return resp, nil
+	return daemonRaw(ctx, deployHTTP, "ziroctld", deploySocket, startDeployDaemon, method, path, body)
 }
 
 // startDeployDaemon starts the ziroctld service and waits (up to 10s) for its socket.
 func startDeployDaemon(ctx context.Context) error {
-	if _, err := loadServiceDef("ziroctld"); err != nil {
-		return errors.New("ziroctld isn't running (enable it with: ziroctl module enable builder)")
-	}
-	if err := startModuleService("ziroctld"); err != nil && !strings.Contains(err.Error(), "already running") {
-		return fmt.Errorf("ziroctld isn't running and could not be started: %w (log: /var/log/ziroctld.log)", err)
-	}
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		if c, err := net.DialTimeout("unix", deploySocket, time.Second); err == nil {
-			c.Close()
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-	return nil // let the retry report why the socket doesn't answer
+	return startSocketService(ctx, "ziroctld", deploySocket, "builder")
 }
 
 // serveDeployDaemon runs ziroctld until SIGTERM.

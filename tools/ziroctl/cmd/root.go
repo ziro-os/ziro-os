@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -31,6 +32,10 @@ and upgrades. Add --json to any command for machine-readable output.`,
 func Execute() {
 	c, err := rootCmd.ExecuteC()
 	auditCommand(c, err)
+	var code exitCodeError
+	if errors.As(err, &code) { // a command run for the user (sandbox exec) failed: pass its status on
+		os.Exit(int(code))
+	}
 	if err != nil {
 		if jsonOutput {
 			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "error", "error": err.Error()})

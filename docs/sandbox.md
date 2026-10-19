@@ -1,0 +1,134 @@
+# Sandboxes
+
+A sandbox is a disposable, isolated machine for code you don't trust: an AI agent's tools, a code interpreter or a CI
+step. Each one is a container that runs under [gVisor](https://gvisor.dev). gVisor is a kernel in user space, so the
+workload's system calls never reach the host kernel. A sandbox keeps a short list of privileges, has no network and
+has resource limits and a lifetime. You manage sandboxes with `ziroctl sandbox`, the REST API or the Go SDK. The
+design is [RFC 0004](design/rfcs/0004-sandboxes.md).
+
+```sh
+ziroctl module enable sandbox                          # gVisor + ziro-sandboxd (downloads ~170 MB once)
+ziroctl sandbox create python:3.13-slim --timeout 30m  # prints the id when it runs
+ziroctl sandbox exec <id> -- python3 -c 'print(6*7)'
+ziroctl sandbox ls
+ziroctl sandbox rm <id>
+```
+
+## What a sandbox can and can't do
+
+| | Default | Can the caller change it? |
+|---|---|---|
+| Kernel | gVisor (systrap: no KVM needed, works in cloud VMs and on arm64) | `runtime: runc` only for operators, and only if the host allows it |
+| Privileges | every capability dropped except chown, dac_override, fowner, fsetid, kill, net_bind_service, setgid, setuid (inside gVisor); `no-new-privileges` | no |
+| Files | the image's own copy-on-write root, a `/workspace` directory, a 256 MiB `/tmp` | no host mounts, no devices |
+| Network | none | a network policy comes in the next release |
+| Resources | 1 GiB memory, 1 CPU, 512 processes | up to the host limits (8 GiB, 4 CPUs, 4096 processes) |
+| Lifetime | 1 hour, then the sandbox is deleted | `--timeout` up to 24 h, `renew` to extend, `--idle-timeout` to delete it sooner |
+
+Root inside a sandbox is root inside gVisor, so installing packages works. A process that exits stops the sandbox,
+and it shows as `failed`. By default a sandbox runs `sleep infinity`, so it stays up for `exec`.
+
+## Commands
+
+```sh
+ziroctl sandbox create node:22 --memory 2Gi --cpus 2 --timeout 2h --idle-timeout 15m --meta agent=claude
+ziroctl sandbox create alpine -e MODE=test -u 1000:1000 -- sh -c 'sleep 3600'
+ziroctl sandbox exec <id> -w /workspace -e DEBUG=1 --timeout 2m -- make test
+echo 'print(42)' | ziroctl sandbox exec <id> -i -- python3
+ziroctl sandbox get <id> --json
+ziroctl sandbox pause <id>                 # freeze its processes (memory is kept)
+ziroctl sandbox resume <id>
+ziroctl sandbox renew <id> --timeout 1h    # expires one hour from now
+```
+
+`exec` streams the command's output as it runs and exits with the command's exit code. A command may run for up to
+1 hour, and its output is capped at 64 MiB.
+
+## For AI agents: the API and a scoped token
+
+Give each agent a token that can only manage sandboxes:
+
+```sh
+ziroctl api token create agent-1 --role deployer --scope sandboxes --ttl 720h
+```
+
+A scoped token gets `403` on every other route. Each sandbox belongs to the token that created it. Another
+deployer's sandbox answers `404`; operators and admins see all of them.
+
+```sh
+H="Authorization: Bearer $TOKEN"
+curl -sk -H "$H" https://host:8443/api/v1/sandboxes -d '{"image":"python:3.13-slim","timeout":"30m"}'
+curl -sk -H "$H" https://host:8443/api/v1/sandboxes/<id>/exec -d '{"command":["python3","-c","print(1+1)"]}'
+# {"stream":"stdout","data":"2\n"}
+# {"exit_code":0}
+curl -sk -H "$H" -X DELETE https://host:8443/api/v1/sandboxes/<id>
+```
+
+| Route | |
+|---|---|
+| `GET/POST /api/v1/sandboxes` | list your sandboxes / create one and wait until it runs |
+| `GET/DELETE /api/v1/sandboxes/{id}` | show / delete with its workspace |
+| `POST /api/v1/sandboxes/{id}/pause`, `/resume`, `/renew` | freeze, thaw, move the expiry (`{"timeout":"1h"}`) |
+| `PUT /api/v1/sandboxes/{id}/metadata` | replace the metadata map |
+| `POST /api/v1/sandboxes/{id}/exec` | run a command; the answer is NDJSON: output lines, then `exit_code` or `error` |
+
+With the Go SDK:
+
+```go
+c, _ := client.New("https://host:8443", token)
+sb, err := c.CreateSandbox(ctx, schema.SandboxSpec{Image: "python:3.13-slim", Timeout: "30m"})
+res, err := c.ExecSandbox(ctx, sb.ID, api.SandboxExecRequest{Command: []string{"python3", "-c", "print(1+1)"}})
+fmt.Print(res.Stdout, res.ExitCode)
+_ = c.DeleteSandbox(ctx, sb.ID)
+```
+
+Every create, exec and delete through the API is in the audit log (`ziroctl audit log`). Expired sandboxes are logged
+as `sandbox expire`.
+
+## Host limits
+
+`/etc/ziro/sandbox.json` sets the policy. Every field is optional:
+
+```json
+{
+  "max_sandboxes": 32,
+  "max_per_owner": 8,
+  "max_memory": "24Gi",
+  "defaults": {"memory": "1Gi", "cpus": 1, "pids": 512},
+  "limits": {"memory": "8Gi", "cpus": 4, "pids": 4096},
+  "default_timeout": "1h",
+  "max_timeout": "24h",
+  "allow_runc": false,
+  "image_policy": {"allow_registries": ["docker.io/library", "ghcr.io/acme"]}
+}
+```
+
+`image_policy` has the same format as the cluster image policy. It can also require cosign signatures
+(`require_signed`, `cosign_keys`), in which case images are pinned to the verified digest.
+
+## How it works
+
+`ziro-sandboxd` (the `ziroctl` binary under another name) owns the sandboxes. It answers on the root-only socket
+`/run/ziro/sandboxd.sock`, and the CLI and the REST API are its clients. The daemon:
+
+- keeps one record per sandbox in `/var/lib/ziro/sandbox/<id>/`, next to its workspace
+- starts each sandbox with nerdctl, using `runsc` (pinned gVisor release) as the OCI runtime
+- runs a reaper every 15 seconds that deletes expired and idle sandboxes, marks stopped ones as `failed`, and removes
+  sandbox containers that have no record
+
+Logs are in `/var/log/ziro-sandboxd.log`.
+
+## Coming next
+
+These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
+
+- **Network policy:** default-deny egress with a domain allowlist. Other sandboxes, the host, cloud metadata and
+  the LAN are blocked.
+- **SSH access:** `ssh -p 22998 zsbx_<token>@host` with short-lived token sessions, and `ssh -L` port forwarding.
+- **Files API:** read and write files in `/workspace`.
+- **HTTPS port previews:** `https://<port>-<id>.<your domain>`.
+- **Credential injection:** the agent sees only placeholders, and the real secret is added on the way out, only for
+  its allowed host.
+- **Kata microVMs:** an option on hosts with KVM.
+- **For agents:** templates, warm pools, snapshots and an MCP server (`ziroctl sandbox mcp`).
+- **Clusters:** sandboxes spread across a cluster's runner nodes.
