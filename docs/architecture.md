@@ -159,7 +159,10 @@ Ziro-OS implements standard OCI specifications:
   `nerdctl exec` in that token's sandbox; `ssh -L` reaches only the sandbox's address. A files API reads and writes
   `/workspace` from the host through `os.Root`. Preview URLs (`https://<port>-<id>.<gateway domain>`) are exact
   gateway routes to the daemon's loopback preview proxy, which checks a stateless HMAC token (bound to the sandbox,
-  the port, the preview's creation time and an expiry), strips it, and proxies to the sandbox's address. The spec only
+  the port, the preview's creation time and an expiry), strips it, and proxies to the sandbox's address. Secrets (credential injection): nftables redirects the
+  port-443 traffic of a sandbox with secrets to the daemon's egress proxy. The proxy enforces the network policy,
+  splices through every server name except the hosts a secret is bound to, and for those terminates TLS with a CA
+  only that sandbox trusts, swapping placeholders for the values (403 when a placeholder goes to another host). The spec only
   picks the image, the command and sizes within the host limits.
 
 ---

@@ -21,7 +21,7 @@ func TestSandboxNftScript(t *testing.T) {
 		{ID: "bbbbbbbbbbbb", IP: "10.250.0.3", Spec: schema.SandboxSpec{Network: &schema.SandboxNetwork{Mode: "open"}}},
 		{ID: "cccccccccccc", IP: "10.250.0.4", Spec: schema.SandboxSpec{Network: &schema.SandboxNetwork{Mode: "none"}}},
 	}
-	script, err := sandboxNftScript("10.250.0.0/16", sbs, []string{"dddddddddddd"})
+	script, err := sandboxNftScript("10.250.0.0/16", sbs, []string{"dddddddddddd"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,10 +65,10 @@ func TestSandboxNftScript(t *testing.T) {
 			t.Errorf("%s not blocked", blocked)
 		}
 	}
-	if _, err := sandboxNftScript("10.250.0.0/16", []sdkapi.Sandbox{{ID: "aaaaaaaaaaaa", IP: "192.168.1.5", Spec: sbs[1].Spec}}, nil); err == nil {
+	if _, err := sandboxNftScript("10.250.0.0/16", []sdkapi.Sandbox{{ID: "aaaaaaaaaaaa", IP: "192.168.1.5", Spec: sbs[1].Spec}}, nil, 0); err == nil {
 		t.Error("an IP outside the subnet was accepted")
 	}
-	if _, err := sandboxNftScript("10.250.0.0/16", nil, []string{"x; flush ruleset"}); err == nil {
+	if _, err := sandboxNftScript("10.250.0.0/16", nil, []string{"x; flush ruleset"}, 0); err == nil {
 		t.Error("a bad id reached the script")
 	}
 }

@@ -74,6 +74,7 @@ type sandboxConfig struct {
 	SSHPort        int              `json:"ssh_port"`             // the SSH gateway (0: off)
 	SSHHost        string           `json:"ssh_host,omitempty"`   // the name clients reach the gateway by (default: the API's host name)
 	PreviewPort    int              `json:"preview_port"`         // the loopback port the gateway's preview routes use (0: previews off)
+	SecretPort     int              `json:"secret_proxy_port"`    // the egress proxy for credential injection (0: secrets off)
 	ImagePolicy    ImagePolicy      `json:"image_policy,omitempty"`
 }
 
@@ -88,6 +89,7 @@ func defaultSandboxConfig() sandboxConfig {
 		Subnet:         sandboxDefSubnet,
 		SSHPort:        22998,
 		PreviewPort:    22997,
+		SecretPort:     22996,
 	}
 }
 
@@ -117,6 +119,9 @@ func loadSandboxConfig() (sandboxConfig, error) {
 	}
 	if c.PreviewPort < 0 || c.PreviewPort > 65535 || (c.PreviewPort != 0 && c.PreviewPort == c.SSHPort) {
 		return c, fmt.Errorf("%s: bad preview_port %d", sandboxConfigFile, c.PreviewPort)
+	}
+	if c.SecretPort < 0 || c.SecretPort > 65535 || (c.SecretPort != 0 && (c.SecretPort == c.SSHPort || c.SecretPort == c.PreviewPort)) {
+		return c, fmt.Errorf("%s: bad secret_proxy_port %d", sandboxConfigFile, c.SecretPort)
 	}
 	if c.SSHPort < 0 || c.SSHPort > 65535 {
 		return c, fmt.Errorf("%s: bad ssh_port %d", sandboxConfigFile, c.SSHPort)
@@ -209,7 +214,7 @@ func sandboxDir(id string) string       { return filepath.Join(sandboxRoot, id) 
 
 // sandboxRunArgs is the nerdctl command line that starts a sandbox. Nothing in the spec can add
 // a mount, a device or a capability; its network is the sandbox network, policed by the host.
-func sandboxRunArgs(sb *sdkapi.Sandbox, image, gateway string) []string {
+func sandboxRunArgs(sb *sdkapi.Sandbox, image, gateway string, secretEnv map[string]string) []string {
 	s := sb.Spec
 	args := []string{"run", "-d", "--name", sandboxContainer(sb.ID), "--hostname", "sandbox",
 		"--label", sandboxLabel + "=" + sb.ID, "--restart", "no"}
@@ -232,13 +237,25 @@ func sandboxRunArgs(sb *sdkapi.Sandbox, image, gateway string) []string {
 	if s.User != "" {
 		args = append(args, "-u", s.User)
 	}
-	keys := make([]string, 0, len(s.Env))
-	for k := range s.Env {
+	if len(secretEnv) > 0 { // the sandbox's CA, read-only (credential injection)
+		for _, mnt := range secretMounts(sb.ID) {
+			args = append(args, "-v", mnt)
+		}
+	}
+	env := map[string]string{}
+	for k, v := range s.Env {
+		env[k] = v
+	}
+	for k, v := range secretEnv {
+		env[k] = v
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		args = append(args, "-e", k+"="+s.Env[k])
+		args = append(args, "-e", k+"="+env[k])
 	}
 	if len(s.Command) == 0 {
 		// Keep the sandbox up for exec and SSH, whatever the image would run.
@@ -327,6 +344,7 @@ type sandboxManager struct {
 
 	previewKey  []byte // nil when preview_port is 0
 	previewPort int
+	egress      *egressProxy // nil when secret_proxy_port is 0
 }
 
 // applyNet converges the sandbox network to the records.
@@ -346,6 +364,13 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 	image, err := enforceImagePolicy(cfg.ImagePolicy, spec.Image)
 	if err != nil {
 		return sdkapi.Sandbox{}, err
+	}
+	secrets := spec.Secrets // values go to secrets.json only
+	if len(secrets) > 0 {
+		if m.egress == nil {
+			return sdkapi.Sandbox{}, errors.New("secrets need the egress proxy (secret_proxy_port in " + sandboxConfigFile + ")")
+		}
+		spec.Secrets = withoutValues(secrets)
 	}
 	now := m.now().UTC()
 	sb := &sdkapi.Sandbox{ID: newSandboxID(), Owner: c.Owner, State: "pending", Spec: spec,
@@ -379,8 +404,11 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 	}
 
 	var out []byte
-	var runErr error
-	if sb.IP != "" {
+	secretEnv, runErr := prepareSecrets(sb.ID, secrets, sb.Expires)
+	if runErr != nil {
+		runErr = fmt.Errorf("secrets: %w", runErr)
+	}
+	if sb.IP != "" && runErr == nil {
 		// The rules for its address go in before the container exists: fail closed.
 		if runErr = m.applyNet(); runErr != nil {
 			runErr = fmt.Errorf("network policy: %w", runErr)
@@ -389,7 +417,7 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // the first run pulls the image
 	defer cancel()
 	if runErr == nil {
-		out, runErr = sandboxNerdctl(ctx, sandboxRunArgs(sb, image, sandboxGateway(m.net.subnet))...)
+		out, runErr = sandboxNerdctl(ctx, sandboxRunArgs(sb, image, sandboxGateway(m.net.subnet), secretEnv)...)
 	}
 	var view sdkapi.Sandbox
 	uerr := m.st.update(sb.ID, func(x *sdkapi.Sandbox) {
@@ -466,6 +494,9 @@ func (m *sandboxManager) remove(id string, c sandboxCaller) error {
 	delete(m.st.all, id)
 	m.st.mu.Unlock()
 	m.access.drop(id)
+	if m.egress != nil {
+		m.egress.forget(id)
+	}
 	err = m.destroy(id)
 	if nerr := m.applyNet(); nerr != nil {
 		fmt.Printf("[sandboxd] network after deleting %s: %v\n", id, nerr)
@@ -636,6 +667,9 @@ func (m *sandboxManager) reap(ctx context.Context) {
 	for _, e := range expired {
 		id := strings.Fields(e)[0]
 		m.access.drop(id)
+		if m.egress != nil {
+			m.egress.forget(id)
+		}
 		err := m.destroy(id)
 		_ = auditLog("ziro-sandboxd", "local", "sandbox expire", e, err)
 	}

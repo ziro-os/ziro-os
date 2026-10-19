@@ -1475,6 +1475,18 @@ components:
         idle_timeout: { type: string, description: delete after this long without an exec }
         metadata: { type: object, additionalProperties: { type: string } }
         network: { $ref: "#/components/schemas/SandboxNetwork" }
+        secrets:
+          type: array
+          maxItems: 16
+          description: "Credential injection: the variable holds a placeholder; the host's egress proxy swaps in the value only in HTTPS requests to its hosts. Values are write-only."
+          items:
+            type: object
+            required: [name, hosts]
+            additionalProperties: false
+            properties:
+              name: { type: string }
+              value: { type: string, writeOnly: true }
+              hosts: { type: array, items: { type: string }, description: "exact names or *.x" }
     SandboxNetwork:
       type: object
       additionalProperties: false

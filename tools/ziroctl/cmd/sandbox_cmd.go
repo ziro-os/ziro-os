@@ -40,7 +40,26 @@ var (
 	sbxExec    sdkapi.SandboxExecRequest
 	sbxExecEnv []string
 	sbxNet     schema.SandboxNetwork
+	sbxSecrets []string
 )
+
+// secretFlags reads --secret NAME@host[,host]: the value comes from this process's environment
+// variable NAME, so it never appears in argv or shell history.
+func secretFlags() ([]schema.SandboxSecret, error) {
+	var out []schema.SandboxSecret
+	for _, f := range sbxSecrets {
+		name, hosts, ok := strings.Cut(f, "@")
+		if !ok || hosts == "" {
+			return nil, fmt.Errorf("--secret %q: want NAME@host[,host]", f)
+		}
+		v, set := os.LookupEnv(name)
+		if !set || v == "" {
+			return nil, fmt.Errorf("--secret %s: set the value in the environment variable %s", name, name)
+		}
+		out = append(out, schema.SandboxSecret{Name: name, Value: v, Hosts: strings.Split(hosts, ",")})
+	}
+	return out, nil
+}
 
 // netFlags reads --net/--allow: nil when neither is set (no network).
 func netFlags() *schema.SandboxNetwork {
@@ -74,7 +93,8 @@ var sandboxCreateCmd = &cobra.Command{
 	Short: "Create a sandbox and wait until it runs",
 	Example: `  ziroctl sandbox create python:3.13-slim
   ziroctl sandbox create node:22 --memory 2Gi --cpus 2 --timeout 2h --idle-timeout 15m --meta agent=claude
-  ziroctl sandbox create python:3.13-slim --allow pypi.org --allow files.pythonhosted.org`,
+  ziroctl sandbox create python:3.13-slim --allow pypi.org --allow files.pythonhosted.org
+  GITHUB_TOKEN=ghp_... ziroctl sandbox create alpine/git --allow api.github.com --secret GITHUB_TOKEN@api.github.com`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		spec := sbxSpec
@@ -87,6 +107,9 @@ var sandboxCreateCmd = &cobra.Command{
 			return err
 		}
 		spec.Network = netFlags()
+		if spec.Secrets, err = secretFlags(); err != nil {
+			return err
+		}
 		if sbxMemory != "" || sbxCPUs != 0 || sbxPIDs != 0 {
 			spec.Resources = &schema.Resources{Memory: sbxMemory, CPUs: sbxCPUs, PIDs: sbxPIDs}
 		}
@@ -279,6 +302,7 @@ func init() {
 	f.StringVar(&sbxSpec.Timeout, "timeout", "", "Lifetime, e.g. 30m (default 1h)")
 	f.StringVar(&sbxSpec.IdleTimeout, "idle-timeout", "", "Delete after this long without an exec")
 	f.StringArrayVar(&sbxMeta, "meta", nil, "Metadata key=value (repeatable)")
+	f.StringArrayVar(&sbxSecrets, "secret", nil, "NAME@host[,host]: a secret from your environment variable NAME; the sandbox only sees a placeholder")
 	for _, fs := range []*cobra.Command{sandboxCreateCmd, sandboxNetworkCmd} {
 		fs.Flags().StringVar(&sbxNet.Mode, "net", "", "Network: none (default), allowlist or open (public internet only)")
 		fs.Flags().StringArrayVar(&sbxNet.Allow, "allow", nil, "Allowed domain (subdomains included), IPv4 address or CIDR; implies --net allowlist")

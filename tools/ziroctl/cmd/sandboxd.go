@@ -74,6 +74,19 @@ func runSandboxDaemon(ctx context.Context) error {
 			fmt.Printf("[sandboxd] sandbox network rules: %v\n", err)
 		}
 	}
+	if cfg.SecretPort > 0 && m.net.ready {
+		ln, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(cfg.SecretPort)))
+		if err != nil {
+			fmt.Printf("[sandboxd] egress proxy: %v (sandboxes with secrets will fail to start)\n", err)
+		} else {
+			m.egress, m.net.proxyPort = newEgressProxy(m), cfg.SecretPort
+			allowFirewall([]FirewallRule{{Port: cfg.SecretPort, Protocol: "tcp", Source: cfg.Subnet, Comment: "Ziro sandbox egress proxy"}}, "")
+			go func() { _ = m.egress.serve(ctx, ln) }()
+			if err := m.applyNet(); err != nil {
+				fmt.Printf("[sandboxd] sandbox network rules: %v\n", err)
+			}
+		}
+	}
 	if cfg.PreviewPort > 0 {
 		key, err := loadPreviewKey()
 		if err != nil {

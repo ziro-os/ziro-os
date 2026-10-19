@@ -124,7 +124,7 @@ func sandboxSet(id string) string { return "s" + id }
 // sandboxNftScript renders the whole table for the sandboxes that have an IP. It keeps the
 // learned-address sets of sandboxes that still exist (flushing chains, not the table) and
 // deletes the sets of those in gone.
-func sandboxNftScript(subnet string, sbs []sdkapi.Sandbox, gone []string) (string, error) {
+func sandboxNftScript(subnet string, sbs []sdkapi.Sandbox, gone []string, proxyPort int) (string, error) {
 	if err := validateSandboxSubnet(subnet); err != nil {
 		return "", err
 	}
@@ -140,9 +140,11 @@ func sandboxNftScript(subnet string, sbs []sdkapi.Sandbox, gone []string) (strin
 	}
 	w("  chain forward { type filter hook forward priority -10; policy accept; }")
 	w("  chain input { type filter hook input priority -10; policy accept; }")
+	w("  chain prerouting { type nat hook prerouting priority dstnat; policy accept; }")
 	w("}")
 	w("flush chain %s forward", t)
 	w("flush chain %s input", t)
+	w("flush chain %s prerouting", t)
 	for _, id := range gone {
 		if !sandboxIDRe.MatchString(id) {
 			return "", fmt.Errorf("bad sandbox id %q", id)
@@ -187,6 +189,15 @@ func sandboxNftScript(subnet string, sbs []sdkapi.Sandbox, gone []string) (strin
 	w("add rule %s forward counter drop comment \"sandbox egress\"", t)
 	w("add rule %s input ip saddr %s ip daddr %s udp dport 53 accept", t, subnet, gw)
 	w("add rule %s input ip saddr %s ip daddr %s tcp dport 53 accept", t, subnet, gw)
+	// Sandboxes with secrets: their HTTPS goes through the egress proxy (credential injection).
+	if proxyPort > 0 {
+		for _, sb := range sbs {
+			if len(sb.Spec.Secrets) > 0 && sb.Spec.Network.Mode != schema.SandboxNetNone {
+				w("add rule %s prerouting ip saddr %s tcp dport 443 redirect to :%d", t, sb.IP, proxyPort)
+				w("add rule %s input ip saddr %s tcp dport %d accept", t, sb.IP, proxyPort)
+			}
+		}
+	}
 	w("add rule %s input ip saddr %s ct state established,related accept", t, subnet)
 	w("add rule %s input ip saddr %s counter drop comment \"sandbox to host\"", t, subnet)
 	return b.String(), nil
@@ -201,6 +212,9 @@ type sandboxNet struct {
 	sets   map[string]bool     // sandbox ids with sets in the table
 	byIP   map[string]ipPolicy // the DNS responder's view
 	dnsMu  sync.RWMutex
+
+	proxyPort int                             // the egress proxy (0: off)
+	learned   map[string]map[string]time.Time // sandbox id -> address -> until (what the sets hold, for the proxy)
 }
 
 type ipPolicy struct {
@@ -209,7 +223,7 @@ type ipPolicy struct {
 }
 
 func newSandboxNet(subnet string) *sandboxNet {
-	return &sandboxNet{subnet: subnet, sets: map[string]bool{}, byIP: map[string]ipPolicy{}}
+	return &sandboxNet{subnet: subnet, sets: map[string]bool{}, byIP: map[string]ipPolicy{}, learned: map[string]map[string]time.Time{}}
 }
 
 // setupSandboxNetwork writes the CNI network, the gateway/DNS address, masquerading for
@@ -297,7 +311,7 @@ func (n *sandboxNet) apply(all []sdkapi.Sandbox) error {
 	}
 	sort.Strings(gone)
 	sort.Slice(sbs, func(i, j int) bool { return sbs[i].IP < sbs[j].IP })
-	script, err := sandboxNftScript(n.subnet, sbs, gone)
+	script, err := sandboxNftScript(n.subnet, sbs, gone, n.proxyPort)
 	if err != nil {
 		return err
 	}
@@ -307,6 +321,11 @@ func (n *sandboxNet) apply(all []sdkapi.Sandbox) error {
 	n.sets = keep
 	n.dnsMu.Lock()
 	n.byIP = byIP
+	for id := range n.learned {
+		if !keep[id] {
+			delete(n.learned, id)
+		}
+	}
 	n.dnsMu.Unlock()
 	return nil
 }
@@ -352,7 +371,49 @@ func (n *sandboxNet) learn(client string, resp []byte) {
 	}
 	if err := sandboxNftAdd("inet", sandboxTable, sandboxSet(pol.id)+"d", public, keep); err != nil {
 		fmt.Printf("[sandboxd] %s: learn %s: %v\n", pol.id, q, err)
+		return
 	}
+	until := time.Now().Add(keep)
+	n.dnsMu.Lock()
+	if n.learned[pol.id] == nil {
+		n.learned[pol.id] = map[string]time.Time{}
+	}
+	for _, ip := range public {
+		n.learned[pol.id][ip] = until
+	}
+	n.dnsMu.Unlock()
+}
+
+func (n *sandboxNet) policyOf(ip string) ipPolicy {
+	n.dnsMu.RLock()
+	defer n.dnsMu.RUnlock()
+	return n.byIP[ip]
+}
+
+// egressAllowed is the forward rules' verdict for a destination, for traffic the egress proxy
+// carries on a sandbox's behalf.
+func (n *sandboxNet) egressAllowed(pol ipPolicy, dst netip.Addr) bool {
+	if pol.net == nil {
+		return false
+	}
+	switch pol.net.Mode {
+	case schema.SandboxNetOpen:
+		return !sandboxBlockedAddr(dst)
+	case schema.SandboxNetAllowlist:
+		for _, e := range pol.net.Allow {
+			if p, err := schema.SandboxAllowPrefix(e); err == nil && p.Contains(dst) {
+				return true
+			}
+		}
+		if sandboxBlockedAddr(dst) {
+			return false
+		}
+		n.dnsMu.RLock()
+		until, ok := n.learned[pol.id][dst.String()]
+		n.dnsMu.RUnlock()
+		return ok && time.Now().Before(until)
+	}
+	return false
 }
 
 func sandboxBlockedAddr(a netip.Addr) bool {

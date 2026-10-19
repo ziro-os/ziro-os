@@ -26,6 +26,16 @@ type SandboxSpec struct {
 	IdleTimeout string            `json:"idle_timeout,omitempty"` // delete after this long without an exec (default: off)
 	Metadata    map[string]string `json:"metadata,omitempty"`     // caller's labels (agent, task id, ...)
 	Network     *SandboxNetwork   `json:"network,omitempty"`      // default: no network at all
+	Secrets     []SandboxSecret   `json:"secrets,omitempty"`      // injected on the way out, never visible inside
+}
+
+// SandboxSecret is a credential the sandbox never sees: its environment variable holds a
+// placeholder, and the host's egress proxy swaps the real value in, only in HTTPS requests to
+// the listed hosts. Value is accepted at create and never returned.
+type SandboxSecret struct {
+	Name  string   `json:"name"`            // the environment variable that holds the placeholder
+	Value string   `json:"value,omitempty"` // write-only
+	Hosts []string `json:"hosts"`           // exact names or "*.x" (x's subdomains), port 443
 }
 
 // SandboxNetwork is a sandbox's egress policy. Whatever the mode, a sandbox never reaches the
@@ -97,7 +107,46 @@ func (s *SandboxSpec) Validate() error {
 	if err := ValidateSandboxMetadata(s.Metadata); err != nil {
 		return err
 	}
-	return s.Network.Validate()
+	if err := s.Network.Validate(); err != nil {
+		return err
+	}
+	return ValidateSandboxSecrets(s.Secrets, s.Env, s.Network)
+}
+
+// ValidateSandboxSecrets checks names (unique, not in env), values and hosts; secrets need a
+// network to be used at all.
+func ValidateSandboxSecrets(secrets []SandboxSecret, env map[string]string, n *SandboxNetwork) error {
+	if len(secrets) == 0 {
+		return nil
+	}
+	if len(secrets) > 16 {
+		return errors.New("secrets: at most 16")
+	}
+	if n == nil || n.Mode == "" || n.Mode == SandboxNetNone {
+		return errors.New("secrets need a network (mode allowlist or open)")
+	}
+	seen := map[string]bool{}
+	for _, s := range secrets {
+		if !EnvKeyRe.MatchString(s.Name) || strings.HasPrefix(s.Name, "ZIRO_") || seen[s.Name] {
+			return fmt.Errorf("secret %q: bad or duplicate name", s.Name)
+		}
+		if _, clash := env[s.Name]; clash {
+			return fmt.Errorf("secret %s is also in env", s.Name)
+		}
+		seen[s.Name] = true
+		if s.Value == "" || len(s.Value) > 16<<10 || strings.ContainsAny(s.Value, "\x00\r\n") {
+			return fmt.Errorf("secret %s: value must be 1 byte to 16 KiB, on one line", s.Name)
+		}
+		if len(s.Hosts) == 0 || len(s.Hosts) > 16 {
+			return fmt.Errorf("secret %s: 1 to 16 hosts", s.Name)
+		}
+		for _, h := range s.Hosts {
+			if len(h) > 253 || !sandboxHostRe.MatchString(h) {
+				return fmt.Errorf("secret %s: %q is not a lowercase host name", s.Name, h)
+			}
+		}
+	}
+	return nil
 }
 
 // Validate checks the mode and that every allow entry is a domain, an IPv4 address or an IPv4 CIDR.

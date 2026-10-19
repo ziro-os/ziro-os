@@ -86,6 +86,37 @@ How it is enforced:
 
 Limits for now: IPv4 only, and a domain allows every port.
 
+## Secrets (credential injection)
+
+An agent needs API keys, and an agent can be tricked into leaking them. With `--secret`, the sandbox never holds the
+key at all:
+
+```sh
+export GITHUB_TOKEN=ghp_...
+ziroctl sandbox create alpine/git --allow api.github.com --secret GITHUB_TOKEN@api.github.com
+ziroctl sandbox exec <id> -- sh -c 'echo $GITHUB_TOKEN'      # zsec_7f3k...: a placeholder
+```
+
+- **The sandbox sees a placeholder.** Inside the sandbox, `$GITHUB_TOKEN` is a random placeholder.
+- **The host fills it in.** The sandbox's HTTPS traffic (port 443) goes through the host's egress proxy. For
+  `api.github.com` only, the proxy terminates TLS with a CA that only this sandbox trusts. It replaces the
+  placeholder with the real value in headers, Basic auth, the query string and the path, then verifies the real
+  server's certificate.
+- **Other hosts can't get it.** A placeholder sent to any other host is refused with `403 credential_endpoint_mismatch`.
+  Traffic to other hosts passes through untouched, with their real certificates.
+- **Where the value lives.** It is taken from your environment (never from the command line), kept only in a
+  root-only file in the sandbox's directory, never returned by the API, and deleted with the sandbox. Each use is
+  audited with the secret's name and host, never its value.
+- **Trusting the sandbox's CA.** The sandbox gets it through `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
+  `GIT_SSL_CAINFO` and `NODE_EXTRA_CA_CERTS`, which point to `/etc/ziro/ca-bundle.crt` and
+  `/etc/ziro/sandbox-ca.crt`. Tools that ignore these variables need the bundle added to their own trust store.
+- **API:** `"secrets": [{"name": "GITHUB_TOKEN", "value": "...", "hosts": ["api.github.com", "*.githubusercontent.com"]}]`
+  in the create body. Secrets need a network (`--allow` or `--net open`).
+- **Policy still applies.** The proxy enforces the sandbox's network policy on what it carries.
+
+Limits for now: request bodies, WebSocket messages and request signing (AWS SigV4) aren't rewritten. Only port 443
+is intercepted, and only over HTTP/1.1.
+
 ## SSH access
 
 Every sandbox can be reached through one SSH gateway on port `22998`. The session token is the user name, so a
@@ -230,6 +261,7 @@ as `sandbox expire`.
   "subnet": "10.250.0.0/16",
   "ssh_port": 22998,
   "preview_port": 22997,
+  "secret_proxy_port": 22996,
   "ssh_host": "sbx.example.com",
   "image_policy": {"allow_registries": ["docker.io/library", "ghcr.io/acme"]}
 }
@@ -254,8 +286,6 @@ Logs are in `/var/log/ziro-sandboxd.log`.
 
 These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
 
-- **Credential injection:** the agent sees only placeholders, and the real secret is added on the way out, only for
-  its allowed host.
 - **Kata microVMs:** an option on hosts with KVM.
 - **For agents:** templates, warm pools, snapshots and an MCP server (`ziroctl sandbox mcp`).
 - **Clusters:** sandboxes spread across a cluster's runner nodes.
