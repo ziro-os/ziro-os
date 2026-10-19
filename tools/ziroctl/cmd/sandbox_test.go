@@ -28,6 +28,7 @@ type fakeNerdctl struct {
 	ps     map[string]string // container -> status
 	fail   string            // a verb that fails
 	sticky map[string]int    // container -> how many rm calls leave it in place
+	images string            // nerdctl images output
 }
 
 func (f *fakeNerdctl) run(_ context.Context, args ...string) ([]byte, error) {
@@ -40,6 +41,8 @@ func (f *fakeNerdctl) run(_ context.Context, args ...string) ([]byte, error) {
 	switch args[0] {
 	case "run":
 		f.ps[args[slices.Index(args, "--name")+1]] = "Up"
+	case "images":
+		return []byte(f.images), nil
 	case "rm":
 		if f.sticky[args[len(args)-1]] > 0 { // nerdctl rm -f of a gVisor container that stays
 			f.sticky[args[len(args)-1]]--

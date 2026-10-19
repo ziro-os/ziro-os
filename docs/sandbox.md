@@ -259,6 +259,47 @@ _ = c.DeleteSandbox(ctx, sb.ID)
 Every create, exec and delete through the API is in the audit log (`ziroctl audit log`). Expired sandboxes are logged
 as `sandbox expire`.
 
+## For agents: templates, warm pools, snapshots, MCP
+
+**Templates.** These are named specs kept by the host's admin:
+
+```sh
+ziroctl sandbox template add python python.json   # {"image":"python:3.13-slim","network":{"mode":"allowlist","allow":["pypi.org"]}}
+ziroctl sandbox create --template python --meta task=42
+ziroctl sandbox template ls
+```
+
+Fields set at create override the template's. Env and metadata are merged. Templates never hold secret values.
+
+**Warm pools.** Set `"pools": {"python": 4}` in the host config to keep 4 sandboxes of a template created and paused.
+A create that only names the template (plus `timeout`, `idle_timeout` and `metadata`) is served from the pool: the
+sandbox is resumed and handed over, which takes milliseconds instead of a container start. The pool refills in the
+background. A pool can't be larger than `max_per_owner`.
+
+**Snapshots.** Save a sandbox's filesystem and start new sandboxes from it (install once, fork many):
+
+```sh
+ziroctl sandbox snapshot create <id> deps-installed    # ziro.local/sandbox/<owner>/deps-installed:<time>
+ziroctl sandbox create ziro.local/sandbox/root/deps-installed:1760000000
+ziroctl sandbox snapshot ls
+ziroctl sandbox snapshot rm <image>
+```
+
+Snapshots belong to the owner who took them. They don't need the host's image policy, because they were built on
+this host. Only the filesystem is saved; processes and memory aren't.
+
+**MCP server.** Any AI agent that speaks the Model Context Protocol gets sandboxes as tools:
+
+```sh
+ziroctl api token create agent --role deployer --scope sandboxes
+claude mcp add ziro-sandbox -e ZIRO_API_URL=https://sbx.example.com:8443 -e ZIRO_API_TOKEN=ziro_... -- ziroctl sandbox mcp
+```
+
+Tools: `sandbox_create` (image or template, `allow` domains or `network_open`, timeout, memory, cpus),
+`sandbox_exec`, `sandbox_write_file`, `sandbox_read_file`, `sandbox_expose`, `sandbox_list` and `sandbox_delete`.
+The server runs anywhere `ziroctl` runs and calls the REST API with the agent's own token, so every action is owned,
+limited and audited. Set `ZIRO_API_CA` to the API's certificate when it is self-signed.
+
 ## Host limits
 
 `/etc/ziro/sandbox.json` sets the policy. Every field is optional:
@@ -278,6 +319,7 @@ as `sandbox expire`.
   "ssh_port": 22998,
   "preview_port": 22997,
   "secret_proxy_port": 22996,
+  "pools": {"python": 4},
   "ssh_host": "sbx.example.com",
   "image_policy": {"allow_registries": ["docker.io/library", "ghcr.io/acme"]}
 }
@@ -302,5 +344,4 @@ Logs are in `/var/log/ziro-sandboxd.log`.
 
 These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
 
-- **For agents:** templates, warm pools, snapshots and an MCP server (`ziroctl sandbox mcp`).
 - **Clusters:** sandboxes spread across a cluster's runner nodes.

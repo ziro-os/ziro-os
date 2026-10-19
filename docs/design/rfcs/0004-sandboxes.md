@@ -1,6 +1,6 @@
 # RFC 0004: Sandboxes for untrusted code and AI agents
 
-- **Status:** Draft (phases 1–6 implemented; later phases follow, one pull request each)
+- **Status:** Draft (phases 1–7 implemented; later phases follow, one pull request each)
 - **Pull request:** sandbox core (phase 1), then one per phase below
 
 ## Summary

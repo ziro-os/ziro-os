@@ -21,6 +21,14 @@ func registerSandboxRoutes(a *apiRouter) {
 		_ = rc.SetWriteDeadline(time.Now().Add(11 * time.Minute))
 		fwd(w, r)
 	})
+	a.get("/api/v1/sandboxes/templates", "deployer", fwd)
+	a.get("/api/v1/sandboxes/snapshots", "deployer", fwd)
+	a.delete("/api/v1/sandboxes/snapshots", "deployer", fwd)
+	a.post("/api/v1/sandboxes/{id}/snapshot", "deployer", func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetWriteDeadline(time.Now().Add(11 * time.Minute)) // committing a large filesystem
+		fwd(w, r)
+	})
 	a.get("/api/v1/sandboxes/{id}", "deployer", fwd)
 	a.delete("/api/v1/sandboxes/{id}", "deployer", fwd)
 	a.post("/api/v1/sandboxes/{id}/pause", "deployer", fwd)

@@ -152,6 +152,29 @@ func (c *Client) UnexposeSandboxPort(ctx context.Context, id string, port int) e
 	return c.Do(ctx, http.MethodDelete, "/api/v1/sandboxes/"+esc(id)+"/previews/"+strconv.Itoa(port), nil, nil)
 }
 
+// SandboxTemplates lists the host's sandbox templates (create with Template set).
+func (c *Client) SandboxTemplates(ctx context.Context) (map[string]schema.SandboxSpec, error) {
+	var out map[string]schema.SandboxSpec
+	return out, c.Get(ctx, "/api/v1/sandboxes/templates", &out)
+}
+
+// SnapshotSandbox commits a sandbox's filesystem to an image new sandboxes can start from.
+func (c *Client) SnapshotSandbox(ctx context.Context, id, name string) (api.SandboxSnapshot, error) {
+	var out api.SandboxSnapshot
+	return out, c.postLong(ctx, "/api/v1/sandboxes/"+esc(id)+"/snapshot", map[string]string{"name": name}, &out)
+}
+
+// SandboxSnapshots lists the caller's snapshots.
+func (c *Client) SandboxSnapshots(ctx context.Context) ([]api.SandboxSnapshot, error) {
+	var out []api.SandboxSnapshot
+	return out, c.Get(ctx, "/api/v1/sandboxes/snapshots", &out)
+}
+
+// RemoveSandboxSnapshot deletes a snapshot image.
+func (c *Client) RemoveSandboxSnapshot(ctx context.Context, image string) error {
+	return c.Do(ctx, http.MethodDelete, "/api/v1/sandboxes/snapshots?image="+url.QueryEscape(image), nil, nil)
+}
+
 // ExecResult is a finished command: its exit code and output.
 type ExecResult struct {
 	ExitCode       int

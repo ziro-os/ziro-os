@@ -15,7 +15,8 @@ import (
 // can't loosen (capabilities, mounts, devices, the network default) is decided by the host, not
 // here; the spec only picks what runs and how big it may get.
 type SandboxSpec struct {
-	Image       string            `json:"image"`
+	Template    string            `json:"template,omitempty"`     // start from a host template; fields set here override it
+	Image       string            `json:"image,omitempty"`        // required unless the template has one
 	Runtime     string            `json:"runtime,omitempty"`      // gvisor (default), gvisor-kvm (hardware virtualization) or runc (operator + host opt-in)
 	Command     []string          `json:"command,omitempty"`      // default: keep the sandbox up (sleep infinity)
 	Env         map[string]string `json:"env,omitempty"`          // plain values: visible to anyone who can inspect the sandbox
@@ -69,7 +70,10 @@ var (
 )
 
 func (s *SandboxSpec) Validate() error {
-	if !SandboxImageRe.MatchString(s.Image) {
+	if s.Template != "" && ValidName(s.Template) != nil {
+		return fmt.Errorf("bad template name %q", s.Template)
+	}
+	if !SandboxImageRe.MatchString(s.Image) && !(s.Image == "" && s.Template != "") {
 		return fmt.Errorf("bad image %q", s.Image)
 	}
 	switch s.Runtime {

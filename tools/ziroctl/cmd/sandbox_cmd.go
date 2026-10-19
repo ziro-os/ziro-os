@@ -89,16 +89,29 @@ func kvFlags(list []string, what string) (map[string]string, error) {
 }
 
 var sandboxCreateCmd = &cobra.Command{
-	Use:   "create <image> [-- command...]",
+	Use:   "create [image] [-- command...]",
 	Short: "Create a sandbox and wait until it runs",
 	Example: `  ziroctl sandbox create python:3.13-slim
   ziroctl sandbox create node:22 --memory 2Gi --cpus 2 --timeout 2h --idle-timeout 15m --meta agent=claude
+  ziroctl sandbox create --template python --meta task=42
   ziroctl sandbox create python:3.13-slim --allow pypi.org --allow files.pythonhosted.org
   GITHUB_TOKEN=ghp_... ziroctl sandbox create alpine/git --allow api.github.com --secret GITHUB_TOKEN@api.github.com`,
-	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		spec := sbxSpec
-		spec.Image, spec.Command = args[0], args[1:]
+		images := args
+		if at := cmd.ArgsLenAtDash(); at >= 0 {
+			images, spec.Command = args[:at], args[at:]
+		}
+		switch {
+		case len(images) == 1:
+			spec.Image = images[0]
+		case len(images) > 1 && cmd.ArgsLenAtDash() < 0:
+			spec.Image, spec.Command = images[0], images[1:]
+		case len(images) > 1:
+			return errors.New("one image, then -- and the command")
+		case spec.Template == "":
+			return errors.New("an image or --template is required")
+		}
 		var err error
 		if spec.Env, err = kvFlags(sbxEnv, "env"); err != nil {
 			return err
@@ -292,6 +305,7 @@ var sandboxServeCmd = &cobra.Command{
 
 func init() {
 	f := sandboxCreateCmd.Flags()
+	f.StringVar(&sbxSpec.Template, "template", "", "Start from a host template (ziroctl sandbox template ls)")
 	f.StringVar(&sbxSpec.Runtime, "runtime", "", "gvisor (default), gvisor-kvm (hardware virtualization, needs /dev/kvm) or runc (operators, when the host allows it)")
 	f.StringArrayVarP(&sbxEnv, "env", "e", nil, "Environment variable KEY=VALUE (repeatable)")
 	f.StringVarP(&sbxSpec.User, "user", "u", "", "Run as uid[:gid] (default: the image's user)")
