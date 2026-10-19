@@ -86,6 +86,61 @@ How it is enforced:
 
 Limits for now: IPv4 only, and a domain allows every port.
 
+## SSH access
+
+Every sandbox can be reached through one SSH gateway on port `22998`. The session token is the user name, so a
+single line gets a person, a CI job or an agent into a sandbox. There are no SSH keys to distribute and no accounts
+on the host:
+
+```sh
+ziroctl sandbox access create <id> --ttl 30m
+# ssh -p 22998 zsbx_7kq2...@sbx.example.com
+ziroctl sandbox access create <id> --public-key ~/.ssh/id_ed25519.pub --single-use
+ziroctl sandbox access ls <id>
+ziroctl sandbox access rm <id> <token-id>
+ziroctl sandbox ssh <id>                       # on the host: a shell, with a single-use token
+```
+
+Then, from anywhere that can reach the host:
+
+```sh
+ssh -p 22998 zsbx_7kq2...@sbx.example.com                   # a shell (bash if the image has it)
+ssh -p 22998 zsbx_7kq2...@sbx.example.com 'pytest -q'       # one command, with its exit status
+ssh -p 22998 -L 8080:localhost:8080 zsbx_7kq2...@sbx.example.com   # reach a port of the sandbox
+```
+
+- **Tokens:**
+  - 128 random bits. Only the hash is kept on the host.
+  - They expire (1 hour by default, at most 24 hours, never after the sandbox) and are deleted with the sandbox.
+  - A `--single-use` token works for one connection.
+  - A token bound to `--public-key` also needs that key, so a leaked user name alone opens nothing.
+- **Host key:** the gateway has its own host key. `access create` prints its `known_hosts` line, so clients can
+  verify it (`ziroctl sandbox ssh` always does).
+- **What a session can do:**
+  - Run a shell or a command in its own sandbox, with a terminal when the client asks for one.
+  - `ssh -L` port forwards, which reach only that sandbox's own address. The sandbox needs a network (`--net` or
+    `--allow`), and the server inside must listen on `0.0.0.0`.
+- **What is refused:** remote forwarding (`-R`), agent forwarding, X11 and `sftp`.
+- **Rate limit and audit:** a client address with too many failed logins is shut out for 10 minutes. Logins are
+  audited with the token id, never the token.
+- **Turning it off:** set `ssh_port` to `0` to disable the gateway, or change the port. The gateway opens its port
+  in the host firewall. Set `ssh_host` to the name clients should use in printed commands; the default is the host
+  name the API was called with.
+
+## Files
+
+Read and write files in a sandbox's `/workspace` from the host side:
+
+```sh
+ziroctl sandbox cp ./main.py <id>:/workspace/main.py
+ziroctl sandbox cp ./run.sh <id>:/workspace/bin/ --mode 0755
+ziroctl sandbox cp <id>:/workspace/out.csv ./out.csv
+ziroctl sandbox files <id> /workspace/src
+```
+
+Paths are confined to `/workspace`. `..` and symlinks the sandbox created can't lead out of it. Uploads are up to
+100 MiB, are written atomically and are owned by the sandbox's user.
+
 ## For AI agents: the API and a scoped token
 
 Give each agent a token that can only manage sandboxes:
@@ -114,6 +169,8 @@ curl -sk -H "$H" -X DELETE https://host:8443/api/v1/sandboxes/<id>
 | `POST /api/v1/sandboxes/{id}/pause`, `/resume`, `/renew` | freeze, thaw, move the expiry (`{"timeout":"1h"}`) |
 | `PUT /api/v1/sandboxes/{id}/metadata` | replace the metadata map |
 | `PUT /api/v1/sandboxes/{id}/network` | replace the network policy (`{"mode":"allowlist","allow":["pypi.org"]}`) |
+| `GET/POST /api/v1/sandboxes/{id}/access`, `DELETE .../access/{aid}` | SSH session tokens: list / issue (`{"ttl","public_key","single_use"}`) / revoke |
+| `GET/PUT/DELETE /api/v1/sandboxes/{id}/files?path=` | read (or list) / write (raw body, `&mode=`) / remove (`&recursive=true`) in `/workspace` |
 | `POST /api/v1/sandboxes/{id}/exec` | run a command; the answer is NDJSON: output lines, then `exit_code` or `error` |
 
 With the Go SDK:
@@ -144,6 +201,8 @@ as `sandbox expire`.
   "max_timeout": "24h",
   "allow_runc": false,
   "subnet": "10.250.0.0/16",
+  "ssh_port": 22998,
+  "ssh_host": "sbx.example.com",
   "image_policy": {"allow_registries": ["docker.io/library", "ghcr.io/acme"]}
 }
 ```
@@ -167,8 +226,6 @@ Logs are in `/var/log/ziro-sandboxd.log`.
 
 These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
 
-- **SSH access:** `ssh -p 22998 zsbx_<token>@host` with short-lived token sessions, and `ssh -L` port forwarding.
-- **Files API:** read and write files in `/workspace`.
 - **HTTPS port previews:** `https://<port>-<id>.<your domain>`.
 - **Credential injection:** the agent sees only placeholders, and the real secret is added on the way out, only for
   its allowed host.

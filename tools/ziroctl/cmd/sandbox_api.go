@@ -28,6 +28,24 @@ func registerSandboxRoutes(a *apiRouter) {
 	a.post("/api/v1/sandboxes/{id}/renew", "deployer", fwd)
 	a.put("/api/v1/sandboxes/{id}/metadata", "deployer", fwd)
 	a.put("/api/v1/sandboxes/{id}/network", "deployer", fwd)
+	a.post("/api/v1/sandboxes/{id}/access", "deployer", fwd)
+	a.get("/api/v1/sandboxes/{id}/access", "deployer", fwd)
+	a.delete("/api/v1/sandboxes/{id}/access/{aid}", "deployer", fwd)
+	// Files: a download streams; an upload may be up to 100 MiB on a slow link.
+	a.get("/api/v1/sandboxes/{id}/files", "deployer", func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetWriteDeadline(time.Time{})
+		proxy.ServeHTTP(&deadlineWriter{w, rc}, r)
+	})
+	a.put("/api/v1/sandboxes/{id}/files", "deployer", func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		end := time.Now().Add(30 * time.Minute)
+		_ = rc.SetReadDeadline(end)
+		_ = rc.SetWriteDeadline(end.Add(time.Minute))
+		r.Body = http.MaxBytesReader(w, r.Body, sandboxFileMax)
+		proxy.ServeHTTP(w, r)
+	})
+	a.delete("/api/v1/sandboxes/{id}/files", "deployer", fwd)
 	// An exec streams its output for as long as it runs (up to 1 h); each write gets its own deadline.
 	a.post("/api/v1/sandboxes/{id}/exec", "deployer", func(w http.ResponseWriter, r *http.Request) {
 		rc := http.NewResponseController(w)

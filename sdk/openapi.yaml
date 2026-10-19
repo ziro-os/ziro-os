@@ -1259,6 +1259,89 @@ paths:
             schema: { $ref: "#/components/schemas/SandboxNetwork" }
       responses:
         "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}/access:
+    get:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: A sandbox's SSH session tokens (never the tokens themselves)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SandboxAccess" } }
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: 'Issue an SSH session token for the gateway: the answer has the ssh command (ssh -p 22998 zsbx_...@host) and the host key, shown once'
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                ttl: { type: string, description: "default 1h, at most 24h, never past the sandbox" }
+                public_key: { type: string, description: authorized_keys line the client must also prove }
+                single_use: { type: boolean }
+      responses:
+        "200":
+          description: The token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxAccess" }
+  /api/v1/sandboxes/{id}/access/{aid}:
+    delete:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Revoke an SSH session token
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - { name: aid, in: path, required: true, schema: { type: string, pattern: "^[0-9a-f]{8}$" } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/sandboxes/{id}/files:
+    get:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: A file's content (application/octet-stream), or a directory listing (JSON array of SandboxFile)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/SandboxPath"
+      responses:
+        "200":
+          description: Content or listing
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+            application/json: { schema: { type: array, items: { $ref: "#/components/schemas/SandboxFile" } } }
+    put:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Write a file (raw body, up to 100 MiB; ?mode=0755), creating its directories
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/SandboxPath"
+        - { name: mode, in: query, schema: { type: string, pattern: "^0?[0-7]{3}$" } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+    delete:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Remove a file, or a directory with ?recursive=true
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/SandboxPath"
+        - { name: recursive, in: query, schema: { type: boolean } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
   /api/v1/sandboxes/{id}/exec:
     post:
       x-ziro-role: deployer
@@ -1298,6 +1381,12 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: "^[a-z2-7]{12}$" }
+    SandboxPath:
+      name: path
+      in: query
+      required: true
+      description: inside /workspace (absolute or relative to it)
+      schema: { type: string }
   requestBodies:
     Stack:
       required: true
@@ -1385,6 +1474,26 @@ components:
         user: { type: string }
         stdin: { type: string, description: at most 1 MiB }
         timeout: { type: string, description: "default 5m, at most 1h" }
+    SandboxAccess:
+      type: object
+      properties:
+        id: { type: string }
+        created: { type: string, format: date-time }
+        expires: { type: string, format: date-time }
+        key_fingerprint: { type: string }
+        single_use: { type: boolean }
+        used: { type: boolean }
+        username: { type: string, description: "the token (zsbx_...), only when created" }
+        ssh: { type: string, description: ready-to-run ssh command, only when created }
+        host_key: { type: string, description: "known_hosts line for the gateway, only when created" }
+    SandboxFile:
+      type: object
+      properties:
+        name: { type: string }
+        size: { type: integer }
+        mode: { type: string }
+        dir: { type: boolean }
+        modified: { type: string, format: date-time }
     SandboxExecEvent:
       type: object
       properties:

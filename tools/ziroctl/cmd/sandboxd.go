@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -52,7 +53,12 @@ func runSandboxDaemon(ctx context.Context) error {
 		l.Close()
 		return err
 	}
-	m := &sandboxManager{st: loadSandboxStore(), net: newSandboxNet(cfg.Subnet), now: time.Now}
+	st := loadSandboxStore()
+	var ids []string
+	for id := range st.all {
+		ids = append(ids, id)
+	}
+	m := &sandboxManager{st: st, net: newSandboxNet(cfg.Subnet), access: loadAccessStore(ids), now: time.Now}
 	for _, sb := range m.st.all { // a create the last daemon didn't finish
 		if sb.State == "pending" {
 			sb.State, sb.Error = "failed", "interrupted: ziro-sandboxd restarted while it was starting"
@@ -67,6 +73,20 @@ func runSandboxDaemon(ctx context.Context) error {
 		if err := m.applyNet(); err != nil {
 			fmt.Printf("[sandboxd] sandbox network rules: %v\n", err)
 		}
+	}
+	if cfg.SSHPort > 0 {
+		signer, err := sandboxHostKey()
+		if err != nil {
+			l.Close()
+			return fmt.Errorf("ssh host key: %w", err)
+		}
+		m.ssh = newSSHGateway(m, signer)
+		allowFirewall([]FirewallRule{{Port: cfg.SSHPort, Protocol: "tcp", Comment: "Ziro sandbox SSH"}}, "")
+		go func() {
+			if err := m.ssh.serve(ctx, net.JoinHostPort("", strconv.Itoa(cfg.SSHPort))); err != nil {
+				fmt.Printf("[sandboxd] ssh gateway: %v\n", err)
+			}
+		}()
 	}
 	go func() {
 		for {
@@ -172,6 +192,32 @@ func (m *sandboxManager) routes() *http.ServeMux {
 		sb, err := m.setNetwork(r.Context(), id, c, n)
 		apiReply(w, err, sb)
 	}))
+	mux.HandleFunc("POST /v1/sandboxes/{id}/access", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		var req sdkapi.SandboxAccessRequest
+		if err := decodeStrict(w, r, &req, 16<<10); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		v, err := m.createAccess(id, c, req, r.Header.Get(hdrHost))
+		apiReply(w, err, v)
+	}))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/access", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		if _, err := m.st.get(id, c); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		apiReply(w, nil, m.access.list(id))
+	}))
+	mux.HandleFunc("DELETE /v1/sandboxes/{id}/access/{aid}", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		if _, err := m.st.get(id, c); err != nil {
+			apiReply(w, err, nil)
+			return
+		}
+		apiReply(w, m.access.revoke(id, r.PathValue("aid")), APIMessage{Status: "ok", Message: "access token revoked"})
+	}))
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		mux.HandleFunc(method+" /v1/sandboxes/{id}/files", with(m.serveFiles))
+	}
 	mux.HandleFunc("POST /v1/sandboxes/{id}/exec", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
 		var req sdkapi.SandboxExecRequest
 		if err := decodeStrict(w, r, &req, sandboxExecMaxStdin+(64<<10)); err != nil {
@@ -250,7 +296,7 @@ func (m *sandboxManager) serveExec(w http.ResponseWriter, r *http.Request, id st
 	m.touch(id)
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "nerdctl", args...)
+	cmd := sandboxExecCommand(ctx, args...)
 	// On timeout or a client hanging up, SIGTERM goes to nerdctl, which forwards it to the
 	// command in the sandbox; killing nerdctl alone would leave the command running there.
 	// ponytail: a command that ignores SIGTERM keeps running until the sandbox's lifetime ends.
