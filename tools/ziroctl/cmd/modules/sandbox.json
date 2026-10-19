@@ -1,6 +1,6 @@
 {
   "name": "sandbox",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Isolated sandboxes for untrusted code and AI agents: gVisor (runsc) and ziro-sandboxd, the daemon behind `ziroctl sandbox` and /api/v1/sandboxes",
   "min_memory_mb": 1024,
   "artifacts": [
@@ -48,6 +48,11 @@
       "path": "/var/lib/ziro/plugins/sandbox/runsc-ziro",
       "mode": "0755",
       "content": "#!/bin/sh\n# Managed by `ziroctl module enable sandbox`: the OCI runtime sandboxes run under\n# (nerdctl --runtime). systrap needs no KVM, so it works in cloud VMs and on arm64;\n# overlay2=none keeps the rootfs on the host snapshot (gofer-mediated), so a sandbox can be committed.\nexec /var/lib/ziro/plugins/sandbox/runsc --platform=systrap --overlay2=none \"$@\"\n"
+    },
+    {
+      "path": "/var/lib/ziro/plugins/sandbox/runsc-ziro-kvm",
+      "mode": "0755",
+      "content": "#!/bin/sh\n# Managed by `ziroctl module enable sandbox`: gVisor on its KVM platform (runtime gvisor-kvm).\n# The sandbox's kernel runs behind hardware virtualization; needs /dev/kvm.\nexec /var/lib/ziro/plugins/sandbox/runsc --platform=kvm --overlay2=none \"$@\"\n"
     }
   ],
   "prepare": [

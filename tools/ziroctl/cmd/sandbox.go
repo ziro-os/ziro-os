@@ -46,8 +46,21 @@ var (
 	sandboxSocket     = "/run/ziro/sandboxd.sock"
 	sandboxRoot       = "/var/lib/ziro/sandbox"
 	sandboxConfigFile = "/etc/ziro/sandbox.json"
-	sandboxRunsc      = "/var/lib/ziro/plugins/sandbox/runsc-ziro" // runsc with Ziro's flags (modules/sandbox.json)
-	sandboxNerdctl    = func(ctx context.Context, args ...string) ([]byte, error) {
+	sandboxRunsc      = "/var/lib/ziro/plugins/sandbox/runsc-ziro"     // runsc with Ziro's flags (modules/sandbox.json)
+	sandboxRunscKVM   = "/var/lib/ziro/plugins/sandbox/runsc-ziro-kvm" // the same on gVisor's KVM platform
+	// kvmReady makes /dev/kvm available (loading the KVM module on x86_64) and reports whether it is.
+	kvmReady = func() bool {
+		if fileExists("/dev/kvm") {
+			return true
+		}
+		for _, mod := range []string{"kvm_intel", "kvm_amd"} {
+			if exec.Command("modprobe", mod).Run() == nil && fileExists("/dev/kvm") {
+				return true
+			}
+		}
+		return false
+	}
+	sandboxNerdctl = func(ctx context.Context, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, "nerdctl", args...).CombinedOutput()
 	}
 )
@@ -70,6 +83,7 @@ type sandboxConfig struct {
 	DefaultTimeout string           `json:"default_timeout"`
 	MaxTimeout     string           `json:"max_timeout"`
 	AllowRunc      bool             `json:"allow_runc,omitempty"` // let operators pick the runc runtime (weaker isolation)
+	DefaultRuntime string           `json:"default_runtime"`      // gvisor or gvisor-kvm
 	Subnet         string           `json:"subnet"`               // the sandbox network
 	SSHPort        int              `json:"ssh_port"`             // the SSH gateway (0: off)
 	SSHHost        string           `json:"ssh_host,omitempty"`   // the name clients reach the gateway by (default: the API's host name)
@@ -87,6 +101,7 @@ func defaultSandboxConfig() sandboxConfig {
 		DefaultTimeout: "1h",
 		MaxTimeout:     "24h",
 		Subnet:         sandboxDefSubnet,
+		DefaultRuntime: schema.SandboxGVisor,
 		SSHPort:        22998,
 		PreviewPort:    22997,
 		SecretPort:     22996,
@@ -123,6 +138,9 @@ func loadSandboxConfig() (sandboxConfig, error) {
 	if c.SecretPort < 0 || c.SecretPort > 65535 || (c.SecretPort != 0 && (c.SecretPort == c.SSHPort || c.SecretPort == c.PreviewPort)) {
 		return c, fmt.Errorf("%s: bad secret_proxy_port %d", sandboxConfigFile, c.SecretPort)
 	}
+	if c.DefaultRuntime != schema.SandboxGVisor && c.DefaultRuntime != schema.SandboxGVisorKVM {
+		return c, fmt.Errorf("%s: default_runtime must be gvisor or gvisor-kvm", sandboxConfigFile)
+	}
 	if c.SSHPort < 0 || c.SSHPort > 65535 {
 		return c, fmt.Errorf("%s: bad ssh_port %d", sandboxConfigFile, c.SSHPort)
 	}
@@ -154,7 +172,10 @@ func resolveSandboxSpec(s *schema.SandboxSpec, cfg sandboxConfig, caller sandbox
 		return 0, err
 	}
 	if s.Runtime == "" {
-		s.Runtime = schema.SandboxGVisor
+		s.Runtime = cfg.DefaultRuntime
+	}
+	if s.Runtime == schema.SandboxGVisorKVM && !kvmReady() {
+		return 0, errors.New("the gvisor-kvm runtime needs /dev/kvm, which this host doesn't have (a VM without nested virtualization?); use gvisor")
 	}
 	if s.Runtime == schema.SandboxRunc {
 		if !cfg.AllowRunc {
@@ -218,7 +239,11 @@ func sandboxRunArgs(sb *sdkapi.Sandbox, image, gateway string, secretEnv map[str
 	s := sb.Spec
 	args := []string{"run", "-d", "--name", sandboxContainer(sb.ID), "--hostname", "sandbox",
 		"--label", sandboxLabel + "=" + sb.ID, "--restart", "no"}
-	if s.Runtime != schema.SandboxRunc {
+	switch s.Runtime {
+	case schema.SandboxGVisorKVM:
+		args = append(args, "--runtime", sandboxRunscKVM)
+	case schema.SandboxRunc:
+	default:
 		args = append(args, "--runtime", sandboxRunsc)
 	}
 	args = append(args, "--security-opt", "no-new-privileges", "--cap-drop", "ALL")

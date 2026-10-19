@@ -159,6 +159,23 @@ func TestResolveSandboxSpec(t *testing.T) {
 	if _, err := resolveSandboxSpec(&schema.SandboxSpec{Image: "a", Runtime: "runc"}, cfg, ops); err != nil {
 		t.Errorf("runc for an operator on an opted-in host: %v", err)
 	}
+	// gvisor-kvm needs /dev/kvm; a host can make it the default.
+	old := kvmReady
+	defer func() { kvmReady = old }()
+	kvmReady = func() bool { return false }
+	if _, err := resolveSandboxSpec(&schema.SandboxSpec{Image: "a", Runtime: "gvisor-kvm"}, cfg, alice); err == nil || !strings.Contains(err.Error(), "/dev/kvm") {
+		t.Errorf("gvisor-kvm without KVM: %v", err)
+	}
+	kvmReady = func() bool { return true }
+	cfg.DefaultRuntime = "gvisor-kvm"
+	s2 := schema.SandboxSpec{Image: "a"}
+	if _, err := resolveSandboxSpec(&s2, cfg, alice); err != nil || s2.Runtime != "gvisor-kvm" {
+		t.Errorf("default runtime: %v %s", err, s2.Runtime)
+	}
+	sb := &sdkapi.Sandbox{ID: "abcdefghijkl", Spec: s2}
+	if args := sandboxRunArgs(sb, "a", "", nil); !slices.Contains(args, sandboxRunscKVM) {
+		t.Errorf("kvm runtime args: %v", args)
+	}
 }
 
 func TestSandboxConfigFile(t *testing.T) {
@@ -171,6 +188,10 @@ func TestSandboxConfigFile(t *testing.T) {
 	os.WriteFile(sandboxConfigFile, []byte(`{"max_sandbox":2}`), 0600)
 	if _, err := loadSandboxConfig(); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+	os.WriteFile(sandboxConfigFile, []byte(`{"default_runtime":"runc"}`), 0600)
+	if _, err := loadSandboxConfig(); err == nil {
+		t.Fatal("runc accepted as the default runtime")
 	}
 }
 

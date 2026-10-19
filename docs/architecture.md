@@ -147,7 +147,7 @@ Ziro-OS implements standard OCI specifications:
 - **`ziroctl`**: the management CLI for containers and apps, networking, security, clusters and upgrades.
   `ziroctl compose` is `nerdctl compose` behind a security preflight (no docker-compose ships).
 - **Sandboxes** (opt-in `sandbox` module, [RFC 0004](design/rfcs/0004-sandboxes.md)): untrusted code runs under
-  gVisor (`runsc`, systrap platform), which nerdctl starts through the runc shim (`--runtime` = a wrapper that sets
+  gVisor (`runsc`, systrap platform, or its KVM platform with `runtime: gvisor-kvm` where `/dev/kvm` exists), which nerdctl starts through the runc shim (`--runtime` = a wrapper that sets
   runsc's flags), so containerd's configuration stays unchanged. `ziro-sandboxd` (a root-only unix socket, like
   `ziroctld`) owns the records, quotas and the reaper. The REST API authenticates, audits and forwards with the
   caller's identity. The host decides the isolation: all capabilities but a short list are dropped, there are no
