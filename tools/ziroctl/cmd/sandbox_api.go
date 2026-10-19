@@ -27,6 +27,7 @@ func registerSandboxRoutes(a *apiRouter) {
 	a.post("/api/v1/sandboxes/{id}/resume", "deployer", fwd)
 	a.post("/api/v1/sandboxes/{id}/renew", "deployer", fwd)
 	a.put("/api/v1/sandboxes/{id}/metadata", "deployer", fwd)
+	a.put("/api/v1/sandboxes/{id}/network", "deployer", fwd)
 	// An exec streams its output for as long as it runs (up to 1 h); each write gets its own deadline.
 	a.post("/api/v1/sandboxes/{id}/exec", "deployer", func(w http.ResponseWriter, r *http.Request) {
 		rc := http.NewResponseController(w)

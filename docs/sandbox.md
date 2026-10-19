@@ -2,8 +2,8 @@
 
 A sandbox is a disposable, isolated machine for code you don't trust: an AI agent's tools, a code interpreter or a CI
 step. Each one is a container that runs under [gVisor](https://gvisor.dev). gVisor is a kernel in user space, so the
-workload's system calls never reach the host kernel. A sandbox keeps a short list of privileges, has no network and
-has resource limits and a lifetime. You manage sandboxes with `ziroctl sandbox`, the REST API or the Go SDK. The
+workload's system calls never reach the host kernel. A sandbox keeps a short list of privileges, has no network unless you ask
+for one (and then only what its policy allows), and has resource limits and a lifetime. You manage sandboxes with `ziroctl sandbox`, the REST API or the Go SDK. The
 design is [RFC 0004](design/rfcs/0004-sandboxes.md).
 
 ```sh
@@ -21,7 +21,7 @@ ziroctl sandbox rm <id>
 | Kernel | gVisor (systrap: no KVM needed, works in cloud VMs and on arm64) | `runtime: runc` only for operators, and only if the host allows it |
 | Privileges | every capability dropped except chown, dac_override, fowner, fsetid, kill, net_bind_service, setgid, setuid (inside gVisor); `no-new-privileges` | no |
 | Files | the image's own copy-on-write root, a `/workspace` directory, a 256 MiB `/tmp` | no host mounts, no devices |
-| Network | none | a network policy comes in the next release |
+| Network | none: no interface at all | `--net open` (the public internet) or `--allow` entries (default-deny); never the host, other sandboxes, cloud metadata or private networks ([below](#network-policy)) |
 | Resources | 1 GiB memory, 1 CPU, 512 processes | up to the host limits (8 GiB, 4 CPUs, 4096 processes) |
 | Lifetime | 1 hour, then the sandbox is deleted | `--timeout` up to 24 h, `renew` to extend, `--idle-timeout` to delete it sooner |
 
@@ -44,6 +44,48 @@ ziroctl sandbox renew <id> --timeout 1h    # expires one hour from now
 `exec` streams the command's output as it runs and exits with the command's exit code. A command may run for up to
 1 hour, and its output is capped at 64 MiB.
 
+## Network policy
+
+A sandbox has one of three network modes:
+
+| Mode | What it reaches |
+|---|---|
+| `none` (default) | nothing: the sandbox has no network interface |
+| `allowlist` | only the listed domains (and their subdomains), IPv4 addresses and CIDRs |
+| `open` | the public internet |
+
+```sh
+ziroctl sandbox create python:3.13-slim --allow pypi.org --allow files.pythonhosted.org
+ziroctl sandbox create node:22 --net open
+ziroctl sandbox network <id> --allow registry.npmjs.org     # replace the policy now
+ziroctl sandbox network <id> --net none                     # cut it off (the interface stays, everything is dropped)
+```
+
+Whatever the mode, a sandbox never reaches:
+
+- the host itself (except its DNS resolver)
+- other sandboxes
+- link-local addresses and cloud metadata (`169.254.0.0/16`)
+- private, CGNAT, loopback, multicast and reserved ranges
+
+Only an operator can allow one of these ranges, by listing it explicitly (`--allow 10.1.2.0/24`). Nothing outside
+can open a connection into a sandbox.
+
+How it is enforced:
+
+- **Outside the sandbox.** The rules live in an nftables table on the host (`inet ziro_sandbox`). Each sandbox has a
+  routed address on the sandbox network (`10.250.0.0/16`, set `subnet` in the host config), so all of its traffic
+  crosses the host's firewall.
+- **Allowed names.** The sandbox's DNS resolver answers `NXDOMAIN` for any name the policy doesn't allow. For allowed
+  names, it adds the addresses they resolve to into the sandbox's allowed set, before the sandbox gets the answer.
+  An allowed name that resolves to a private address doesn't open that address, so DNS rebinding can't reach your
+  LAN.
+- **Fails closed.** A new sandbox's rules are in place before it starts. If the rules for a running sandbox can't be
+  applied, it is paused and marked `failed`.
+- **Fixed at create.** A sandbox created without a network can't get one later. Create a new one instead.
+
+Limits for now: IPv4 only, and a domain allows every port.
+
 ## For AI agents: the API and a scoped token
 
 Give each agent a token that can only manage sandboxes:
@@ -57,7 +99,8 @@ deployer's sandbox answers `404`; operators and admins see all of them.
 
 ```sh
 H="Authorization: Bearer $TOKEN"
-curl -sk -H "$H" https://host:8443/api/v1/sandboxes -d '{"image":"python:3.13-slim","timeout":"30m"}'
+curl -sk -H "$H" https://host:8443/api/v1/sandboxes \
+  -d '{"image":"python:3.13-slim","timeout":"30m","network":{"mode":"allowlist","allow":["pypi.org"]}}'
 curl -sk -H "$H" https://host:8443/api/v1/sandboxes/<id>/exec -d '{"command":["python3","-c","print(1+1)"]}'
 # {"stream":"stdout","data":"2\n"}
 # {"exit_code":0}
@@ -70,6 +113,7 @@ curl -sk -H "$H" -X DELETE https://host:8443/api/v1/sandboxes/<id>
 | `GET/DELETE /api/v1/sandboxes/{id}` | show / delete with its workspace |
 | `POST /api/v1/sandboxes/{id}/pause`, `/resume`, `/renew` | freeze, thaw, move the expiry (`{"timeout":"1h"}`) |
 | `PUT /api/v1/sandboxes/{id}/metadata` | replace the metadata map |
+| `PUT /api/v1/sandboxes/{id}/network` | replace the network policy (`{"mode":"allowlist","allow":["pypi.org"]}`) |
 | `POST /api/v1/sandboxes/{id}/exec` | run a command; the answer is NDJSON: output lines, then `exit_code` or `error` |
 
 With the Go SDK:
@@ -99,6 +143,7 @@ as `sandbox expire`.
   "default_timeout": "1h",
   "max_timeout": "24h",
   "allow_runc": false,
+  "subnet": "10.250.0.0/16",
   "image_policy": {"allow_registries": ["docker.io/library", "ghcr.io/acme"]}
 }
 ```
@@ -122,8 +167,6 @@ Logs are in `/var/log/ziro-sandboxd.log`.
 
 These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
 
-- **Network policy:** default-deny egress with a domain allowlist. Other sandboxes, the host, cloud metadata and
-  the LAN are blocked.
 - **SSH access:** `ssh -p 22998 zsbx_<token>@host` with short-lived token sessions, and `ssh -L` port forwarding.
 - **Files API:** read and write files in `/workspace`.
 - **HTTPS port previews:** `https://<port>-<id>.<your domain>`.

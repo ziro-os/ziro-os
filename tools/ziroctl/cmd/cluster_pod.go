@@ -359,7 +359,41 @@ type podDNS struct {
 	eps       map[string][]string // app -> pod IPs
 	clients   netip.Prefix
 	upstreams []string
-	egress    *egressLearner // fills egress-controlled apps' allow sets from their DNS answers
+	policy    dnsPolicy // nil: relay everything
+}
+
+// dnsPolicy decides which names a client may resolve, and learns from the answers it gets
+// (egress control fills nftables sets with the addresses of allowed names).
+type dnsPolicy interface {
+	allow(client, name string) bool
+	learn(client string, resp []byte)
+}
+
+// refuse answers NXDOMAIN when the policy doesn't let client resolve the query's name.
+func (d *podDNS) refuse(q []byte, client string) []byte {
+	if d.policy == nil || len(q) < 12 {
+		return nil
+	}
+	name, end, err := dnsName(q, 12)
+	if err != nil || end+4 > len(q) {
+		return nil
+	}
+	if d.policy.allow(client, name) {
+		return nil
+	}
+	resp := append([]byte{}, q[:end+4]...)
+	resp[2] = 0x80 | q[2]&0x01 // QR, keep RD
+	resp[3] = 0x83             // RA, NXDOMAIN
+	for i := 6; i < 12; i++ {
+		resp[i] = 0 // no answer, authority or additional records
+	}
+	return resp
+}
+
+func (d *podDNS) learn(client string, resp []byte) {
+	if d.policy != nil {
+		d.policy.learn(client, resp)
+	}
 }
 
 func (d *podDNS) setEndpoints(eps map[string][]string) {
@@ -528,8 +562,11 @@ func (d *podDNS) serve(addr string) error {
 				}
 				resp := d.answer(q)
 				if resp == nil {
+					resp = d.refuse(q, addrIP(c.RemoteAddr()))
+				}
+				if resp == nil {
 					if resp = d.forward(q, true); resp != nil {
-						d.egress.learn(addrIP(c.RemoteAddr()), resp) // before the pod gets the answer
+						d.learn(addrIP(c.RemoteAddr()), resp) // before the pod gets the answer
 					}
 				}
 				if resp != nil {
@@ -548,7 +585,11 @@ func (d *podDNS) serve(addr string) error {
 			continue
 		}
 		q := append([]byte{}, buf[:n]...)
-		if resp := d.answer(q); resp != nil {
+		resp := d.answer(q)
+		if resp == nil {
+			resp = d.refuse(q, addrIP(from))
+		}
+		if resp != nil {
 			_, _ = pc.WriteTo(resp, from)
 			continue
 		}
@@ -557,7 +598,7 @@ func (d *podDNS) serve(addr string) error {
 			go func() {
 				defer func() { <-sem }()
 				if resp := d.forward(q, false); resp != nil {
-					d.egress.learn(addrIP(from), resp) // before the pod gets the answer (and connects)
+					d.learn(addrIP(from), resp) // before the pod gets the answer (and connects)
 					_, _ = pc.WriteTo(resp, from)
 				}
 			}()

@@ -1178,7 +1178,7 @@ paths:
     post:
       x-ziro-role: deployer
       tags: [sandboxes]
-      summary: Create a sandbox (gVisor, no network, host limits) and wait until it runs; the first use of an image pulls it
+      summary: Create a sandbox (gVisor, host limits, no network unless asked) and wait until it runs; the first use of an image pulls it
       requestBody:
         required: true
         content:
@@ -1243,6 +1243,20 @@ paths:
         content:
           application/json:
             schema: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}/network:
+    put:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Replace a sandbox's egress policy and apply it now (a sandbox created without a network can't get one; allowing a private range needs operator)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SandboxNetwork" }
       responses:
         "200": { $ref: "#/components/responses/Sandbox" }
   /api/v1/sandboxes/{id}/exec:
@@ -1336,6 +1350,18 @@ components:
         timeout: { type: string, description: "lifetime, e.g. 30m (default 1h, host maximum 24h)" }
         idle_timeout: { type: string, description: delete after this long without an exec }
         metadata: { type: object, additionalProperties: { type: string } }
+        network: { $ref: "#/components/schemas/SandboxNetwork" }
+    SandboxNetwork:
+      type: object
+      additionalProperties: false
+      description: "Egress policy. Never the host, other sandboxes, link-local/metadata or private ranges (unless an operator allows one)."
+      properties:
+        mode: { type: string, enum: [none, allowlist, open], description: "none (default): no interface; open: the public internet" }
+        allow:
+          type: array
+          maxItems: 64
+          items: { type: string }
+          description: "allowlist: domains (subdomains included, *.x too), IPv4 addresses and CIDRs"
     Sandbox:
       type: object
       properties:
@@ -1343,6 +1369,7 @@ components:
         owner: { type: string, description: the token that created it (root from the host CLI) }
         state: { type: string, enum: [pending, running, paused, failed] }
         error: { type: string }
+        ip: { type: string, description: address on the sandbox network }
         spec: { $ref: "#/components/schemas/SandboxSpec" }
         created: { type: string, format: date-time }
         expires: { type: string, format: date-time }

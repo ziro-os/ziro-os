@@ -1,6 +1,6 @@
 # RFC 0004: Sandboxes for untrusted code and AI agents
 
-- **Status:** Draft (phase 1 in the first pull request; later phases follow, one pull request each)
+- **Status:** Draft (phases 1 and 2 implemented; later phases follow, one pull request each)
 - **Pull request:** sandbox core (phase 1), then one per phase below
 
 ## Summary
@@ -74,7 +74,7 @@ contexts. A single host doesn't need them, and each would be a large dependency.
 | Privilege | `--cap-drop ALL`, plus a short list (chown, dac_override, fowner, fsetid, kill, net_bind_service, setgid, setuid) that applies inside gVisor; `no-new-privileges` |
 | Resources | memory (no swap), cpus, pids, a 256 MiB `/tmp` tmpfs |
 | Filesystem | the image's copy-on-write rootfs and a per-sandbox `/workspace`; no host mounts and no devices |
-| Network | none in phase 1 (`--network none`); phase 2 adds a default-deny policy |
+| Network | none by default (no interface); with a policy, a routed address whose egress is default-deny (see phase 2) |
 | Lifetime | a timeout and an optional idle timeout; the reaper deletes expired sandboxes and audits it |
 
 `runc` is available only when `allow_runc` is set on the host and the caller is an operator. Nothing in the spec can

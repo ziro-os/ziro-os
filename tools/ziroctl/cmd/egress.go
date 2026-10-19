@@ -202,6 +202,9 @@ func (l *egressLearner) set(egress map[string][]string, assignments []Assignment
 	l.mu.Unlock()
 }
 
+// allow: app egress is enforced on addresses, not names (pods may resolve anything).
+func (l *egressLearner) allow(client, name string) bool { return true }
+
 // learn adds the A records of an allowed domain's answer to the querying app's set.
 func (l *egressLearner) learn(client string, resp []byte) {
 	if l == nil {
@@ -214,19 +217,22 @@ func (l *egressLearner) learn(client string, resp []byte) {
 	if app == "" {
 		return
 	}
+	q, ips, ttl := dnsAnswerA(resp)
+	if len(ips) == 0 || !matchesAny(q, allowed) {
+		return
+	}
+	if err := l.add(egressSet(app), ips, ttl); err != nil {
+		fmt.Printf("[egress] %s: %v\n", app, err)
+	}
+}
+
+// dnsAnswerA returns a DNS answer's question name and its A records, with how long to keep
+// them: the lowest TTL, but at least 5 minutes (clients reuse answers a little past the TTL).
+func dnsAnswerA(resp []byte) (q string, ips []string, keep time.Duration) {
 	var m dnsmessage.Message
 	if m.Unpack(resp) != nil || len(m.Questions) != 1 {
-		return
+		return "", nil, 0
 	}
-	q := strings.ToLower(m.Questions[0].Name.String())
-	ok := false
-	for _, d := range allowed {
-		ok = ok || matchSuffix(q, d)
-	}
-	if !ok {
-		return
-	}
-	var ips []string
 	ttl := uint32(86400)
 	for _, rr := range m.Answers {
 		if a, isA := rr.Body.(*dnsmessage.AResource); isA {
@@ -234,22 +240,29 @@ func (l *egressLearner) learn(client string, resp []byte) {
 			ttl = min(ttl, rr.Header.TTL)
 		}
 	}
-	if len(ips) == 0 {
-		return
+	return strings.ToLower(m.Questions[0].Name.String()), ips, max(time.Duration(ttl)*time.Second, 5*time.Minute)
+}
+
+func matchesAny(name string, domains []string) bool {
+	for _, d := range domains {
+		if matchSuffix(name, d) {
+			return true
+		}
 	}
-	// Grace beyond the TTL: clients reuse answers a little past it.
-	d := max(time.Duration(ttl)*time.Second, 5*time.Minute)
-	if err := l.add(egressSet(app), ips, d); err != nil {
-		fmt.Printf("[egress] %s: %v\n", app, err)
-	}
+	return false
 }
 
 func nftAddLearned(set string, ips []string, ttl time.Duration) error {
+	return nftAddElements("inet", "ziro_egress", set+"d", ips, ttl)
+}
+
+// nftAddElements adds addresses with a timeout to a set.
+func nftAddElements(family, table, set string, ips []string, ttl time.Duration) error {
 	elems := make([]string, len(ips))
 	for i, ip := range ips {
 		elems[i] = fmt.Sprintf("%s timeout %ds", ip, int(ttl/time.Second))
 	}
-	out, err := exec.Command("nft", "add", "element", "inet", "ziro_egress", set+"d", "{ "+strings.Join(elems, ", ")+" }").CombinedOutput()
+	out, err := exec.Command("nft", "add", "element", family, table, set, "{ "+strings.Join(elems, ", ")+" }").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}

@@ -3,6 +3,7 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"path"
 	"regexp"
 	"strings"
@@ -24,7 +25,23 @@ type SandboxSpec struct {
 	Timeout     string            `json:"timeout,omitempty"`      // lifetime, e.g. 30m (default and maximum from the host config)
 	IdleTimeout string            `json:"idle_timeout,omitempty"` // delete after this long without an exec (default: off)
 	Metadata    map[string]string `json:"metadata,omitempty"`     // caller's labels (agent, task id, ...)
+	Network     *SandboxNetwork   `json:"network,omitempty"`      // default: no network at all
 }
+
+// SandboxNetwork is a sandbox's egress policy. Whatever the mode, a sandbox never reaches the
+// host, other sandboxes, link-local/cloud metadata or private networks, unless an operator
+// lists such a range in allow.
+type SandboxNetwork struct {
+	Mode  string   `json:"mode,omitempty"`  // none (default: no interface), allowlist, open (the public internet)
+	Allow []string `json:"allow,omitempty"` // allowlist: domains (subdomains included, "*.x" too), IPv4 addresses and CIDRs
+}
+
+// Sandbox network modes.
+const (
+	SandboxNetNone      = "none"
+	SandboxNetAllowlist = "allowlist"
+	SandboxNetOpen      = "open"
+)
 
 // Sandbox runtimes.
 const (
@@ -37,6 +54,7 @@ var (
 	SandboxImageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:@-]{0,255}$`)
 	sandboxUserRe  = regexp.MustCompile(`^[0-9]{1,10}(:[0-9]{1,10})?$`)
 	metadataKeyRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,62}$`)
+	sandboxHostRe  = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$`)
 )
 
 func (s *SandboxSpec) Validate() error {
@@ -76,7 +94,50 @@ func (s *SandboxSpec) Validate() error {
 			return fmt.Errorf("bad duration %q (at least 1m)", d)
 		}
 	}
-	return ValidateSandboxMetadata(s.Metadata)
+	if err := ValidateSandboxMetadata(s.Metadata); err != nil {
+		return err
+	}
+	return s.Network.Validate()
+}
+
+// Validate checks the mode and that every allow entry is a domain, an IPv4 address or an IPv4 CIDR.
+func (n *SandboxNetwork) Validate() error {
+	if n == nil {
+		return nil
+	}
+	switch n.Mode {
+	case "", SandboxNetNone, SandboxNetOpen:
+		if len(n.Allow) > 0 {
+			return errors.New("network: allow needs mode allowlist")
+		}
+	case SandboxNetAllowlist:
+	default:
+		return fmt.Errorf("network mode must be %s, %s or %s", SandboxNetNone, SandboxNetAllowlist, SandboxNetOpen)
+	}
+	if len(n.Allow) > 64 {
+		return errors.New("network: at most 64 allow entries")
+	}
+	for _, e := range n.Allow {
+		if _, err := SandboxAllowPrefix(e); err == nil {
+			continue
+		}
+		if len(e) > 253 || !sandboxHostRe.MatchString(e) {
+			return fmt.Errorf("network: %q is neither a lowercase domain nor an IPv4 address or CIDR", e)
+		}
+	}
+	return nil
+}
+
+// SandboxAllowPrefix parses an allow entry that is an IPv4 address or CIDR.
+func SandboxAllowPrefix(e string) (netip.Prefix, error) {
+	if a, err := netip.ParseAddr(e); err == nil && a.Is4() {
+		return netip.PrefixFrom(a, 32), nil
+	}
+	p, err := netip.ParsePrefix(e)
+	if err != nil || !p.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("%q is not an IPv4 address or CIDR", e)
+	}
+	return p.Masked(), nil
 }
 
 // ValidateSandboxEnv checks env names and sizes (also used by exec requests).

@@ -150,8 +150,11 @@ Ziro-OS implements standard OCI specifications:
   gVisor (`runsc`, systrap platform), which nerdctl starts through the runc shim (`--runtime` = a wrapper that sets
   runsc's flags), so containerd's configuration stays unchanged. `ziro-sandboxd` (a root-only unix socket, like
   `ziroctld`) owns the records, quotas and the reaper. The REST API authenticates, audits and forwards with the
-  caller's identity. The host decides the isolation: all capabilities but a short list are dropped, there is no
-  network, no host mounts and no devices, resources are limited, and every sandbox has a lifetime. The spec only
+  caller's identity. The host decides the isolation: all capabilities but a short list are dropped, there are no
+  host mounts and no devices, resources are limited, and every sandbox has a lifetime. A sandbox has no network
+  unless its policy asks for one. Then it gets a routed (CNI ptp) address, and egress is filtered on the host by
+  `inet ziro_sandbox`: default-deny, a domain allowlist learned by the sandbox DNS resolver, and never the host,
+  the LAN, metadata or other sandboxes. The spec only
   picks the image, the command and sizes within the host limits.
 
 ---
