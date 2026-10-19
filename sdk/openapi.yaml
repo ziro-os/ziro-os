@@ -1259,6 +1259,41 @@ paths:
             schema: { $ref: "#/components/schemas/SandboxNetwork" }
       responses:
         "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/{id}/previews:
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Publish a port at https://<port>-<id>.<gateway domain> (needs a network and a gateway domain); a private preview's answer has a token, posting again mints another
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [port]
+              additionalProperties: false
+              properties:
+                port: { type: integer, minimum: 1, maximum: 65535 }
+                public: { type: boolean, description: no token needed }
+                ttl: { type: string, description: "lifetime of the returned token (default and maximum: the sandbox's)" }
+      responses:
+        "200":
+          description: The preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxPreview" }
+  /api/v1/sandboxes/{id}/previews/{port}:
+    delete:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Remove a preview (its gateway route) and revoke its tokens
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - { name: port, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
   /api/v1/sandboxes/{id}/access:
     get:
       x-ziro-role: deployer
@@ -1459,6 +1494,7 @@ components:
         state: { type: string, enum: [pending, running, paused, failed] }
         error: { type: string }
         ip: { type: string, description: address on the sandbox network }
+        previews: { type: array, items: { $ref: "#/components/schemas/SandboxPreview" } }
         spec: { $ref: "#/components/schemas/SandboxSpec" }
         created: { type: string, format: date-time }
         expires: { type: string, format: date-time }
@@ -1474,6 +1510,15 @@ components:
         user: { type: string }
         stdin: { type: string, description: at most 1 MiB }
         timeout: { type: string, description: "default 5m, at most 1h" }
+    SandboxPreview:
+      type: object
+      properties:
+        port: { type: integer }
+        public: { type: boolean }
+        url: { type: string }
+        created: { type: string, format: date-time }
+        token: { type: string, description: "private previews, only when created: send as X-Ziro-Preview-Token, or open token_url once (sets a cookie)" }
+        token_url: { type: string }
     SandboxAccess:
       type: object
       properties:

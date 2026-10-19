@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/ziro-os/ziro-os/sdk/api"
 	"github.com/ziro-os/ziro-os/sdk/schema"
@@ -137,6 +138,18 @@ func (c *Client) DeleteSandboxFile(ctx context.Context, id, path string, recursi
 		q += "&recursive=true"
 	}
 	return c.Do(ctx, http.MethodDelete, "/api/v1/sandboxes/"+esc(id)+"/files?"+q, nil, nil)
+}
+
+// ExposeSandboxPort publishes a port at https://<port>-<id>.<domain>; a private preview's
+// answer carries a token (and a link with it).
+func (c *Client) ExposeSandboxPort(ctx context.Context, id string, req api.SandboxPreviewRequest) (api.SandboxPreview, error) {
+	var out api.SandboxPreview
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/sandboxes/"+esc(id)+"/previews", req, &out)
+}
+
+// UnexposeSandboxPort removes a preview and revokes its tokens.
+func (c *Client) UnexposeSandboxPort(ctx context.Context, id string, port int) error {
+	return c.Do(ctx, http.MethodDelete, "/api/v1/sandboxes/"+esc(id)+"/previews/"+strconv.Itoa(port), nil, nil)
 }
 
 // ExecResult is a finished command: its exit code and output.

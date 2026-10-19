@@ -157,7 +157,9 @@ Ziro-OS implements standard OCI specifications:
   the LAN, metadata or other sandboxes. The same daemon runs the SSH gateway (`:22998`). Its session token
   is the SSH user name: the token is hashed at rest, expires, and can be single-use or bound to a key. A session is
   `nerdctl exec` in that token's sandbox; `ssh -L` reaches only the sandbox's address. A files API reads and writes
-  `/workspace` from the host through `os.Root`. The spec only
+  `/workspace` from the host through `os.Root`. Preview URLs (`https://<port>-<id>.<gateway domain>`) are exact
+  gateway routes to the daemon's loopback preview proxy, which checks a stateless HMAC token (bound to the sandbox,
+  the port, the preview's creation time and an expiry), strips it, and proxies to the sandbox's address. The spec only
   picks the image, the command and sizes within the host limits.
 
 ---

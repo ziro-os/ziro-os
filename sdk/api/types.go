@@ -182,7 +182,8 @@ type Sandbox struct {
 	Owner      string             `json:"owner"` // the API token that created it ("root" from the host CLI)
 	State      string             `json:"state"` // pending, running, paused, failed
 	Error      string             `json:"error,omitempty"`
-	IP         string             `json:"ip,omitempty"` // on the sandbox network (network mode allowlist or open)
+	IP         string             `json:"ip,omitempty"`       // on the sandbox network (network mode allowlist or open)
+	Previews   []SandboxPreview   `json:"previews,omitempty"` // ports published over HTTPS
 	Spec       schema.SandboxSpec `json:"spec"`
 	Created    time.Time          `json:"created"`
 	Expires    time.Time          `json:"expires"`
@@ -236,4 +237,22 @@ type SandboxFile struct {
 	Mode     string    `json:"mode"`
 	Dir      bool      `json:"dir,omitempty"`
 	Modified time.Time `json:"modified"`
+}
+
+// SandboxPreviewRequest is the body of POST /api/v1/sandboxes/{id}/previews.
+type SandboxPreviewRequest struct {
+	Port   int    `json:"port"`
+	Public bool   `json:"public,omitempty"` // no token needed
+	TTL    string `json:"ttl,omitempty"`    // lifetime of the token returned (default and maximum: the sandbox's)
+}
+
+// SandboxPreview is a sandbox port published at https://<port>-<id>.<domain>.
+type SandboxPreview struct {
+	Port    int       `json:"port"`
+	Public  bool      `json:"public,omitempty"`
+	URL     string    `json:"url"`
+	Created time.Time `json:"created"`
+	// Only in the answer to POST, for a private preview:
+	Token    string `json:"token,omitempty"`     // header X-Ziro-Preview-Token, or ?ziro_token= once (sets a cookie)
+	TokenURL string `json:"token_url,omitempty"` // the URL with the token, to open in a browser
 }

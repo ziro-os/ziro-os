@@ -127,6 +127,32 @@ ssh -p 22998 -L 8080:localhost:8080 zsbx_7kq2...@sbx.example.com   # reach a por
   in the host firewall. Set `ssh_host` to the name clients should use in printed commands; the default is the host
   name the API was called with.
 
+## Preview URLs
+
+Publish a port of a sandbox at an HTTPS address. This works for a dev server an agent started, a notebook, or an
+API it built:
+
+```sh
+ziroctl gateway domain set apps.example.com      # once: the gateway's base domain
+ziroctl sandbox expose <id> 3000                  # https://3000-<id>.apps.example.com/?ziro_token=...
+ziroctl sandbox expose <id> 8080 --public         # no token
+ziroctl sandbox unexpose <id> 3000                # removes the URL and revokes its tokens
+```
+
+- **Through the gateway.** Each preview is a route on the [gateway](gateway.md), so it gets the gateway's TLS (ACME,
+  the domain's wildcard certificate, or the gateway's own CA for private names), HTTP/2 and HTTP/3, rate limits and
+  WebSockets.
+- **Private by default.** A preview needs a signed token. Open the printed link once (the token becomes an HttpOnly
+  cookie and leaves the address bar), or send the token in the `X-Ziro-Preview-Token` header. The token is removed
+  before the request reaches the sandbox.
+- **Token lifetime.** A token lasts as long as the sandbox, or `--ttl`. Running `expose` again prints a new token.
+  `unexpose` (or deleting the sandbox) revokes all of a preview's tokens.
+- **Needs a network.** The sandbox must have one (`--net` or `--allow`), and the server inside must listen on
+  `0.0.0.0`.
+- **Single host only.** On a cluster member, previews come with cluster support.
+- **Turning it off.** `preview_port` in the host config is the loopback port the gateway's routes use; `0` turns
+  previews off.
+
 ## Files
 
 Read and write files in a sandbox's `/workspace` from the host side:
@@ -169,6 +195,7 @@ curl -sk -H "$H" -X DELETE https://host:8443/api/v1/sandboxes/<id>
 | `POST /api/v1/sandboxes/{id}/pause`, `/resume`, `/renew` | freeze, thaw, move the expiry (`{"timeout":"1h"}`) |
 | `PUT /api/v1/sandboxes/{id}/metadata` | replace the metadata map |
 | `PUT /api/v1/sandboxes/{id}/network` | replace the network policy (`{"mode":"allowlist","allow":["pypi.org"]}`) |
+| `POST /api/v1/sandboxes/{id}/previews`, `DELETE .../previews/{port}` | publish a port at `https://<port>-<id>.<domain>` (`{"port":3000,"public":false}`) / remove it |
 | `GET/POST /api/v1/sandboxes/{id}/access`, `DELETE .../access/{aid}` | SSH session tokens: list / issue (`{"ttl","public_key","single_use"}`) / revoke |
 | `GET/PUT/DELETE /api/v1/sandboxes/{id}/files?path=` | read (or list) / write (raw body, `&mode=`) / remove (`&recursive=true`) in `/workspace` |
 | `POST /api/v1/sandboxes/{id}/exec` | run a command; the answer is NDJSON: output lines, then `exit_code` or `error` |
@@ -202,6 +229,7 @@ as `sandbox expire`.
   "allow_runc": false,
   "subnet": "10.250.0.0/16",
   "ssh_port": 22998,
+  "preview_port": 22997,
   "ssh_host": "sbx.example.com",
   "image_policy": {"allow_registries": ["docker.io/library", "ghcr.io/acme"]}
 }
@@ -226,7 +254,6 @@ Logs are in `/var/log/ziro-sandboxd.log`.
 
 These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
 
-- **HTTPS port previews:** `https://<port>-<id>.<your domain>`.
 - **Credential injection:** the agent sees only placeholders, and the real secret is added on the way out, only for
   its allowed host.
 - **Kata microVMs:** an option on hosts with KVM.

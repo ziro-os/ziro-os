@@ -73,6 +73,7 @@ type sandboxConfig struct {
 	Subnet         string           `json:"subnet"`               // the sandbox network
 	SSHPort        int              `json:"ssh_port"`             // the SSH gateway (0: off)
 	SSHHost        string           `json:"ssh_host,omitempty"`   // the name clients reach the gateway by (default: the API's host name)
+	PreviewPort    int              `json:"preview_port"`         // the loopback port the gateway's preview routes use (0: previews off)
 	ImagePolicy    ImagePolicy      `json:"image_policy,omitempty"`
 }
 
@@ -86,6 +87,7 @@ func defaultSandboxConfig() sandboxConfig {
 		MaxTimeout:     "24h",
 		Subnet:         sandboxDefSubnet,
 		SSHPort:        22998,
+		PreviewPort:    22997,
 	}
 }
 
@@ -112,6 +114,9 @@ func loadSandboxConfig() (sandboxConfig, error) {
 		if _, err := time.ParseDuration(d); err != nil {
 			return c, fmt.Errorf("%s: bad timeout %q", sandboxConfigFile, d)
 		}
+	}
+	if c.PreviewPort < 0 || c.PreviewPort > 65535 || (c.PreviewPort != 0 && c.PreviewPort == c.SSHPort) {
+		return c, fmt.Errorf("%s: bad preview_port %d", sandboxConfigFile, c.PreviewPort)
 	}
 	if c.SSHPort < 0 || c.SSHPort > 65535 {
 		return c, fmt.Errorf("%s: bad ssh_port %d", sandboxConfigFile, c.SSHPort)
@@ -319,6 +324,9 @@ type sandboxManager struct {
 	access *accessStore
 	ssh    *sshGateway // nil when ssh_port is 0
 	now    func() time.Time
+
+	previewKey  []byte // nil when preview_port is 0
+	previewPort int
 }
 
 // applyNet converges the sandbox network to the records.
@@ -449,14 +457,16 @@ func cmdError(out []byte, err error) string {
 }
 
 func (m *sandboxManager) remove(id string, c sandboxCaller) error {
-	if _, err := m.st.get(id, c); err != nil {
+	sb, err := m.st.get(id, c)
+	if err != nil {
 		return err
 	}
+	dropPreviews(sb)
 	m.st.mu.Lock()
 	delete(m.st.all, id)
 	m.st.mu.Unlock()
 	m.access.drop(id)
-	err := m.destroy(id)
+	err = m.destroy(id)
 	if nerr := m.applyNet(); nerr != nil {
 		fmt.Printf("[sandboxd] network after deleting %s: %v\n", id, nerr)
 	}
@@ -613,10 +623,16 @@ func (m *sandboxManager) reap(ctx context.Context) {
 			expired = append(expired, id+" (idle)")
 		}
 	}
+	var gone []sdkapi.Sandbox
 	for _, e := range expired {
-		delete(m.st.all, strings.Fields(e)[0])
+		id := strings.Fields(e)[0]
+		gone = append(gone, *m.st.all[id])
+		delete(m.st.all, id)
 	}
 	m.st.mu.Unlock()
+	for _, sb := range gone {
+		dropPreviews(sb)
+	}
 	for _, e := range expired {
 		id := strings.Fields(e)[0]
 		m.access.drop(id)
