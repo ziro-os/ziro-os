@@ -1,7 +1,7 @@
 # DHCP CNI dependency override
 
 The host builder retains Alpine's CNI plugin set and replaces both shipped copies
-of DHCP with upstream CNI v1.9.1 compiled against `golang.org/x/net v0.59.0`.
+of DHCP with upstream CNI v1.9.1 compiled against `golang.org/x/net v0.61.0`.
 The DHCP client dependency is also pinned to its patched July 2026 revision,
 closing GO-2026-6237 (a malformed IPv4 packet can panic the DHCP client).
 Alpine's 1.9.1-r3 binary embeds v0.43.0, which triggers five high-severity

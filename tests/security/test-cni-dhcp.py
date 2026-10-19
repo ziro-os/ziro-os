@@ -2,18 +2,25 @@
 """Check both shipped DHCP copies and the upstream CNI VERSION contract."""
 import json
 import pathlib
+import re
 import struct
 import subprocess
 import sys
 
 
+def pinned_xnet():
+    gomod = pathlib.Path(__file__).resolve().parents[2] / "packages/cni-dhcp/go.mod"
+    return re.search(r"^\s*golang\.org/x/net (v\S+)", gomod.read_text(), re.M).group(1)
+
+
 def inspect(root, arch):
+    xnet = pinned_xnet()
     goarch = {"x86_64": "amd64", "arm64": "arm64"}[arch]
     files = [root / "usr/libexec/cni/dhcp", root / "opt/cni/bin/dhcp"]
     assert files[0].read_bytes() == files[1].read_bytes(), "DHCP copies differ"
     for path in files:
         metadata = subprocess.check_output(["go", "version", "-m", str(path)], text=True)
-        assert "golang.org/x/net\tv0.59.0\t" in metadata, metadata
+        assert f"golang.org/x/net\t{xnet}\t" in metadata, metadata
         assert "github.com/containernetworking/plugins\tv1.9.1\t" in metadata, metadata
         assert "github.com/insomniacslk/dhcp\tv0.0.0-20260719225207-c76316d4aa82\t" in metadata, metadata
         assert "CGO_ENABLED=0" in metadata and f"GOARCH={goarch}" in metadata, metadata
