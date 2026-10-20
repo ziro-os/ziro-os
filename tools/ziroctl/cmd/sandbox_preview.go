@@ -121,6 +121,9 @@ func (m *sandboxManager) expose(id string, c sandboxCaller, req sdkapi.SandboxPr
 		return sdkapi.SandboxPreview{}, errors.New("previews are off (preview_port in " + sandboxConfigFile + ")")
 	}
 	dom := previewDomain()
+	if mc := m.meshCfg(); mc != nil { // a cluster node: the master's gateway domain and routes
+		dom = schema.GatewayDomain{Name: mc.Domain}
+	}
 	if dom.Name == "" {
 		return sdkapi.SandboxPreview{}, errors.New("previews need a gateway domain: ziroctl gateway domain set <domain>")
 	}
@@ -149,8 +152,10 @@ func (m *sandboxManager) expose(id string, c sandboxCaller, req sdkapi.SandboxPr
 		pv = sdkapi.SandboxPreview{Port: req.Port, Public: req.Public, URL: "https://" + host + "/", Created: m.now().UTC()}
 		r := GatewayRoute{Name: previewRoute(id, req.Port), Hosts: []string{host}, TLS: dom.TLS(),
 			To: []GatewayUpstream{{Address: net.JoinHostPort("127.0.0.1", strconv.Itoa(m.previewPort))}}, MaxBodyMB: 100, Timeout: "5m"}
-		if err := previewPutRoute(r); err != nil {
-			return pv, fmt.Errorf("gateway route: %w", err)
+		if !clusterPreviews.Load() { // on a cluster the master adds the route
+			if err := previewPutRoute(r); err != nil {
+				return pv, fmt.Errorf("gateway route: %w", err)
+			}
 		}
 		err := m.st.update(id, func(x *sdkapi.Sandbox) {
 			kept := x.Previews[:0:0]
@@ -184,8 +189,10 @@ func (m *sandboxManager) unexpose(id string, c sandboxCaller, port int) error {
 	if !found {
 		return errNotFound(fmt.Sprintf("port %d isn't published", port))
 	}
-	if err := previewDelRoute(previewRoute(id, port)); err != nil {
-		return err
+	if !clusterPreviews.Load() {
+		if err := previewDelRoute(previewRoute(id, port)); err != nil {
+			return err
+		}
 	}
 	return m.st.update(id, func(x *sdkapi.Sandbox) {
 		kept := x.Previews[:0:0]
@@ -200,6 +207,9 @@ func (m *sandboxManager) unexpose(id string, c sandboxCaller, port int) error {
 
 // dropPreviews removes the gateway routes of a deleted sandbox.
 func dropPreviews(sb sdkapi.Sandbox) {
+	if clusterPreviews.Load() { // the master drops them with the sandbox's directory entry
+		return
+	}
 	for _, p := range sb.Previews {
 		if err := previewDelRoute(previewRoute(sb.ID, p.Port)); err != nil {
 			fmt.Printf("[sandboxd] %s: remove preview route %d: %v\n", sb.ID, p.Port, err)

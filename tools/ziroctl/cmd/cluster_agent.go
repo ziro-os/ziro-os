@@ -459,7 +459,10 @@ var clusterAgentCmd = &cobra.Command{
 			}
 			var resp heartbeatResponse
 			hb := heartbeatRequest{Containers: total, Running: running, Failed: failed, WGPubKey: pub, WGPort: meshPort, MeshError: lastMesh,
-				Conditions: conds, Caps: builderCaps(nodeCaps), Keys: storedKeyIDs(), Arch: runtime.GOARCH, Builds: ag.builds.report()}
+				Conditions: conds, Caps: withSandboxCap(builderCaps(nodeCaps)), Keys: storedKeyIDs(), Arch: runtime.GOARCH, Builds: ag.builds.report()}
+			if hasCapList(hb.Caps, capSandbox) {
+				hb.Sandboxes = localSandboxIDs()
+			}
 			if ag.mode == "anywhere" { // path discovery key, endpoints, relays, NAT type; node cert for relays
 				if _, disco, err := meshDiscoKey(); err == nil {
 					hb.DiscoKey = disco
@@ -503,6 +506,7 @@ var clusterAgentCmd = &cobra.Command{
 					return fetchTaskArchive(ctx, t, token, meshNet)
 				})
 				ag.images.ensure(resp.MeshIP, resp.ImageToken)
+				writeSandboxMesh(resp.SandboxMesh)
 				ag.mu.Lock()
 				ag.token = resp.ImageToken
 				if meshNet.IsValid() {

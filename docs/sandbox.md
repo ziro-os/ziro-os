@@ -300,6 +300,27 @@ Tools: `sandbox_create` (image or template, `allow` domains or `network_open`, t
 The server runs anywhere `ziroctl` runs and calls the REST API with the agent's own token, so every action is owned,
 limited and audited. Set `ZIRO_API_CA` to the API's certificate when it is self-signed.
 
+## On a cluster
+
+Enable the module on the nodes that should run sandboxes (`ziroctl module enable sandbox`). The cluster then works
+as one sandbox platform. Clients, agents and the MCP server talk to the master's API, and users SSH to any node:
+
+- **Placement.** A create through the master's API runs on a ready, schedulable node that has the module (not
+  cordoned, not labelled `runner=false`). It picks the node with the fewest sandboxes, then the one with the most
+  memory. A sandbox started from a snapshot runs on the node that holds the snapshot.
+- **Forwarding.** Every request about a sandbox goes to the node that runs it, with the caller's identity, so
+  ownership, quotas and audit work as on one host. Lists are merged from all nodes. Each node serves its sandbox API
+  only on its mesh address (port 7446, WireGuard), behind a cluster token.
+- **One SSH address.** A token names its sandbox. Any node's gateway asks the owning node to check the token (which
+  spends a single-use token there), then relays the session to the owner's gateway. The relay pins the owner's host
+  key, which it fetches over the mesh. `ssh -p 22998 zsbx_...@<any node>` works for every sandbox in the cluster. All gateways present the same
+  cluster host key, created by the master and handed to sandbox nodes over the cluster's pinned TLS, so one
+  `known_hosts` line covers every node.
+- **Previews.** Preview URLs become routes on the cluster's gateways, pointing at the owning node's preview proxy
+  on its mesh address.
+- **Node loss.** Sandboxes are ephemeral: if a node goes away, its sandboxes go with it and are never moved. The
+  master forgets sandboxes a node no longer reports, and drops their preview routes.
+
 ## Host limits
 
 `/etc/ziro/sandbox.json` sets the policy. Every field is optional:
@@ -339,9 +360,3 @@ limited and audited. Set `ZIRO_API_CA` to the API's certificate when it is self-
   sandbox containers that have no record
 
 Logs are in `/var/log/ziro-sandboxd.log`.
-
-## Coming next
-
-These are designed in [RFC 0004](design/rfcs/0004-sandboxes.md) and come one release at a time:
-
-- **Clusters:** sandboxes spread across a cluster's runner nodes.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,14 +64,24 @@ func sandboxHostKey() (ssh.Signer, error) {
 
 type sshGateway struct {
 	m      *sandboxManager
-	signer ssh.Signer
+	own    ssh.Signer                 // this host's key
+	shared atomic.Pointer[ssh.Signer] // a cluster's gateways all present the cluster key
+	port   int                        // where it listens (relays from other nodes connect to it)
 	sem    chan struct{}
 	mu     sync.Mutex
 	fails  map[string][]time.Time
 }
 
 func newSSHGateway(m *sandboxManager, signer ssh.Signer) *sshGateway {
-	return &sshGateway{m: m, signer: signer, sem: make(chan struct{}, sshMaxConns), fails: map[string][]time.Time{}}
+	return &sshGateway{m: m, own: signer, sem: make(chan struct{}, sshMaxConns), fails: map[string][]time.Time{}}
+}
+
+// signer is the host key clients see: the cluster's, when this node is in one.
+func (g *sshGateway) signer() ssh.Signer {
+	if s := g.shared.Load(); s != nil {
+		return *s
+	}
+	return g.own
 }
 
 func (g *sshGateway) serve(ctx context.Context, addr string) error {
@@ -77,7 +89,7 @@ func (g *sshGateway) serve(ctx context.Context, addr string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("ziro-sandboxd: SSH gateway on %s (host key %s)\n", addr, ssh.FingerprintSHA256(g.signer.PublicKey()))
+	fmt.Printf("ziro-sandboxd: SSH gateway on %s (host key %s)\n", addr, ssh.FingerprintSHA256(g.signer().PublicKey()))
 	return g.accept(ctx, ln)
 }
 
@@ -135,7 +147,20 @@ func (g *sshGateway) failed(ip string) {
 
 func (g *sshGateway) config(ip string) *ssh.ServerConfig {
 	auth := func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		if rid, ok := strings.CutPrefix(c.User(), "zrelay_"); ok {
+			return g.relayAuth(rid, key, ip)
+		}
 		id, aid, err := g.m.access.use(c.User(), key, g.m.now())
+		if err != nil && err.Error() == "unknown token" { // a sandbox on another cluster node?
+			owner, rid, raid, rerr := g.remoteAccess(c.User(), key)
+			if rerr == nil {
+				_ = auditLog("sandbox-access:"+raid, "ssh:"+ip, "sandbox ssh (relayed to "+owner+")", rid, nil)
+				return &ssh.Permissions{Extensions: map[string]string{"sandbox": rid, "access": raid, "relay": owner}}, nil
+			}
+			if errors.Is(rerr, errNeedKey) {
+				return nil, rerr
+			}
+		}
 		if err != nil {
 			if !errors.Is(err, errNeedKey) {
 				g.failed(ip)
@@ -158,8 +183,23 @@ func (g *sshGateway) config(ip string) *ssh.ServerConfig {
 		MaxAuthTries:         6,
 		ServerVersion:        "SSH-2.0-ZiroSandbox",
 	}
-	cfg.AddHostKey(g.signer)
+	cfg.AddHostKey(g.signer())
 	return cfg
+}
+
+// relayAuth admits another node's gateway relaying a session it already authenticated: it
+// proves the cluster's shared host key (only cluster gateways hold it).
+func (g *sshGateway) relayAuth(id string, key ssh.PublicKey, ip string) (*ssh.Permissions, error) {
+	shared := g.shared.Load()
+	if key == nil || shared == nil || !sandboxIDRe.MatchString(id) ||
+		subtle.ConstantTimeCompare(key.Marshal(), (*shared).PublicKey().Marshal()) != 1 {
+		g.failed(ip)
+		return nil, errors.New("denied")
+	}
+	if sb, err := g.m.st.get(id, sandboxCaller{Role: "admin"}); err != nil || sb.State != "running" {
+		return nil, errors.New("the sandbox isn't running")
+	}
+	return &ssh.Permissions{Extensions: map[string]string{"sandbox": id, "access": "relay"}}, nil
 }
 
 func (g *sshGateway) handle(c net.Conn, ip string) {
@@ -173,6 +213,10 @@ func (g *sshGateway) handle(c net.Conn, ip string) {
 	defer sc.Close()
 	go ssh.DiscardRequests(reqs) // tcpip-forward and friends: refused
 	id := sc.Permissions.Extensions["sandbox"]
+	if owner := sc.Permissions.Extensions["relay"]; owner != "" {
+		g.relay(sc, chans, owner, id)
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { // keep the session alive past the idle reaper, and end it with the sandbox

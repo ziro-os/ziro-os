@@ -58,7 +58,7 @@ func runSandboxDaemon(ctx context.Context) error {
 	for id := range st.all {
 		ids = append(ids, id)
 	}
-	m := &sandboxManager{st: st, net: newSandboxNet(cfg.Subnet), access: loadAccessStore(ids), now: time.Now}
+	m := &sandboxManager{st: st, net: newSandboxNet(cfg.Subnet), access: loadAccessStore(ids), mesh: &meshState{}, now: time.Now}
 	for _, sb := range m.st.all { // a create the last daemon didn't finish
 		if sb.State == "pending" {
 			sb.State, sb.Error = "failed", "interrupted: ziro-sandboxd restarted while it was starting"
@@ -110,6 +110,7 @@ func runSandboxDaemon(ctx context.Context) error {
 			return fmt.Errorf("ssh host key: %w", err)
 		}
 		m.ssh = newSSHGateway(m, signer)
+		m.ssh.port = cfg.SSHPort
 		allowFirewall([]FirewallRule{{Port: cfg.SSHPort, Protocol: "tcp", Comment: "Ziro sandbox SSH"}}, "")
 		go func() {
 			if err := m.ssh.serve(ctx, net.JoinHostPort("", strconv.Itoa(cfg.SSHPort))); err != nil {
@@ -126,6 +127,7 @@ func runSandboxDaemon(ctx context.Context) error {
 			if cfg, err := loadSandboxConfig(); err == nil {
 				m.fillPools(cfg)
 			}
+			m.syncMesh()
 			select {
 			case <-ctx.Done():
 				return

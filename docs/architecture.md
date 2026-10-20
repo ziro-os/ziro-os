@@ -165,7 +165,10 @@ Ziro-OS implements standard OCI specifications:
   only that sandbox trusts, swapping placeholders for the values (403 when a placeholder goes to another host). Templates (`/etc/ziro/sandbox/templates`),
   warm pools of paused sandboxes (a create becomes a resume), snapshots (`nerdctl commit` to
   `ziro.local/sandbox/<owner>/...`), and an MCP server (`ziroctl sandbox mcp`, stdio, through the REST API with the
-  agent's scoped token) are the agent-facing layer. The spec only
+  agent's scoped token) are the agent-facing layer. On a cluster, the master keeps a directory (sandbox id → node) in the Raft
+  state, places new sandboxes on runner nodes, and forwards each request to the owning node's mesh sandbox API
+  (`:7446`, cluster token). Any node's SSH gateway relays a token for another node's sandbox after that node checks
+  it, and preview routes point at the owning node over the mesh. The spec only
   picks the image, the command and sizes within the host limits.
 
 ---
