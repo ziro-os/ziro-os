@@ -24,6 +24,9 @@ const snapshotRepo = "ziro.local/sandbox/"
 
 var snapshotNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
+// snapshotImageRe: a snapshot's image reference as snapshot() names it.
+var snapshotImageRe = regexp.MustCompile(`^ziro\.local/sandbox/[a-z0-9._-]{1,64}/[a-z0-9][a-z0-9._-]{0,62}:[0-9]{1,20}$`)
+
 // snapshotOwner turns an owner (token name, "root") into an image path segment.
 func snapshotOwner(owner string) string {
 	return strings.Map(func(r rune) rune {

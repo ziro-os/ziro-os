@@ -122,8 +122,10 @@ func serveClusterSandboxes(w http.ResponseWriter, r *http.Request) bool {
 	switch {
 	case rest == "" && r.Method == http.MethodPost:
 		v.create(w, r)
-	case rest == "" || rest == "snapshots":
-		v.fanout(w, r)
+	case rest == "":
+		v.fanout(w, r, "/v1/sandboxes")
+	case rest == "snapshots":
+		v.fanout(w, r, "/v1/sandboxes/snapshots")
 	case rest == "templates":
 		nodes := v.sandboxNodes()
 		if len(nodes) == 0 {
@@ -184,31 +186,49 @@ func (v *sandboxClusterView) create(w http.ResponseWriter, r *http.Request) {
 func (v *sandboxClusterView) nodesWithSnapshot(r *http.Request, image string) map[string]bool {
 	only := map[string]bool{}
 	for _, n := range v.sandboxNodes() {
-		if code, out, err := v.call(r, n, http.MethodGet, "/v1/sandboxes/snapshots", nil); err == nil && code == http.StatusOK {
-			var list []sdkapi.SandboxSnapshot
-			if json.Unmarshal(out, &list) == nil {
-				for _, s := range list {
-					if s.Image == image {
-						only[n.ID] = true
-					}
-				}
+		for _, s := range v.snapshotsOn(r, n) {
+			if s == image {
+				only[n.ID] = true
 			}
 		}
 	}
 	return only
 }
 
-// fanout sends a list (or snapshot delete) to every sandbox node and merges the answers.
-func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request) {
-	path := "/v1" + strings.TrimPrefix(r.URL.Path, "/api/v1")
-	if r.URL.RawQuery != "" {
-		path += "?" + r.URL.RawQuery
+// snapshotsOn lists the snapshot images a node holds that the caller may see.
+func (v *sandboxClusterView) snapshotsOn(r *http.Request, n *ClusterNode) []string {
+	code, out, err := v.call(r, n, http.MethodGet, "/v1/sandboxes/snapshots", nil)
+	var list []sdkapi.SandboxSnapshot
+	if err != nil || code != http.StatusOK || json.Unmarshal(out, &list) != nil {
+		return nil
 	}
+	images := make([]string, 0, len(list))
+	for _, s := range list {
+		if snapshotImageRe.MatchString(s.Image) {
+			images = append(images, s.Image)
+		}
+	}
+	return images
+}
+
+// fanout sends a list (or snapshot delete) to every sandbox node and merges the answers. path is
+// one of the fixed list paths; nothing of the request URL reaches a node's URL but a validated
+// snapshot name.
+func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path string) {
 	if r.Method == http.MethodDelete { // a snapshot: on whichever node holds it
+		want := r.URL.Query().Get("image")
 		for _, n := range v.sandboxNodes() {
-			if code, _, err := v.call(r, n, http.MethodDelete, path, nil); err == nil && code == http.StatusOK {
-				apiReply(w, nil, APIMessage{Status: "ok", Message: "snapshot removed"})
-				return
+			// The name sent to the node is the node's own (from its list, as the caller may
+			// see it), never the request's text.
+			for _, image := range v.snapshotsOn(r, n) {
+				if image != want {
+					continue
+				}
+				q := path + "?" + url.Values{"image": {image}}.Encode()
+				if code, _, err := v.call(r, n, http.MethodDelete, q, nil); err == nil && code == http.StatusOK {
+					apiReply(w, nil, APIMessage{Status: "ok", Message: "snapshot removed"})
+					return
+				}
 			}
 		}
 		apiReply(w, errNotFound("no such snapshot"), nil)
@@ -228,14 +248,21 @@ func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request) {
 // forSandbox forwards a request about one sandbox to its node, and keeps the cluster's records
 // (directory entry, preview routes) in step with what the node did.
 func (v *sandboxClusterView) forSandbox(w http.ResponseWriter, r *http.Request, parts []string) {
-	id := parts[0]
-	p, ok := v.st.Sandboxes[id]
+	// The id used from here on is the directory's own key, never the request's text.
+	id, p, ok := "", SandboxPlacement{}, false
+	if sandboxIDRe.MatchString(parts[0]) {
+		for k, pl := range v.st.Sandboxes {
+			if k == parts[0] {
+				id, p, ok = k, pl, true
+			}
+		}
+	}
 	var n *ClusterNode
 	if ok {
 		n = v.node(p.Node)
 	}
 	if !ok || n == nil || (!(apiRoleRank[apiRole(r)] >= apiRoleRank["operator"]) && p.Owner != apiTokenName(r)) {
-		apiReply(w, errNotFound("no sandbox "+id), nil)
+		apiReply(w, errNotFound("no such sandbox"), nil)
 		return
 	}
 	sub := ""
