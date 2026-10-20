@@ -476,7 +476,10 @@ def main():
                 "printf '#!/bin/sh\\nexec /usr/bin/tail -f /dev/null\\n' > /var/lib/ziro/plugins/tailscale/tailscaled && "
                 "printf '#!/bin/sh\\necho \"$@\" >> /tmp/ts-cli.log\\nexit 0\\n' > /var/lib/ziro/plugins/tailscale/tailscale && "
                 "chmod 755 /var/lib/ziro/plugins/tailscale/tailscaled /var/lib/ziro/plugins/tailscale/tailscale", timeout=120)
-        rc, out = con.run("ziroctl tailscale setup 2>&1; echo SETUP=$?; sleep 2; P=$(cat /run/ziro-tailscaled.pid); "
+        # The stand-in tailscaled is a script that execs tail: wait until it has (slow arm64 TCG runners
+        # can still show the script, or a restart by the healer, a few seconds later).
+        rc, out = con.run("ziroctl tailscale setup 2>&1; echo SETUP=$?; for i in $(seq 30); do P=$(cat /run/ziro-tailscaled.pid 2>/dev/null); "
+                          "grep -qx 'Name:.tail' /proc/$P/status 2>/dev/null && break; sleep 1; done; "
                           "grep -E '^(Name|Uid|CapEff|CapBnd|NoNewPrivs):' /proc/$P/status; "
                           "echo TSUID=$(id -u tailscale); "
                           "echo MODES=$(stat -c '%a:%U' /var/lib/ziro/tailscale /run/tailscale /etc/ziro/tailscale/tailscaled.env | tr '\\n' ' '); "
