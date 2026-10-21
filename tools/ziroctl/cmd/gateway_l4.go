@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -22,6 +23,19 @@ func (g *gatewayServer) serveL4(conn net.Conn, r *gwRoute) {
 	defer conn.Close()
 	start := time.Now()
 	ip := gwPeerIP(conn.RemoteAddr().String())
+	if a, err := netip.ParseAddr(ip); err == nil {
+		set := g.settings.Load()
+		if g.bans.banned(a, start.UnixNano()) || set != nil && set.manual.contains(a) {
+			r.m.deny(denyBan)
+			r.m.observe(403, 0)
+			return
+		}
+		if set != nil && set.deny.contains(a) || r.deny.contains(a) {
+			r.m.deny(denyList)
+			r.m.observe(403, 0)
+			return
+		}
+	}
 	if !clientAllowed(r, ip) {
 		r.m.deny(denyACL)
 		r.m.observe(403, 0)

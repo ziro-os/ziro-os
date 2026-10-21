@@ -18,7 +18,11 @@ import (
 // resolved config: TLS (ACME, uploaded certificates or an internal CA), HTTP/1.1, HTTP/2 and
 // HTTP/3, load balancing with active and passive health checks, header rules, redirects,
 // rate limits, basic auth, TCP and TLS-SNI passthrough, Prometheus metrics, JSON access log.
-// The data plane is gateway_proxy.go; stores, the API and `expose` are gateway_store.go.
+// The data plane is gateway_proxy.go (route table, handler), gateway_lb.go (balancing, health),
+// gateway_traffic.go (retries, ejection, mirroring, CORS), gateway_waf*.go (firewall),
+// gateway_limit.go and gateway_ban.go (rate limits, bans), gateway_metrics.go, gateway_observe.go and
+// gateway_log.go (observability), gateway_l4.go (TCP, passthrough) and gateway_tls.go; stores, the
+// API and `expose` are gateway_store.go.
 
 var (
 	gatewayConfigPath = "/run/ziro/gateway/config.json"

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -612,5 +613,62 @@ func TestGatewayFirewallAPI(t *testing.T) {
 	}
 	if w := do("PUT", "/api/v1/gateway/routes/r", `{"hosts":["r.test"],"to":[{"address":"10.0.0.5:9000"}],"waf":{"mode":"block","level":2},"deny_cidrs":["192.0.2.0/24"]}`); w.Code != 200 {
 		t.Fatalf("route with a WAF: %d %s", w.Code, w.Body.String())
+	}
+}
+
+type addrConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c addrConn) RemoteAddr() net.Addr { return c.remote }
+
+// Bans, deny lists and allow lists protect TCP routes too.
+func TestGatewayTCPRoutePolicy(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(c, c); c.Close() }() // echo
+		}
+	}()
+	route := rs(GatewayRoute{Name: "db", Kind: "tcp", Listen: 5432, DenyCIDRs: []string{"192.0.2.0/24"}, AllowCIDRs: []string{"198.51.100.0/24", "203.0.113.0/24"}},
+		ln.Addr().String())
+	g := fwServer(t, GatewaySettings{Bans: []GatewayBan{{Addr: "198.51.100.66"}}, DenyCIDRs: []string{"203.0.113.128/25"}}, route)
+	r := g.tbl.Load().tcp[5432]
+	try := func(ip string) bool {
+		client, server := net.Pipe()
+		defer client.Close()
+		done := make(chan struct{})
+		go func() {
+			g.serveL4(addrConn{server, &net.TCPAddr{IP: net.ParseIP(ip), Port: 4000}}, r)
+			close(done)
+		}()
+		client.SetDeadline(time.Now().Add(2 * time.Second))
+		client.Write([]byte("ping"))
+		buf := make([]byte, 4)
+		_, err := io.ReadFull(client, buf)
+		client.Close()
+		<-done
+		return err == nil && string(buf) == "ping"
+	}
+	for ip, want := range map[string]bool{"198.51.100.5": true, "203.0.113.5": true, "198.51.100.66": false, "203.0.113.200": false,
+		"192.0.2.9": false, "10.0.0.1": false} {
+		if got := try(ip); got != want {
+			t.Errorf("%s: connected=%v, want %v", ip, got, want)
+		}
+	}
+	m := g.metricsText()
+	for _, want := range []string{`reason="ban"`, `reason="deny"`, `reason="acl"`} {
+		if !strings.Contains(m, want) {
+			t.Errorf("metrics lack %s", want)
+		}
 	}
 }

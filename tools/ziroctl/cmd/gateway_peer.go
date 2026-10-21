@@ -16,7 +16,7 @@ import (
 // hub (the first gateway node). The hub relays them into the mesh and every other node routes
 // replies back through it. Under the default-deny policy a peer reaches only apps whose
 // allow_from names it ("peer:<name>") or all peers ("peers").
-// ponytail: one hub, so clients need a new config (`gateway peer add` again) if the first
+// Known limitation: one hub, so clients need a new config (`gateway peer add` again) if the first
 // gateway node changes; add a hub per gateway with per-peer affinity if that becomes a problem.
 
 // RemotePeer is a WireGuard client admitted to the mesh. Only its public key is stored.

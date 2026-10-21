@@ -474,15 +474,9 @@ var (
 	gwMetricsAddr, gwMetricsTokenFile string
 )
 
-// gatewaySource returns the config to serve: the agent-written file on cluster gateway nodes,
-// the local store otherwise.
-func gatewaySource() (*GatewayConfig, error) {
-	cfg, _, err := gatewaySourceSig(nil)
-	return cfg, err
-}
-
-// gatewaySourceSig is gatewaySource for a polling reloader: it returns a signature of the config
-// and, when the signature equals prev, a nil config (nothing to do). On a cluster node the
+// gatewaySourceSig returns the config to serve: the agent-written file on cluster gateway nodes, the
+// local store otherwise. For a polling reloader it also returns a signature of the config and, when
+// the signature equals prev, a nil config (nothing to do). On a cluster node the
 // signature is the file itself, so an unchanged config costs one read and a comparison.
 func gatewaySourceSig(prev []byte) (*GatewayConfig, []byte, error) {
 	if _, err := loadClusterConfig(); err == nil {
@@ -1266,7 +1260,7 @@ func init() {
 	f.StringArrayVar(&gwF.rmReq, "remove-header", nil, "Remove a request header (repeatable)")
 	f.StringArrayVar(&gwF.setResp, "set-response-header", nil, "Set a response header: Name=value (repeatable)")
 	f.StringArrayVar(&gwF.rmResp, "remove-response-header", nil, "Remove a response header (repeatable)")
-	f.IntVar(&gwF.r.Retries, "retries", 0, "Retry another upstream after a dial error (idempotent requests, 0-5)")
+	f.IntVar(&gwF.r.Retries, "retries", 0, "Retry another upstream after a failed attempt: dial errors always, more with --retry-on (idempotent requests, 0-5)")
 	f.StringVar(&gwF.r.Timeout, "timeout", "", "Upstream response timeout (default 60s)")
 	f.BoolVar(&gwF.r.Compress, "compress", false, "gzip compressible responses")
 	f.StringVar(&gwF.r.Redirect, "redirect", "", "Redirect instead of proxying; {uri} is the request URI")
@@ -1274,7 +1268,7 @@ func init() {
 	f.StringVar(&gwF.respond, "respond", "", "Answer with a fixed response: status[:body]")
 	f.StringVar(&gwF.r.TLS, "tls", "auto", "auto (ACME HTTP-01), dns01 (ACME DNS-01, wildcards), off, internal (gateway CA) or cert:<name>")
 	f.StringSliceVar(&gwF.r.AllowCIDRs, "allow-cidr", nil, "Only clients from these CIDRs (repeatable)")
-	f.IntVar(&gwF.r.RateRPS, "rate", 0, "Requests (or connections) per second per client IP (0 = unlimited)")
+	f.IntVar(&gwF.r.RateRPS, "rate", 0, "Requests (or connections) per second per client (see --rate-key; 0 = unlimited)")
 	f.IntVar(&gwF.r.MaxBodyMB, "max-body-mb", 0, "Request body limit in MB (default 10)")
 	f.StringArrayVar(&gwF.basicAuth, "basic-auth", nil, "Require HTTP basic auth: user:password (stored as bcrypt; repeatable; the password shows in process listings, prefer --basic-auth-file)")
 	f.StringVar(&gwF.basicAuthFile, "basic-auth-file", "", "Read user:password lines for basic auth from a file (mode 600)")
