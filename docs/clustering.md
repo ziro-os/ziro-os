@@ -359,7 +359,8 @@ The API: `GET /api/v1/cluster/heal` (viewer) and `POST /api/v1/cluster/heal` (ad
 - IPv4 only; one pod /24 per node (253 replicas).
 - An app's `data` paths (`/var/lib/ziro/apps/<app>/<index>/` on the replica's node, `ZIRO_REPLICA` in the
   container) are node-local: a replica that moves starts empty. A single replica stays where its data is (sticky);
-  use `data` with several replicas only for apps that replicate themselves.
+  use `data` with several replicas only for apps that replicate themselves. [Postgres clusters](postgres.md) pin
+  each member to a node and replicate between them.
 
 ## Cluster DNS records and egress control
 

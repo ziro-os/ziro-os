@@ -341,3 +341,40 @@ func (c *Client) UploadGatewayCert(ctx context.Context, name string, cert schema
 func (c *Client) DeleteGatewayCert(ctx context.Context, name string) error {
 	return c.Do(ctx, http.MethodDelete, "/api/v1/gateway/certs/"+esc(name), nil, nil)
 }
+
+// ---- Postgres clusters ----
+
+// PGClusters lists the Postgres clusters with their groups, members, roles and replication state.
+func (c *Client) PGClusters(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.Get(ctx, "/api/v1/pg", &out)
+}
+
+// PGCluster returns one cluster, with its recent failover events.
+func (c *Client) PGCluster(ctx context.Context, name string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/pg/"+esc(name), &out)
+}
+
+// CreatePGCluster creates a cluster ({"name", "replicas", "version", "resources", "shards", ...}).
+func (c *Client) CreatePGCluster(ctx context.Context, req map[string]any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/pg", req, &out)
+}
+
+// PGAction changes a cluster: action is scale ({"replicas": n}), add-replica, rm-replica
+// ({"member": "m3"}), switchover ({"to": "m2"}), add-shard, pause or resume.
+func (c *Client) PGAction(ctx context.Context, name, action string, body map[string]any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/pg/"+esc(name)+"/"+esc(action), body, &out)
+}
+
+// RemovePGCluster removes a cluster; purge also deletes its data on every node and its credentials.
+func (c *Client) RemovePGCluster(ctx context.Context, name string, purge bool) (api.Message, error) {
+	var m api.Message
+	q := ""
+	if purge {
+		q = "?purge=true"
+	}
+	return m, c.Do(ctx, http.MethodDelete, "/api/v1/pg/"+esc(name)+q, nil, &m)
+}

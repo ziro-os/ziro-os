@@ -156,6 +156,7 @@ func renderMetrics(h hostMetrics, st *ClusterState, members []memberView, selfID
 	for k, n := range map[string]int{"apps": len(st.Apps), "routes": len(st.Routes), "peers": len(st.Peers), "secrets": len(st.Secrets)} {
 		m.sample("ziro_cluster_objects", map[string]string{"kind": k}, float64(n))
 	}
+	pgMetrics(&m, st, now)
 	if r := h.Router; r != nil {
 		m.family("ziro_router_streams", "gauge", "Router devices streaming their netmap from this planet.")
 		m.sample("ziro_router_streams", nil, float64(r.Streams))

@@ -25,7 +25,6 @@ type pgCreateOpts struct {
 	Sync      string
 	Shards    int // worker groups; 0 = a plain cluster
 	Citus     string
-	Pooler    string
 	Resources *Resources
 	Database  string
 	User      string
@@ -68,7 +67,7 @@ func pgCreate(st *ClusterState, o pgCreateOpts, now time.Time) (*PGCluster, erro
 		return nil, fmt.Errorf("a sharded cluster needs a Citus image: --citus-image <image@sha256:...>")
 	}
 	c := &PGCluster{Name: o.Name, Version: o.Version, Image: image, Sync: o.Sync, Replicas: o.Replicas, Resources: o.Resources,
-		Database: o.Database, User: o.User, AllowFrom: o.AllowFrom, Pooler: o.Pooler, Colocate: o.Colocate,
+		Database: o.Database, User: o.User, AllowFrom: o.AllowFrom, Colocate: o.Colocate,
 		CreatedAt: now.UTC().Format(time.RFC3339)}
 	groups := []string{"main"}
 	if o.Shards > 0 {
@@ -264,7 +263,6 @@ type pgView struct {
 	Database  string        `json:"database"`
 	User      string        `json:"user"`
 	Sharded   bool          `json:"sharded"`
-	Pooler    bool          `json:"pooler"`
 	Endpoints pgEndpointsV  `json:"endpoints"`
 	Groups    []pgGroupView `json:"groups"`
 }
@@ -295,7 +293,7 @@ type pgMemberView struct {
 
 func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
 	v := pgView{Name: c.Name, Version: c.Version, Sync: c.Sync, Replicas: c.Replicas, Database: c.Database, User: c.User,
-		Sharded: c.Citus != "", Pooler: c.Pooler != "",
+		Sharded:   c.Citus != "",
 		Endpoints: pgEndpointsV{RW: c.Name + "-rw." + meshDomain + ":" + pgPort, RO: c.Name + "-ro." + meshDomain + ":" + pgPort}}
 	for gi := range c.Groups {
 		g := &c.Groups[gi]

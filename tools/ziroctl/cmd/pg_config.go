@@ -163,9 +163,6 @@ func pgMemberApp(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) Cluste
 		}
 	}
 	allow = uniq(append(allow, c.AllowFrom...))
-	if c.Pooler != "" {
-		allow = uniq(append(allow, c.poolerApp()))
-	}
 	sticky := true
 	return ClusteredApp{
 		Name: app, Image: image, Replicas: 1, Env: env, Args: []string{"bash", configMountPoint + "/entry.sh"},
@@ -174,8 +171,6 @@ func pgMemberApp(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) Cluste
 		ConfigFiles: map[string]string{"entry.sh": pgEntryScript, "postgresql.conf": pgTuning(c.Resources, c.Citus != "")},
 	}
 }
-
-func (c *PGCluster) poolerApp() string { return pgAppPrefix + c.Name + "-pool" }
 
 // podNetOf is the cluster pod network, the only place members accept connections from.
 func podNetOf(st *ClusterState) string {

@@ -32,7 +32,12 @@ var pgNerdctl pgRunner = func(ctx context.Context, argv ...string) (string, erro
 
 // psqlArgs is `nerdctl exec` of psql in a member, one -c per statement.
 func psqlArgs(container string, sqls ...string) []string {
-	args := []string{"exec", "-u", "postgres", container, "psql", "-X", "-U", "postgres", "-d", "postgres",
+	return psqlDB(container, "postgres", sqls...)
+}
+
+// psqlDB is psqlArgs in a named database.
+func psqlDB(container, db string, sqls ...string) []string {
+	args := []string{"exec", "-u", "postgres", container, "psql", "-X", "-U", "postgres", "-d", db,
 		"-v", "ON_ERROR_STOP=1", "-A", "-t", "-q", "-F", "|"}
 	for _, s := range sqls {
 		args = append(args, "-c", s)

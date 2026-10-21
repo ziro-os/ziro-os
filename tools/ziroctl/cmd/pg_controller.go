@@ -98,11 +98,43 @@ func (m *PGMember) issue(op, arg string, epoch int64, now time.Time) bool {
 
 // ---- events ----
 
-func (g *PGGroup) note(now time.Time, format string, a ...any) {
-	g.Events = append(g.Events, PGEvent{At: now, Msg: fmt.Sprintf(format, a...)})
+func (g *PGGroup) note(now time.Time, format string, a ...any) { g.record(now, "", format, a...) }
+
+// alert records an event that also raises an alert (category "database") once it is committed.
+func (g *PGGroup) alert(now time.Time, severity, format string, a ...any) {
+	g.record(now, severity, format, a...)
+}
+
+func (g *PGGroup) record(now time.Time, severity, format string, a ...any) {
+	g.Events = append(g.Events, PGEvent{At: now, Msg: fmt.Sprintf(format, a...), Alert: severity})
 	if len(g.Events) > 20 {
 		g.Events = g.Events[len(g.Events)-20:]
 	}
+}
+
+type pgAlert struct {
+	Severity, Cluster, Group, Msg string
+}
+
+// pgTakeAlerts returns the alerts not yet raised and marks them raised. The caller raises them
+// after the state is committed.
+func pgTakeAlerts(st *ClusterState) []pgAlert {
+	var out []pgAlert
+	for _, c := range st.PG {
+		for gi := range c.Groups {
+			g := &c.Groups[gi]
+			for i := range g.Events {
+				if e := &g.Events[i]; e.Alert != "" && !e.Sent {
+					e.Sent = true
+					out = append(out, pgAlert{e.Alert, c.Name, g.Name, e.Msg})
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Cluster+out[i].Group+out[i].Msg < out[j].Cluster+out[j].Group+out[j].Msg
+	})
+	return out
 }
 
 // ---- what the agents report ----
@@ -138,6 +170,7 @@ type PGOrder struct {
 	Op        string `json:"op"`
 	Arg       string `json:"arg,omitempty"`
 	Epoch     int64  `json:"epoch"`
+	DB        string `json:"db,omitempty"`
 }
 
 // pgFind locates the member that runs app.
@@ -216,7 +249,7 @@ func pgOrdersFor(st *ClusterState, nodeID string) []PGOrder {
 				for _, r := range st.Replicas {
 					if r.App == app && r.Node == nodeID {
 						out = append(out, PGOrder{ID: m.Cmd.ID, App: app, Container: replicaName(app, r.Index, r.Hash),
-							Op: m.Cmd.Op, Arg: m.Cmd.Arg, Epoch: m.Cmd.Epoch})
+							Op: m.Cmd.Op, Arg: m.Cmd.Arg, Epoch: m.Cmd.Epoch, DB: m.Cmd.DB})
 					}
 				}
 			}
@@ -327,7 +360,7 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 		pgCitusSettle(c, g, m, cmd, now)
 	}
 	if !cmd.OK {
-		g.note(now, "%s on %s failed: %s", cmd.Op, m.ID, cmd.Msg)
+		g.alert(now, "medium", "%s on %s failed: %s", cmd.Op, m.ID, cmd.Msg)
 	}
 	m.Cmd = nil
 }
@@ -375,7 +408,7 @@ func pgFailover(c *PGCluster, g *PGGroup, now time.Time) {
 	}
 	if !pgSafeToPromote(reachable, total, k) {
 		if g.last(now, 60*time.Second, "waiting") {
-			g.note(now, "primary is down, but only %d of %d replicas answer; promoting could lose acknowledged writes", reachable, total)
+			g.alert(now, "high", "primary is down, but only %d of %d replicas answer; promoting could lose acknowledged writes", reachable, total)
 		}
 		return
 	}
@@ -404,7 +437,7 @@ func pgPromote(c *PGCluster, g *PGGroup, target *PGMember, now time.Time, why st
 	target.Role = pgPromoting
 	target.Cmd = newPGCommand(opPromote, "", g.Epoch, now)
 	g.Sync = "" // the new primary starts without synchronous standbys; pgSyncAndSlots sets them
-	g.note(now, "promoting %s (%s), epoch %d", target.ID, why, g.Epoch)
+	g.alert(now, "high", "promoting %s (%s), epoch %d", target.ID, why, g.Epoch)
 }
 
 func pgFinishPromotion(c *PGCluster, g *PGGroup, now time.Time) {
@@ -428,7 +461,7 @@ func pgFinishPromotion(c *PGCluster, g *PGGroup, now time.Time) {
 		}
 		m.Role = pgReplica
 		m.Cmd = nil
-		g.note(now, "promoting %s failed: %s", m.ID, cmd.Msg)
+		g.alert(now, "high", "promoting %s failed: %s", m.ID, cmd.Msg)
 	}
 }
 
@@ -475,7 +508,7 @@ func pgStartSwitchover(c *PGCluster, g *PGGroup, to string, now time.Time) error
 }
 
 func pgAbortSwitch(g *PGGroup, p *PGMember, now time.Time, why string) {
-	g.note(now, "switchover aborted: %s", why)
+	g.alert(now, "medium", "switchover aborted: %s", why)
 	g.Switch = nil
 	if p != nil && p.Cmd == nil {
 		p.issue(opWritable, "", g.Epoch, now)
@@ -561,7 +594,7 @@ func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) 
 		node := pgPickNode(st, c, g)
 		if node == "" {
 			if g.last(now, 5*time.Minute, "nonode") {
-				g.note(now, "no node is free for another replica (members of a group are spread over nodes)")
+				g.alert(now, "medium", "no node is free for another replica (members of a group are spread over nodes)")
 			}
 			return
 		}
@@ -651,9 +684,6 @@ func pgEnsureApps(st *ClusterState, c *PGCluster) {
 			want[app.Name] = true
 			upsertApp(st, app)
 		}
-	}
-	for name := range pgPoolerApps(st, c) {
-		want[name] = true
 	}
 	prefix := pgAppPrefix + c.Name + "-"
 	var kept []ClusteredApp

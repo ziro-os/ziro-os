@@ -101,7 +101,7 @@ ziroctl cluster replicas mysql-cluster           # where each replica runs and w
 
 Only apps that replicate their own data can be scaled, and only up to the definition's `max_replicas`. A single
 database such as `postgres` cannot: a second replica would be an independent, empty database, and the app's DNS name
-would mix the two. `ziroctl cluster scale` refuses the same thing (`--force` overrides). The scale is remembered, so a
+would mix the two. For a replicated Postgres with automatic failover use [`ziroctl pg`](postgres.md). `ziroctl cluster scale` refuses the same thing (`--force` overrides). The scale is remembered, so a
 later `apps deploy` of the same name keeps it. The replicas of an app that lists its members to each other
 (`ZIRO_PEERS`) restart one at a time so the list stays correct.
 

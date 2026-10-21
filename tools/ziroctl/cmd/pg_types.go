@@ -68,26 +68,30 @@ type PGCluster struct {
 	Database  string     `json:"database"`             // created on the first primary
 	User      string     `json:"user"`                 // its owner
 	AllowFrom []string   `json:"allow_from,omitempty"` // apps allowed to connect
-	Pooler    string     `json:"pooler,omitempty"`     // PgBouncer image; empty = no pooler
 	Citus     string     `json:"citus,omitempty"`      // Citus member image; set for a sharded cluster
 	Groups    []PGGroup  `json:"groups"`
 	CreatedAt string     `json:"created_at"`
 	Paused    bool       `json:"paused,omitempty"`   // the controller leaves roles alone (maintenance)
 	Colocate  bool       `json:"colocate,omitempty"` // allow members of a group on the same node (development)
+	// Citus registration progress (pg_citus.go).
+	CitusReady       bool `json:"citus_ready,omitempty"`       // the coordinator is registered under its DNS name
+	MetaSynced       bool `json:"meta_synced,omitempty"`       // the metadata reached every node
+	RebalancePending bool `json:"rebalance_pending,omitempty"` // a worker joined: shards should move
 }
 
 // PGGroup is one primary and its replicas: a plain cluster has one group ("main"); a sharded one has a
 // coordinator ("coord") and one group per shard ("w1", "w2", ...).
 type PGGroup struct {
-	Name    string               `json:"name"`
-	Epoch   int64                `json:"epoch"`           // bumped on every promotion; commands carry it
-	Next    int                  `json:"next"`            // numbering of the next member
-	Members []PGMember           `json:"members"`         // the primary first
-	Sync    string               `json:"sync,omitempty"`  // synchronous_standby_names last applied on the primary
-	Slots   int64                `json:"slots,omitempty"` // the epoch for which the primary's replication slots were created
-	Notes   map[string]time.Time `json:"notes,omitempty"` // when a repeated event was last recorded
-	Switch  *PGSwitch            `json:"switch,omitempty"`
-	Events  []PGEvent            `json:"events,omitempty"` // the last few role changes, newest last
+	Name       string               `json:"name"`
+	Epoch      int64                `json:"epoch"`           // bumped on every promotion; commands carry it
+	Next       int                  `json:"next"`            // numbering of the next member
+	Members    []PGMember           `json:"members"`         // the primary first
+	Sync       string               `json:"sync,omitempty"`  // synchronous_standby_names last applied on the primary
+	Slots      int64                `json:"slots,omitempty"` // the epoch for which the primary's replication slots were created
+	Notes      map[string]time.Time `json:"notes,omitempty"` // when a repeated event was last recorded
+	Switch     *PGSwitch            `json:"switch,omitempty"`
+	Registered bool                 `json:"registered,omitempty"` // Citus: the coordinator knows this worker group
+	Events     []PGEvent            `json:"events,omitempty"`     // the last few role changes, newest last
 }
 
 // PGMember is one Postgres container.
@@ -122,6 +126,7 @@ type PGCommand struct {
 	Op    string    `json:"op"`
 	Arg   string    `json:"arg,omitempty"`
 	Epoch int64     `json:"epoch"`
+	DB    string    `json:"db,omitempty"` // the database an order runs in (Citus); empty = postgres
 	At    time.Time `json:"at"`
 	Done  bool      `json:"done,omitempty"`
 	OK    bool      `json:"ok,omitempty"`
@@ -138,8 +143,10 @@ type PGSwitch struct {
 
 // PGEvent records a role change for `pg status`.
 type PGEvent struct {
-	At  time.Time `json:"at"`
-	Msg string    `json:"msg"`
+	At    time.Time `json:"at"`
+	Msg   string    `json:"msg"`
+	Alert string    `json:"alert,omitempty"` // severity of the alert this event raises ("" = none)
+	Sent  bool      `json:"sent,omitempty"`  // the alert was raised
 }
 
 // ---- names ----

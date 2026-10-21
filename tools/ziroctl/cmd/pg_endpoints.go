@@ -99,3 +99,39 @@ func pgAliasTargets(pods map[string][]string, st *ClusterState, alias string) []
 func isPGAlias(st *ClusterState, name string) bool {
 	return strings.Contains(name, "-") && len(pgAliasMembers(st, name)) > 0
 }
+
+// pgMetrics adds the Postgres clusters to the master's metrics.
+func pgMetrics(m *metricsWriter, st *ClusterState, now time.Time) {
+	if len(st.PG) == 0 {
+		return
+	}
+	m.family("ziro_pg_primary", "gauge", "The member that is the primary of a group (1).")
+	m.family("ziro_pg_members", "gauge", "Members of a group by state.")
+	m.family("ziro_pg_epoch", "gauge", "Promotions of a group so far (the failover epoch).")
+	m.family("ziro_pg_replication_lag_milliseconds", "gauge", "How far a replica's replay is behind.")
+	for _, v := range pgViews(st, now) {
+		for _, g := range v.Groups {
+			base := map[string]string{"cluster": v.Name, "group": g.Name}
+			with := func(extra map[string]string) map[string]string {
+				l := map[string]string{"cluster": v.Name, "group": g.Name}
+				for k, x := range extra {
+					l[k] = x
+				}
+				return l
+			}
+			m.sample("ziro_pg_epoch", base, float64(g.Epoch))
+			states := map[string]int{}
+			for _, mv := range g.Members {
+				states[mv.State]++
+				if mv.Role == pgPrimary {
+					m.sample("ziro_pg_primary", with(map[string]string{"member": mv.ID}), 1)
+				} else {
+					m.sample("ziro_pg_replication_lag_milliseconds", with(map[string]string{"member": mv.ID}), float64(mv.LagMs))
+				}
+			}
+			for _, s := range []string{"ready", "catching-up", "starting", "down", "draining"} {
+				m.sample("ziro_pg_members", with(map[string]string{"state": s}), float64(states[s]))
+			}
+		}
+	}
+}

@@ -84,8 +84,8 @@ container with `nerdctl exec` and reports the result in the next heartbeat. Noth
 Pod DNS answers role-following names computed from `ClusterState.PG`: `<cluster>-<group>-rw` is the primary,
 `<cluster>-<group>-ro` the ready replicas (the primary when there are none). `<cluster>-rw` and `<cluster>-ro` alias the
 default group (the only group, or the Citus coordinator). Replicas use the read-write name as their
-`primary_conninfo`, so they follow a new primary by themselves. An optional PgBouncer pool runs as ordinary
-stateless cluster apps in front of both names. `pg expose` creates gateway TCP routes with allow-lists.
+`primary_conninfo`, so they follow a new primary by themselves. A connection pooler (PgBouncer as
+ordinary stateless cluster apps) is a follow-up. `pg expose` creates gateway TCP routes with allow-lists.
 
 ### Sharding
 
@@ -120,7 +120,7 @@ Credentials are never served over the API.
   validated arguments; no shell string or SQL from a client reaches a container.
 - Passwords are cluster secrets (sealed, replicated, delivered as env files). Replication uses its own role over
   scram-sha-256, allowed only from the pod CIDR. The superuser socket is reachable only inside the container.
-- Pod network policy applies: only the cluster's own members, the pooler and the apps named with `--allow-from` can
+- Pod network policy applies: only the cluster's own members and the apps named with `--allow-from` can
   reach the ports. The gateway route is opt-in with an allow-list.
 - A compromised replica can read what replication sends it (everything). It cannot promote itself: roles come from
   the master and commands carry the epoch.

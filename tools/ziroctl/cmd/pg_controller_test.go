@@ -846,3 +846,94 @@ func TestPGAgentOrdersRunOnceAndReportBack(t *testing.T) {
 		t.Fatalf("results %+v, ran %d", res, ran)
 	}
 }
+
+func TestPGCitusRegistersWorkersAndRebalances(t *testing.T) {
+	w := newPGWorld(t, 3)
+	c := w.create(pgCreateOpts{Replicas: 1, Shards: 2, Citus: "docker.io/citusdata/citus:13.2.0@sha256:" + strings.Repeat("a", 64)})
+	if len(c.Groups) != 3 || c.Groups[0].Name != "coord" || c.entryGroup() != "coord" {
+		t.Fatalf("groups: %+v", c.Groups)
+	}
+	if _, err := pgCreate(newPGWorld(t, 3).st, pgCreateOpts{Name: "x", Shards: 2}, w.now); err == nil {
+		t.Fatal("a sharded cluster without a Citus image")
+	}
+	w.settle(40)
+	c = w.cluster()
+	if !c.CitusReady || !c.MetaSynced || c.RebalancePending {
+		t.Fatalf("registration: ready=%v synced=%v rebalance=%v (%s)", c.CitusReady, c.MetaSynced, c.RebalancePending, w.events("coord"))
+	}
+	for _, name := range []string{"w1", "w2"} {
+		if !c.group(name).Registered {
+			t.Fatalf("%s is not registered", name)
+		}
+	}
+	var seq []string
+	for _, l := range w.log {
+		if strings.Contains(l, " citus-") {
+			seq = append(seq, strings.Join(strings.Fields(l)[1:], " "))
+		}
+	}
+	want := []string{"citus-coordinator db-coord-rw.cluster.ziro", "citus-add-node db-w1-rw.cluster.ziro", "citus-add-node db-w2-rw.cluster.ziro", "citus-metadata-sync", "citus-rebalance"}
+	if !slices.Equal(seq, want) {
+		t.Fatalf("citus orders:\n got %v\nwant %v", seq, want)
+	}
+	// Every member of a sharded cluster loads Citus; the coordinator is the entry point.
+	a := w.st.app(w.app("w1", "m1"))
+	if a.Env["ZIRO_PG_CITUS"] != "1" || !strings.Contains(a.ConfigFiles["postgresql.conf"], "wal_level = logical") || !strings.Contains(a.Image, "citus") {
+		t.Fatalf("worker member: %+v", a)
+	}
+	eps := podEndpoints(w.st)
+	if len(eps["db-rw"]) != 1 || len(eps["db-w1-rw"]) != 1 || eps["db-rw"][0] == eps["db-w1-rw"][0] {
+		t.Fatalf("endpoints: %v", eps)
+	}
+
+	// A worker failover changes no Citus registration.
+	before := len(w.log)
+	w.down[w.member("w1", "m1").Node] = true
+	w.step(pgGrace + 5*time.Second)
+	w.settle(8)
+	if w.primaryOf("w1") != "m2" {
+		t.Fatalf("worker failover: %s", w.events("w1"))
+	}
+	for _, l := range w.log[before:] {
+		if strings.Contains(l, " citus-") {
+			t.Fatalf("a worker failover re-registered a node: %s", l)
+		}
+	}
+	w.down[w.member("w1", "m1").Node] = false
+
+	// Adding a shard group: registered, metadata re-synced, shards rebalanced.
+	name, err := pgAddShard(w.st, "db", w.now)
+	if err != nil || name != "w3" {
+		t.Fatalf("add shard: %q %v", name, err)
+	}
+	w.settle(40)
+	c = w.cluster()
+	if !c.group("w3").Registered || !c.MetaSynced || c.RebalancePending || len(c.group("w3").Members) != 2 {
+		t.Fatalf("after add-shard: %+v", c.group("w3"))
+	}
+	if _, err := pgAddShard(newPGWorld(t, 3).st, "db", w.now); err == nil {
+		t.Fatal("add-shard on an unknown cluster")
+	}
+}
+
+func TestCitusOrdersAreValidated(t *testing.T) {
+	for _, tc := range []struct {
+		op, arg string
+		ok      bool
+	}{
+		{opCitusCoordinator, "db-coord-rw.cluster.ziro", true}, {opCitusAddNode, "db-w1-rw.cluster.ziro", true},
+		{opCitusAddNode, "x'); drop table y; --", false}, {opCitusAddNode, "", false}, {opCitusAddNode, "A.b", false},
+		{opCitusMetaSync, "", true}, {opCitusMetaSync, "x", false}, {opCitusRebalance, "", true},
+	} {
+		if err := validPGCommand(tc.op, tc.arg); (err == nil) != tc.ok {
+			t.Errorf("%s %q: %v", tc.op, tc.arg, err)
+		}
+	}
+	if _, err := pgSteps(PGOrder{Container: "zc-pgc-db-coord-m1-x", Op: opCitusMetaSync, DB: "app; drop"}); err == nil {
+		t.Fatal("an injected database name")
+	}
+	steps, err := pgSteps(PGOrder{Container: "zc-pgc-db-coord-m1-x", Op: opCitusAddNode, Arg: "db-w1-rw.cluster.ziro", DB: "app"})
+	if err != nil || !slices.Contains(steps[0], "app") || !slices.Contains(steps[0], "-d") {
+		t.Fatalf("steps: %v %v", steps, err)
+	}
+}

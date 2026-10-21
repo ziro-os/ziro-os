@@ -14,11 +14,14 @@
 set -eu
 umask 077
 
-CFG=/etc/ziro-config
-PORT=5432
+# The defaults are the container's; tests (tests/pg/entry-test.sh) point them elsewhere.
+CFG="${ZIRO_PG_CONFIG_DIR:-/etc/ziro-config}"
+PORT="${ZIRO_PG_PORT:-5432}"
+SOCK="${ZIRO_PG_SOCKET_DIR:-/var/run/postgresql}"
+LISTEN="${ZIRO_PG_LISTEN:-*}"
 export PATH="$PATH:/usr/lib/postgresql/${PG_MAJOR:-17}/bin"
 export PGDATA="${PGDATA:?PGDATA is not set}"
-PGPASSFILE=/tmp/.ziro-pgpass
+PGPASSFILE="${ZIRO_PG_PASSFILE:-/tmp/.ziro-pgpass}"
 export PGPASSFILE
 
 log() { echo "[ziro-pg] $*" >&2; }
@@ -173,9 +176,9 @@ chown postgres "$PGDATA/ziro.conf" "$PGDATA/pg_hba.conf" "$PGDATA/postgresql.con
 
 if [ "$role" = primary ]; then
 	(
-		until as_pg psql -X -h /var/run/postgresql -d postgres -Atc 'select 1' >/dev/null 2>&1; do sleep 1; done
-		[ "$(as_pg psql -X -h /var/run/postgresql -d postgres -Atc 'select pg_is_in_recovery()')" = f ] || exit 0
-		as_pg psql -X -h /var/run/postgresql -d postgres -v ON_ERROR_STOP=1 \
+		until as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select 1' >/dev/null 2>&1; do sleep 1; done
+		[ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select pg_is_in_recovery()')" = f ] || exit 0
+		as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 \
 			-v repl="$PG_REPL_PASSWORD" -v app_user="$app_user" -v app_pass="$POSTGRES_PASSWORD" -v app_db="$app_db" <<'SQL'
 SELECT format('CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD %L', :'repl')
   WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'replicator') \gexec
@@ -189,12 +192,12 @@ SELECT format('CREATE DATABASE %I OWNER %I', :'app_db', :'app_user')
   WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'app_db') \gexec
 SQL
 		if [ -n "${ZIRO_PG_CITUS:-}" ]; then
-			as_pg psql -X -h /var/run/postgresql -d "$app_db" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS citus' >/dev/null
+			as_pg psql -X -h "$SOCK" -p "$PORT" -d "$app_db" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS citus' >/dev/null
 		fi
 		log "accounts are in place"
 	) &
 fi
 
 log "starting as $role (epoch $epoch)"
-exec gosu postgres postgres -D "$PGDATA" -c listen_addresses='*' -c "config_file=$PGDATA/postgresql.conf" \
-	-c "hba_file=$PGDATA/pg_hba.conf"
+exec gosu postgres postgres -D "$PGDATA" -c "listen_addresses=$LISTEN" -c "port=$PORT" -c "unix_socket_directories=$SOCK" \
+	-c "config_file=$PGDATA/postgresql.conf" -c "hba_file=$PGDATA/pg_hba.conf"

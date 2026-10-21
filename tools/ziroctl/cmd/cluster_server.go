@@ -1125,13 +1125,16 @@ var clusterServeCmd = &cobra.Command{
 					continue
 				}
 				var heal HealConfig
+				var pgAlerts []pgAlert
 				if err := withState(func(st *ClusterState) error {
+					pgAlerts = nil
 					now := time.Now()
 					if healSeq < 0 {
 						healSeq = st.Heal.Next
 					}
 					healPass(st, now) // cordons first, so scheduling already sees them
 					pgPass(st, now)   // Postgres roles and members, before the apps are scheduled
+					pgAlerts = pgTakeAlerts(st)
 					scheduleReplicas(st, now)
 					heal = st.Heal
 					if err := maybeSealSecrets(st); err != nil {
@@ -1142,6 +1145,9 @@ var clusterServeCmd = &cobra.Command{
 					fmt.Printf("[cluster] schedule: %v\n", err)
 				} else if err == nil {
 					healSeq = emitHealActions(heal, healSeq) // only what was committed
+					for _, a := range pgAlerts {
+						alertf(a.Severity, "database", "Postgres "+a.Cluster+"/"+a.Group+": "+a.Msg, map[string]any{"cluster": a.Cluster, "group": a.Group})
+					}
 				}
 			}
 		}()
