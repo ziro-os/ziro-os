@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,7 +44,7 @@ func gatewaySources(st *ClusterState, app string) []string {
 	routed := false
 	for _, r := range st.Routes {
 		for _, a := range routeApps(r) {
-			routed = routed || a == app
+			routed = routed || a == app || slices.Contains(pgAliasMembers(st, a), app)
 		}
 	}
 	if !routed {
@@ -64,7 +65,7 @@ func gatewaySources(st *ClusterState, app string) []string {
 func clusterAppTargets(st *ClusterState, eps, pods map[string][]string, app string) []string {
 	a := st.app(app)
 	if a == nil {
-		return nil
+		return pgAliasTargets(pods, st, app) // a Postgres read-write or read-only name
 	}
 	port, proto, _ := strings.Cut(hostPortKey(a.Port), "/")
 	if port == "" || proto != "tcp" {

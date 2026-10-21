@@ -129,8 +129,14 @@ type ClusteredApp struct {
 	Sticky *bool `json:"sticky,omitempty"`
 	// StopTimeout is how many seconds a replica gets to shut down (SIGTERM) before it is killed
 	// when it is replaced or removed; 0 means 30 for an app with Data and an immediate kill otherwise.
-	StopTimeout int        `json:"stop_timeout,omitempty"`
-	Resources   *Resources `json:"resources,omitempty"` // per replica
+	StopTimeout int `json:"stop_timeout,omitempty"`
+	// Node pins every replica of the app to one node (a database member and its data directory).
+	// The replica stays unplaced while the node is not Ready or is cordoned.
+	Node string `json:"node,omitempty"`
+	// ConfigFiles are small files the agent writes next to the container and mounts read-only at
+	// /etc/ziro-config (name -> content). They are part of the spec: changing one rolls the app.
+	ConfigFiles map[string]string `json:"config_files,omitempty"`
+	Resources   *Resources        `json:"resources,omitempty"` // per replica
 	// Arch pins replicas to nodes of one architecture (an image built here is single-arch);
 	// ImageNode is the node that holds a ziro.local image, which other nodes fetch over the mesh.
 	Arch      string `json:"arch,omitempty"`
@@ -148,6 +154,33 @@ func (a ClusteredApp) stickyData() bool {
 		return *a.Sticky
 	}
 	return !a.Replicated && a.Replicas <= 1
+}
+
+const (
+	maxConfigFiles     = 16
+	maxConfigFileBytes = 64 << 10
+	configMountPoint   = "/etc/ziro-config"
+)
+
+var configFileRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validConfigFiles checks the files of an app: they are written by the agent as root, so names are
+// plain and sizes bounded.
+func validConfigFiles(files map[string]string) error {
+	if len(files) > maxConfigFiles {
+		return fmt.Errorf("at most %d config files", maxConfigFiles)
+	}
+	total := 0
+	for name, content := range files {
+		if !configFileRe.MatchString(name) || strings.Contains(content, "\x00") {
+			return fmt.Errorf("invalid config file %q", name)
+		}
+		total += len(content)
+	}
+	if total > maxConfigFileBytes {
+		return fmt.Errorf("config files are larger than %d bytes", maxConfigFileBytes)
+	}
+	return nil
 }
 
 const (
@@ -198,14 +231,15 @@ type ClusterState struct {
 	Shares        []ClusterShare `json:"shares,omitempty"`      // NFS shares served over the mesh
 	// PurgeData: apps whose node-local data every node deletes (app -> when requested). Entries
 	// expire after purgeDataTTL; deploying an app of that name again cancels its entry.
-	PurgeData       map[string]string `json:"purge_data,omitempty"`
-	DNSCloud        DNSCloud          `json:"dns_cloud,omitempty"` // public DNS provider: records for the gateway's names (dnsprovider.go)
-	Heal            HealConfig        `json:"heal,omitempty"`      // auto-healing settings and recent actions (see cluster_heal.go)
-	GatewayACME     GatewayACME       `json:"gateway_acme,omitempty"`
-	GatewaySettings GatewaySettings   `json:"gateway_settings,omitempty"`
-	GatewayDomain   GatewayDomain     `json:"gateway_domain,omitempty"`
-	Peers           []RemotePeer      `json:"peers,omitempty"`    // WireGuard remote-access clients
-	PodCIDR         string            `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
+	PurgeData       map[string]string     `json:"purge_data,omitempty"`
+	DNSCloud        DNSCloud              `json:"dns_cloud,omitempty"` // public DNS provider: records for the gateway's names (dnsprovider.go)
+	Heal            HealConfig            `json:"heal,omitempty"`      // auto-healing settings and recent actions (see cluster_heal.go)
+	GatewayACME     GatewayACME           `json:"gateway_acme,omitempty"`
+	GatewaySettings GatewaySettings       `json:"gateway_settings,omitempty"`
+	GatewayDomain   GatewayDomain         `json:"gateway_domain,omitempty"`
+	Peers           []RemotePeer          `json:"peers,omitempty"`    // WireGuard remote-access clients
+	PG              map[string]*PGCluster `json:"pg,omitempty"`       // Postgres clusters (pg_types.go)
+	PodCIDR         string                `json:"pod_cidr,omitempty"` // cluster pod network; "" = host-port networking only
 	// MeshMode "anywhere" runs the node mesh on the zirocd engine (NAT traversal, relays): only
 	// masters need a public address. "" (direct) is kernel WireGuard between reachable nodes.
 	MeshMode string `json:"mesh_mode,omitempty"`
@@ -492,6 +526,14 @@ func validPortNum(s string) bool {
 func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
 	if a.StopTimeout < 0 || a.StopTimeout > maxStopTimeout {
 		return fmt.Errorf("stop_timeout must be 0-%d seconds", maxStopTimeout)
+	}
+	if a.Node != "" {
+		if err := validLabel(a.Node); err != nil {
+			return fmt.Errorf("invalid node %q", a.Node)
+		}
+	}
+	if err := validConfigFiles(a.ConfigFiles); err != nil {
+		return err
 	}
 	if err := validName(a.Name); err != nil {
 		return err

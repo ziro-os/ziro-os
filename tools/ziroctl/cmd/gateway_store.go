@@ -183,6 +183,9 @@ func (clusterRouteStore) appTargetsKnown(app string) error {
 	if err != nil {
 		return err
 	}
+	if isPGAlias(st, app) {
+		return nil
+	}
 	a := st.app(app)
 	if a == nil {
 		return fmt.Errorf("cluster app %q not found", app)

@@ -83,6 +83,9 @@ type heartbeatRequest struct {
 	NodeCSR  string        `json:"node_csr,omitempty"`
 	// Sandboxes this node holds (nil from agents without the sandbox module).
 	Sandboxes []string `json:"sandboxes,omitempty"`
+	// Postgres members on this node: probes, and the outcome of orders (pg_agent.go).
+	PG        []PGReport `json:"pg,omitempty"`
+	PGResults []PGResult `json:"pg_results,omitempty"`
 }
 
 // Assignment is one container the master wants running on a node.
@@ -105,9 +108,13 @@ type Assignment struct {
 	ImageFrom string            `json:"image_from,omitempty"` // mesh address serving a ziro.local image
 	Resources *Resources        `json:"resources,omitempty"`  // memory/CPU/PID limits
 	Network   string            `json:"network,omitempty"`    // local apps: a named network (stacks)
+	PG        bool              `json:"pg,omitempty"`         // a Postgres member: the agent probes it
 	// StopTimeout is the seconds the container gets to stop before it is killed (a label on the
 	// container, so it is known when the replica is later replaced and no longer assigned).
-	StopTimeout int `json:"stop_timeout,omitempty"`
+	StopTimeout int `json:"stop_timeout,omitempty"` // ConfigFiles are written beside the container and mounted read-only at /etc/ziro-config;
+	// Dynamic files are rewritten by the agent while the container runs (not part of the spec).
+	ConfigFiles map[string]string `json:"config_files,omitempty"`
+	Dynamic     map[string]string `json:"dynamic,omitempty"`
 }
 
 // MeshPeer is another node on the WireGuard mesh.
@@ -132,6 +139,7 @@ type heartbeatResponse struct {
 	Peers       []MeshPeer          `json:"peers,omitempty"`
 	Endpoints   map[string][]string `json:"endpoints,omitempty"` // app -> mesh IPs
 	Policy      *MeshPolicy         `json:"policy,omitempty"`
+	PGOrders    []PGOrder           `json:"pg_orders,omitempty"`    // orders for Postgres members on this node
 	Gateway     *GatewayConfig      `json:"gateway,omitempty"`      // only for nodes labelled gateway
 	CA          string              `json:"ca,omitempty"`           // cluster CA: older agents switch their pin to it
 	Masters     []string            `json:"masters,omitempty"`      // every master's API address (failover)
@@ -178,6 +186,16 @@ func specHash(a ClusteredApp) string {
 	}
 	if len(a.Volumes) > 0 || a.VolumeEpoch > 0 {
 		fmt.Fprintf(h, "\x00volumes=%q\x00epoch=%d", a.Volumes, a.VolumeEpoch)
+	}
+	if len(a.ConfigFiles) > 0 {
+		names := make([]string, 0, len(a.ConfigFiles))
+		for n := range a.ConfigFiles {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fmt.Fprintf(h, "\x00file=%s\x00%s", n, a.ConfigFiles[n])
+		}
 	}
 	if a.StopTimeout > 0 { // only when set: the default grace period must not roll existing apps
 		fmt.Fprintf(h, "\x00stop=%d", a.StopTimeout)
@@ -504,7 +522,9 @@ func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[stri
 		}
 		as := Assignment{Name: replicaName(r.App, r.Index, r.Hash), App: r.App, Image: spec.Image, Args: spec.Args,
 			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts, PrivEsc: spec.AllowPrivilegeEscalation,
-			Volumes: volumeArgs(spec.Volumes), Replica: r.Index, Data: spec.Data, DataUID: spec.DataUID, Resources: spec.Resources, StopTimeout: spec.stopTimeout()}
+			Volumes: volumeArgs(spec.Volumes), Replica: r.Index, Data: spec.Data, DataUID: spec.DataUID, Resources: spec.Resources, StopTimeout: spec.stopTimeout(),
+			ConfigFiles: spec.ConfigFiles, Dynamic: pgDynamic(st, r.App)}
+		as.PG = as.Dynamic != nil
 		if spec.Network == "pod" && r.IP != "" && n != nil && n.PodCIDR != "" {
 			as.IP, as.DNS, as.Hosts = r.IP, podGateway(n.PodCIDR), nil // discovery via DNS instead
 		}
@@ -923,7 +943,9 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 				rp.Fails, rp.Error, rp.Avoid = 0, "", ""
 			}
 		}
+		pgIngest(st, n.ID, req.PG, req.PGResults, time.Now())
 		scheduleReplicas(st, time.Now())
+		resp.PGOrders = pgOrdersFor(st, n.ID)
 		resp.Builds, resp.ImageToken = heartbeatBuilds(st, n, req)
 		if hasCap(n, capSandbox) {
 			for _, id := range pruneSandboxes(st, n.ID, req.Sandboxes, time.Now()) {
@@ -1109,6 +1131,7 @@ var clusterServeCmd = &cobra.Command{
 						healSeq = st.Heal.Next
 					}
 					healPass(st, now) // cordons first, so scheduling already sees them
+					pgPass(st, now)   // Postgres roles and members, before the apps are scheduled
 					scheduleReplicas(st, now)
 					heal = st.Heal
 					if err := maybeSealSecrets(st); err != nil {

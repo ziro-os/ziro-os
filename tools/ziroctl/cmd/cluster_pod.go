@@ -147,6 +147,7 @@ func podEndpoints(st *ClusterState) map[string][]string {
 			out[strconv.Itoa(r.Index)+"."+r.App] = []string{r.IP}
 		}
 	}
+	pgEndpoints(st, out, pgNow())
 	for _, ips := range out {
 		sort.Strings(ips)
 	}
