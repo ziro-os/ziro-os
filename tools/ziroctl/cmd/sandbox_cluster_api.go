@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -250,8 +251,9 @@ func (v *sandboxClusterView) snapshotsOn(r *http.Request, n *ClusterNode) []stri
 // one of the fixed list paths; nothing of the request URL reaches a node's URL but a validated
 // snapshot name.
 func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path string) {
-	if r.Method == http.MethodDelete { // a snapshot: on whichever node holds it
+	if r.Method == http.MethodDelete { // a snapshot: on every node that holds a copy
 		want := r.URL.Query().Get("image")
+		removed := 0
 		for _, n := range v.sandboxNodes() {
 			// The name sent to the node is the node's own (from its list, as the caller may
 			// see it), never the request's text.
@@ -261,12 +263,23 @@ func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path
 				}
 				q := path + "?" + url.Values{"image": {image}}.Encode()
 				if code, _, err := v.call(r, n, http.MethodDelete, q, nil); err == nil && code == http.StatusOK {
-					apiReply(w, nil, APIMessage{Status: "ok", Message: "snapshot removed"})
-					return
+					removed++
 				}
 			}
 		}
-		apiReply(w, errNotFound("no such snapshot"), nil)
+		if removed == 0 {
+			apiReply(w, errNotFound("no such snapshot"), nil)
+			return
+		}
+		// A copy still in flight to another node is removed by the next sync, not replicated.
+		_ = sandboxClusterMutate(func(st *ClusterState) error {
+			if st.SnapshotTombstones == nil {
+				st.SnapshotTombstones = map[string]time.Time{}
+			}
+			st.SnapshotTombstones[want] = time.Now().UTC()
+			return nil
+		})
+		apiReply(w, nil, APIMessage{Status: "ok", Message: fmt.Sprintf("snapshot removed from %d node(s)", removed)})
 		return
 	}
 	merged := []json.RawMessage{}
@@ -276,6 +289,10 @@ func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path
 		if err == nil && code == http.StatusOK && json.Unmarshal(out, &items) == nil {
 			merged = append(merged, items...)
 		}
+	}
+	if path == "/v1/sandboxes/snapshots" {
+		apiReply(w, nil, mergeSnapshots(merged))
+		return
 	}
 	if path != "/v1/sandboxes" {
 		apiReply(w, nil, merged)
@@ -292,6 +309,29 @@ func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path
 	sort.Slice(list, func(i, j int) bool { return list[i].Created.Before(list[j].Created) })
 	list, err := filterSandboxes(list, r.URL.Query())
 	apiReply(w, err, list)
+}
+
+// mergeSnapshots lists each snapshot once, with the number of nodes that hold a copy.
+func mergeSnapshots(raw []json.RawMessage) []sdkapi.SandboxSnapshot {
+	by := map[string]*sdkapi.SandboxSnapshot{}
+	for _, r := range raw {
+		var s sdkapi.SandboxSnapshot
+		if json.Unmarshal(r, &s) != nil || s.Image == "" {
+			continue
+		}
+		if have, ok := by[s.Image]; ok {
+			have.Nodes++
+			continue
+		}
+		s.Nodes = 1
+		by[s.Image] = &s
+	}
+	out := make([]sdkapi.SandboxSnapshot, 0, len(by))
+	for _, s := range by {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Image < out[j].Image })
+	return out
 }
 
 // forSandbox forwards a request about one sandbox to its node, and keeps the cluster's records

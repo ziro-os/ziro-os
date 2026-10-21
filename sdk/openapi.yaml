@@ -1706,6 +1706,7 @@ components:
         size: { type: string, description: "the image's size" }
         created: { type: string, format: date-time }
         workspace_size: { type: integer, format: int64, description: "bytes of the /workspace archive kept with the image" }
+        nodes: { type: integer, description: "on a cluster master: how many nodes hold a copy" }
     SandboxAccess:
       type: object
       properties:

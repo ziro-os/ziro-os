@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -1062,6 +1063,15 @@ var clusterServeCmd = &cobra.Command{
 		// Leader-only duties: the periodic scheduling pass (dead nodes lose their replicas even
 		// without traffic). Every master: renew its certificate; a joined master asks to become a
 		// voter once it has caught up.
+		go func() { // the leader keeps every snapshot on every sandbox node (sandbox_snapshot_sync.go)
+			for range time.Tick(snapshotSyncEvery) {
+				if rs.isLeader() {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+					syncSnapshots(ctx)
+					cancel()
+				}
+			}
+		}()
 		go func() {
 			healSeq := -1 // actions recorded before this leader's first pass were announced by its predecessor
 			for range time.Tick(agentInterval) {

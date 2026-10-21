@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -45,6 +46,16 @@ func (f *fakeNerdctl) run(_ context.Context, args ...string) ([]byte, error) {
 		return []byte(f.images), nil
 	case "commit":
 		f.images += args[len(args)-1] + "\t1MB\n"
+	case "save": // save -o <file> <ref>: an OCI archive naming ref
+		writeImageTar(args[2], args[3])
+	case "load": // load -i <file>: lists the image it names
+		names, err := imageTarNames(args[2])
+		if err != nil {
+			return []byte(err.Error()), err
+		}
+		for _, n := range names {
+			f.images += n + "\t1MB\n"
+		}
 	case "pause":
 		f.ps[args[len(args)-1]] = "Paused"
 	case "unpause":
@@ -493,4 +504,15 @@ func TestSandboxTouchThrottle(t *testing.T) {
 	if !onDisk().Equal(*now) {
 		t.Errorf("after 30s the disk has %v", onDisk())
 	}
+}
+
+// writeImageTar writes a minimal OCI image archive whose index.json names ref.
+func writeImageTar(path, ref string) {
+	f, _ := os.Create(path)
+	defer f.Close()
+	tw := tar.NewWriter(f)
+	idx := `{"manifests":[{"annotations":{"io.containerd.image.name":"` + ref + `"}}]}`
+	tw.WriteHeader(&tar.Header{Name: "index.json", Mode: 0644, Size: int64(len(idx)), Typeflag: tar.TypeReg})
+	io.WriteString(tw, idx)
+	tw.Close()
 }
