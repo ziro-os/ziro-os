@@ -41,6 +41,7 @@ line.
 `iifname` as well as the source CIDR. Nothing is added to the trusted interfaces.
 
 **The Tailscale module** (following pull requests).
+
 - Binaries come from the signed catalog (`ziro-os/pkgs`), pinned by sha256 and re-verified on every boot, like
   cloudflared. A daily job there takes the newest stable release, checks Tailscale's own signature, pins it and re-signs
   the catalog. Hosts update daily (`ziroctl tailscale update`) and restore the previous binary if the node does not come

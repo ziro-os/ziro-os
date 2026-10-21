@@ -54,6 +54,7 @@ ziroctl compose down
 ```
 
 Before `up`, `create` and `run`, the file is checked. These are refused unless you pass `--allow-privileged`:
+
 - `privileged`
 - host network, pid or ipc
 - `cap_add`

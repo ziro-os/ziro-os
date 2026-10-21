@@ -149,8 +149,11 @@ Example output:
   - Never limited: loopback, link-local, the cluster mesh (`ziro0`), container bridges and `protect allow` CIDRs.
   - Manage bans with `ziroctl security bans list|ban|unban`, or `GET/POST /api/v1/security/bans` (changes need an
     admin token).
+- **Gateway firewall.** The gateway can screen requests with a web application firewall (SQL injection, XSS, path
+  traversal, command injection, Log4Shell, XXE, SSRF, scanners), refuse deny-listed and banned clients, and ban
+  repeat offenders by itself. It takes the client address from trusted proxies only. See [gateway](gateway.md).
 - **Security alerting**: `ziroctl security alerting add <name> --url https://... [--min-severity high]
-  [--events ban,threat,fim,canary] [--format json|slack]` pushes Sentinel threats, file-integrity and canary
+  [--events ban,threat,fim,canary,gateway] [--format json|slack]` pushes Sentinel threats, file-integrity and canary
   changes, and bans to webhooks.
   - Each request is signed: `X-Ziro-Signature: sha256=HMAC-SHA256(secret, X-Ziro-Timestamp + "." + body)`. The
     secret is shown once at creation. Reject stale timestamps to stop replays.
@@ -262,4 +265,3 @@ linking and CNI VERSION response; it does not exercise a custom DHCP lease lifec
 These checks do not establish cloud-image boot correctness, external agent isolation, or the absence of all
 vulnerabilities. An agent that receives a host runtime socket or privileged mounts receives the corresponding host
 authority. The cluster agent is a workload reconciler, not a permission sandbox for AI agents.
-

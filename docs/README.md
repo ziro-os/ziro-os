@@ -25,7 +25,8 @@ modules for everything else. New here? Read [getting started](getting-started.md
 
 - [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes, with rollback.
 - [Smart DNS](dns.md): caching resolver, split DNS, records, blocklists, egress control.
-- [Gateway](gateway.md): HTTP(S), HTTP/3 and TCP routing with automatic TLS.
+- [Gateway](gateway.md): HTTP(S), HTTP/3 and TCP routing with automatic TLS, traffic management, a web application
+  firewall and metrics.
 - [WireGuard VPN](wireguard.md): remote access to a host.
 - [Cloudflare Tunnel](cloudflare-tunnel.md): publish services without a public IP, with optional Zero Trust
   Access (`ziroctl cf`, opt-in module).

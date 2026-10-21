@@ -54,12 +54,14 @@ err = c.Events(ctx, func(e api.AuditRecord) error {
 ```
 
 **Routes:** the API follows one convention.
+
 - Paths are `/api/v1/<resource>[/{name}[/<action>]]`.
 - `GET` reads, `POST` creates or runs an action, `PUT` replaces, and `DELETE` removes.
 - Long operations (module enable, app deploy, upgrades, backups, image pulls) answer `202 Accepted` and run in the
   background.
 
 **CLI-only on purpose:** a few commands have no API.
+
 - Interactive commands: `container run`/`exec`.
 - Commands that print key material: `wireguard peer add` (a private key), `apps credentials`.
 - Signing and building: catalog signing, `dev`.

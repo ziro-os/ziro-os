@@ -83,6 +83,20 @@ flowchart TB
 - **Gateway:** zirogate is one L4/L7 data plane (HTTP/1.1, HTTP/2, HTTP/3, TCP, TLS passthrough) fed by a route
   store: cluster state, resolved by the master to running replicas, or a local file on standalone hosts. The CLI
   and the API server edit routes; the gateway re-validates and hot-swaps them ([gateway guide](gateway.md)).
+  Design decisions:
+  - The route table is an immutable snapshot behind an atomic pointer. A request takes no lock, and a reload cannot
+    drop a request in flight. Unchanged routes keep their rate-limit state, counters and health across reloads.
+  - Per-request state is lock-free or sharded (metrics, limiters, bans), and every table is bounded and swept, so a
+    flood of distinct clients or churning pod addresses cannot grow memory without limit.
+  - The access log is written by one background writer through a bounded queue and drops lines, counted, rather than
+    stalling traffic.
+  - The WAF is native Go with no new dependency. A literal prefilter (Aho-Corasick) decides which RE2 expressions run,
+    so cost follows the request's content, and RE2 keeps worst-case time linear. Coraza and the OWASP CRS were
+    rejected: their dependency weight and per-request cost conflict with a minimal base.
+  - Policy sees one canonical identity: a cleaned path, a normalized host, and a client address that only a trusted
+    proxy may name.
+  - Rate limits, automatic bans and metrics are per node. Sharing them across nodes needs a replicated store and is
+    left out until a deployment needs it.
 - **Cloudflare Tunnel (`ziroctl cf`):**
   - It's the catalog module `cloudflared`: the upstream static binary, sha256-pinned, running as its own user.
     The catalog changes the binary and ziroctl changes the commands, so a new upstream release is only a catalog
@@ -293,8 +307,9 @@ Known limits:
 
 ### 5.4 Design notes
 
-- **Gateway (zirogate).** HTTP(S), TCP and TLS-passthrough ingress, plus WireGuard remote-access peers relayed by a
-  hub gateway node. See [gateway.md](gateway.md) for the full feature set.
+- **Gateway (zirogate).** HTTP(S), TCP and TLS-passthrough ingress with traffic management, a web application
+  firewall and Prometheus metrics, plus WireGuard remote-access peers relayed by a hub gateway node. See
+  [gateway.md](gateway.md) for the full feature set.
   - Routes (`host`, `path_prefix` → `app:port`, `tls: auto|internal|cert:<name>|dns01|off`, `allow_cidrs`,
     `rate_rps`, `max_body_mb`) live in cluster state and are delivered in heartbeats to nodes labeled `gateway`.
   - The proxy is `httputil.ReverseProxy`. It balances over running endpoints on the mesh (`round_robin`,

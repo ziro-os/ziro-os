@@ -25,8 +25,8 @@ see [getting started](docs/getting-started.md) and [installation](docs/installat
 
 - **Containers:** containerd, runc and CNI; `ziroctl container` and `compose`; signed app catalogs; deploys from git
   with rollback ([containers](docs/containers.md), [apps](docs/apps.md), [deploy](docs/deploy.md)).
-- **Networking:** a gateway with automatic TLS and HTTP/3, DNS, WireGuard, and a global mesh router for
-  devices anywhere ([gateway](docs/gateway.md), [router](docs/router.md)).
+- **Networking:** a gateway with automatic TLS, HTTP/3, traffic management, a web application firewall and Prometheus
+  metrics, DNS, WireGuard, and a global mesh router for devices anywhere ([gateway](docs/gateway.md), [router](docs/router.md)).
 - **Clusters:** Raft HA control plane, WireGuard mesh, pod network, policies and sealed secrets in the same binary
   ([clustering](docs/clustering.md)).
 - **Operations:** declarative host config, signed tools updates and OS upgrades with rollback, backups, an

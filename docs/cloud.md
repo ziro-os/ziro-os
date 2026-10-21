@@ -67,6 +67,7 @@ host:
 ## Terraform (AWS)
 
 `deploy/terraform/aws` creates the following:
+
 - a VPC with subnets across availability zones
 - a security group
 - a launch template for Ziro OS AMIs, with IMDSv2 required and hop limit 1, so containers can't reach instance

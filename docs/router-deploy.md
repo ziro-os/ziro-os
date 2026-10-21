@@ -72,7 +72,6 @@ docker compose exec device-b zirocd up --name device-b
 
 ### Check it
 
-
 ```sh
 docker compose exec device-a zirocd status          # device-b: direct 172.x.x.x:41641
 docker compose exec device-a zirocd ping device-b

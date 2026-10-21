@@ -132,6 +132,7 @@ and enter the code:  WDJB-MJHT
 
 **How it works.** The router runs the flow, so zirocd never talks to the identity provider and the client secret never
 leaves the masters (it's stored and sealed with the cluster secrets).
+
 1. The leader asks the provider for a device code and hands the URL and user code to zirocd.
 2. The leader polls the provider until the user approves.
 3. It verifies the ID token: issuer, audience (your client ID), signature against the provider's published keys, and

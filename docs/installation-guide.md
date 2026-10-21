@@ -30,6 +30,7 @@ ziroctl install
 ```
 
 The installer asks for the following:
+
 - the disk
 - the network: DHCP, or a static IP with gateway and DNS
 - the hostname

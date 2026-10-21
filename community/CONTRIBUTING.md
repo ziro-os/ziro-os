@@ -154,7 +154,11 @@ for m in sdk tools/ziroctl tools/ziropkg tools/zirocd; do
   (cd "$m" && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...)
 done
 shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh
+npx markdownlint-cli2@0.23.3 "**/*.md" "#node_modules"  # Markdown style, see .markdownlint.json
 ```
+
+The Go tests also check the documentation: every `ziroctl` command in `docs/` must exist with valid flags, and every
+relative link and heading anchor in the Markdown files must resolve.
 
 ## Adding a command
 

@@ -48,6 +48,7 @@ ziroctl system top --json            # for scripts; also GET /api/v1/system/top
 ```
 
 There are three panes:
+
 - **Containers** (`c`): CPU, memory against its limit, network and block I/O rates, and PIDs. It's read straight
   from each container's cgroup, like `docker stats`.
 - **Processes** (`p`): PID, user, CPU, RSS, state, and the service or container each one belongs to.
@@ -60,6 +61,7 @@ There are three panes:
   - Without conntrack it lists sockets and their states, with no byte counts.
 
 Keys:
+
 - `tab`, `c`, `p` and `n` switch panes.
 - `s` cycles the sort: CPU, memory or name; in the network pane, rate, total or remote.
 - `/` filters (a name, an IP or a port).
@@ -80,6 +82,7 @@ ziroctl system prune --all               # also drop the upgrade rollback genera
 ```
 
 Prune removes only what nothing uses:
+
 - stopped containers that no app or cluster owns
 - images no container uses. A container counts as using an image by its full name (`mysql:8.4` and
   `docker.io/library/mysql:8.4` are the same image) or by digest. An image that a container starts using between
@@ -101,6 +104,7 @@ turns this off.
 
 Every long-running service (sentinel, crond, cluster-agent, cluster-master, ziro-api, gateway, module daemons) is
 supervised by ziro-init:
+
 - **Restart:** a daemon that exits is restarted with a crash-loop backoff of 1 s doubling to 60 s, with no limit.
 - **Ownership:** daemons are always children of PID 1, whoever started them, so no exit goes unseen.
 - **Second line:** once a minute, the sentinel starts any enabled service that is down, for example one stopped

@@ -184,6 +184,7 @@ ziroctl deploy hook web            # URL path and secret (--rotate replaces the 
 - **GitLab:** Settings > Webhooks, the same URL, the secret as the secret token.
 
 The route is public, and the secret decides everything:
+
 - **Signature:** GitHub's `X-Hub-Signature-256` HMAC or GitLab's `X-Gitlab-Token`, compared in constant time.
   An unknown app answers exactly like a bad signature.
 - **Branch:** pushes to other branches are ignored.
@@ -194,6 +195,7 @@ The route is public, and the secret decides everything:
 
 `ziroctl deploy` talks to ziroctld on a root-only socket, `/run/ziro/ziroctld.sock`. The REST API exposes the same
 operations under `/api/v1/deployments`:
+
 - creating a deployment from a repository needs `admin`, because it runs code from that repository
 - pushing source, redeploy and rollback need `deployer`
 - reading needs `viewer`
