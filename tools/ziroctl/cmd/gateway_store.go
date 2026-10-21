@@ -470,6 +470,8 @@ var (
 	gwHTTPAddr  string
 	gwHTTPSAddr string
 	gwHTTP3     bool
+
+	gwMetricsAddr, gwMetricsTokenFile string
 )
 
 // gatewaySource returns the config to serve: the agent-written file on cluster gateway nodes,
@@ -564,7 +566,7 @@ var gatewayServeCmd = &cobra.Command{
 			fmt.Printf("[gateway] admin token: %v (bans cannot be lifted at run time)\n", err)
 		}
 		g.startKernelBans(ctx)
-		var last []byte
+		var last, rejected []byte
 		reload := func() bool {
 			cfg, sig, err := gatewaySourceSig(last)
 			if err != nil {
@@ -573,11 +575,21 @@ var gatewayServeCmd = &cobra.Command{
 			if cfg == nil {
 				return true // unchanged
 			}
+			if bytes.Equal(sig, rejected) {
+				return g.ready.Load() // already reported; keep serving the last good table
+			}
 			if err := g.load(cfg); err != nil {
 				fmt.Printf("[gateway] config rejected, keeping previous routes: %v\n", err)
-				return last != nil
+				g.metrics.reloadFailed.Add(1)
+				rejected = sig
+				alertf("high", "gateway", "gateway configuration rejected", map[string]any{"error": err.Error()})
+				return g.ready.Load()
 			}
+			rejected = nil
 			last = sig
+			g.metrics.reloadOK.Add(1)
+			g.metrics.lastReloadOK.Store(time.Now().Unix())
+			g.ready.Store(true)
 			g.syncL4Listeners()
 			rules := []FirewallRule{}
 			for _, a := range []string{gwHTTPAddr, gwHTTPSAddr} {
@@ -644,15 +656,16 @@ var gatewayServeCmd = &cobra.Command{
 		// ReadHeaderTimeout, slow bodies by the per-request deadline set in the handler.
 		mk := func(addr string, h http.Handler) *http.Server {
 			return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second,
-				IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
+				IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10, ConnState: g.trackConn}
 		}
 		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: g.getCertificate,
-			NextProtos: []string{"h2", "http/1.1", acme.ALPNProto}}
+			NextProtos: []string{"h2", "http/1.1", acme.ALPNProto}, VerifyConnection: g.countHandshake}
 		httpSrv := mk(gwHTTPAddr, g.acmeMgr.HTTPHandler(g.handler(false)))
 		httpsSrv := mk(gwHTTPSAddr, g.handler(true))
 		httpsSrv.TLSConfig = tlsCfg
 
 		errc := make(chan error, 4)
+		servers := []*http.Server{httpSrv, httpsSrv}
 		hln, err := net.Listen("tcp", gwHTTPAddr)
 		if err != nil {
 			return err
@@ -681,6 +694,21 @@ var gatewayServeCmd = &cobra.Command{
 				fmt.Printf("[gateway] admin endpoint: %v\n", err)
 			}
 		}()
+		if gwMetricsAddr != "" {
+			tok, err := os.ReadFile(gwMetricsTokenFile)
+			if err != nil || len(strings.TrimSpace(string(tok))) < 16 {
+				return fmt.Errorf("--metrics-listen needs --metrics-token-file with a token of 16+ characters")
+			}
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", metricsAuth(strings.TrimSpace(string(tok)), g.adminHandler()))
+			ms := &http.Server{Addr: gwMetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+			go func() {
+				if err := ms.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					fmt.Printf("[gateway] metrics listener: %v\n", err)
+				}
+			}()
+			servers = append(servers, ms)
+		}
 		fmt.Printf("[gateway] serving http %s, https %s (h2%s), admin %s\n", gwHTTPAddr, gwHTTPSAddr,
 			map[bool]string{true: ", h3", false: ""}[gwHTTP3], gatewayAdminAddr)
 		select {
@@ -688,7 +716,7 @@ var gatewayServeCmd = &cobra.Command{
 			return err
 		case <-ctx.Done():
 		}
-		g.shutdown([]*http.Server{httpSrv, httpsSrv}, ln, admin)
+		g.shutdown(servers, ln, admin)
 		return nil
 	},
 }
@@ -1272,6 +1300,8 @@ func init() {
 	gatewayServeCmd.Flags().StringVar(&gwHTTPAddr, "http", ":80", "HTTP listen address")
 	gatewayServeCmd.Flags().StringVar(&gwHTTPSAddr, "https", ":443", "HTTPS listen address (TCP, and UDP for HTTP/3)")
 	gatewayServeCmd.Flags().BoolVar(&gwHTTP3, "http3", true, "Serve HTTP/3 (QUIC) on the HTTPS port")
+	gatewayServeCmd.Flags().StringVar(&gwMetricsAddr, "metrics-listen", "", "Also serve /metrics on this address, behind a bearer token")
+	gatewayServeCmd.Flags().StringVar(&gwMetricsTokenFile, "metrics-token-file", "", "File holding the bearer token for --metrics-listen")
 
 	gatewayRouteCmd.AddCommand(gatewayRouteAddCmd, gatewayRouteRmCmd, gatewayRouteLsCmd)
 	gatewayCertCmd.AddCommand(gatewayCertAddCmd, gatewayCertRmCmd, gatewayCertLsCmd)

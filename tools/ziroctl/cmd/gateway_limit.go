@@ -217,6 +217,11 @@ const wafBlockAlert = 100 // blocked requests on one route within a janitor inte
 // route with no usable upstream. Alerts are deduplicated by the alert queue.
 func (g *gatewayServer) raiseAlerts(t *routeTable, now time.Time, blocked map[string]uint64) {
 	nano := now.UnixNano()
+	for _, c := range g.certExpiries() {
+		if left := c.at.Sub(now); left < 14*24*time.Hour {
+			alertf("medium", "gateway", "certificate "+c.name+" expires soon", map[string]any{"name": c.name, "expires": c.at.UTC().Format(time.RFC3339)})
+		}
+	}
 	for _, r := range t.all {
 		n := r.m.denied[denyWAF].Load()
 		if d := n - blocked[r.Name]; d >= wafBlockAlert && n >= d {

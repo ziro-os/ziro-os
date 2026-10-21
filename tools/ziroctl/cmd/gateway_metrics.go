@@ -60,6 +60,11 @@ type routeMetrics struct {
 	mirrorSkipped atomic.Uint64 // copies not sent: too large, or too many pending
 
 	wafMatches [numWAFGroups][3]atomic.Uint64 // requests with a match, by group and outcome: log, detect, block
+
+	upHist  [gwNumBuckets + 1]atomic.Uint64 // time to the upstream's response headers, per attempt
+	upSumNs atomic.Uint64
+	upCount atomic.Uint64
+	upResp  [6]atomic.Uint64 // upstream responses by status class (index 1 = 1xx ... 5 = 5xx)
 }
 
 // observe records a finished request or L4 connection.
@@ -80,6 +85,19 @@ func (m *routeMetrics) observe(code int, d time.Duration) {
 
 func (m *routeMetrics) deny(r denyReason) { m.denied[r].Add(1) }
 
+// observeUpstream records one upstream attempt that produced a response.
+func (m *routeMetrics) observeUpstream(code int, d time.Duration) {
+	i := 0
+	for s := d.Seconds(); i < gwNumBuckets && s > gwBuckets[i]; i++ {
+	}
+	m.upHist[i].Add(1)
+	m.upSumNs.Add(uint64(d))
+	m.upCount.Add(1)
+	if c := code / 100; c >= 1 && c <= 5 {
+		m.upResp[c].Add(1)
+	}
+}
+
 type gwMetrics struct {
 	mu     sync.RWMutex
 	routes map[string]*routeMetrics
@@ -91,6 +109,14 @@ type gwMetrics struct {
 
 	logDropped atomic.Uint64
 	bansTotal  atomic.Uint64
+
+	reloadOK     atomic.Uint64
+	reloadFailed atomic.Uint64
+	lastReloadOK atomic.Int64 // unix seconds
+	conns        atomic.Int64 // open client connections served by the HTTP servers
+	l4conns      atomic.Int64 // open TCP and passthrough connections
+	tlsVersion   [4]atomic.Uint64
+	h3Handshakes atomic.Uint64
 }
 
 func newGWMetrics() *gwMetrics {
@@ -213,6 +239,26 @@ func (m *gwMetrics) write(w io.Writer) {
 		for i := range r.m.denied {
 			if n := r.m.denied[i].Load(); n > 0 {
 				fmt.Fprintf(bw, "zirogate_denied_total{route=%q,reason=%q} %d\n", r.name, denyNames[i], n)
+			}
+		}
+	}
+	family("zirogate_upstream_request_duration_seconds", "Time to an upstream's response headers, per attempt.", "histogram")
+	for _, r := range routes {
+		var cum uint64
+		for i, b := range gwBuckets {
+			cum += r.m.upHist[i].Load()
+			fmt.Fprintf(bw, "zirogate_upstream_request_duration_seconds_bucket{route=%q,le=\"%g\"} %d\n", r.name, b, cum)
+		}
+		cum += r.m.upHist[gwNumBuckets].Load()
+		fmt.Fprintf(bw, "zirogate_upstream_request_duration_seconds_bucket{route=%q,le=\"+Inf\"} %d\n", r.name, cum)
+		fmt.Fprintf(bw, "zirogate_upstream_request_duration_seconds_sum{route=%q} %g\n", r.name, float64(r.m.upSumNs.Load())/1e9)
+		fmt.Fprintf(bw, "zirogate_upstream_request_duration_seconds_count{route=%q} %d\n", r.name, r.m.upCount.Load())
+	}
+	family("zirogate_upstream_responses_total", "Responses from upstreams by status class.", "counter")
+	for _, r := range routes {
+		for c := 1; c <= 5; c++ {
+			if n := r.m.upResp[c].Load(); n > 0 {
+				fmt.Fprintf(bw, "zirogate_upstream_responses_total{route=%q,class=\"%dxx\"} %d\n", r.name, c, n)
 			}
 		}
 	}

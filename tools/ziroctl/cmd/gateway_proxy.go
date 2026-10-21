@@ -240,6 +240,7 @@ type gatewayServer struct {
 	mirrorSem  chan struct{} // bounds mirrored requests in flight
 	httpsPort  int           // the public HTTPS port when it is not 443 (for redirects)
 	draining   atomic.Bool
+	ready      atomic.Bool    // a configuration is loaded
 	l4wg       sync.WaitGroup // open TCP and passthrough connections
 }
 
@@ -465,6 +466,7 @@ func (rt gwRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 				}
 			}
 			c.upStatus, c.upNS = code, now.Sub(t0).Nanoseconds()
+			r.m.observeUpstream(code, now.Sub(t0))
 			resp.Body = &countedBody{ReadCloser: resp.Body, cnt: &tg.up.active}
 			return resp, nil
 		}
@@ -1175,6 +1177,16 @@ func (g *gatewayServer) adminHandler() http.Handler {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		g.metrics.write(w)
+		g.writeServerMetrics(w)
+	})
+	// Liveness: the process answers. Readiness: it serves traffic (and is not draining).
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok\n") })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if !g.isReady() {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, "ready\n")
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

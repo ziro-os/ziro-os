@@ -17,6 +17,8 @@ import (
 func (g *gatewayServer) serveL4(conn net.Conn, r *gwRoute) {
 	g.l4wg.Add(1)
 	defer g.l4wg.Done()
+	g.metrics.l4conns.Add(1)
+	defer g.metrics.l4conns.Add(-1)
 	defer conn.Close()
 	start := time.Now()
 	ip := gwPeerIP(conn.RemoteAddr().String())

@@ -208,5 +208,5 @@ func collectMetrics() string {
 			}
 		}
 	}
-	return renderMetrics(h, st, members, selfID, time.Now())
+	return renderMetrics(h, st, members, selfID, time.Now()) + gatewayMetricsText()
 }
