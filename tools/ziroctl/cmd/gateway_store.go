@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -11,9 +12,11 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,7 +24,6 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // Route stores: the cluster (master state; gateway nodes get resolved routes by heartbeat) or a
@@ -34,9 +36,10 @@ var (
 
 // gatewayData is what a store holds.
 type gatewayData struct {
-	Routes []GatewayRoute `json:"routes"`
-	ACME   GatewayACME    `json:"acme"`
-	Domain GatewayDomain  `json:"domain,omitempty"` // base domain of deployed apps
+	Routes   []GatewayRoute  `json:"routes"`
+	ACME     GatewayACME     `json:"acme"`
+	Settings GatewaySettings `json:"settings,omitempty"`
+	Domain   GatewayDomain   `json:"domain,omitempty"` // base domain of deployed apps
 	// DNSCloud publishes the gateway's names at a public DNS provider (dnsprovider.go).
 	DNSCloud DNSCloud `json:"dns_cloud,omitempty"`
 }
@@ -77,16 +80,16 @@ func (clusterRouteStore) read() (*gatewayData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &gatewayData{Routes: st.Routes, ACME: st.GatewayACME, Domain: st.GatewayDomain, DNSCloud: st.DNSCloud}, nil
+	return &gatewayData{Routes: st.Routes, ACME: st.GatewayACME, Settings: st.GatewaySettings, Domain: st.GatewayDomain, DNSCloud: st.DNSCloud}, nil
 }
 
 func (clusterRouteStore) update(fn func(d *gatewayData) error) error {
 	return withState(func(st *ClusterState) error {
-		d := &gatewayData{Routes: append([]GatewayRoute(nil), st.Routes...), ACME: st.GatewayACME, Domain: st.GatewayDomain, DNSCloud: st.DNSCloud}
+		d := &gatewayData{Routes: append([]GatewayRoute(nil), st.Routes...), ACME: st.GatewayACME, Settings: st.GatewaySettings, Domain: st.GatewayDomain, DNSCloud: st.DNSCloud}
 		if err := fn(d); err != nil {
 			return err
 		}
-		st.Routes, st.GatewayACME, st.GatewayDomain, st.DNSCloud = d.Routes, d.ACME, d.Domain, d.DNSCloud
+		st.Routes, st.GatewayACME, st.GatewaySettings, st.GatewayDomain, st.DNSCloud = d.Routes, d.ACME, d.Settings, d.Domain, d.DNSCloud
 		for _, r := range d.Routes {
 			if r.TLS == "internal" && st.Secrets[gatewayInternalCASecret] == nil {
 				c, k, err := newInternalCA()
@@ -259,7 +262,7 @@ func (s localRouteStore) config() (*GatewayConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &GatewayConfig{ACME: d.ACME, Routes: []GatewayRouteState{}}
+	cfg := &GatewayConfig{ACME: d.ACME, Settings: d.Settings, Routes: []GatewayRouteState{}}
 	for _, r := range d.Routes {
 		r.Normalize()
 		var serve bool
@@ -470,15 +473,37 @@ var (
 // gatewaySource returns the config to serve: the agent-written file on cluster gateway nodes,
 // the local store otherwise.
 func gatewaySource() (*GatewayConfig, error) {
+	cfg, _, err := gatewaySourceSig(nil)
+	return cfg, err
+}
+
+// gatewaySourceSig is gatewaySource for a polling reloader: it returns a signature of the config
+// and, when the signature equals prev, a nil config (nothing to do). On a cluster node the
+// signature is the file itself, so an unchanged config costs one read and a comparison.
+func gatewaySourceSig(prev []byte) (*GatewayConfig, []byte, error) {
 	if _, err := loadClusterConfig(); err == nil {
-		var cfg GatewayConfig
 		b, err := os.ReadFile(gatewayConfigPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return &cfg, json.Unmarshal(b, &cfg)
+		if bytes.Equal(b, prev) {
+			return nil, prev, nil
+		}
+		var cfg GatewayConfig
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			return nil, nil, err
+		}
+		return &cfg, b, nil
 	}
-	return localRouteStore{dir: gatewayLocalDir}.config()
+	cfg, err := localRouteStore{dir: gatewayLocalDir}.config()
+	if err != nil {
+		return nil, nil, err
+	}
+	b, _ := json.Marshal(cfg)
+	if bytes.Equal(b, prev) {
+		return nil, prev, nil
+	}
+	return cfg, b, nil
 }
 
 // gwFirewallComment marks the firewall rules the gateway owns (opened and closed as routes change).
@@ -526,22 +551,25 @@ var gatewayServeCmd = &cobra.Command{
 	Short:  "Run the gateway (the gateway service)",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
 		g := newGatewayServer()
+		g.alog = newAccessLog(os.Stdout, &g.metrics.logDropped)
+		g.httpsPort = portOf(gwHTTPSAddr)
 		var last []byte
 		reload := func() bool {
-			cfg, err := gatewaySource()
+			cfg, sig, err := gatewaySourceSig(last)
 			if err != nil {
 				return false
 			}
-			b, _ := json.Marshal(cfg)
-			if string(b) == string(last) {
-				return true
+			if cfg == nil {
+				return true // unchanged
 			}
 			if err := g.load(cfg); err != nil {
 				fmt.Printf("[gateway] config rejected, keeping previous routes: %v\n", err)
 				return last != nil
 			}
-			last = b
+			last = sig
 			g.syncL4Listeners()
 			rules := []FirewallRule{}
 			for _, a := range []string{gwHTTPAddr, gwHTTPSAddr} {
@@ -552,11 +580,9 @@ var gatewayServeCmd = &cobra.Command{
 			if gwHTTP3 {
 				rules = append(rules, FirewallRule{Port: portOf(gwHTTPSAddr), Protocol: "udp"})
 			}
-			g.mu.RLock()
-			for p := range g.tcp {
+			for p := range g.tbl.Load().tcp {
 				rules = append(rules, FirewallRule{Port: p, Protocol: "tcp"})
 			}
-			g.mu.RUnlock()
 			syncGatewayFirewall(rules)
 			fmt.Printf("[gateway] loaded %d routes\n", len(cfg.Routes))
 			return true
@@ -564,20 +590,32 @@ var gatewayServeCmd = &cobra.Command{
 		// After a reboot the agent may not have rewritten the config yet (tmpfs): wait for it,
 		// so the ACME account is built from real settings.
 		for !reload() {
-			time.Sleep(time.Second)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(time.Second):
+			}
 		}
 		go func() {
-			for range time.Tick(time.Second) {
-				reload()
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if !g.draining.Load() {
+						reload()
+					}
+				}
 			}
 		}()
+		go g.janitor(ctx)
 
 		if err := os.MkdirAll(gatewayCertDir, 0700); err != nil {
 			return err
 		}
-		g.mu.RLock()
-		cfg := g.cfg
-		g.mu.RUnlock()
+		cfg := g.tbl.Load().cfg
 		g.acmeMgr = &autocert.Manager{
 			Prompt: autocert.AcceptTOS,
 			Cache:  autocert.DirCache(filepath.Join(gatewayCertDir, "acme")),
@@ -594,9 +632,11 @@ var gatewayServeCmd = &cobra.Command{
 			g.acmeMgr.Client = &acme.Client{DirectoryURL: cfg.ACME.Directory}
 		}
 
+		// No ReadTimeout: a long upload or stream is legitimate. Slow headers are cut by
+		// ReadHeaderTimeout, slow bodies by the per-request deadline set in the handler.
 		mk := func(addr string, h http.Handler) *http.Server {
 			return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second,
-				ReadTimeout: 5 * time.Minute, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
+				IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
 		}
 		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: g.getCertificate,
 			NextProtos: []string{"h2", "http/1.1", acme.ALPNProto}}
@@ -605,7 +645,11 @@ var gatewayServeCmd = &cobra.Command{
 		httpsSrv.TLSConfig = tlsCfg
 
 		errc := make(chan error, 4)
-		go func() { errc <- httpSrv.ListenAndServe() }()
+		hln, err := net.Listen("tcp", gwHTTPAddr)
+		if err != nil {
+			return err
+		}
+		go func() { errc <- httpSrv.Serve(g.wrapProxyListener(hln)) }()
 		ln, err := net.Listen("tcp", gwHTTPSAddr)
 		if err != nil {
 			return err
@@ -614,24 +658,71 @@ var gatewayServeCmd = &cobra.Command{
 		go g.splitTLS(ln, https)
 		go func() { errc <- httpsSrv.ServeTLS(https, "", "") }()
 		if gwHTTP3 {
-			g.h3 = &http3.Server{Addr: gwHTTPSAddr, Handler: g.handler(true), TLSConfig: http3.ConfigureTLSConfig(tlsCfg)}
+			h3 := &http3.Server{Addr: gwHTTPSAddr, Handler: g.handler(true), TLSConfig: http3.ConfigureTLSConfig(tlsCfg)}
+			g.h3.Store(h3)
 			go func() {
-				if err := g.h3.ListenAndServe(); err != nil {
+				if err := h3.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					fmt.Printf("[gateway] HTTP/3 disabled: %v\n", err)
-					g.h3 = nil
+					g.h3.CompareAndSwap(h3, nil)
 				}
 			}()
 		}
 		admin := &http.Server{Addr: gatewayAdminAddr, Handler: g.adminHandler(), ReadHeaderTimeout: 5 * time.Second}
 		go func() {
-			if err := admin.ListenAndServe(); err != nil {
+			if err := admin.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fmt.Printf("[gateway] admin endpoint: %v\n", err)
 			}
 		}()
 		fmt.Printf("[gateway] serving http %s, https %s (h2%s), admin %s\n", gwHTTPAddr, gwHTTPSAddr,
 			map[bool]string{true: ", h3", false: ""}[gwHTTP3], gatewayAdminAddr)
-		return <-errc
+		select {
+		case err := <-errc:
+			return err
+		case <-ctx.Done():
+		}
+		g.shutdown([]*http.Server{httpSrv, httpsSrv}, ln, admin)
+		return nil
 	},
+}
+
+// shutdown drains the gateway: it stops accepting, lets in-flight requests and TCP connections
+// finish for the configured drain time, then closes what is left. Hijacked connections
+// (WebSocket) are not tracked by net/http and end when the process exits.
+func (g *gatewayServer) shutdown(servers []*http.Server, rawTLS net.Listener, admin *http.Server) {
+	g.draining.Store(true)
+	drain := gatewayDefaultDrain
+	if s := g.settings.Load(); s != nil {
+		drain = s.drain
+	}
+	fmt.Printf("[gateway] draining for up to %s\n", drain)
+	ctx, cancel := context.WithTimeout(context.Background(), drain)
+	defer cancel()
+	rawTLS.Close()
+	g.closeL4()
+	var wg sync.WaitGroup
+	for _, srv := range servers {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = srv.Shutdown(ctx) }()
+	}
+	if h3 := g.h3.Load(); h3 != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = h3.Shutdown(ctx) }()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); g.l4wg.Wait() }()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		for _, srv := range servers {
+			_ = srv.Close()
+		}
+	}
+	_ = admin.Close()
+	if g.alog != nil {
+		g.alog.close()
+	}
 }
 
 func portOf(addr string) int {
@@ -692,6 +783,7 @@ type routeFlags struct {
 	tcp, passthrough                   bool
 	apps, to, headers, setReq, setResp []string
 	rmReq, rmResp, basicAuth           []string
+	basicAuthFile                      string
 	respond                            string
 	health                             string
 }
@@ -792,18 +884,20 @@ func routeFromFlags(name string, f routeFlags) (GatewayRoute, error) {
 		r.Health = &GatewayHealth{Path: path, Interval: interval}
 	}
 	for _, e := range f.basicAuth {
-		user, pass, ok := strings.Cut(e, ":")
-		if !ok || user == "" || len(pass) < 8 {
-			return r, fmt.Errorf("--basic-auth wants user:password (password 8+ characters)")
+		if err := addBasicAuth(&r, e, "--basic-auth"); err != nil {
+			return r, err
 		}
-		h, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	}
+	if f.basicAuthFile != "" {
+		entries, err := readBasicAuthFile(f.basicAuthFile)
 		if err != nil {
 			return r, err
 		}
-		if r.BasicAuth == nil {
-			r.BasicAuth = map[string]string{}
+		for _, e := range entries {
+			if err := addBasicAuth(&r, e, "--basic-auth-file"); err != nil {
+				return r, err
+			}
 		}
-		r.BasicAuth[user] = string(h)
 	}
 	return r, nil
 }
@@ -1141,7 +1235,8 @@ func init() {
 	f.StringSliceVar(&gwF.r.AllowCIDRs, "allow-cidr", nil, "Only clients from these CIDRs (repeatable)")
 	f.IntVar(&gwF.r.RateRPS, "rate", 0, "Requests (or connections) per second per client IP (0 = unlimited)")
 	f.IntVar(&gwF.r.MaxBodyMB, "max-body-mb", 0, "Request body limit in MB (default 10)")
-	f.StringArrayVar(&gwF.basicAuth, "basic-auth", nil, "Require HTTP basic auth: user:password (stored as bcrypt; repeatable)")
+	f.StringArrayVar(&gwF.basicAuth, "basic-auth", nil, "Require HTTP basic auth: user:password (stored as bcrypt; repeatable; the password shows in process listings, prefer --basic-auth-file)")
+	f.StringVar(&gwF.basicAuthFile, "basic-auth-file", "", "Read user:password lines for basic auth from a file (mode 600)")
 	f.BoolVar(&gwF.tcp, "tcp", false, "A TCP route on --listen (databases, any TCP service)")
 	f.IntVar(&gwF.r.Listen, "listen", 0, "Port for a --tcp route")
 	f.BoolVar(&gwF.passthrough, "passthrough", false, "TLS passthrough on :443 routed by SNI (the upstream terminates TLS)")
@@ -1249,6 +1344,7 @@ func registerGatewayRoutes(a *apiRouter) {
 			apiReply(w, err, APIMessage{Status: "ok", Message: "route " + name + " removed"})
 		}
 	})
+	registerGatewaySettingsRoutes(a)
 	a.get("/api/v1/gateway/status", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		if s := store(w); s != nil {
 			st, err := gatewayStatus(s)

@@ -1043,6 +1043,10 @@ func restartService(name string) error {
 	return startService(name)
 }
 
+// stopGrace lets a service that drains on SIGTERM finish before SIGKILL (the default is 3s). The
+// gateway's drain time is at most schema.GatewayMaxDrainSeconds.
+var stopGrace = map[string]time.Duration{"gateway": 65 * time.Second}
+
 func stopService(name string) error {
 	def, err := loadServiceDef(name)
 	if err != nil {
@@ -1072,7 +1076,11 @@ func stopService(name string) error {
 	}
 
 	_ = proc.Signal(syscall.SIGTERM)
-	if !waitGone(pid, 3*time.Second) {
+	grace := 3 * time.Second
+	if g, ok := stopGrace[name]; ok {
+		grace = g
+	}
+	if !waitGone(pid, grace) {
 		_ = proc.Signal(syscall.SIGKILL)
 		if !waitGone(pid, 2*time.Second) {
 			return fmt.Errorf("PID %d did not exit", pid)

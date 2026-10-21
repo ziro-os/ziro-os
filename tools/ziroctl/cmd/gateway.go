@@ -26,9 +26,11 @@ var (
 )
 
 const (
-	gatewayDownFor     = 10 * time.Second // an upstream that failed a dial is skipped this long
-	gatewayDefaultBody = 10               // MB
-	gatewayMaxTargets  = 64
+	gatewayDownFor      = 10 * time.Second // an upstream that failed a dial is skipped this long
+	gatewayDefaultBody  = 10               // MB
+	gatewayBodyTimeout  = 5 * time.Minute  // a request body must arrive within this
+	gatewayDefaultDrain = 25 * time.Second
+	gatewayMaxTargets   = 64
 )
 
 // gatewaySources returns the gateway nodes' mesh IPs when some route targets app: routing an
@@ -95,7 +97,7 @@ func resolveTargets(r GatewayRoute, appAddrs func(app string) []string) GatewayR
 
 // gatewayConfigFor resolves the cluster's routes for gateway nodes.
 func gatewayConfigFor(st *ClusterState) *GatewayConfig {
-	cfg := &GatewayConfig{ACME: st.GatewayACME, Routes: []GatewayRouteState{}}
+	cfg := &GatewayConfig{ACME: st.GatewayACME, Settings: st.GatewaySettings, Routes: []GatewayRouteState{}}
 	eps, pods := appEndpoints(st), podEndpoints(st)
 	for _, r := range st.Routes {
 		r.Normalize()

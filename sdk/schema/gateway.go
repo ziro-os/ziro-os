@@ -134,11 +134,70 @@ type GatewayCert struct {
 	Key  string `json:"key"`
 }
 
+// GatewaySettings are the gateway-wide options that are not tied to one route.
+type GatewaySettings struct {
+	// TrustedProxies are the load balancers and CDNs in front of the gateway (addresses or CIDRs).
+	// The client address is taken from X-Forwarded-For only when the TCP peer is trusted; the
+	// chain is read right to left, skipping trusted hops.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// ProxyProtocol accepts a PROXY protocol v1 or v2 header on every connection from a trusted
+	// proxy. Connections from any other peer are served without it.
+	ProxyProtocol bool `json:"proxy_protocol,omitempty"`
+	// DrainSeconds is how long a stopping gateway waits for in-flight requests (default 25).
+	DrainSeconds int `json:"drain_seconds,omitempty"`
+}
+
+const (
+	GatewayDefaultDrainSeconds = 25
+	GatewayMaxDrainSeconds     = 60
+	GatewayMaxTrustedProxies   = 64
+)
+
+// Validate checks the settings at every trust boundary (CLI, API, gateway reload).
+func (s *GatewaySettings) Validate() error {
+	if len(s.TrustedProxies) > GatewayMaxTrustedProxies {
+		return fmt.Errorf("at most %d trusted proxies", GatewayMaxTrustedProxies)
+	}
+	for _, c := range s.TrustedProxies {
+		if _, err := ParseProxyPrefix(c); err != nil {
+			return fmt.Errorf("invalid trusted proxy %q", c)
+		}
+	}
+	if s.ProxyProtocol && len(s.TrustedProxies) == 0 {
+		return fmt.Errorf("proxy_protocol needs trusted_proxies: the header is accepted only from them")
+	}
+	if s.DrainSeconds < 0 || s.DrainSeconds > GatewayMaxDrainSeconds {
+		return fmt.Errorf("drain_seconds must be 0-%d", GatewayMaxDrainSeconds)
+	}
+	return nil
+}
+
+// Drain is the shutdown grace period.
+func (s *GatewaySettings) Drain() time.Duration {
+	if s.DrainSeconds == 0 {
+		return GatewayDefaultDrainSeconds * time.Second
+	}
+	return time.Duration(s.DrainSeconds) * time.Second
+}
+
+// ParseProxyPrefix parses a CIDR or a single address (taken as /32 or /128).
+func ParseProxyPrefix(s string) (netip.Prefix, error) {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p.Masked(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()), nil
+}
+
 // GatewayConfig is what a gateway serves: routes with their resolved targets.
 type GatewayConfig struct {
-	ACME   GatewayACME            `json:"acme"`
-	Routes []GatewayRouteState    `json:"routes"`
-	Certs  map[string]GatewayCert `json:"certs,omitempty"` // "cert:<name>" routes
+	ACME     GatewayACME            `json:"acme"`
+	Settings GatewaySettings        `json:"settings,omitempty"`
+	Routes   []GatewayRouteState    `json:"routes"`
+	Certs    map[string]GatewayCert `json:"certs,omitempty"` // "cert:<name>" routes
 	// InternalCA signs certificates for "internal" routes (PEM cert + key); empty = the gateway
 	// keeps its own CA in gatewayCertDir.
 	InternalCA *GatewayCert `json:"internal_ca,omitempty"`

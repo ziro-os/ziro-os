@@ -32,6 +32,7 @@ type (
 	GatewayRespond    = schema.GatewayRespond
 	HeaderRules       = schema.HeaderRules
 	GatewayACME       = schema.GatewayACME
+	GatewaySettings   = schema.GatewaySettings
 	GatewayDomain     = schema.GatewayDomain
 	GatewayCert       = schema.GatewayCert
 	GatewayConfig     = schema.GatewayConfig
