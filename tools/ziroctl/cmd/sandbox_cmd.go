@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +43,9 @@ var (
 	sbxExecEnv []string
 	sbxNet     schema.SandboxNetwork
 	sbxSecrets []string
+	sbxState   string
+	sbxLabels  []string
+	sbxTail    int
 )
 
 // secretFlags reads --secret NAME@host[,host]: the value comes from this process's environment
@@ -141,11 +146,16 @@ var sandboxCreateCmd = &cobra.Command{
 }
 
 var sandboxLsCmd = &cobra.Command{
-	Use: "ls", Aliases: []string{"list"}, Short: "List sandboxes", Example: "  ziroctl sandbox ls",
-	Args: cobra.NoArgs,
+	Use: "ls", Aliases: []string{"list"}, Short: "List sandboxes",
+	Example: "  ziroctl sandbox ls\n  ziroctl sandbox ls --state running --label task=42",
+	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		q := url.Values{"label": sbxLabels}
+		if sbxState != "" {
+			q.Set("state", sbxState)
+		}
 		var list []sdkapi.Sandbox
-		if err := sandboxCall("GET", "/v1/sandboxes", nil, &list); err != nil {
+		if err := sandboxCall("GET", "/v1/sandboxes?"+q.Encode(), nil, &list); err != nil {
 			return err
 		}
 		return printResult(list, func() {
@@ -173,6 +183,38 @@ var sandboxGetCmd = &cobra.Command{
 			b, _ := json.MarshalIndent(sb, "", "  ")
 			fmt.Println(string(b))
 		})
+	},
+}
+
+var sandboxStatsCmd = &cobra.Command{
+	Use: "stats <id>", Short: "Show a sandbox's CPU, memory, processes, network and disk",
+	Example: "  ziroctl sandbox stats <id> --json", Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		var s sdkapi.SandboxStats
+		if err := sandboxCall("GET", "/v1/sandboxes/"+args[0]+"/stats", nil, &s); err != nil {
+			return err
+		}
+		return printResult(s, func() {
+			limit := "-"
+			if s.MemoryLimit > 0 {
+				limit = humanBytes(s.MemoryLimit)
+			}
+			fmt.Printf("state %s  cpu %.1f%%  memory %s / %s  pids %d\nnet rx %s tx %s  disk read %s write %s\n",
+				s.State, s.CPUPercent, humanBytes(s.MemoryBytes), limit, s.PIDs,
+				humanBytes(s.NetRx), humanBytes(s.NetTx), humanBytes(s.BlockRead), humanBytes(s.BlockWrite))
+		})
+	},
+}
+
+var sandboxLogsCmd = &cobra.Command{
+	Use: "logs <id>", Short: "Show the output of a sandbox's main command",
+	Example: "  ziroctl sandbox logs <id> --tail 50", Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		var l sdkapi.SandboxLogs
+		if err := sandboxCall("GET", "/v1/sandboxes/"+args[0]+"/logs?tail="+strconv.Itoa(sbxTail), nil, &l); err != nil {
+			return err
+		}
+		return printResult(l, func() { fmt.Print(l.Logs) })
 	},
 }
 
@@ -328,6 +370,10 @@ func init() {
 	e.StringVarP(&sbxExec.User, "user", "u", "", "Run as uid[:gid]")
 	e.StringVar(&sbxExec.Timeout, "timeout", "", "Stop the command after this long (default 5m, max 1h)")
 	e.BoolP("stdin", "i", false, "Send this command's stdin (up to 1 MiB)")
+	sandboxLsCmd.Flags().StringVar(&sbxState, "state", "", "Only sandboxes in this state (pending, running, paused, failed)")
+	sandboxLsCmd.Flags().StringArrayVar(&sbxLabels, "label", nil, "Only sandboxes with this metadata KEY=VALUE, or KEY set (repeatable)")
+	sandboxLogsCmd.Flags().IntVar(&sbxTail, "tail", 200, "Number of lines from the end (at most 10000)")
+	sandboxCmd.AddCommand(sandboxStatsCmd, sandboxLogsCmd)
 	sandboxCmd.AddCommand(sandboxCreateCmd, sandboxLsCmd, sandboxGetCmd, sandboxExecCmd, sandboxRenewCmd, sandboxNetworkCmd,
 		sandboxAction("rm", "", "Delete sandboxes and their workspaces"),
 		sandboxAction("pause", "pause", "Freeze a sandbox's processes"),

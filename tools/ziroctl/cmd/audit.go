@@ -168,7 +168,7 @@ var auditReadOnly = map[string]bool{
 	"status": true, "list": true, "ls": true, "nodes": true, "services": true, "endpoints": true, "logs": true,
 	"ps": true, "images": true, "inspect": true, "search": true, "usage": true, "version": true, "scan": true,
 	"monitor": true, "motd": true, "doctor": true, "audit": true, "log": true, "verify": true, "help": true,
-	"completion": true, "token": true,
+	"completion": true, "token": true, "stats": true,
 }
 
 // sensitiveFlags hold credentials; their values are never recorded.

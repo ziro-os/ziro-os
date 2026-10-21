@@ -230,6 +230,31 @@ type SandboxAccess struct {
 	HostKey  string `json:"host_key,omitempty"` // known_hosts line for the gateway
 }
 
+// SandboxStats is a sandbox's resource use, from its cgroup: CPU over a short sample, the rest
+// current values or totals since it started.
+type SandboxStats struct {
+	State       string  `json:"state"`
+	CPUPercent  float64 `json:"cpu_percent"` // of one CPU
+	MemoryBytes uint64  `json:"memory_bytes"`
+	MemoryLimit uint64  `json:"memory_limit"`
+	PIDs        uint64  `json:"pids"`
+	NetRx       uint64  `json:"net_rx_bytes"`
+	NetTx       uint64  `json:"net_tx_bytes"`
+	BlockRead   uint64  `json:"block_read_bytes"`
+	BlockWrite  uint64  `json:"block_write_bytes"`
+}
+
+// SandboxLogs is the end of a sandbox's main command's output (stdout and stderr).
+type SandboxLogs struct {
+	Logs string `json:"logs"`
+}
+
+// SandboxFilter narrows a sandbox list; empty fields match everything.
+type SandboxFilter struct {
+	State  string            // pending, running, paused or failed
+	Labels map[string]string // metadata that must match ("" value: the key must be set)
+}
+
 // SandboxFile is an entry of a sandbox's /workspace listing.
 type SandboxFile struct {
 	Name     string    `json:"name"`

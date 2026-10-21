@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -242,7 +243,21 @@ func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path
 			merged = append(merged, items...)
 		}
 	}
-	apiReply(w, nil, merged)
+	if path != "/v1/sandboxes" {
+		apiReply(w, nil, merged)
+		return
+	}
+	// The filters apply here, to the merged list: request text never goes into a node's URL.
+	var list []sdkapi.Sandbox
+	for _, raw := range merged {
+		var sb sdkapi.Sandbox
+		if json.Unmarshal(raw, &sb) == nil {
+			list = append(list, sb)
+		}
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Created.Before(list[j].Created) })
+	list, err := filterSandboxes(list, r.URL.Query())
+	apiReply(w, err, list)
 }
 
 // forSandbox forwards a request about one sandbox to its node, and keeps the cluster's records

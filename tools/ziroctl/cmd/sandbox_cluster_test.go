@@ -137,6 +137,16 @@ func TestSandboxClusterForwarding(t *testing.T) {
 	if w := do(other, "GET", "/api/v1/sandboxes", ""); strings.TrimSpace(w.Body.String()) != "[]" {
 		t.Errorf("other's list: %s", w.Body)
 	}
+	// Filters apply to the merged list.
+	if w := do(agent, "GET", "/api/v1/sandboxes?state=running", ""); json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list) != 2 {
+		t.Errorf("state=running: %s", w.Body)
+	}
+	if w := do(agent, "GET", "/api/v1/sandboxes?state=paused", ""); strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Errorf("state=paused: %s", w.Body)
+	}
+	if w := do(agent, "GET", "/api/v1/sandboxes?state=bogus", ""); w.Code != 400 {
+		t.Errorf("state=bogus: %d", w.Code)
+	}
 	// Per-sandbox requests reach the owner node; others get 404 at the master.
 	if w := do(agent, "GET", "/api/v1/sandboxes/"+sb.ID, ""); w.Code != 200 || !strings.Contains(w.Body.String(), sb.ID) {
 		t.Errorf("get: %d %s", w.Code, w.Body)

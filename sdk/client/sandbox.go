@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 
 	"github.com/ziro-os/ziro-os/sdk/api"
@@ -21,6 +22,48 @@ import (
 func (c *Client) Sandboxes(ctx context.Context) ([]api.Sandbox, error) {
 	var out []api.Sandbox
 	return out, c.Get(ctx, "/api/v1/sandboxes", &out)
+}
+
+// ListSandboxes lists the caller's sandboxes that match f.
+func (c *Client) ListSandboxes(ctx context.Context, f api.SandboxFilter) ([]api.Sandbox, error) {
+	q := url.Values{}
+	if f.State != "" {
+		q.Set("state", f.State)
+	}
+	keys := make([]string, 0, len(f.Labels))
+	for k := range f.Labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if v := f.Labels[k]; v != "" {
+			q.Add("label", k+"="+v)
+		} else {
+			q.Add("label", k)
+		}
+	}
+	path := "/api/v1/sandboxes"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out []api.Sandbox
+	return out, c.Get(ctx, path, &out)
+}
+
+// SandboxStats returns a sandbox's resource use (CPU over a short sample).
+func (c *Client) SandboxStats(ctx context.Context, id string) (api.SandboxStats, error) {
+	var out api.SandboxStats
+	return out, c.Get(ctx, "/api/v1/sandboxes/"+esc(id)+"/stats", &out)
+}
+
+// SandboxLogs returns the last tail lines (0: 200) of the sandbox's main command's output.
+func (c *Client) SandboxLogs(ctx context.Context, id string, tail int) (string, error) {
+	path := "/api/v1/sandboxes/" + esc(id) + "/logs"
+	if tail > 0 {
+		path += "?tail=" + strconv.Itoa(tail)
+	}
+	var out api.SandboxLogs
+	return out.Logs, c.Get(ctx, path, &out)
 }
 
 // Sandbox returns one sandbox.
