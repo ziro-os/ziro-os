@@ -54,7 +54,7 @@ fi
 
 BUILD_DIR="$REPO_ROOT/build"
 ALPINE_IMAGE="${ALPINE_IMAGE:-alpine:3.24}"
-KERNEL_VER="${KERNEL_VERSION:-6.18.54}"   # longterm; same base as Alpine linux-virt
+KERNEL_VER="${KERNEL_VERSION:-6.18.57}"   # longterm; same base as Alpine linux-virt
 OUT="$BUILD_DIR/kernel-custom-$TARGET_ARCH"
 CCACHE_DIR_HOST="$BUILD_DIR/ccache-$TARGET_ARCH"   # persisted by CI (actions/cache)
 DL_DIR="$BUILD_DIR/dl"                             # kernel.org tarballs
