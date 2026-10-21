@@ -285,8 +285,16 @@ ziroctl sandbox snapshot ls
 ziroctl sandbox snapshot rm <image>
 ```
 
-Snapshots belong to the owner who took them. They don't need the host's image policy, because they were built on
-this host. Only the filesystem is saved; processes and memory aren't.
+A snapshot has two parts, taken while the sandbox is briefly paused so they match:
+
+- its root filesystem (packages installed with `apt`, `pip install --user` and so on), committed to the image;
+- its `/workspace`, which is a mount the image can't hold. It is archived next to the sandboxes
+  (`/var/lib/ziro/sandbox/.snapshots/`) with its modes, owners and symlinks, and unpacked into every sandbox started
+  from the snapshot. `workspace_size` in `snapshot ls --json` is its compressed size (at most 8 GiB, 500,000 entries).
+
+You can snapshot a paused sandbox, and it stays paused. Snapshots belong to the owner who took them. They don't need
+the host's image policy, because they were built on this host. `/tmp` is not saved, and neither are processes or
+memory.
 
 **MCP server.** Any AI agent that speaks the Model Context Protocol gets sandboxes as tools:
 

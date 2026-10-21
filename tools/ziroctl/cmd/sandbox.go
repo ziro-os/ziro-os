@@ -404,10 +404,12 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 	if err != nil {
 		return sdkapi.Sandbox{}, err
 	}
-	if !snap { // snapshots come from this host; anything else meets the image policy
-		if image, err = enforceImagePolicy(cfg.ImagePolicy, spec.Image); err != nil {
+	if snap { // snapshots come from this host; anything else meets the image policy
+		if image, err = findSnapshot(ctx, image); err != nil {
 			return sdkapi.Sandbox{}, err
 		}
+	} else if image, err = enforceImagePolicy(cfg.ImagePolicy, spec.Image); err != nil {
+		return sdkapi.Sandbox{}, err
 	}
 	secrets := spec.Secrets // values go to secrets.json only
 	if len(secrets) > 0 {
@@ -448,9 +450,17 @@ func (m *sandboxManager) create(ctx context.Context, spec schema.SandboxSpec, c 
 	}
 
 	var out []byte
-	secretEnv, runErr := prepareSecrets(sb.ID, secrets, sb.Expires)
-	if runErr != nil {
-		runErr = fmt.Errorf("secrets: %w", runErr)
+	var runErr error
+	if snap {
+		if runErr = restoreWorkspace(image, sb.ID); runErr != nil {
+			runErr = fmt.Errorf("snapshot workspace: %w", runErr)
+		}
+	}
+	var secretEnv map[string]string
+	if runErr == nil {
+		if secretEnv, runErr = prepareSecrets(sb.ID, secrets, sb.Expires); runErr != nil {
+			runErr = fmt.Errorf("secrets: %w", runErr)
+		}
 	}
 	if sb.IP != "" && runErr == nil {
 		// The rules for its address go in before the container exists: fail closed.
@@ -670,10 +680,11 @@ func (m *sandboxManager) touch(id string) {
 
 // ---- the reaper ----
 
-// reap deletes sandboxes past their lifetime or idle timeout, marks sandboxes whose container
-// is gone or exited as failed, and removes sandbox containers nobody owns (a crash between
-// starting a container and saving its record).
-func (m *sandboxManager) reap(ctx context.Context) {
+const sandboxStoppedMsg = "the sandbox stopped (its command exited, it ran out of memory, or the host restarted)"
+
+// reconcile is the reaper's pass: one container listing, then markExited and reap on it.
+func (m *sandboxManager) reconcile(ctx context.Context) {
+	// -a: without it nerdctl lists only containers that are "Up", and a paused one looks gone.
 	out, err := sandboxNerdctl(ctx, "ps", "-a", "--filter", "label="+sandboxLabel, "--format", "{{.Names}}\t{{.Status}}")
 	if err != nil {
 		fmt.Printf("[sandboxd] list containers: %s\n", cmdError(out, err))
@@ -685,6 +696,46 @@ func (m *sandboxManager) reap(ctx context.Context) {
 			status[name] = strings.ToLower(st)
 		}
 	}
+	m.markExited(status)
+	m.reap(ctx, status)
+}
+
+// containerState is the sandbox state a container status means: running, paused, or "" (gone or
+// exited).
+func containerState(status string) string {
+	switch {
+	case strings.HasPrefix(status, "up"):
+		return "running"
+	case strings.HasPrefix(status, "paused"):
+		return "paused"
+	}
+	return ""
+}
+
+// markExited flags running and paused sandboxes whose container stopped (the command exited,
+// OOM, a host restart). A sandbox it flagged whose container is alive after all (a listing that
+// missed it) gets its state back.
+func (m *sandboxManager) markExited(status map[string]string) {
+	m.st.mu.Lock()
+	defer m.st.mu.Unlock()
+	for id, sb := range m.st.all {
+		live := containerState(status[sandboxContainer(id)])
+		switch {
+		case (sb.State == "running" || sb.State == "paused") && live == "":
+			sb.State, sb.Error = "failed", sandboxStoppedMsg
+		case sb.State == "failed" && sb.Error == sandboxStoppedMsg && live != "":
+			sb.State, sb.Error = live, ""
+		default:
+			continue
+		}
+		_ = m.st.save(sb)
+	}
+}
+
+// reap deletes sandboxes past their lifetime or idle timeout and removes sandbox containers
+// nobody owns (a crash between starting a container and saving its record). status is the
+// container listing (name -> lowercased status); reap takes its sandboxes out of it.
+func (m *sandboxManager) reap(ctx context.Context, status map[string]string) {
 	now := m.now().UTC()
 	var expired []string
 	m.st.mu.Lock()
@@ -725,27 +776,6 @@ func (m *sandboxManager) reap(ctx context.Context) {
 	for name := range status { // containers without a record
 		if strings.HasPrefix(name, "ziro-sbx-") {
 			_, _ = sandboxNerdctl(ctx, "rm", "-f", name)
-		}
-	}
-}
-
-// markExited flags running sandboxes whose container stopped (the command exited, OOM, a host
-// restart). It asks nerdctl once for all of them.
-func (m *sandboxManager) markExited(ctx context.Context) {
-	out, err := sandboxNerdctl(ctx, "ps", "--filter", "label="+sandboxLabel, "--format", "{{.Names}}")
-	if err != nil {
-		return
-	}
-	up := map[string]bool{}
-	for _, n := range strings.Fields(string(out)) {
-		up[n] = true
-	}
-	m.st.mu.Lock()
-	defer m.st.mu.Unlock()
-	for id, sb := range m.st.all {
-		if (sb.State == "running" || sb.State == "paused") && !up[sandboxContainer(id)] {
-			sb.State, sb.Error = "failed", "the sandbox stopped (its command exited, it ran out of memory, or the host restarted)"
-			_ = m.st.save(sb)
 		}
 	}
 }

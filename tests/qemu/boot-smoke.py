@@ -312,10 +312,13 @@ def sandbox_checks(con, check):
                       "for i in $(seq 60); do ziroctl sandbox ls | grep -q 'paused.*pool:tiny' && break; sleep 2; done; "
                       "s=$(date +%s%N); w=$(ziroctl sandbox create --template tiny 2>/dev/null | head -1); e=$(date +%s%N); "
                       "echo CLAIM_MS=$(( (e - s) / 1000000 )); ziroctl sandbox get $w --json | grep -c '\"owner\": \"root\"'; "
-                      "ziroctl sandbox exec $w -- sh -c 'echo snap > /etc/marker' && img=$(ziroctl sandbox snapshot create $w marker) && "
-                      "f=$(ziroctl sandbox create $img 2>/dev/null | head -1) && ziroctl sandbox exec $f -- cat /etc/marker; "
+                      "ziroctl sandbox exec $w -- sh -c 'echo snap > /etc/marker; echo ws-kept > /workspace/data; ln -s data /workspace/link' && "
+                      "ziroctl sandbox pause $w >/dev/null && img=$(ziroctl sandbox snapshot create $w marker) && ziroctl sandbox get $w | grep -c paused && "
+                      "ziroctl sandbox resume $w >/dev/null && "
+                      "f=$(ziroctl sandbox create $img 2>/dev/null | head -1) && ziroctl sandbox exec $f -- cat /etc/marker /workspace/link; "
                       "ziroctl sandbox rm $w $f >/dev/null; echo '{}' > /etc/ziro/sandbox.json", timeout=600)
-    check("sandbox pool + snapshot: a warm create is a resume; a snapshot carries the filesystem", "snap" in out and "CLAIM_MS=" in out, out)
+    check("sandbox pool + snapshot: a warm create is a resume; a snapshot (of a paused sandbox) carries the rootfs and /workspace",
+          "snap" in out and "ws-kept" in out and "CLAIM_MS=" in out, out)
     # MCP over stdio, through the REST API with a scoped token.
     rc, out = con.run("ziroctl service start ziro-api >/dev/null 2>&1; sleep 3; t=$(ziroctl api token create mcp --role deployer --scope sandboxes 2>/dev/null) && "
                       "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' "
@@ -323,9 +326,12 @@ def sandbox_checks(con, check):
                       "| ZIRO_API_TOKEN=$t ziroctl sandbox mcp | tail -1 | grep -o 'running' | head -1; "
                       "for i in $(ziroctl sandbox ls --json | grep -o '\"id\": \"[a-z2-7]*\"' | cut -d'\"' -f4); do ziroctl sandbox get $i --json | grep -q '\"owner\": \"mcp\"' && ziroctl sandbox rm $i >/dev/null && echo MCP_OWNED; done", timeout=300)
     check("sandbox mcp: an agent creates a sandbox over MCP, owned by its scoped token", "running" in out and "MCP_OWNED" in out, out)
-    rc, out = con.run(f"ziroctl sandbox pause {sid} && ziroctl sandbox resume {sid} && ziroctl sandbox rm {sid}; "
+    # Paused past a reaper pass (15 s) is still paused, and resumes.
+    rc, out = con.run(f"ziroctl sandbox pause {sid} && sleep 20 && ziroctl sandbox get {sid} | grep -c paused && "
+                      f"ziroctl sandbox resume {sid} && ziroctl sandbox exec {sid} -- echo RESUMED && ziroctl sandbox rm {sid}; "
                       "ziroctl sandbox ls --json; nerdctl ps -a --format '{{.Names}}' | grep -c '^ziro-sbx-'", timeout=120)
-    check("sandbox pause/resume/rm leaves nothing behind", "[]" in out and out.split()[-1] == "0", out)
+    check("sandbox pause survives the reaper, resumes, and rm leaves nothing behind",
+          "RESUMED" in out and "[]" in out and out.split()[-1] == "0", out)
 
 
 def main():

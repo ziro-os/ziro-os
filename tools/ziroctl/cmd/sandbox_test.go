@@ -43,6 +43,12 @@ func (f *fakeNerdctl) run(_ context.Context, args ...string) ([]byte, error) {
 		f.ps[args[slices.Index(args, "--name")+1]] = "Up"
 	case "images":
 		return []byte(f.images), nil
+	case "commit":
+		f.images += args[len(args)-1] + "\t1MB\n"
+	case "pause":
+		f.ps[args[len(args)-1]] = "Paused"
+	case "unpause":
+		f.ps[args[len(args)-1]] = "Up 5 minutes"
 	case "rm":
 		if f.sticky[args[len(args)-1]] > 0 { // nerdctl rm -f of a gVisor container that stays
 			f.sticky[args[len(args)-1]]--
@@ -57,7 +63,7 @@ func (f *fakeNerdctl) run(_ context.Context, args ...string) ([]byte, error) {
 				b.WriteString(name + "\n")
 			} else if slices.Contains(args, "-a") {
 				b.WriteString(name + "\t" + st + "\n")
-			} else if !strings.HasPrefix(st, "Exited") {
+			} else if strings.HasPrefix(st, "Up") { // like nerdctl: no -a, only the running ones
 				b.WriteString(name + "\n")
 			}
 		}
@@ -311,8 +317,7 @@ func TestSandboxReaper(t *testing.T) {
 	f.ps["ziro-sbx-orphan00000"] = "Up"
 	f.ps[sandboxContainer(dies.ID)] = "Exited (0) 1 second ago"
 	*now = now.Add(11 * time.Minute)
-	m.markExited(context.Background())
-	m.reap(context.Background())
+	m.reconcile(context.Background())
 	for _, gone := range []string{short.ID, idle.ID} {
 		if _, ok := m.st.all[gone]; ok {
 			t.Errorf("%s not reaped", gone)
@@ -332,6 +337,38 @@ func TestSandboxReaper(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(auditPath); strings.Count(string(b), "sandbox expire") != 2 {
 		t.Errorf("audit: %s", b)
+	}
+}
+
+// A paused sandbox is alive: the reaper keeps it paused (nerdctl ps without -a hides it), and a
+// sandbox an older reaper wrongly failed that way heals.
+func TestSandboxPausedSurvivesReaper(t *testing.T) {
+	m, f, _ := stubSandboxes(t)
+	sb, err := m.create(context.Background(), schema.SandboxSpec{Image: "a"}, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.setPaused(context.Background(), sb.ID, alice, true); err != nil {
+		t.Fatal(err)
+	}
+	m.reconcile(context.Background())
+	if got, _ := m.st.get(sb.ID, alice); got.State != "paused" {
+		t.Fatalf("paused sandbox after the reaper: %s (%s)", got.State, got.Error)
+	}
+	if got, err := m.setPaused(context.Background(), sb.ID, alice, false); err != nil || got.State != "running" {
+		t.Fatalf("resume: %+v %v", got, err)
+	}
+	m.st.update(sb.ID, func(x *sdkapi.Sandbox) { x.State, x.Error = "failed", sandboxStoppedMsg })
+	f.ps[sandboxContainer(sb.ID)] = "Paused"
+	m.reconcile(context.Background())
+	if got, _ := m.st.get(sb.ID, alice); got.State != "paused" || got.Error != "" {
+		t.Errorf("heal: %s (%s)", got.State, got.Error)
+	}
+	// Any other failure stays.
+	m.st.update(sb.ID, func(x *sdkapi.Sandbox) { x.State, x.Error = "failed", "network policy could not be applied" })
+	m.reconcile(context.Background())
+	if got, _ := m.st.get(sb.ID, alice); got.State != "failed" {
+		t.Errorf("a policy failure healed: %s", got.State)
 	}
 }
 

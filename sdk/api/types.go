@@ -264,4 +264,7 @@ type SandboxSnapshot struct {
 	Sandbox string    `json:"sandbox,omitempty"` // the sandbox it was taken from (when created)
 	Size    string    `json:"size,omitempty"`
 	Created time.Time `json:"created"`
+	// WorkspaceSize is the compressed size of the /workspace archive kept with the image (0 for
+	// snapshots taken before workspaces were kept).
+	WorkspaceSize int64 `json:"workspace_size,omitempty"`
 }

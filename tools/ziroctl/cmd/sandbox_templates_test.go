@@ -76,6 +76,12 @@ func TestSandboxWarmPool(t *testing.T) {
 	if pooled != 2 {
 		t.Fatalf("%d pooled sandboxes", pooled)
 	}
+	m.reconcile(context.Background()) // paused pool sandboxes are alive, not failed
+	for _, sb := range m.st.list(ops) {
+		if sb.State != "paused" {
+			t.Fatalf("pool sandbox %s after the reaper: %s", sb.ID, sb.State)
+		}
+	}
 	runs := func() int {
 		return len(slices.DeleteFunc(slices.Clone(f.calls), func(c []string) bool { return c[0] != "run" }))
 	}
@@ -108,19 +114,59 @@ func TestSandboxWarmPool(t *testing.T) {
 func TestSandboxSnapshots(t *testing.T) {
 	m, f, _ := stubSandboxes(t)
 	sb, _ := m.create(context.Background(), schema.SandboxSpec{Image: "a"}, alice)
+	ws := filepath.Join(sandboxDir(sb.ID), "workspace")
+	os.MkdirAll(filepath.Join(ws, ".venv/bin"), 0755)
+	os.WriteFile(filepath.Join(ws, "main.py"), []byte("print(1)"), 0640)
+	os.WriteFile(filepath.Join(ws, ".venv/bin/run"), []byte("#!/bin/sh"), 0755)
+	os.Symlink("/usr/bin/python3", filepath.Join(ws, ".venv/bin/python")) // venvs link out: kept verbatim
 	snap, err := m.snapshot(context.Background(), sb.ID, alice, "deps")
-	if err != nil || !strings.HasPrefix(snap.Image, "ziro.local/sandbox/alice/deps:") {
+	if err != nil || !strings.HasPrefix(snap.Image, "ziro.local/sandbox/alice/deps:") || snap.WorkspaceSize == 0 {
 		t.Fatalf("%+v %v", snap, err)
 	}
-	last := f.calls[len(f.calls)-1]
-	if last[0] != "commit" || last[1] != sandboxContainer(sb.ID) || last[2] != snap.Image {
-		t.Errorf("commit %v", last)
+	// A running sandbox is flushed and frozen around the commit, and thawed after.
+	var verbs []string
+	for _, c := range f.calls[len(f.calls)-4:] {
+		verbs = append(verbs, strings.Join(c[:min(len(c), 2)], " "))
 	}
+	if want := []string{"exec " + sandboxContainer(sb.ID), "pause " + sandboxContainer(sb.ID), "commit --pause=false", "unpause " + sandboxContainer(sb.ID)}; !slices.Equal(verbs, want) {
+		t.Errorf("snapshot calls %v, want %v", verbs, want)
+	}
+	if got, _ := m.st.get(sb.ID, alice); got.State != "running" || f.ps[sandboxContainer(sb.ID)] == "Paused" {
+		t.Errorf("after the snapshot: %s / %s", got.State, f.ps[sandboxContainer(sb.ID)])
+	}
+	// A paused sandbox stays paused: no pause of its own, and commit mustn't pause it.
+	m.setPaused(context.Background(), sb.ID, alice, true)
+	n := len(f.calls)
+	if _, err := m.snapshot(context.Background(), sb.ID, alice, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.calls[n:]; len(c) != 1 || c[0][0] != "commit" || c[0][1] != "--pause=false" {
+		t.Errorf("snapshot of a paused sandbox: %v", c)
+	}
+	m.setPaused(context.Background(), sb.ID, alice, false)
 	if _, err := m.snapshot(context.Background(), sb.ID, alice, "Bad Name"); err == nil {
 		t.Error("bad name")
 	}
 	if _, err := m.snapshot(context.Background(), sb.ID, bob, "x"); err == nil {
 		t.Error("bob snapshotted alice's sandbox")
+	}
+	// A sandbox started from it has the workspace back: content, modes, links.
+	fork, err := m.create(context.Background(), schema.SandboxSpec{Image: snap.Image}, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fws := filepath.Join(sandboxDir(fork.ID), "workspace")
+	if b, _ := os.ReadFile(filepath.Join(fws, "main.py")); string(b) != "print(1)" {
+		t.Errorf("main.py = %q", b)
+	}
+	if fi, err := os.Stat(filepath.Join(fws, "main.py")); err != nil || fi.Mode().Perm() != 0640 {
+		t.Errorf("main.py mode %v %v", fi, err)
+	}
+	if fi, err := os.Stat(filepath.Join(fws, ".venv/bin/run")); err != nil || fi.Mode().Perm() != 0755 {
+		t.Errorf("run mode %v %v", fi, err)
+	}
+	if l, err := os.Readlink(filepath.Join(fws, ".venv/bin/python")); l != "/usr/bin/python3" {
+		t.Errorf("symlink %q %v", l, err)
 	}
 	// Starting from a snapshot: one's own (no image policy), never another owner's.
 	os.WriteFile(sandboxConfigFile, []byte(`{"image_policy":{"allow_registries":["ghcr.io/acme"]}}`), 0600)
@@ -145,5 +191,13 @@ func TestSandboxSnapshots(t *testing.T) {
 	}
 	if err := m.removeSnapshot(context.Background(), alice, "ziro.local/sandbox/alice/deps:1760000000"); err != nil {
 		t.Error(err)
+	}
+	// Removing a snapshot removes its workspace archive too.
+	f.images = snap.Image + "\t1MB\n"
+	if err := m.removeSnapshot(context.Background(), alice, snap.Image); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(snapshotArchive(snap.Image)); !os.IsNotExist(err) {
+		t.Errorf("archive left: %v", err)
 	}
 }

@@ -121,8 +121,7 @@ func runSandboxDaemon(ctx context.Context) error {
 	go func() {
 		for {
 			rctx, cancel := context.WithTimeout(ctx, time.Minute)
-			m.markExited(rctx)
-			m.reap(rctx)
+			m.reconcile(rctx)
 			cancel()
 			if cfg, err := loadSandboxConfig(); err == nil {
 				m.fillPools(cfg)

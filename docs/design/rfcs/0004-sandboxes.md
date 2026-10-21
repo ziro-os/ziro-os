@@ -151,7 +151,7 @@ Each phase is one pull request.
    proportion for this OS, while gVisor's KVM platform gives a hardware boundary with the binary already installed
    and no kernel change (both Ziro kernels have KVM). A slim Kata bundle can still be added later as another
    runtime.
-7. **Agent platform**: templates, warm pools, snapshots (`nerdctl commit`), an MCP server (`ziroctl sandbox mcp`).
+7. **Agent platform**: templates, warm pools, snapshots (`nerdctl commit` of the rootfs plus an archive of `/workspace`), an MCP server (`ziroctl sandbox mcp`).
 8. **Cluster**:
    - placement on runner nodes, with records in Raft
    - the API and SSH gateway forward to the node that owns a sandbox over the mesh with mTLS
