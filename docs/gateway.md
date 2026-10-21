@@ -261,11 +261,55 @@ ziroctl gateway route add upload --host files.example.com --app files --waf bloc
 | `scanner` | Known attack tools in the user agent, probes for sensitive paths |
 | `protocol` | Unknown methods, TRACE, oversized URIs, many-range requests, the `Proxy` header (httpoxy), NUL bytes |
 
-`ziroctl gateway waf rules` lists every rule with its ID (`ZW-942100`), group, level and score. IDs are stable.
+`ziroctl gateway waf rules` lists every rule in use with its ID (`ZW-942100`), group, level, score and stage. IDs are
+stable.
 
 Rules have a level. Level 1, the default, holds precise rules with few false positives. Level 2 adds broader rules and
 level 3 adds paranoid ones, which flag more legitimate traffic (`--waf-level 2`). Exclude a rule or a whole group with
 `--waf-exclude ZW-942100` or `--waf-exclude xss`.
+
+### Updating the rules
+
+The rules are data. A host starts with the rule set built into `ziroctl`; newer sets are published as a signed pack in
+the [`ziro-os/pkgs`](https://github.com/ziro-os/pkgs) repository, so a new rule reaches gateways without a release.
+
+```sh
+ziroctl gateway waf update            # fetch, verify and install the newest rules now
+ziroctl gateway waf update --check    # only report whether a newer pack is available
+ziroctl gateway waf status            # the pack in use, its signature expiry, staged rules, rollback
+ziroctl gateway waf rollback          # return to the previous pack
+ziroctl gateway settings set --waf-auto-update=false
+```
+
+- **Instant.** `waf update` replaces the cached pack atomically. Every running gateway on the host notices within a
+  second, rebuilds the routes that have a WAF, and swaps its route table. No restart, no dropped connection. On a
+  cluster master the update also tells every gateway node to fetch the rules, so the whole cluster changes within one
+  heartbeat. Rule content never travels through cluster state: each node downloads and verifies the pack itself.
+- **Automatic.** Unless `--waf-auto-update=false`, each gateway checks for a newer pack about once a day (a day plus or
+  minus an hour, so a fleet does not ask at once). Hosts that are offline keep the pack they have.
+- **Trusted.** The pack's index is signed with the same key as the module catalog and pinned by sha256, like every
+  catalog. An index older than its expiry, or with a lower serial than the one installed, is refused.
+- **Checked before use.** A pack is installed only if it passes strict validation (at most 256 rules, RE2 expressions
+  of at most 2 KiB, lower-case literals, known groups and targets), compiles, and every rule passes the `match` and
+  `nomatch` samples it carries. A pack that fails any check is not installed: the rules in use stay, and a gateway
+  that finds a damaged cache keeps its rules and raises an alert. A host with no valid pack uses the built-in rules.
+- **Staged.** A rule can ship at the `detect` stage: it is logged and counted (`zirogate_waf_matches_total`, the `waf`
+  field of the access log) but adds nothing to a request's score, so a new rule can be watched before it can block.
+  `ziroctl gateway waf status` lists staged rules. A rule at the `off` stage does not run.
+- **Reversible.** `waf rollback` reinstates the previous pack. The pack rolled back from is not installed again by the
+  daily update, but a newer one is.
+- **Stable.** Rule IDs keep their meaning. An exclusion naming a rule that a later pack retired is still accepted, so an
+  update cannot make an existing route configuration invalid. The seven protocol rules inspect the request line and
+  headers in code; a pack can change their score, level, stage and message but not their logic.
+
+To add a rule, open a pull request to `ziro-os/pkgs` (see its `CONTRIBUTING.md`). The repository's CI runs
+`ziroctl gateway waf test` on the rules file, signs the catalog and publishes it; the next `waf update` or daily check
+picks it up. To check a rules file yourself:
+
+```sh
+ziroctl gateway waf test waf/zirogate-crs/rules.json
+ziroctl gateway waf export > rules.json     # the built-in rules, as a starting point
+```
 
 ### What it inspects
 
@@ -385,6 +429,7 @@ ziroctl gateway settings set --trusted-proxy 10.0.0.0/8 --proxy-protocol --drain
 | `--proxy-protocol` | Accept PROXY protocol v1 or v2 from trusted proxies |
 | `--drain-seconds` | How long a stopping gateway waits for requests in flight (default 25, at most 60) |
 | `--waf`, `--waf-*` | The default firewall of routes that have none |
+| `--waf-auto-update` | Fetch new WAF rules about once a day (default on; `--waf-auto-update=false` to stop) |
 | `--deny-cidr` | Networks refused on every route |
 | `--auto-ban`, `--auto-ban-*` | Automatic bans |
 
@@ -429,6 +474,9 @@ gateway. To scrape a gateway over the network, add
 | `zirogate_upstream_active_requests` | gauge | `route`, `upstream` | Requests in flight to an upstream |
 | `zirogate_upstream_healthy` | gauge | `route`, `upstream` | Result of the active health check |
 | `zirogate_waf_matches_total` | counter | `route`, `group`, `action` | Requests with WAF matches; action is `log`, `detect` or `block` |
+| `zirogate_waf_pack_info` | gauge | `pack`, `version`, `source` | The WAF rule pack in use (`builtin` or `catalog`) |
+| `zirogate_waf_pack_serial`, `zirogate_waf_pack_expiry_seconds` | gauge | | Serial of the signed index the rules came from, and seconds until it expires |
+| `zirogate_waf_pack_update_total` | counter | `result` | Rule pack fetches and loads: `ok`, `error`, `load_error` |
 | `zirogate_mirror_requests_total` | counter | `route`, `result` | Mirrored requests: `ok`, `error`, `skipped` |
 | `zirogate_bans_total`, `zirogate_bans_active` | counter, gauge | | Automatic bans issued, and in force |
 | `zirogate_connections` | gauge | `kind` | Open client connections (`http`, `tcp`) |
@@ -528,7 +576,8 @@ For a real load test, run a generator such as `wrk` or `vegeta` against a stagin
 ### Several gateway nodes
 
 Routes, certificates, settings and manual bans are shared by all gateway nodes. Rate limits, automatic bans and metrics
-are per node.
+are per node. WAF rule packs are fetched and verified by each node; `waf update` on the cluster master makes every node
+fetch at once.
 
 ## Architecture
 
@@ -576,7 +625,10 @@ PUT    /api/v1/gateway/settings
 GET    /api/v1/gateway/bans                manual bans, and the automatic bans of this host's gateway
 POST   /api/v1/gateway/bans                {"addr","for","reason"}
 DELETE /api/v1/gateway/bans/{addr}         escape "/" in a CIDR as %2F
-GET    /api/v1/gateway/waf/rules           the rule catalog
+GET    /api/v1/gateway/waf/rules           the rules in use
+GET    /api/v1/gateway/waf/pack            the installed rule pack, staged rules, rollback availability
+POST   /api/v1/gateway/waf/update          fetch and install the newest signed rule pack
+POST   /api/v1/gateway/waf/rollback        return to the previous rule pack
 GET    /api/v1/gateway/domain              the base domain of deployed apps, gateway addresses, DNS records
 PUT    /api/v1/gateway/domain              {"name":"apps.example.com"}
 DELETE /api/v1/gateway/domain
@@ -660,3 +712,7 @@ These behaviors changed:
 - Stopping the gateway drains instead of cutting connections, and the service manager waits up to 65 seconds for it.
 - Rate-limit state and round-robin position now survive configuration reloads.
 - Ejection of failing upstreams is unchanged unless a route sets the outlier flags.
+- WAF rules update by themselves once a day when a signed pack is published, and a rule added to the pack can start
+  blocking at the next check. New rules are published at the `detect` stage first when they might match legitimate
+  traffic. To keep the rules fixed, run `ziroctl gateway settings set --waf-auto-update=false`; use
+  `ziroctl gateway waf rollback` to return to the previous pack.

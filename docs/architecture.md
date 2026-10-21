@@ -93,6 +93,13 @@ flowchart TB
   - The WAF is native Go with no new dependency. A literal prefilter (Aho-Corasick) decides which RE2 expressions run,
     so cost follows the request's content, and RE2 keeps worst-case time linear. Coraza and the OWASP CRS were
     rejected: their dependency weight and per-request cost conflict with a minimal base.
+  - WAF rules are data, not code: the built-in set is an embedded JSON pack, and newer packs are published as a signed
+    catalog of kind `waf` in `ziro-os/pkgs`, reusing the catalog's signing, sha256 pinning, expiry and rollback
+    protection instead of adding a second trust mechanism. A pack is validated as strictly as any trust boundary
+    (size limits, RE2 only, the rule's own match and nomatch samples must pass) and is installed whole or not at all;
+    the engine is swapped atomically, so a bad pack can only fail to load. Rule packs are data and cannot carry code:
+    the seven protocol rules stay in Go and a pack can only change their metadata. Nodes fetch packs themselves;
+    cluster state carries only an epoch that says "fetch now", never rule content.
   - Policy sees one canonical identity: a cleaned path, a normalized host, and a client address that only a trusted
     proxy may name.
   - Rate limits, automatic bans and metrics are per node. Sharing them across nodes needs a replicated store and is
