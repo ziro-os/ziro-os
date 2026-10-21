@@ -53,6 +53,11 @@ type routeMetrics struct {
 	denied   [numDeny]atomic.Uint64
 	retries  atomic.Uint64
 	upErrors atomic.Uint64 // transport errors talking to an upstream
+
+	ejections     atomic.Uint64 // upstreams ejected by the outlier policy
+	mirrored      atomic.Uint64
+	mirrorErrors  atomic.Uint64
+	mirrorSkipped atomic.Uint64 // copies not sent: too large, or too many pending
 }
 
 // observe records a finished request or L4 connection.
@@ -218,6 +223,21 @@ func (m *gwMetrics) write(w io.Writer) {
 	for _, r := range routes {
 		if n := r.m.upErrors.Load(); n > 0 {
 			fmt.Fprintf(bw, "zirogate_upstream_errors_total{route=%q} %d\n", r.name, n)
+		}
+	}
+
+	family("zirogate_outlier_ejections_total", "Upstreams ejected for failing repeatedly.", "counter")
+	for _, r := range routes {
+		if n := r.m.ejections.Load(); n > 0 {
+			fmt.Fprintf(bw, "zirogate_outlier_ejections_total{route=%q} %d\n", r.name, n)
+		}
+	}
+	family("zirogate_mirror_requests_total", "Mirrored requests by result.", "counter")
+	for _, r := range routes {
+		for res, c := range map[string]*atomic.Uint64{"ok": &r.m.mirrored, "error": &r.m.mirrorErrors, "skipped": &r.m.mirrorSkipped} {
+			if n := c.Load(); n > 0 {
+				fmt.Fprintf(bw, "zirogate_mirror_requests_total{route=%q,result=%q} %d\n", r.name, res, n)
+			}
 		}
 	}
 

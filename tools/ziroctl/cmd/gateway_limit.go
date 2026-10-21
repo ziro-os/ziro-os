@@ -35,8 +35,15 @@ type bucketState struct {
 	last   time.Time
 }
 
-func newTokenBucket(rps int) *tokenBucket {
-	return &tokenBucket{rate: float64(rps), burst: math.Max(float64(rps), 10)}
+func newTokenBucket(rps int) *tokenBucket { return newTokenBucketBurst(rps, 0) }
+
+// newTokenBucketBurst is newTokenBucket with a chosen burst (0 = max(rps, 10)).
+func newTokenBucketBurst(rps, burst int) *tokenBucket {
+	b := math.Max(float64(rps), 10)
+	if burst > 0 {
+		b = float64(burst)
+	}
+	return &tokenBucket{rate: float64(rps), burst: b}
 }
 
 // fnv32 is FNV-1a over a string, without allocating.

@@ -2,17 +2,17 @@ package cmd
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +43,27 @@ type gwRoute struct {
 	m          *routeMetrics
 	cookieName string
 	realm      string
+
+	// Resolved from the route's traffic settings (see gateway_traffic.go).
+	pathRe      *regexp.Regexp
+	hdrM        []gwMatcher
+	queryM      []gwMatcher
+	cookieM     []gwMatcher
+	scheme      string // http or https toward the upstreams
+	ownTr       bool   // tr belongs to this route (https, h2c) and is closed with it
+	reqTimeout  time.Duration
+	idleTimeout time.Duration
+	retryOn     uint8
+	budget      *retryBudget
+	outlier     *gwOutlier
+	slowStart   time.Duration
+	hashSpec    keySpec
+	rateSpec    keySpec
+	rewrite     *regexp.Regexp
+	rewriteTo   string
+	cors        *gwCORS
+	mirror      []*gwTarget
+	mirrorPct   int
 }
 
 // matches reports whether the request fits the route's path, method and header matchers.
@@ -70,6 +91,30 @@ func (r *gwRoute) matches(req *http.Request) bool {
 			return false
 		}
 	}
+	if r.pathRe != nil && !r.pathRe.MatchString(path) {
+		return false
+	}
+	for i := range r.hdrM {
+		m := &r.hdrM[i]
+		v := req.Header.Get(m.name)
+		if !m.test(v, len(req.Header[m.name]) > 0) {
+			return false
+		}
+	}
+	for i := range r.queryM {
+		m := &r.queryM[i]
+		v, found := queryGet(req.URL.RawQuery, m.name)
+		if !m.test(v, found) {
+			return false
+		}
+	}
+	for i := range r.cookieM {
+		m := &r.cookieM[i]
+		v, found := cookieGet(req.Header, m.name)
+		if !m.test(v, found) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -79,7 +124,10 @@ func (r *gwRoute) specificity() int {
 	if r.PathExact {
 		s += 100000
 	}
-	return s + len(r.Methods) + len(r.Headers)*2
+	if r.PathRegex != "" {
+		s++
+	}
+	return s + len(r.Methods) + (len(r.Headers)+len(r.HeaderMatchers)+len(r.QueryMatchers)+len(r.CookieMatchers))*2
 }
 
 // routeTable is an immutable snapshot of what the gateway serves. A reload builds a new one and
@@ -164,7 +212,7 @@ type gatewayServer struct {
 	checks    map[string]checkEntry
 	checkMu   sync.Mutex
 
-	transports sync.Map // response timeout -> *http.Transport
+	transports sync.Map // transportKey -> *http.Transport
 	proxy      *httputil.ReverseProxy
 	log        func(v any) // events (health changes, config problems); the access log is alog
 	alog       *accessLog  // nil: requests are not logged
@@ -183,7 +231,8 @@ type gatewayServer struct {
 	l4        map[int]net.Listener
 	l4Mu      sync.Mutex
 	reqIDGen  func() string
-	httpsPort int // the public HTTPS port when it is not 443 (for redirects)
+	mirrorSem chan struct{} // bounds mirrored requests in flight
+	httpsPort int           // the public HTTPS port when it is not 443 (for redirects)
 	draining  atomic.Bool
 	l4wg      sync.WaitGroup // open TCP and passthrough connections
 }
@@ -196,7 +245,11 @@ type gwCtx struct {
 	target   *gwTarget
 	tls      bool
 	clientIP string
+	key      string // what hash-based balancing hashes
 	reqID    string
+	traceID  string
+	trace    string // traceparent sent upstream
+	cancel   context.CancelFunc
 	upStatus int
 	upNS     int64
 	err      error
@@ -228,17 +281,15 @@ var reqPool = sync.Pool{New: func() any { return new(reqState) }}
 func newGatewayServer() *gatewayServer {
 	g := &gatewayServer{checks: map[string]checkEntry{},
 		certs: map[string]*tls.Certificate{}, leafs: map[string]*tls.Certificate{}, l4: map[int]net.Listener{},
-		metrics: newGWMetrics(), leafLimit: newTokenBucket(leafIssuePerSec)}
+		metrics: newGWMetrics(), leafLimit: newTokenBucket(leafIssuePerSec), mirrorSem: make(chan struct{}, mirrorMaxPending)}
 	g.tbl.Store(newRouteTable())
 	g.log = func(v any) {
 		if b, err := json.Marshal(v); err == nil {
 			fmt.Println(string(b))
 		}
 	}
-	g.reqIDGen = func() string {
-		var b [8]byte
-		_, _ = rand.Read(b[:])
-		return hex.EncodeToString(b[:])
+	g.reqIDGen = func() string { // identifiers for correlation, not secrets: no syscall per request
+		return string(appendHex64(make([]byte, 0, 16), mrand.Uint64()))
 	}
 	bufPool := &gwBufferPool{}
 	g.proxy = &httputil.ReverseProxy{
@@ -246,10 +297,17 @@ func newGatewayServer() *gatewayServer {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			c := pr.In.Context().Value(gwCtxKey{}).(*gwCtx)
 			out := pr.Out
-			out.URL.Scheme, out.URL.Host = "http", c.target.addr
+			out.URL.Scheme, out.URL.Host = c.route.scheme, c.target.addr
 			if sp := c.route.StripPrefix; sp != "" && strings.HasPrefix(out.URL.Path, sp) {
 				out.URL.Path = "/" + strings.TrimLeft(strings.TrimPrefix(out.URL.Path, sp), "/")
 				out.URL.RawPath = ""
+			}
+			if re := c.route.rewrite; re != nil {
+				p := re.ReplaceAllString(out.URL.Path, c.route.rewriteTo)
+				if !strings.HasPrefix(p, "/") {
+					p = "/" + p
+				}
+				out.URL.Path, out.URL.RawPath = p, ""
 			}
 			out.Host = pr.In.Host
 			h := out.Header
@@ -265,6 +323,7 @@ func newGatewayServer() *gatewayServer {
 				h.Del(k)
 			}
 			h.Set("X-Request-ID", c.reqID)
+			h.Set("Traceparent", c.trace)
 			applyHeaderRules(h, c.route.RequestHeaders)
 		},
 		Transport: gwRoundTripper{g},
@@ -274,7 +333,16 @@ func newGatewayServer() *gatewayServer {
 				resp.Header.Set("Strict-Transport-Security", "max-age=31536000")
 			}
 			resp.Header.Set("X-Request-ID", c.reqID)
+			if r := c.route; r.cors != nil {
+				r.cors.apply(resp.Header, resp.Request.Header.Get("Origin"))
+			}
+			if c.route.SecurityHeaders {
+				setSecurityHeaders(resp.Header)
+			}
 			applyHeaderRules(resp.Header, c.route.ResponseHeaders)
+			if c.route.idleTimeout > 0 && c.cancel != nil {
+				resp.Body = newIdleBody(resp.Body, c.route.idleTimeout, c.cancel)
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -338,64 +406,101 @@ func (b *gwBufferPool) Get() []byte {
 
 func (b *gwBufferPool) Put(v []byte) { b.p.Put(&v) }
 
-// transport returns the shared upstream transport for a response timeout.
-func (g *gatewayServer) transport(timeout time.Duration) *http.Transport {
-	if t, ok := g.transports.Load(timeout); ok {
+type transportKey struct{ connect, header time.Duration }
+
+// transport returns the upstream transport shared by routes with the same timeouts.
+func (g *gatewayServer) transport(connect, header time.Duration) *http.Transport {
+	k := transportKey{connect, header}
+	if t, ok := g.transports.Load(k); ok {
 		return t.(*http.Transport)
 	}
-	t := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:          8192,
-		MaxIdleConnsPerHost:   512,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		ResponseHeaderTimeout: timeout,
-		ReadBufferSize:        32 << 10,
-		WriteBufferSize:       32 << 10,
-	}
-	v, _ := g.transports.LoadOrStore(timeout, t)
+	v, _ := g.transports.LoadOrStore(k, newUpstreamTransport(connect, header))
 	return v.(*http.Transport)
 }
 
-// gwRoundTripper sends a request to the chosen upstream and, for idempotent requests, retries
-// another upstream after a dial error (the request never reached the first one).
+// gwRoundTripper sends a request to the chosen upstream and retries another one when the route
+// allows it: after a dial error (the request never reached the first upstream) for any idempotent
+// request, and, if the route asks for it, after a 502/503/504, a timeout or a reset for idempotent
+// requests without a body. Retries draw on the route's retry budget.
 type gwRoundTripper struct{ g *gatewayServer }
 
 func (rt gwRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	g := rt.g
 	c := req.Context().Value(gwCtxKey{}).(*gwCtx)
-	tr := c.route.tr
+	r := c.route
 	for attempt := 0; ; attempt++ {
 		tg := c.target
 		c.markTried(tg)
 		tg.up.active.Add(1)
 		t0 := time.Now()
-		resp, err := tr.RoundTrip(req)
+		resp, err := r.tr.RoundTrip(req)
+		now := time.Now()
 		if err == nil {
-			c.upStatus, c.upNS = resp.StatusCode, time.Since(t0).Nanoseconds()
+			code := resp.StatusCode
+			failed := code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
+			if failed {
+				g.recordFailure(r, tg, now, false)
+			} else {
+				g.recordSuccess(tg, now)
+			}
+			if failed && r.retryOn&retry5xx != 0 && attempt < r.Retries && replayable(req) {
+				if next := g.pick(r, c.key, now, c.tried[:c.nTried]); next != nil && r.budget.take() {
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+					resp.Body.Close()
+					tg.up.active.Add(-1)
+					r.m.retries.Add(1)
+					if !sleepCtx(req.Context(), backoff(attempt)) {
+						return nil, req.Context().Err()
+					}
+					req = req.Clone(req.Context())
+					req.URL.Host = next.addr
+					c.target = next
+					continue
+				}
+			}
+			c.upStatus, c.upNS = code, now.Sub(t0).Nanoseconds()
 			resp.Body = &countedBody{ReadCloser: resp.Body, cnt: &tg.up.active}
 			return resp, nil
 		}
 		tg.up.active.Add(-1)
-		if !isDialErr(err) { // after a dial the request may have reached the upstream: never resend
+		if errors.Is(err, context.Canceled) { // the client left: not the upstream's fault
 			return nil, err
 		}
-		tg.up.markDown(time.Now())
-		g.metrics.upstreamFailure(c.route.Name, tg.addr)
-		idempotent := req.Method == http.MethodGet || req.Method == http.MethodHead || req.Method == http.MethodOptions
-		if attempt >= c.route.Retries || !idempotent {
+		dial := isDialErr(err)
+		g.recordFailure(r, tg, now, dial)
+		if dial {
+			g.metrics.upstreamFailure(r.Name, tg.addr)
+		}
+		// After a dial the request never reached the upstream, so any idempotent request may go
+		// elsewhere. Otherwise it may have been processed: only a body-less idempotent request
+		// is replayed, and only for the failures the route lists.
+		retry := false
+		switch {
+		case dial:
+			retry = idempotentMethod(req.Method)
+		case r.retryOn&retryTimeout != 0 && isTimeout(err), r.retryOn&retryReset != 0 && isReset(err):
+			retry = replayable(req)
+		}
+		if !retry || attempt >= r.Retries {
 			return nil, err
 		}
-		next := g.pick(c.route, c.clientIP, time.Now(), c.tried[:c.nTried])
-		if next == nil {
+		next := g.pick(r, c.key, now, c.tried[:c.nTried])
+		if next == nil || !r.budget.take() {
 			return nil, err
 		}
-		c.route.m.retries.Add(1)
+		r.m.retries.Add(1)
+		if !dial && !sleepCtx(req.Context(), backoff(attempt)) {
+			return nil, req.Context().Err()
+		}
 		req = req.Clone(req.Context())
 		req.URL.Host = next.addr
 		c.target = next
 	}
+}
+
+// replayable reports whether a request can be sent again: idempotent and without a body.
+func replayable(req *http.Request) bool {
+	return idempotentMethod(req.Method) && req.ContentLength == 0 && len(req.TransferEncoding) == 0
 }
 
 type countedBody struct {
@@ -496,6 +601,13 @@ func (g *gatewayServer) load(cfg *GatewayConfig) error {
 	g.certMu.Unlock()
 	g.settings.Store(settings)
 	g.tbl.Store(t)
+	for _, o := range old.all { // a replaced route's own connections would otherwise idle until they time out
+		if o.ownTr && g.routeNamed(o.Name) != o {
+			if c, ok := o.tr.(interface{ CloseIdleConnections() }); ok {
+				c.CloseIdleConnections()
+			}
+		}
+	}
 	g.hasSNI.Store(len(t.sniEx)+len(t.sniWd) > 0)
 	g.prune(t)
 	g.syncHealthChecks(t)
@@ -503,15 +615,77 @@ func (g *gatewayServer) load(cfg *GatewayConfig) error {
 }
 
 // buildRoute resolves one route's runtime state. prev, the route of the same name before the
-// reload, lends the state worth keeping: a rate limit's buckets, the round-robin position and
-// the health of targets that are still there.
+// reload, lends the state worth keeping: a rate limit's buckets, the round-robin position, the
+// retry budget and the health of targets that are still there.
 func (g *gatewayServer) buildRoute(rs GatewayRouteState, fp string, prev *gwRoute) (*gwRoute, error) {
-	r := &gwRoute{GatewayRouteState: rs, fp: fp, timeout: 60 * time.Second, m: g.metrics.route(rs.Name),
-		cookieName: "ziro_gw_" + rs.Name, realm: rs.Name}
-	if rs.Timeout != "" {
-		r.timeout, _ = time.ParseDuration(rs.Timeout)
+	r := &gwRoute{GatewayRouteState: rs, fp: fp, m: g.metrics.route(rs.Name), cookieName: "ziro_gw_" + rs.Name,
+		realm: rs.Name, scheme: "http", outlier: newOutlier(rs.Outlier), hashSpec: parseKeySpec(rs.HashKey),
+		rateSpec: parseKeySpec(rs.RateKey), mirrorPct: 100}
+	if rs.UpstreamProto == "https" {
+		r.scheme = "https"
 	}
-	r.tr = g.transport(r.timeout)
+	connect, header := 5*time.Second, 60*time.Second
+	if rs.Timeout != "" {
+		header, _ = time.ParseDuration(rs.Timeout)
+	}
+	if t := rs.Timeouts; t != nil {
+		if t.Connect != "" {
+			connect, _ = time.ParseDuration(t.Connect)
+		}
+		if t.ResponseHeader != "" {
+			header, _ = time.ParseDuration(t.ResponseHeader)
+		}
+		if t.Request != "" {
+			r.reqTimeout, _ = time.ParseDuration(t.Request)
+		}
+		if t.Idle != "" {
+			r.idleTimeout, _ = time.ParseDuration(t.Idle)
+		}
+	}
+	r.timeout = header
+	if rs.UpstreamProto == "https" || rs.UpstreamProto == "h2c" {
+		tr, err := routeTransport(rs, connect, header)
+		if err != nil {
+			return nil, fmt.Errorf("route %q: %w", rs.Name, err)
+		}
+		r.tr, r.ownTr = tr, true
+	} else {
+		r.tr = g.transport(connect, header)
+	}
+	if o := rs.Outlier; o != nil && o.SlowStart != "" {
+		r.slowStart = r.outlier.slowStart
+	}
+	var err error
+	if rs.PathRegex != "" {
+		if r.pathRe, err = regexp.Compile(rs.PathRegex); err != nil {
+			return nil, fmt.Errorf("route %q: path regex: %w", rs.Name, err)
+		}
+	}
+	for _, m := range []struct {
+		src    []GatewayMatcher
+		dst    *[]gwMatcher
+		header bool
+	}{{rs.HeaderMatchers, &r.hdrM, true}, {rs.QueryMatchers, &r.queryM, false}, {rs.CookieMatchers, &r.cookieM, false}} {
+		if *m.dst, err = compileMatchers(m.src, m.header); err != nil {
+			return nil, fmt.Errorf("route %q: %w", rs.Name, err)
+		}
+	}
+	if w := rs.Rewrite; w != nil {
+		if r.rewrite, err = regexp.Compile(w.Pattern); err != nil {
+			return nil, fmt.Errorf("route %q: rewrite: %w", rs.Name, err)
+		}
+		r.rewriteTo = w.Replace
+	}
+	r.cors = newCORS(rs.CORS)
+	r.retryOn = retryMask(rs.RetryOn)
+	if rs.Retries > 0 {
+		if prev != nil && prev.budget != nil && prev.RetryBudget == rs.RetryBudget {
+			r.budget = prev.budget
+		} else {
+			r.budget = newRetryBudget(rs.RetryBudget)
+		}
+	}
+
 	targets := rs.Targets
 	if len(targets) == 0 {
 		for _, u := range rs.Upstreams {
@@ -521,11 +695,17 @@ func (g *gatewayServer) buildRoute(rs GatewayRouteState, fp string, prev *gwRout
 	if len(targets) > gatewayMaxTargets*4 {
 		return nil, fmt.Errorf("route %q: too many targets", rs.Name)
 	}
-	for _, t := range targets {
+	mk := func(t GatewayTarget) (*gwTarget, error) {
 		if _, err := netip.ParseAddrPort(t.Addr); err != nil || t.Weight < 1 {
 			return nil, fmt.Errorf("route %q: invalid upstream %q", rs.Name, t.Addr)
 		}
-		tg := &gwTarget{addr: t.Addr, weight: t.Weight, sticky: stickyValue(t.Addr), up: g.upstreamFor(t.Addr)}
+		return &gwTarget{addr: t.Addr, weight: t.Weight, sticky: stickyValue(t.Addr), seed: mix64(fnv64(t.Addr)), up: g.upstreamFor(t.Addr)}, nil
+	}
+	for _, t := range targets {
+		tg, err := mk(t)
+		if err != nil {
+			return nil, err
+		}
 		if prev != nil {
 			for _, pt := range prev.targets {
 				if pt.addr == t.Addr {
@@ -535,6 +715,19 @@ func (g *gatewayServer) buildRoute(rs GatewayRouteState, fp string, prev *gwRout
 		}
 		r.targets = append(r.targets, tg)
 	}
+	if rs.Mirror != nil {
+		r.mirrorPct = rs.Mirror.Percent
+		if r.mirrorPct == 0 {
+			r.mirrorPct = 100
+		}
+		for _, t := range rs.MirrorTargets {
+			tg, err := mk(t)
+			if err != nil {
+				return nil, err
+			}
+			r.mirror = append(r.mirror, tg)
+		}
+	}
 	for _, c := range rs.AllowCIDRs {
 		p, _ := netip.ParsePrefix(c)
 		r.allow = append(r.allow, p.Masked())
@@ -543,10 +736,10 @@ func (g *gatewayServer) buildRoute(rs GatewayRouteState, fp string, prev *gwRout
 		r.hdrs = append(r.hdrs, gwHeaderMatch{http.CanonicalHeaderKey(k), v})
 	}
 	if rs.RateRPS > 0 {
-		if prev != nil && prev.limiter != nil && prev.RateRPS == rs.RateRPS {
+		if prev != nil && prev.limiter != nil && prev.RateRPS == rs.RateRPS && prev.RateBurst == rs.RateBurst {
 			r.limiter = prev.limiter
 		} else {
-			r.limiter = newTokenBucket(rs.RateRPS)
+			r.limiter = newTokenBucketBurst(rs.RateRPS, rs.RateBurst)
 		}
 	}
 	if len(rs.BasicAuth) > 0 {
@@ -705,7 +898,11 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 			return
 		}
 		st.route = rt
-		rt.m.inflight.Add(1)
+		if n := rt.m.inflight.Add(1); rt.MaxConcurrent > 0 && n > int64(rt.MaxConcurrent) {
+			st.sw.Header().Set("Retry-After", "1")
+			st.deny(denyShed, http.StatusServiceUnavailable, "too many concurrent requests")
+			return
+		}
 		if !secure && rt.TLS != "off" {
 			target := host
 			if g.httpsPort != 0 && g.httpsPort != 443 {
@@ -718,9 +915,25 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 			st.deny(denyACL, http.StatusForbidden, "forbidden")
 			return
 		}
-		if rt.limiter != nil && !rt.limiter.allow(rateKey(ip), start) {
-			st.sw.Header().Set("Retry-After", "1")
-			st.deny(denyRate, http.StatusTooManyRequests, "rate limit exceeded")
+		if rt.limiter != nil {
+			key := ip
+			if rt.rateSpec.kind != 0 {
+				key = rt.rateSpec.value(req, ip)
+			} else {
+				key = rateKey(ip)
+			}
+			if ok, left := rt.limiter.take(key, start); !ok {
+				wait := max(int((1-left)/rt.limiter.rate)+1, 1)
+				h := st.sw.Header()
+				h.Set("Retry-After", strconv.Itoa(wait))
+				h.Set("RateLimit-Limit", strconv.Itoa(int(rt.limiter.rate)))
+				h.Set("RateLimit-Remaining", "0")
+				h.Set("RateLimit-Reset", strconv.Itoa(wait))
+				st.deny(denyRate, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+		}
+		if rt.cors != nil && rt.cors.preflight(&st.sw, req) { // preflights carry no credentials
 			return
 		}
 		if ok, limited := g.checkBasicAuth(rt, req, ip, start); !ok {
@@ -760,17 +973,30 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 			_ = http.NewResponseController(&st.sw).SetReadDeadline(start.Add(gatewayBodyTimeout))
 		}
 		req.Body = http.MaxBytesReader(&st.sw, req.Body, limit<<20)
+		c.key = ip
+		if rt.LB == "hash" {
+			c.key = rt.hashSpec.value(req, ip)
+		}
 		var tg *gwTarget
 		if rt.LB == "cookie" {
 			tg = g.stickyTarget(rt, req, start)
 		}
 		if tg == nil {
-			tg = g.pick(rt, ip, start, nil)
+			tg = g.pick(rt, c.key, start, nil)
 		}
 		if tg == nil {
-			st.deny(denyNoUp, http.StatusServiceUnavailable, "no healthy upstream")
+			reason := denyNoUp
+			if rt.MaxUpstreamConns > 0 {
+				reason = denyShed
+			}
+			st.sw.Header().Set("Retry-After", "1")
+			st.deny(reason, http.StatusServiceUnavailable, "no healthy upstream")
 			return
 		}
+		if rt.budget != nil {
+			rt.budget.request()
+		}
+		g.maybeMirror(rt, req, ip)
 		if rt.LB == "cookie" {
 			http.SetCookie(&st.sw, &http.Cookie{Name: rt.cookieName, Value: tg.sticky, Path: "/",
 				HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
@@ -782,7 +1008,17 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 			out = gz
 		}
 		c.route, c.target, c.tls, c.clientIP = rt, tg, secure, ip
-		g.proxy.ServeHTTP(out, req.WithContext(context.WithValue(req.Context(), gwCtxKey{}, c)))
+		c.traceID, c.trace = traceContext(req.Header.Get("Traceparent"))
+		ctx := req.Context()
+		if rt.reqTimeout > 0 || rt.idleTimeout > 0 {
+			if rt.reqTimeout > 0 {
+				ctx, c.cancel = context.WithTimeout(ctx, rt.reqTimeout)
+			} else {
+				ctx, c.cancel = context.WithCancel(ctx)
+			}
+			defer c.cancel()
+		}
+		g.proxy.ServeHTTP(out, req.WithContext(context.WithValue(ctx, gwCtxKey{}, c)))
 	})
 }
 
@@ -811,7 +1047,7 @@ func (g *gatewayServer) finish(st *reqState, req *http.Request) {
 		bp := logBufPool.Get().(*[]byte)
 		rec := gwAccessRecord{start: st.start, client: st.ip, host: st.host, method: req.Method, path: req.URL.Path,
 			status: code, bytes: st.sw.bytes, ms: d.Milliseconds(), route: routeName, requestID: st.c.reqID,
-			userAgent: req.UserAgent(), waf: st.waf}
+			userAgent: req.UserAgent(), waf: st.waf, traceID: st.c.traceID}
 		if st.c.target != nil {
 			rec.upstream = st.c.target.addr
 			rec.upStatus, rec.upMS = st.c.upStatus, st.c.upNS/1e6
@@ -883,4 +1119,13 @@ func (g *gatewayServer) adminHandler() http.Handler {
 		_ = json.NewEncoder(w).Encode(g.status())
 	})
 	return mux
+}
+
+func (g *gatewayServer) routeNamed(name string) *gwRoute {
+	for _, r := range g.tbl.Load().all {
+		if r.Name == name {
+			return r
+		}
+	}
+	return nil
 }

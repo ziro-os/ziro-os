@@ -79,6 +79,7 @@ type gwAccessRecord struct {
 	userAgent    string
 	tls          string
 	waf          string
+	traceID      string
 }
 
 const logMaxField = 256 // longest request-controlled value logged
@@ -119,6 +120,10 @@ func (r *gwAccessRecord) appendJSON(b []byte) []byte {
 	if r.tls != "" {
 		b = append(b, `,"tls":`...)
 		b = appendJSONString(b, r.tls)
+	}
+	if r.traceID != "" {
+		b = append(b, `,"trace_id":`...)
+		b = appendJSONString(b, r.traceID)
 	}
 	if r.waf != "" {
 		b = append(b, `,"waf":`...)

@@ -417,7 +417,9 @@ func routesConflict(a, b GatewayRoute) error {
 			}
 		}
 	case a.Kind == "http" && b.Kind == "http" && a.PathPrefix == b.PathPrefix && a.PathExact == b.PathExact &&
-		strings.Join(a.Methods, ",") == strings.Join(b.Methods, ",") && fmt.Sprint(a.Headers) == fmt.Sprint(b.Headers):
+		strings.Join(a.Methods, ",") == strings.Join(b.Methods, ",") && fmt.Sprint(a.Headers) == fmt.Sprint(b.Headers) &&
+		a.PathRegex == b.PathRegex && fmt.Sprint(a.HeaderMatchers) == fmt.Sprint(b.HeaderMatchers) &&
+		fmt.Sprint(a.QueryMatchers) == fmt.Sprint(b.QueryMatchers) && fmt.Sprint(a.CookieMatchers) == fmt.Sprint(b.CookieMatchers):
 		for _, h := range a.Hosts {
 			for _, k := range b.Hosts {
 				if h == k {
@@ -786,6 +788,7 @@ type routeFlags struct {
 	basicAuthFile                      string
 	respond                            string
 	health                             string
+	traffic                            trafficFlags
 }
 
 var gwF routeFlags
@@ -899,7 +902,7 @@ func routeFromFlags(name string, f routeFlags) (GatewayRoute, error) {
 			}
 		}
 	}
-	return r, nil
+	return r, applyTrafficFlags(&r, f.traffic)
 }
 
 var gatewayRouteCmd = &cobra.Command{Use: "route", Short: "Manage gateway routes", Example: "  ziroctl gateway route add shop --host shop.example.com --app web\n  ziroctl gateway route ls"}
@@ -1218,7 +1221,7 @@ func init() {
 	f.StringArrayVar(&gwF.headers, "header", nil, "Only requests with this header value: Name=value (repeatable)")
 	f.StringArrayVar(&gwF.apps, "app", nil, "App to route to, optionally app:weight (repeatable: canary)")
 	f.StringArrayVar(&gwF.to, "to", nil, "Address to route to, ip:port[@weight] (repeatable)")
-	f.StringVar(&gwF.r.LB, "lb", "round_robin", "round_robin, least_conn, ip_hash or cookie (sticky)")
+	f.StringVar(&gwF.r.LB, "lb", "round_robin", "round_robin, least_conn, p2c, ip_hash, hash (see --hash-key) or cookie (sticky)")
 	f.StringVar(&gwF.health, "health", "", "Active health check path[@interval], e.g. /healthz@5s")
 	f.StringVar(&gwF.r.StripPrefix, "strip-prefix", "", "Remove this prefix before forwarding")
 	f.StringArrayVar(&gwF.setReq, "set-header", nil, "Set a request header: Name=value (repeatable)")
@@ -1239,6 +1242,7 @@ func init() {
 	f.StringVar(&gwF.basicAuthFile, "basic-auth-file", "", "Read user:password lines for basic auth from a file (mode 600)")
 	f.BoolVar(&gwF.tcp, "tcp", false, "A TCP route on --listen (databases, any TCP service)")
 	f.IntVar(&gwF.r.Listen, "listen", 0, "Port for a --tcp route")
+	registerTrafficFlags(f, &gwF.r, &gwF.traffic)
 	f.BoolVar(&gwF.passthrough, "passthrough", false, "TLS passthrough on :443 routed by SNI (the upstream terminates TLS)")
 
 	ef := gatewayExposeCmd.Flags()

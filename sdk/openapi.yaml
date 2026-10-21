@@ -1871,7 +1871,7 @@ components:
         headers: { type: object, additionalProperties: { type: string } }
         listen: { type: integer, description: port of a tcp route }
         to: { type: array, items: { $ref: "#/components/schemas/GatewayUpstream" } }
-        lb: { type: string, enum: [round_robin, least_conn, ip_hash, cookie] }
+        lb: { type: string, enum: [round_robin, least_conn, p2c, ip_hash, hash, cookie] }
         health:
           type: object
           properties:
@@ -1896,6 +1896,67 @@ components:
         rate_rps: { type: integer }
         max_body_mb: { type: integer }
         basic_auth: { type: object, additionalProperties: { type: string }, description: user -> bcrypt hash }
+        path_regex: { type: string, description: RE2 expression the path must also match }
+        header_matchers: { type: array, items: { $ref: "#/components/schemas/GatewayMatcher" } }
+        query_matchers: { type: array, items: { $ref: "#/components/schemas/GatewayMatcher" } }
+        cookie_matchers: { type: array, items: { $ref: "#/components/schemas/GatewayMatcher" } }
+        timeouts:
+          type: object
+          properties:
+            connect: { type: string, examples: [5s] }
+            response_header: { type: string, description: per attempt }
+            request: { type: string, description: the whole exchange }
+            idle: { type: string, description: longest silence from the upstream while streaming }
+        retry_on: { type: array, items: { type: string, enum: [connect, 5xx, timeout, reset] } }
+        retry_budget: { type: integer, minimum: 0, maximum: 100, description: retries as a percent of requests (default 20) }
+        outlier:
+          type: object
+          description: Eject upstreams that keep failing
+          properties:
+            consecutive: { type: integer, description: failures in a row (default 5) }
+            eject_for: { type: string, description: first ejection time, doubling per repeat (default 30s) }
+            max_eject_percent: { type: integer, description: never eject more than this share (default 50) }
+            slow_start: { type: string, description: ramp traffic back over this time }
+        max_concurrent: { type: integer, description: requests in flight on the route; over it gets 503 }
+        max_upstream_conns: { type: integer, description: requests in flight per upstream }
+        hash_key: { type: string, description: 'with lb hash: ip, header:Name, cookie:Name or query:name' }
+        rate_key: { type: string, description: 'what rate_rps counts per: ip (default), header:Name, cookie:Name, query:name' }
+        rate_burst: { type: integer }
+        mirror:
+          type: object
+          description: Copy a share of the traffic to another upstream and discard the answer
+          properties:
+            app: { type: string }
+            address: { type: string, description: "IP:port" }
+            percent: { type: integer, minimum: 1, maximum: 100 }
+        rewrite:
+          type: object
+          properties:
+            pattern: { type: string, description: RE2 expression over the path }
+            replace: { type: string, description: replacement; $1 refers to a group }
+        cors:
+          type: object
+          description: Answer CORS preflights and add the response headers
+          properties:
+            origins: { type: array, items: { type: string } }
+            methods: { type: array, items: { type: string } }
+            headers: { type: array, items: { type: string } }
+            expose: { type: array, items: { type: string } }
+            credentials: { type: boolean }
+            max_age: { type: integer }
+        security_headers: { type: boolean, description: add nosniff, frame and referrer headers the app does not set }
+        upstream_proto: { type: string, enum: [http, https, h2c] }
+        upstream_tls:
+          type: object
+          properties:
+            server_name: { type: string }
+            ca_pem: { type: string, description: trusted CA certificates (PEM); empty = system roots }
+    GatewayMatcher:
+      type: object
+      properties:
+        name: { type: string }
+        op: { type: string, enum: [eq, present, prefix, regex], default: eq }
+        value: { type: string }
     HeaderRules:
       type: object
       properties:
@@ -1908,6 +1969,13 @@ components:
           properties:
             upstreams: { type: array, items: { type: string } }
             targets:
+              type: array
+              items:
+                type: object
+                properties:
+                  addr: { type: string }
+                  weight: { type: integer }
+            mirror_targets:
               type: array
               items:
                 type: object

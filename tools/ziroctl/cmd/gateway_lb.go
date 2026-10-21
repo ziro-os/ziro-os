@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strconv"
@@ -19,7 +20,10 @@ import (
 type gwUpstream struct {
 	addr      string
 	active    atomic.Int64 // requests in flight
-	downUntil atomic.Int64 // unix nanoseconds: skipped until then after a dial failure
+	downUntil atomic.Int64 // unix nanoseconds: ejected until then
+	rampStart atomic.Int64 // unix nanoseconds: when the last ejection ended (slow start)
+	consec    atomic.Int32 // failures in a row
+	ejections atomic.Int32 // recent ejections: each one lasts longer
 }
 
 func (g *gatewayServer) upstreamFor(addr string) *gwUpstream {
@@ -36,6 +40,7 @@ type gwTarget struct {
 	addr      string
 	weight    int
 	sticky    string // value of the sticky-session cookie that pins a client to this target
+	seed      uint64 // identity for hash-based balancing
 	up        *gwUpstream
 	unhealthy atomic.Bool // the last active health check failed
 }
@@ -44,7 +49,7 @@ func (t *gwTarget) usable(now int64) bool {
 	return t.up.downUntil.Load() <= now && !t.unhealthy.Load()
 }
 
-// markDown skips the upstream for gatewayDownFor after a failed dial.
+// markDown skips the upstream for gatewayDownFor (TCP routes, which have no policy of their own).
 func (u *gwUpstream) markDown(now time.Time) { u.downUntil.Store(now.Add(gatewayDownFor).UnixNano()) }
 
 // fnv64 is FNV-1a over a string, without allocating.
@@ -60,9 +65,11 @@ func stickyValue(addr string) string { return strconv.FormatUint(fnv64(addr), 36
 
 // picker filters the candidates of one selection.
 type picker struct {
-	tried  []*gwTarget // already attempted by this request
-	strict bool        // only usable targets (false: none were, so probe any)
-	now    int64
+	tried     []*gwTarget // already attempted by this request
+	strict    bool        // only usable targets (false: none were, so probe any)
+	now       int64
+	maxConns  int64         // requests in flight an upstream may have (0 = no limit)
+	slowStart time.Duration // ramp-up after an ejection (0 = off)
 }
 
 func (p *picker) ok(t *gwTarget) bool {
@@ -71,24 +78,29 @@ func (p *picker) ok(t *gwTarget) bool {
 			return false
 		}
 	}
+	if p.maxConns > 0 && t.up.active.Load() >= p.maxConns {
+		return false
+	}
 	return !p.strict || t.usable(p.now)
 }
 
 // pick chooses a target by the route's policy among the usable ones, skipping the targets in
-// tried. When none is usable it probes one anyway: better a try than a guaranteed 503.
-func (g *gatewayServer) pick(r *gwRoute, clientIP string, now time.Time, tried []*gwTarget) *gwTarget {
-	p := picker{tried: tried, strict: true, now: now.UnixNano()}
+// tried. key is what the hashing policies use: the client address for ip_hash, or the configured
+// header, cookie or query value for hash. When no target is usable it probes one anyway: better a
+// try than a guaranteed 503 (but never beyond the per-upstream connection limit).
+func (g *gatewayServer) pick(r *gwRoute, key string, now time.Time, tried []*gwTarget) *gwTarget {
+	p := picker{tried: tried, strict: true, now: now.UnixNano(), maxConns: int64(r.MaxUpstreamConns), slowStart: r.slowStart}
 	total := 0
 	for _, t := range r.targets {
 		if p.ok(t) {
-			total += t.weight
+			total += p.effWeight(t)
 		}
 	}
 	if total == 0 {
 		p.strict = false
 		for _, t := range r.targets {
 			if p.ok(t) {
-				total += t.weight
+				total += p.effWeight(t)
 			}
 		}
 		if total == 0 {
@@ -103,16 +115,59 @@ func (g *gatewayServer) pick(r *gwRoute, clientIP string, now time.Time, tried [
 			if !p.ok(t) {
 				continue
 			}
-			if score := float64(t.up.active.Load()+1) / float64(t.weight); score < bestScore {
+			if score := float64(t.up.active.Load()+1) / float64(p.effWeight(t)); score < bestScore {
 				best, bestScore = t, score
 			}
 		}
 		return best
+	case "p2c":
+		return powerOfTwo(r.targets, &p)
 	case "ip_hash":
-		return weightedAt(r.targets, &p, total, fnv64(clientIP))
+		return weightedAt(r.targets, &p, total, fnv64(key))
+	case "hash":
+		return rendezvous(r.targets, &p, key)
 	default: // round_robin, and cookie when there is no valid sticky cookie
 		return weightedAt(r.targets, &p, total, r.next.Add(1)-1)
 	}
+}
+
+// powerOfTwo samples two eligible targets at random and takes the less loaded: nearly as even as
+// least_conn, without every request contending on the same "least" target.
+func powerOfTwo(targets []*gwTarget, p *picker) *gwTarget {
+	n := 0
+	for _, t := range targets {
+		if p.ok(t) {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	nth := func(k int) *gwTarget {
+		for _, t := range targets {
+			if p.ok(t) {
+				if k == 0 {
+					return t
+				}
+				k--
+			}
+		}
+		return nil
+	}
+	i := rand.IntN(n)
+	a := nth(i)
+	if n == 1 {
+		return a
+	}
+	j := rand.IntN(n - 1)
+	if j >= i { // a different target than a
+		j++
+	}
+	b := nth(j)
+	if float64(b.up.active.Load()+1)/float64(p.effWeight(b)) < float64(a.up.active.Load()+1)/float64(p.effWeight(a)) {
+		return b
+	}
+	return a
 }
 
 func weightedAt(targets []*gwTarget, p *picker, total int, n uint64) *gwTarget {
@@ -125,10 +180,11 @@ func weightedAt(targets []*gwTarget, p *picker, total int, n uint64) *gwTarget {
 		if first == nil {
 			first = t
 		}
-		if x < t.weight {
+		w := p.effWeight(t)
+		if x < w {
 			return t
 		}
-		x -= t.weight
+		x -= w
 	}
 	return first
 }
@@ -198,7 +254,7 @@ func (g *gatewayServer) healthLoop(ctx context.Context, r *gwRoute, tg *gwTarget
 		interval, _ = time.ParseDuration(r.Health.Interval)
 	}
 	addr := tg.addr
-	client := &http.Client{Timeout: min(interval, 5*time.Second), Transport: g.transport(5 * time.Second),
+	client := &http.Client{Timeout: min(interval, 5*time.Second), Transport: r.tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	var last *bool
 	check := func() {
@@ -208,7 +264,7 @@ func (g *gatewayServer) healthLoop(ctx context.Context, r *gwRoute, tg *gwTarget
 				c.Close()
 				ok = true
 			}
-		} else if req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+r.Health.Path, nil); err == nil {
+		} else if req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.scheme+"://"+addr+r.Health.Path, nil); err == nil {
 			if len(r.Hosts) > 0 && !strings.HasPrefix(r.Hosts[0], "*.") {
 				req.Host = r.Hosts[0]
 			}

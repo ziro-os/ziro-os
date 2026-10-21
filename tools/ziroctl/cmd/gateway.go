@@ -92,6 +92,15 @@ func resolveTargets(r GatewayRoute, appAddrs func(app string) []string) GatewayR
 			rs.Upstreams = append(rs.Upstreams, a)
 		}
 	}
+	if m := r.Mirror; m != nil {
+		addrs := []string{m.Address}
+		if m.App != "" {
+			addrs = appAddrs(m.App)
+		}
+		for _, a := range addrs {
+			rs.MirrorTargets = append(rs.MirrorTargets, GatewayTarget{Addr: a, Weight: 1})
+		}
+	}
 	return rs
 }
 

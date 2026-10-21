@@ -28,7 +28,7 @@ type GatewayRoute struct {
 
 	App string            `json:"app,omitempty"` // v1: one app (To[0] after Normalize)
 	To  []GatewayUpstream `json:"to,omitempty"`
-	LB  string            `json:"lb,omitempty"` // round_robin (default), least_conn, ip_hash, cookie
+	LB  string            `json:"lb,omitempty"` // round_robin (default), least_conn, p2c, ip_hash, hash, cookie
 
 	Health *GatewayHealth `json:"health,omitempty"`
 
@@ -50,6 +50,31 @@ type GatewayRoute struct {
 	RateRPS    int               `json:"rate_rps,omitempty"`    // per client IP (requests, or connections for tcp/tls); 0 = unlimited
 	MaxBodyMB  int               `json:"max_body_mb,omitempty"` // 0 = 10
 	BasicAuth  map[string]string `json:"basic_auth,omitempty"`  // user -> bcrypt hash
+
+	// Traffic management (gateway_traffic.go); all optional.
+	PathRegex      string           `json:"path_regex,omitempty"` // RE2 over the path, in addition to path_prefix
+	HeaderMatchers []GatewayMatcher `json:"header_matchers,omitempty"`
+	QueryMatchers  []GatewayMatcher `json:"query_matchers,omitempty"`
+	CookieMatchers []GatewayMatcher `json:"cookie_matchers,omitempty"`
+
+	Timeouts    *GatewayTimeouts `json:"timeouts,omitempty"`
+	RetryOn     []string         `json:"retry_on,omitempty"`     // connect (default), 5xx, timeout, reset; idempotent requests without a body
+	RetryBudget int              `json:"retry_budget,omitempty"` // retries may be at most this percent of requests (default 20)
+
+	Outlier          *GatewayOutlier `json:"outlier,omitempty"`
+	MaxConcurrent    int             `json:"max_concurrent,omitempty"`     // requests in flight on this route; over it gets 503
+	MaxUpstreamConns int             `json:"max_upstream_conns,omitempty"` // requests in flight per upstream
+
+	HashKey   string `json:"hash_key,omitempty"` // lb hash: ip, header:Name, cookie:Name or query:name
+	RateKey   string `json:"rate_key,omitempty"` // what a rate limit counts per: ip (default), header:Name, cookie:Name, query:name
+	RateBurst int    `json:"rate_burst,omitempty"`
+
+	Mirror          *GatewayMirror      `json:"mirror,omitempty"`
+	Rewrite         *GatewayRewrite     `json:"rewrite,omitempty"`
+	CORS            *GatewayCORS        `json:"cors,omitempty"`
+	SecurityHeaders bool                `json:"security_headers,omitempty"` // nosniff, frame and referrer policy unless the app sets them
+	UpstreamProto   string              `json:"upstream_proto,omitempty"`   // http (default), https or h2c
+	UpstreamTLS     *GatewayUpstreamTLS `json:"upstream_tls,omitempty"`
 }
 
 // GatewayUpstream is a route target: an app (cluster app or local `apps` instance) or an
@@ -205,8 +230,9 @@ type GatewayConfig struct {
 
 type GatewayRouteState struct {
 	GatewayRoute
-	Upstreams []string        `json:"upstreams"`         // ip:port of every target (v1 gateways read only this)
-	Targets   []GatewayTarget `json:"targets,omitempty"` // with weights
+	Upstreams     []string        `json:"upstreams"`                // ip:port of every target (v1 gateways read only this)
+	Targets       []GatewayTarget `json:"targets,omitempty"`        // with weights
+	MirrorTargets []GatewayTarget `json:"mirror_targets,omitempty"` // where a mirror copies to, resolved
 }
 
 type GatewayTarget struct {
@@ -371,9 +397,9 @@ func (r *GatewayRoute) Validate() error {
 		}
 	}
 	switch r.LB {
-	case "round_robin", "least_conn", "ip_hash", "cookie":
+	case "round_robin", "least_conn", "p2c", "ip_hash", "hash", "cookie":
 	default:
-		return fmt.Errorf("lb must be round_robin, least_conn, ip_hash or cookie")
+		return fmt.Errorf("lb must be round_robin, least_conn, p2c, ip_hash, hash or cookie")
 	}
 	if r.LB == "cookie" && (r.Kind != "http" || r.TLS == "off") {
 		return fmt.Errorf("cookie stickiness needs an HTTPS route (the cookie is Secure); use --lb ip_hash")
@@ -432,7 +458,7 @@ func (r *GatewayRoute) Validate() error {
 			return fmt.Errorf("basic auth user %q needs a bcrypt hash", u)
 		}
 	}
-	return nil
+	return r.validTraffic()
 }
 
 // RouteApps lists the apps a route sends traffic to.
@@ -445,6 +471,9 @@ func RouteApps(r GatewayRoute) []string {
 		if u.App != "" && u.App != r.App {
 			out = append(out, u.App)
 		}
+	}
+	if r.Mirror != nil && r.Mirror.App != "" {
+		out = append(out, r.Mirror.App)
 	}
 	return out
 }

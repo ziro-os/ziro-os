@@ -26,18 +26,25 @@ type (
 	AppVersion   = schema.AppVersion
 	AppComponent = schema.AppComponent
 
-	GatewayRoute      = schema.GatewayRoute
-	GatewayUpstream   = schema.GatewayUpstream
-	GatewayHealth     = schema.GatewayHealth
-	GatewayRespond    = schema.GatewayRespond
-	HeaderRules       = schema.HeaderRules
-	GatewayACME       = schema.GatewayACME
-	GatewaySettings   = schema.GatewaySettings
-	GatewayDomain     = schema.GatewayDomain
-	GatewayCert       = schema.GatewayCert
-	GatewayConfig     = schema.GatewayConfig
-	GatewayRouteState = schema.GatewayRouteState
-	GatewayTarget     = schema.GatewayTarget
+	GatewayRoute       = schema.GatewayRoute
+	GatewayUpstream    = schema.GatewayUpstream
+	GatewayHealth      = schema.GatewayHealth
+	GatewayRespond     = schema.GatewayRespond
+	HeaderRules        = schema.HeaderRules
+	GatewayACME        = schema.GatewayACME
+	GatewaySettings    = schema.GatewaySettings
+	GatewayMatcher     = schema.GatewayMatcher
+	GatewayTimeouts    = schema.GatewayTimeouts
+	GatewayOutlier     = schema.GatewayOutlier
+	GatewayMirror      = schema.GatewayMirror
+	GatewayRewrite     = schema.GatewayRewrite
+	GatewayCORS        = schema.GatewayCORS
+	GatewayUpstreamTLS = schema.GatewayUpstreamTLS
+	GatewayDomain      = schema.GatewayDomain
+	GatewayCert        = schema.GatewayCert
+	GatewayConfig      = schema.GatewayConfig
+	GatewayRouteState  = schema.GatewayRouteState
+	GatewayTarget      = schema.GatewayTarget
 
 	APIMessage         = sdkapi.Message
 	AppDeployRequest   = sdkapi.AppDeployRequest

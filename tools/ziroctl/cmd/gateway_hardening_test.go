@@ -650,15 +650,6 @@ func TestGatewayReloadKeepsState(t *testing.T) {
 	}
 }
 
-func (g *gatewayServer) routeNamed(name string) *gwRoute {
-	for _, r := range g.tbl.Load().all {
-		if r.Name == name {
-			return r
-		}
-	}
-	return nil
-}
-
 // ---- internal CA ----
 
 func TestInternalLeafBoundedAndLimited(t *testing.T) {
