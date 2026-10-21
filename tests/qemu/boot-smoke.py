@@ -256,6 +256,12 @@ def sandbox_checks(con, check):
                       f"wget -q -T 3 -O- http://1.1.1.1 >/dev/null 2>&1; echo NET=$?'", timeout=120)
     check("sandbox: reduced capabilities, loopback only, no network",
           "00000000000004fb" in out and "NET=0" not in out and "eth0" not in out, out)
+    # Observability: list filters, stats from the cgroup, the main command's output.
+    rc, out = con.run("o=$(ziroctl sandbox create alpine --timeout 10m --meta obs=1 -- sh -c 'echo OBS-STARTED; sleep 3600' 2>&1 | tail -2 | head -1) && sleep 2 && "
+                      "ziroctl sandbox ls --label obs=1 --state running | grep -c \"$o\"; ziroctl sandbox ls --label obs=2 --json; "
+                      "ziroctl sandbox stats $o --json; ziroctl sandbox logs $o --tail 5; ziroctl sandbox rm $o >/dev/null", timeout=300)
+    check("sandbox ls filters, stats (memory, pids) and logs of the main command",
+          "OBS-STARTED" in out and '"memory_bytes":' in out and '"memory_bytes": 0' not in out and "[]" in out, out)
     # Network policy: an allowlisted name works, anything else is refused; open never reaches private ranges.
     rc, out = con.run("ziroctl sandbox create alpine --timeout 10m --allow dl-cdn.alpinelinux.org 2>&1 | tail -2", timeout=300)
     nid = out.split()[0] if out.split() else ""

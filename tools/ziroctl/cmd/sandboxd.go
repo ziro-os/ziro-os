@@ -172,7 +172,8 @@ func (m *sandboxManager) routes() *http.ServeMux {
 		}
 	}
 	mux.HandleFunc("GET /v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
-		apiReply(w, nil, m.st.list(sandboxCallerOf(r)))
+		list, err := filterSandboxes(m.st.list(sandboxCallerOf(r)), r.URL.Query())
+		apiReply(w, err, list)
 	})
 	mux.HandleFunc("POST /v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
 		var spec schema.SandboxSpec
@@ -207,6 +208,14 @@ func (m *sandboxManager) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/sandboxes/{id}", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
 		sb, err := m.st.get(id, c)
 		apiReply(w, err, sb)
+	}))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/stats", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		s, err := m.stats(r.Context(), id, c)
+		apiReply(w, err, s)
+	}))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/logs", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
+		l, err := m.logs(r.Context(), id, c, r.URL.Query().Get("tail"))
+		apiReply(w, err, l)
 	}))
 	mux.HandleFunc("DELETE /v1/sandboxes/{id}", with(func(w http.ResponseWriter, r *http.Request, id string, c sandboxCaller) {
 		apiReply(w, m.remove(id, c), APIMessage{Status: "ok", Message: "sandbox " + id + " deleted"})

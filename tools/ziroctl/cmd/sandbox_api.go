@@ -43,6 +43,8 @@ func registerSandboxRoutes(a *apiRouter) {
 		fwd(w, r)
 	})
 	a.get("/api/v1/sandboxes/{id}", "deployer", fwd)
+	a.get("/api/v1/sandboxes/{id}/stats", "deployer", fwd)
+	a.get("/api/v1/sandboxes/{id}/logs", "deployer", fwd)
 	a.delete("/api/v1/sandboxes/{id}", "deployer", fwd)
 	a.post("/api/v1/sandboxes/{id}/pause", "deployer", fwd)
 	a.post("/api/v1/sandboxes/{id}/resume", "deployer", fwd)

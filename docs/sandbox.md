@@ -36,6 +36,9 @@ ziroctl sandbox create alpine -e MODE=test -u 1000:1000 -- sh -c 'sleep 3600'
 ziroctl sandbox exec <id> -w /workspace -e DEBUG=1 --timeout 2m -- make test
 echo 'print(42)' | ziroctl sandbox exec <id> -i -- python3
 ziroctl sandbox get <id> --json
+ziroctl sandbox ls --state running --label agent=claude
+ziroctl sandbox stats <id>                 # cpu, memory, processes, network and disk I/O
+ziroctl sandbox logs <id> --tail 50        # the main command's output
 ziroctl sandbox pause <id>                 # freeze its processes (memory is kept)
 ziroctl sandbox resume <id>
 ziroctl sandbox renew <id> --timeout 1h    # expires one hour from now
@@ -239,6 +242,9 @@ curl -sk -H "$H" -X DELETE https://host:8443/api/v1/sandboxes/<id>
 | `GET/POST /api/v1/sandboxes` | list your sandboxes / create one and wait until it runs |
 | `GET/DELETE /api/v1/sandboxes/{id}` | show / delete with its workspace |
 | `POST /api/v1/sandboxes/{id}/pause`, `/resume`, `/renew` | freeze, thaw, move the expiry (`{"timeout":"1h"}`) |
+| `GET /api/v1/sandboxes?state=running&label=task=42` | list, filtered by state and metadata (`label=key` or `key=value`, repeatable) |
+| `GET /api/v1/sandboxes/{id}/stats` | CPU %, memory used and limit, processes, network and disk bytes |
+| `GET /api/v1/sandboxes/{id}/logs?tail=200` | the end of the main command's output (for sandboxes created with a command) |
 | `PUT /api/v1/sandboxes/{id}/metadata` | replace the metadata map |
 | `PUT /api/v1/sandboxes/{id}/network` | replace the network policy (`{"mode":"allowlist","allow":["pypi.org"]}`) |
 | `POST /api/v1/sandboxes/{id}/previews`, `DELETE .../previews/{port}` | publish a port at `https://<port>-<id>.<domain>` (`{"port":3000,"public":false}`) / remove it |

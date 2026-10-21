@@ -1169,6 +1169,14 @@ paths:
       x-ziro-role: deployer
       tags: [sandboxes]
       summary: The caller's sandboxes (operators and admins see all)
+      parameters:
+        - { name: state, in: query, schema: { type: string, enum: [pending, running, paused, failed] } }
+        - name: label
+          in: query
+          description: "metadata that must match: key=value, or key (set to anything); repeatable, all must match"
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
       responses:
         "200":
           description: Sandboxes, oldest first
@@ -1273,6 +1281,33 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
       responses:
         "200": { $ref: "#/components/responses/Message" }
+  /api/v1/sandboxes/{id}/stats:
+    get:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: A running or paused sandbox's resource use, from its cgroup (CPU over a 0.5 s sample; byte counters since it started)
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200":
+          description: Resource use
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxStats" }
+  /api/v1/sandboxes/{id}/logs:
+    get:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: The end of the output (stdout and stderr) of the sandbox's main command; at most 4 MiB
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - { name: tail, in: query, schema: { type: integer, minimum: 1, maximum: 10000, default: 200 } }
+      responses:
+        "200":
+          description: Output
+          content:
+            application/json:
+              schema: { type: object, properties: { logs: { type: string } } }
   /api/v1/sandboxes/{id}/pause:
     post:
       x-ziro-role: deployer
@@ -1601,6 +1636,18 @@ components:
         created: { type: string, format: date-time }
         token: { type: string, description: "private previews, only when created: send as X-Ziro-Preview-Token, or open token_url once (sets a cookie)" }
         token_url: { type: string }
+    SandboxStats:
+      type: object
+      properties:
+        state: { type: string }
+        cpu_percent: { type: number, description: "of one CPU" }
+        memory_bytes: { type: integer, format: int64 }
+        memory_limit: { type: integer, format: int64 }
+        pids: { type: integer }
+        net_rx_bytes: { type: integer, format: int64 }
+        net_tx_bytes: { type: integer, format: int64 }
+        block_read_bytes: { type: integer, format: int64 }
+        block_write_bytes: { type: integer, format: int64 }
     SandboxSnapshot:
       type: object
       properties:
