@@ -9,7 +9,7 @@ Every login (and the boot console) shows a short summary, from `ziroctl motd`:
 
 ```
   ▀▀█ █ █▀█ █▀█  █▀█ █▀▀   1.0.17
-  █▄▄ █ █▀▄ █▄█  █▄█ ▄▄█   web-1 · Proxmox VE / QEMU KVM · x86_64 · 6.18.54-ziro · up 3d 4h
+  █▄▄ █ █▀▄ █▄█  █▄█ ▄▄█   web-1 · Proxmox VE / QEMU KVM · x86_64 · 6.18.57-ziro · up 3d 4h
 
   CPU       2 vCPU  load 0.42 0.38 0.31
   Memory    █████████░░░░░  2.5 GiB / 3.9 GiB     64%
