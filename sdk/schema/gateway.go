@@ -75,6 +75,10 @@ type GatewayRoute struct {
 	SecurityHeaders bool                `json:"security_headers,omitempty"` // nosniff, frame and referrer policy unless the app sets them
 	UpstreamProto   string              `json:"upstream_proto,omitempty"`   // http (default), https or h2c
 	UpstreamTLS     *GatewayUpstreamTLS `json:"upstream_tls,omitempty"`
+
+	// Firewall (gateway_waf.go). The WAF is for http routes; deny lists work on every kind.
+	WAF       *GatewayWAF `json:"waf,omitempty"`        // overrides the gateway-wide default
+	DenyCIDRs []string    `json:"deny_cidrs,omitempty"` // refused even when allow_cidrs would admit them
 }
 
 // GatewayUpstream is a route target: an app (cluster app or local `apps` instance) or an
@@ -170,6 +174,15 @@ type GatewaySettings struct {
 	ProxyProtocol bool `json:"proxy_protocol,omitempty"`
 	// DrainSeconds is how long a stopping gateway waits for in-flight requests (default 25).
 	DrainSeconds int `json:"drain_seconds,omitempty"`
+
+	// WAF is the default firewall of http routes that have none of their own.
+	WAF *GatewayWAF `json:"waf,omitempty"`
+	// DenyCIDRs are refused on every route.
+	DenyCIDRs []string `json:"deny_cidrs,omitempty"`
+	// Bans are manual bans, enforced on every route; expired ones are dropped by the control plane.
+	Bans []GatewayBan `json:"bans,omitempty"`
+	// AutoBan bans clients that keep getting blocked by the WAF or failing basic auth.
+	AutoBan *GatewayAutoBan `json:"auto_ban,omitempty"`
 }
 
 const (
@@ -193,6 +206,25 @@ func (s *GatewaySettings) Validate() error {
 	}
 	if s.DrainSeconds < 0 || s.DrainSeconds > GatewayMaxDrainSeconds {
 		return fmt.Errorf("drain_seconds must be 0-%d", GatewayMaxDrainSeconds)
+	}
+	if s.WAF != nil {
+		if err := s.WAF.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := ValidCIDRList(s.DenyCIDRs, MaxGlobalDenyCIDRs); err != nil {
+		return fmt.Errorf("deny_cidrs: %v", err)
+	}
+	if len(s.Bans) > MaxManualBans {
+		return fmt.Errorf("at most %d manual bans", MaxManualBans)
+	}
+	for _, b := range s.Bans {
+		if err := b.Validate(); err != nil {
+			return err
+		}
+	}
+	if s.AutoBan != nil {
+		return s.AutoBan.Validate()
 	}
 	return nil
 }
@@ -457,6 +489,17 @@ func (r *GatewayRoute) Validate() error {
 		if ValidName(u) != nil || !BcryptRe.MatchString(h) {
 			return fmt.Errorf("basic auth user %q needs a bcrypt hash", u)
 		}
+	}
+	if r.WAF != nil {
+		if r.Kind != "http" {
+			return fmt.Errorf("the WAF is for http routes")
+		}
+		if err := r.WAF.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := ValidCIDRList(r.DenyCIDRs, MaxRouteDenyCIDRs); err != nil {
+		return fmt.Errorf("deny_cidrs: %v", err)
 	}
 	return r.validTraffic()
 }

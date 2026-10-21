@@ -604,3 +604,27 @@ func benchGatewayHandler(b *testing.B, route GatewayRoute) {
 		}
 	})
 }
+
+// The same path with the WAF in block mode and a realistic browser request.
+func BenchmarkGatewayHandlerWAF(b *testing.B) {
+	g := v2Server(b, rs(GatewayRoute{Name: "b", Hosts: []string{"b.test"}, WAF: &GatewayWAF{Mode: "block"}}, "10.0.0.1:80", "10.0.0.2:80"))
+	for _, r := range g.tbl.Load().all {
+		r.tr = stubRT{}
+	}
+	h := g.handler(false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := &discardWriter{h: http.Header{}}
+		req := httptest.NewRequest("GET", "http://b.test/products?id=42&sort=price&page=3&q=blue+shoes", nil)
+		req.RemoteAddr = "10.1.2.3:4567"
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+		req.Header.Set("Cookie", "session=Zm9vYmFyYmF6MTIzNDU2; theme=dark; lang=en-US")
+		for pb.Next() {
+			clear(w.h)
+			h.ServeHTTP(w, req)
+		}
+	})
+}

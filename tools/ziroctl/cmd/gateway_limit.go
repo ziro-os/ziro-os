@@ -185,16 +185,18 @@ func (c *authCache) put(d [32]byte, now time.Time) {
 	s.m[d] = now.Add(authCacheTTL).UnixNano()
 }
 
-// janitor trims limiter state that has nothing left to remember, until ctx ends.
+// janitor trims state that has nothing left to remember and raises alerts, until ctx ends.
 func (g *gatewayServer) janitor(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
+	blocked := map[string]uint64{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			for _, r := range g.tbl.Load().all {
+			tbl := g.tbl.Load()
+			for _, r := range tbl.all {
 				if r.limiter != nil {
 					r.limiter.sweep(now)
 				}
@@ -203,6 +205,32 @@ func (g *gatewayServer) janitor(ctx context.Context) {
 				}
 			}
 			g.leafLimit.sweep(now)
+			g.bans.sweep(now)
+			g.raiseAlerts(tbl, now, blocked)
+		}
+	}
+}
+
+const wafBlockAlert = 100 // blocked requests on one route within a janitor interval
+
+// raiseAlerts reports what an operator should look at: a route the WAF is blocking heavily, a
+// route with no usable upstream. Alerts are deduplicated by the alert queue.
+func (g *gatewayServer) raiseAlerts(t *routeTable, now time.Time, blocked map[string]uint64) {
+	nano := now.UnixNano()
+	for _, r := range t.all {
+		n := r.m.denied[denyWAF].Load()
+		if d := n - blocked[r.Name]; d >= wafBlockAlert && n >= d {
+			alertf("high", "gateway", "WAF is blocking requests on "+r.Name, map[string]any{"route": r.Name, "blocked": d, "interval": "30s"})
+		}
+		blocked[r.Name] = n
+		if len(r.targets) > 0 {
+			usable := false
+			for _, tg := range r.targets {
+				usable = usable || tg.usable(nano)
+			}
+			if !usable {
+				alertf("high", "gateway", "no healthy upstream for "+r.Name, map[string]any{"route": r.Name, "targets": len(r.targets)})
+			}
 		}
 	}
 }

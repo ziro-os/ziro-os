@@ -58,6 +58,8 @@ type routeMetrics struct {
 	mirrored      atomic.Uint64
 	mirrorErrors  atomic.Uint64
 	mirrorSkipped atomic.Uint64 // copies not sent: too large, or too many pending
+
+	wafMatches [numWAFGroups][3]atomic.Uint64 // requests with a match, by group and outcome: log, detect, block
 }
 
 // observe records a finished request or L4 connection.
@@ -88,6 +90,7 @@ type gwMetrics struct {
 	health   map[string]bool
 
 	logDropped atomic.Uint64
+	bansTotal  atomic.Uint64
 }
 
 func newGWMetrics() *gwMetrics {
@@ -241,6 +244,17 @@ func (m *gwMetrics) write(w io.Writer) {
 		}
 	}
 
+	family("zirogate_waf_matches_total", "Requests with WAF matches, by rule group and outcome (log: below the threshold; detect: would block; block).", "counter")
+	for _, r := range routes {
+		for g := range r.m.wafMatches {
+			for a, name := range [...]string{"log", "detect", "block"} {
+				if n := r.m.wafMatches[g][a].Load(); n > 0 {
+					fmt.Fprintf(bw, "zirogate_waf_matches_total{route=%q,group=%q,action=%q} %d\n", r.name, wafGroupNames[g], name, n)
+				}
+			}
+		}
+	}
+
 	m.fmu.Lock()
 	fk := gwSortedKeys(m.failures)
 	fv := make([]uint64, len(fk))
@@ -268,6 +282,8 @@ func (m *gwMetrics) write(w io.Writer) {
 		}
 		fmt.Fprintf(bw, "zirogate_upstream_healthy{route=%q,upstream=%q} %d\n", r, u, v)
 	}
+	family("zirogate_bans_total", "Clients banned automatically.", "counter")
+	fmt.Fprintf(bw, "zirogate_bans_total %d\n", m.bansTotal.Load())
 	family("zirogate_log_dropped_total", "Access log lines dropped because the log writer fell behind.", "counter")
 	fmt.Fprintf(bw, "zirogate_log_dropped_total %d\n", m.logDropped.Load())
 }

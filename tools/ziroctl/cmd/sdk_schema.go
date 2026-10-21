@@ -40,6 +40,10 @@ type (
 	GatewayRewrite     = schema.GatewayRewrite
 	GatewayCORS        = schema.GatewayCORS
 	GatewayUpstreamTLS = schema.GatewayUpstreamTLS
+	GatewayWAF         = schema.GatewayWAF
+	GatewayWAFRule     = schema.GatewayWAFRule
+	GatewayBan         = schema.GatewayBan
+	GatewayAutoBan     = schema.GatewayAutoBan
 	GatewayDomain      = schema.GatewayDomain
 	GatewayCert        = schema.GatewayCert
 	GatewayConfig      = schema.GatewayConfig
@@ -74,10 +78,15 @@ var (
 	pluginRoot    = schema.PluginRoot
 )
 
-func validName(name string) error                            { return schema.ValidName(name) }
-func checkServicePaths(def *ServiceDef) error                { return schema.CheckServicePaths(def) }
-func validateDataPaths(paths []string) error                 { return schema.ValidateDataPaths(paths) }
-func validateRoute(r *GatewayRoute) error                    { return r.Validate() }
+func validName(name string) error             { return schema.ValidName(name) }
+func checkServicePaths(def *ServiceDef) error { return schema.CheckServicePaths(def) }
+func validateDataPaths(paths []string) error  { return schema.ValidateDataPaths(paths) }
+func validateRoute(r *GatewayRoute) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	return checkWAFExclusions(r.WAF)
+}
 func validHost(h string) bool                                { return schema.ValidHost(h) }
 func routeApps(r GatewayRoute) []string                      { return schema.RouteApps(r) }
 func expand(s string, v map[string]string) (string, error)   { return schema.Expand(s, v) }

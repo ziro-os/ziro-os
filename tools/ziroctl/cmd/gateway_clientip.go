@@ -114,18 +114,46 @@ type gwSettings struct {
 	trusted    []netip.Prefix
 	proxyProto bool
 	drain      time.Duration
+	deny       *cidrSet   // refused on every route
+	manual     *cidrSet   // manual bans in force
+	waf        *wafPolicy // default firewall of routes without their own
+	autoBan    *gwAutoBan // nil: clients are never banned automatically
 }
 
 func newGWSettings(s GatewaySettings) (*gwSettings, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
-	out := &gwSettings{proxyProto: s.ProxyProtocol, drain: s.Drain()}
+	out := &gwSettings{proxyProto: s.ProxyProtocol, drain: s.Drain(), autoBan: newAutoBan(s.AutoBan)}
 	for _, c := range s.TrustedProxies {
 		p, _ := schema.ParseProxyPrefix(c)
 		out.trusted = append(out.trusted, p)
 	}
+	var err error
+	if out.deny, err = newCIDRSet(s.DenyCIDRs); err != nil {
+		return nil, err
+	}
+	var bans []string
+	now := time.Now()
+	for _, b := range s.Bans {
+		if !b.Expired(now) {
+			bans = append(bans, b.Addr)
+		}
+	}
+	if out.manual, err = newCIDRSet(bans); err != nil {
+		return nil, err
+	}
+	if out.waf, err = newWAFPolicy(s.WAF); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// neverBan reports addresses an automatic ban must not touch: loopback and link-local, and the
+// trusted proxies (banning a load balancer would cut off everyone behind it).
+func (s *gwSettings) neverBan(a netip.Addr) bool {
+	a = a.Unmap()
+	return a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified() || a.IsMulticast() || s.trustedAddr(a)
 }
 
 func (s *gwSettings) trustedAddr(a netip.Addr) bool {

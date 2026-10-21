@@ -262,7 +262,7 @@ func (s localRouteStore) config() (*GatewayConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &GatewayConfig{ACME: d.ACME, Settings: d.Settings, Routes: []GatewayRouteState{}}
+	cfg := &GatewayConfig{ACME: d.ACME, Settings: activeSettings(d.Settings, time.Now()), Routes: []GatewayRouteState{}}
 	for _, r := range d.Routes {
 		r.Normalize()
 		var serve bool
@@ -558,6 +558,12 @@ var gatewayServeCmd = &cobra.Command{
 		g := newGatewayServer()
 		g.alog = newAccessLog(os.Stdout, &g.metrics.logDropped)
 		g.httpsPort = portOf(gwHTTPSAddr)
+		if tok, err := newAdminToken(); err == nil {
+			g.adminToken = tok
+		} else {
+			fmt.Printf("[gateway] admin token: %v (bans cannot be lifted at run time)\n", err)
+		}
+		g.startKernelBans(ctx)
 		var last []byte
 		reload := func() bool {
 			cfg, sig, err := gatewaySourceSig(last)
@@ -789,6 +795,7 @@ type routeFlags struct {
 	respond                            string
 	health                             string
 	traffic                            trafficFlags
+	waf                                wafFlags
 }
 
 var gwF routeFlags
@@ -901,6 +908,9 @@ func routeFromFlags(name string, f routeFlags) (GatewayRoute, error) {
 				return r, err
 			}
 		}
+	}
+	if r.WAF, err = f.waf.build(); err != nil {
+		return r, err
 	}
 	return r, applyTrafficFlags(&r, f.traffic)
 }
@@ -1243,6 +1253,8 @@ func init() {
 	f.BoolVar(&gwF.tcp, "tcp", false, "A TCP route on --listen (databases, any TCP service)")
 	f.IntVar(&gwF.r.Listen, "listen", 0, "Port for a --tcp route")
 	registerTrafficFlags(f, &gwF.r, &gwF.traffic)
+	registerWAFFlags(f, &gwF.waf, "this route (default: the gateway-wide setting)")
+	f.StringSliceVar(&gwF.r.DenyCIDRs, "deny-cidr", nil, "Refuse clients from these addresses or CIDRs, even if --allow-cidr admits them (repeatable)")
 	f.BoolVar(&gwF.passthrough, "passthrough", false, "TLS passthrough on :443 routed by SNI (the upstream terminates TLS)")
 
 	ef := gatewayExposeCmd.Flags()
@@ -1349,6 +1361,7 @@ func registerGatewayRoutes(a *apiRouter) {
 		}
 	})
 	registerGatewaySettingsRoutes(a)
+	registerGatewayFirewallRoutes(a)
 	a.get("/api/v1/gateway/status", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		if s := store(w); s != nil {
 			st, err := gatewayStatus(s)

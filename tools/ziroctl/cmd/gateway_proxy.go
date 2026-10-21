@@ -64,6 +64,9 @@ type gwRoute struct {
 	cors        *gwCORS
 	mirror      []*gwTarget
 	mirrorPct   int
+	deny        *cidrSet   // addresses refused on this route
+	waf         *wafPolicy // the route's own firewall (when wafOwn)
+	wafOwn      bool       // the route configures its own WAF, even if that is "off"
 }
 
 // matches reports whether the request fits the route's path, method and header matchers.
@@ -218,23 +221,26 @@ type gatewayServer struct {
 	alog       *accessLog  // nil: requests are not logged
 	metrics    *gwMetrics
 	auth       authCache
+	bans       gwBanTable
+	kernelBan  func(netip.Addr, time.Duration) // applies a ban to the host firewall (nil: not wired)
 
-	certMu    sync.Mutex
-	certs     map[string]*tls.Certificate // uploaded, by name
-	leafs     map[string]*tls.Certificate // internal CA leafs, by host
-	leafLimit *tokenBucket
-	ca        *tls.Certificate
-	caPEM     []byte
-	acmeMgr   *autocert.Manager
-	h3        atomic.Pointer[http3.Server]
-	hasSNI    atomic.Bool
-	l4        map[int]net.Listener
-	l4Mu      sync.Mutex
-	reqIDGen  func() string
-	mirrorSem chan struct{} // bounds mirrored requests in flight
-	httpsPort int           // the public HTTPS port when it is not 443 (for redirects)
-	draining  atomic.Bool
-	l4wg      sync.WaitGroup // open TCP and passthrough connections
+	certMu     sync.Mutex
+	certs      map[string]*tls.Certificate // uploaded, by name
+	leafs      map[string]*tls.Certificate // internal CA leafs, by host
+	leafLimit  *tokenBucket
+	ca         *tls.Certificate
+	caPEM      []byte
+	acmeMgr    *autocert.Manager
+	h3         atomic.Pointer[http3.Server]
+	hasSNI     atomic.Bool
+	l4         map[int]net.Listener
+	l4Mu       sync.Mutex
+	reqIDGen   func() string
+	adminToken string        // lets root on this host change the running gateway (see gateway_firewall.go)
+	mirrorSem  chan struct{} // bounds mirrored requests in flight
+	httpsPort  int           // the public HTTPS port when it is not 443 (for redirects)
+	draining   atomic.Bool
+	l4wg       sync.WaitGroup // open TCP and passthrough connections
 }
 
 type gwCtxKey struct{}
@@ -544,7 +550,7 @@ func (g *gatewayServer) load(cfg *GatewayConfig) error {
 	seenNames := map[string]bool{}
 	for i, rs := range cfg.Routes {
 		rs.Normalize()
-		if err := validateRoute(&rs.GatewayRoute); err != nil {
+		if err := rs.GatewayRoute.Validate(); err != nil { // not validateRoute: old configs naming a retired rule still load
 			return fmt.Errorf("route %q: %w", rs.Name, err)
 		}
 		if seenNames[rs.Name] {
@@ -677,6 +683,15 @@ func (g *gatewayServer) buildRoute(rs GatewayRouteState, fp string, prev *gwRout
 		r.rewriteTo = w.Replace
 	}
 	r.cors = newCORS(rs.CORS)
+	if r.deny, err = newCIDRSet(rs.DenyCIDRs); err != nil {
+		return nil, fmt.Errorf("route %q: %w", rs.Name, err)
+	}
+	if rs.WAF != nil {
+		r.wafOwn = true
+		if r.waf, err = newWAFPolicy(rs.WAF); err != nil {
+			return nil, fmt.Errorf("route %q: %w", rs.Name, err)
+		}
+	}
 	r.retryOn = retryMask(rs.RetryOn)
 	if rs.Retries > 0 {
 		if prev != nil && prev.budget != nil && prev.RetryBudget == rs.RetryBudget {
@@ -881,6 +896,21 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 		}
 		c := &st.c
 		c.reqID = reqID
+		st.sw.Header().Set("X-Request-ID", reqID)
+
+		// Banned and denied clients are turned away before anything else is spent on them.
+		set := g.settings.Load()
+		addr, aerr := netip.ParseAddr(ip)
+		if aerr == nil {
+			if g.bans.banned(addr, start.UnixNano()) || set != nil && set.manual.contains(addr) {
+				st.deny(denyBan, http.StatusForbidden, "forbidden")
+				return
+			}
+			if set != nil && set.deny.contains(addr) {
+				st.deny(denyList, http.StatusForbidden, "forbidden")
+				return
+			}
+		}
 
 		// Match and forward the canonical path, so no rule is sidestepped by how the path is spelled.
 		p, ok := cleanRequestPath(req.URL.Path)
@@ -911,6 +941,10 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 			http.Redirect(&st.sw, req, "https://"+target+req.URL.RequestURI(), http.StatusPermanentRedirect)
 			return
 		}
+		if aerr == nil && rt.deny.contains(addr) {
+			st.deny(denyList, http.StatusForbidden, "forbidden")
+			return
+		}
 		if !clientAllowed(rt, ip) {
 			st.deny(denyACL, http.StatusForbidden, "forbidden")
 			return
@@ -936,8 +970,40 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 		if rt.cors != nil && rt.cors.preflight(&st.sw, req) { // preflights carry no credentials
 			return
 		}
+		if req.ContentLength != 0 { // no ReadTimeout on the server: bound slow uploads here instead
+			_ = http.NewResponseController(&st.sw).SetReadDeadline(start.Add(gatewayBodyTimeout))
+		}
+		wp := rt.waf
+		if !rt.wafOwn && set != nil {
+			wp = set.waf
+		}
+		if wp != nil {
+			var body []byte
+			form, read := wp.wantBody(req)
+			if read {
+				var release func()
+				body, release = wp.readBody(req)
+				defer release()
+			}
+			if v := wp.inspect(req, ip, body, form); v.n > 0 {
+				if act := wp.action(&v); act != wafPass {
+					for gi := 0; gi < int(numWAFGroups); gi++ {
+						if v.groups&(1<<uint(gi)) != 0 {
+							rt.m.wafMatches[gi][int(act)-1].Add(1)
+						}
+					}
+					st.waf = [...]string{wafLogged: "log:", wafWouldBlock: "detect:", wafBlocked: "block:"}[act] + v.String()
+					if act == wafBlocked {
+						g.strike(ip, "waf "+v.ids[0])
+						st.deny(denyWAF, http.StatusForbidden, "forbidden")
+						return
+					}
+				}
+			}
+		}
 		if ok, limited := g.checkBasicAuth(rt, req, ip, start); !ok {
 			if limited {
+				g.strike(ip, "basic auth guessing")
 				st.sw.Header().Set("Retry-After", "1")
 				st.deny(denyAuth, http.StatusTooManyRequests, "too many failed attempts")
 				return
@@ -949,7 +1015,6 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 		if h3 := g.h3.Load(); h3 != nil && isTLS {
 			_ = h3.SetQUICHeaders(st.sw.Header())
 		}
-		st.sw.Header().Set("X-Request-ID", reqID)
 		switch {
 		case rt.Redirect != "":
 			http.Redirect(&st.sw, req, strings.ReplaceAll(rt.Redirect, "{uri}", req.URL.RequestURI()), rt.RedirectCode)
@@ -968,9 +1033,6 @@ func (g *gatewayServer) handler(isTLS bool) http.Handler {
 		if req.ContentLength > limit<<20 {
 			st.deny(denyBody, http.StatusRequestEntityTooLarge, "request body too large")
 			return
-		}
-		if req.ContentLength != 0 { // no ReadTimeout on the server: bound slow uploads here instead
-			_ = http.NewResponseController(&st.sw).SetReadDeadline(start.Add(gatewayBodyTimeout))
 		}
 		req.Body = http.MaxBytesReader(&st.sw, req.Body, limit<<20)
 		c.key = ip
@@ -1118,6 +1180,7 @@ func (g *gatewayServer) adminHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(g.status())
 	})
+	g.adminBanRoutes(mux)
 	return mux
 }
 

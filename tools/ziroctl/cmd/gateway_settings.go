@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
@@ -22,16 +23,36 @@ func readGatewaySettings(s routeStore) (GatewaySettings, error) {
 	return d.Settings, nil
 }
 
-// putGatewaySettings validates and stores the settings.
-func putGatewaySettings(s routeStore, set GatewaySettings) (GatewaySettings, error) {
-	var clean []string
-	for _, c := range set.TrustedProxies {
+func nonBlank(list []string) []string {
+	var out []string
+	for _, c := range list {
 		if c = strings.TrimSpace(c); c != "" {
-			clean = append(clean, c)
+			out = append(out, c)
 		}
 	}
-	set.TrustedProxies = clean
+	return out
+}
+
+// activeSettings is what gateways receive: the settings without the bans that have run out.
+func activeSettings(s GatewaySettings, now time.Time) GatewaySettings {
+	var live []GatewayBan
+	for _, b := range s.Bans {
+		if !b.Expired(now) {
+			live = append(live, b)
+		}
+	}
+	s.Bans = live
+	return s
+}
+
+// putGatewaySettings validates and stores the settings.
+func putGatewaySettings(s routeStore, set GatewaySettings) (GatewaySettings, error) {
+	set.TrustedProxies = nonBlank(set.TrustedProxies)
+	set.DenyCIDRs = nonBlank(set.DenyCIDRs)
 	if err := set.Validate(); err != nil {
+		return set, err
+	}
+	if err := checkWAFExclusions(set.WAF); err != nil {
 		return set, err
 	}
 	return set, s.update(func(d *gatewayData) error { d.Settings = set; return nil })
@@ -41,6 +62,14 @@ var gwSettingsFlags struct {
 	trusted       []string
 	proxyProtocol bool
 	drain         int
+	waf           wafFlags
+	deny          []string
+	autoBan       bool
+	abStrikes     int
+	abWindow      string
+	abDuration    string
+	abMax         string
+	abKernel      bool
 }
 
 var gatewaySettingsCmd = &cobra.Command{
@@ -93,6 +122,39 @@ An empty --trusted-proxy clears the list.`,
 		}
 		if f.Changed("drain-seconds") {
 			set.DrainSeconds = gwSettingsFlags.drain
+		}
+		if gwSettingsFlags.waf.any() {
+			if set.WAF, err = gwSettingsFlags.waf.build(); err != nil {
+				return err
+			}
+		}
+		if f.Changed("deny-cidr") {
+			set.DenyCIDRs = nonBlank(gwSettingsFlags.deny)
+		}
+		if f.Changed("auto-ban") && !gwSettingsFlags.autoBan {
+			set.AutoBan = nil
+		} else if gwSettingsFlags.autoBan || f.Changed("auto-ban-strikes") || f.Changed("auto-ban-window") ||
+			f.Changed("auto-ban-duration") || f.Changed("auto-ban-max") || f.Changed("auto-ban-kernel") {
+			ab := set.AutoBan
+			if ab == nil {
+				ab = &GatewayAutoBan{}
+			}
+			if f.Changed("auto-ban-strikes") {
+				ab.Strikes = gwSettingsFlags.abStrikes
+			}
+			if f.Changed("auto-ban-window") {
+				ab.Window = gwSettingsFlags.abWindow
+			}
+			if f.Changed("auto-ban-duration") {
+				ab.Duration = gwSettingsFlags.abDuration
+			}
+			if f.Changed("auto-ban-max") {
+				ab.Max = gwSettingsFlags.abMax
+			}
+			if f.Changed("auto-ban-kernel") {
+				ab.Kernel = gwSettingsFlags.abKernel
+			}
+			set.AutoBan = ab
 		}
 		if _, err := putGatewaySettings(s, set); err != nil {
 			return err
@@ -177,6 +239,14 @@ func init() {
 	f.StringSliceVar(&gwSettingsFlags.trusted, "trusted-proxy", nil, "Load balancer or CDN address or CIDR in front of the gateway (repeatable; empty clears)")
 	f.BoolVar(&gwSettingsFlags.proxyProtocol, "proxy-protocol", false, "Accept PROXY protocol v1/v2 from trusted proxies (--proxy-protocol=false turns it off)")
 	f.IntVar(&gwSettingsFlags.drain, "drain-seconds", 0, "How long a stopping gateway waits for in-flight requests (default 25, max 60)")
+	registerWAFFlags(f, &gwSettingsFlags.waf, "routes that have none of their own")
+	f.StringSliceVar(&gwSettingsFlags.deny, "deny-cidr", nil, "Refuse these addresses or CIDRs on every route (repeatable; empty clears)")
+	f.BoolVar(&gwSettingsFlags.autoBan, "auto-ban", false, "Ban clients that keep getting blocked by the WAF or failing basic auth (--auto-ban=false turns it off)")
+	f.IntVar(&gwSettingsFlags.abStrikes, "auto-ban-strikes", 0, "Blocked requests within the window that earn a ban (default 5)")
+	f.StringVar(&gwSettingsFlags.abWindow, "auto-ban-window", "", "Window for counting strikes (default 1m)")
+	f.StringVar(&gwSettingsFlags.abDuration, "auto-ban-duration", "", "First ban; doubles for repeat offenders (default 10m)")
+	f.StringVar(&gwSettingsFlags.abMax, "auto-ban-max", "", "Longest ban (default 24h)")
+	f.BoolVar(&gwSettingsFlags.abKernel, "auto-ban-kernel", false, "Also ban in the host firewall: every port, not just the gateway's")
 	gatewaySettingsCmd.AddCommand(gatewaySettingsSetCmd)
 	gatewayCmd.AddCommand(gatewaySettingsCmd)
 }

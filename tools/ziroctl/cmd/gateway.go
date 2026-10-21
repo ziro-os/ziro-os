@@ -106,7 +106,7 @@ func resolveTargets(r GatewayRoute, appAddrs func(app string) []string) GatewayR
 
 // gatewayConfigFor resolves the cluster's routes for gateway nodes.
 func gatewayConfigFor(st *ClusterState) *GatewayConfig {
-	cfg := &GatewayConfig{ACME: st.GatewayACME, Settings: st.GatewaySettings, Routes: []GatewayRouteState{}}
+	cfg := &GatewayConfig{ACME: st.GatewayACME, Settings: activeSettings(st.GatewaySettings, time.Now()), Routes: []GatewayRouteState{}}
 	eps, pods := appEndpoints(st), podEndpoints(st)
 	for _, r := range st.Routes {
 		r.Normalize()
