@@ -67,9 +67,9 @@ primary failed when its node is down or it has not answered for 30 seconds, and 
 4. fences the old primary: when it returns, its entry script finds another primary behind `-rw`, refuses to serve,
    and rejoins as a replica with `pg_rewind`, or from a new base backup when the rewind is not possible.
 
-The controller does nothing while the cluster is partitioned or when probe data is stale, and `ziroctl pg pause
-shop` stops it from changing roles at all (for maintenance), `ziroctl pg resume shop` brings it back. Every promotion is an alert in the category `database` and is listed in
-`ziroctl pg status`.
+The controller does nothing while the cluster is partitioned or when probe data is stale. `ziroctl pg pause shop`
+stops it from changing roles at all (for maintenance) and `ziroctl pg resume shop` brings it back. Every promotion
+is an alert in the category `database` and is listed in `ziroctl pg status`.
 
 ### Planned switchover
 
@@ -127,8 +127,8 @@ distinct values and appears in most queries (tenant, user or device id).
 
 `ziroctl pg status shop` lists the members with role, node, state, timeline, lag and recent events. The master's
 `/metrics` has `ziro_pg_members`, `ziro_pg_primary`, `ziro_pg_epoch` and `ziro_pg_replication_lag_milliseconds` per
-cluster, group and member. Alerts of category `database` fire on a promotion, when no safe promotion exists, when a command to a member
-fails, when a switchover is aborted and when no node is free for another replica.
+cluster, group and member. Alerts of category `database` fire on a promotion, when no safe promotion exists, when
+a command to a member fails, when a switchover is aborted and when no node is free for another replica.
 
 ## Removing a cluster
 
