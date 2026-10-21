@@ -25,7 +25,7 @@ import (
 // so a create that only names the template (plus timeout, idle timeout and metadata) is a
 // resume: milliseconds instead of a container start. The reaper refills pools.
 //
-// ponytail: fixed pool sizes; size them from demand when there is a metric to drive it.
+// Known limitation: fixed pool sizes; size them from demand when there is a metric to drive it.
 
 var sandboxTemplateDir = "/etc/ziro/sandbox/templates"
 

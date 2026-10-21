@@ -15,7 +15,7 @@ flowchart LR
 
 ## 1. Turn on builds
 
-Building from git needs the `builder` plugin (BuildKit, git and the deploy daemon). It's not in the base image.
+Building from git needs the `builder` module (BuildKit, git and the deploy daemon). It's not in the base image.
 
 ```sh
 ziroctl module enable builder

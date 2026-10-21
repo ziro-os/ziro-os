@@ -491,6 +491,53 @@ paths:
       summary: Upstream health, active connections and requests per route
       responses:
         "200": { description: Status, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayStatus" } } } }
+  /api/v1/gateway/settings:
+    get:
+      x-ziro-role: viewer
+      tags: [gateway]
+      summary: Gateway-wide settings, trusted proxies, PROXY protocol and drain time
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    put:
+      x-ziro-role: admin
+      tags: [gateway]
+      summary: 'Replace the gateway-wide settings: trusted_proxies and proxy_protocol (only a trusted proxy may name the real client), drain_seconds, waf (the default firewall), deny_cidrs, bans and auto_ban ({"trusted_proxies": ["10.0.0.0/8"], "waf": {"mode": "detect"}, "auto_ban": {"strikes": 5}})'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/gateway/waf/rules:
+    get:
+      x-ziro-role: viewer
+      tags: [gateway]
+      summary: The built-in WAF rules, with their group, level and score
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/gateway/bans:
+    get:
+      x-ziro-role: viewer
+      tags: [gateway]
+      summary: Manual bans, and the automatic bans of the gateway running on this host
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+    post:
+      x-ziro-role: admin
+      tags: [gateway]
+      summary: 'Ban an address or network on every gateway node ({"addr": "203.0.113.0/24", "for": "24h", "reason": "scraper"}); without "for" until removed'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/gateway/bans/{addr}:
+    delete:
+      x-ziro-role: admin
+      tags: [gateway]
+      summary: Lift a ban (an address, or a network written as in the ban; escape "/" as %2F)
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
   /api/v1/gateway/domain:
     get:
       x-ziro-role: viewer
@@ -1857,7 +1904,7 @@ components:
         headers: { type: object, additionalProperties: { type: string } }
         listen: { type: integer, description: port of a tcp route }
         to: { type: array, items: { $ref: "#/components/schemas/GatewayUpstream" } }
-        lb: { type: string, enum: [round_robin, least_conn, ip_hash, cookie] }
+        lb: { type: string, enum: [round_robin, least_conn, p2c, ip_hash, hash, cookie] }
         health:
           type: object
           properties:
@@ -1882,6 +1929,92 @@ components:
         rate_rps: { type: integer }
         max_body_mb: { type: integer }
         basic_auth: { type: object, additionalProperties: { type: string }, description: user -> bcrypt hash }
+        path_regex: { type: string, description: RE2 expression the path must also match }
+        header_matchers: { type: array, items: { $ref: "#/components/schemas/GatewayMatcher" } }
+        query_matchers: { type: array, items: { $ref: "#/components/schemas/GatewayMatcher" } }
+        cookie_matchers: { type: array, items: { $ref: "#/components/schemas/GatewayMatcher" } }
+        timeouts:
+          type: object
+          properties:
+            connect: { type: string, examples: [5s] }
+            response_header: { type: string, description: per attempt }
+            request: { type: string, description: the whole exchange }
+            idle: { type: string, description: longest silence from the upstream while streaming }
+        retry_on: { type: array, items: { type: string, enum: [connect, 5xx, timeout, reset] } }
+        retry_budget: { type: integer, minimum: 0, maximum: 100, description: retries as a percent of requests (default 20) }
+        outlier:
+          type: object
+          description: Eject upstreams that keep failing
+          properties:
+            consecutive: { type: integer, description: failures in a row (default 5) }
+            eject_for: { type: string, description: first ejection time, doubling per repeat (default 30s) }
+            max_eject_percent: { type: integer, description: never eject more than this share (default 50) }
+            slow_start: { type: string, description: ramp traffic back over this time }
+        max_concurrent: { type: integer, description: requests in flight on the route; over it gets 503 }
+        max_upstream_conns: { type: integer, description: requests in flight per upstream }
+        hash_key: { type: string, description: 'with lb hash: ip, header:Name, cookie:Name or query:name' }
+        rate_key: { type: string, description: 'what rate_rps counts per: ip (default), header:Name, cookie:Name, query:name' }
+        rate_burst: { type: integer }
+        mirror:
+          type: object
+          description: Copy a share of the traffic to another upstream and discard the answer
+          properties:
+            app: { type: string }
+            address: { type: string, description: "IP:port" }
+            percent: { type: integer, minimum: 1, maximum: 100 }
+        rewrite:
+          type: object
+          properties:
+            pattern: { type: string, description: RE2 expression over the path }
+            replace: { type: string, description: replacement; $1 refers to a group }
+        cors:
+          type: object
+          description: Answer CORS preflights and add the response headers
+          properties:
+            origins: { type: array, items: { type: string } }
+            methods: { type: array, items: { type: string } }
+            headers: { type: array, items: { type: string } }
+            expose: { type: array, items: { type: string } }
+            credentials: { type: boolean }
+            max_age: { type: integer }
+        security_headers: { type: boolean, description: add nosniff, frame and referrer headers the app does not set }
+        upstream_proto: { type: string, enum: [http, https, h2c] }
+        upstream_tls:
+          type: object
+          properties:
+            server_name: { type: string }
+            ca_pem: { type: string, description: trusted CA certificates (PEM); empty = system roots }
+        waf: { $ref: "#/components/schemas/GatewayWAF" }
+        deny_cidrs: { type: array, items: { type: string }, description: refused even when allow_cidrs would admit them }
+    GatewayWAF:
+      type: object
+      description: Web application firewall; requests are scored and blocked at the threshold
+      properties:
+        mode: { type: string, enum: [off, detect, block], default: detect }
+        level: { type: integer, minimum: 1, maximum: 3, default: 1 }
+        threshold: { type: integer, minimum: 1, maximum: 100, default: 5 }
+        exclude: { type: array, items: { type: string }, description: 'rule IDs (ZW-942100) or groups (sqli, xss, lfi, rce, java, xxe, ssrf, protocol, scanner)' }
+        inspect_body_kb: { type: integer, minimum: 1, maximum: 256, default: 8 }
+        skip_body: { type: boolean }
+        rules:
+          type: array
+          description: Custom rules, evaluated before the built-in ones
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              target: { type: string, description: 'path, query, body, method, host, user_agent, ip, arg:NAME, header:Name, cookie:NAME' }
+              op: { type: string, enum: [eq, contains, prefix, suffix, regex, cidr] }
+              value: { type: string }
+              not: { type: boolean }
+              action: { type: string, enum: [allow, deny, log, score] }
+              score: { type: integer, minimum: 1, maximum: 20 }
+    GatewayMatcher:
+      type: object
+      properties:
+        name: { type: string }
+        op: { type: string, enum: [eq, present, prefix, regex], default: eq }
+        value: { type: string }
     HeaderRules:
       type: object
       properties:
@@ -1894,6 +2027,13 @@ components:
           properties:
             upstreams: { type: array, items: { type: string } }
             targets:
+              type: array
+              items:
+                type: object
+                properties:
+                  addr: { type: string }
+                  weight: { type: integer }
+            mirror_targets:
               type: array
               items:
                 type: object

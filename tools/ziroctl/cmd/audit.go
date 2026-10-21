@@ -23,7 +23,7 @@ import (
 // previous line, so editing or deleting a record breaks the chain at that point
 // (`ziroctl audit verify`). It lives in /var/log/ziro/, outside the /var/log/*.log copy+truncate
 // rotator, and rotates itself by rename so the chain continues across files.
-// ponytail: root can still rewrite the whole chain; ship the log off-host (syslog/SIEM) or
+// Known limitation: root can still rewrite the whole chain; ship the log off-host (syslog/SIEM) or
 // record `audit verify`'s head hash externally when that threat matters.
 var auditPath = "/var/log/ziro/audit.log"
 

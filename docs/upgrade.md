@@ -1,4 +1,4 @@
-# Upgrading Ziro-OS
+# Upgrading Ziro OS
 
 Upgrades move an installed host to a newer release **without erasing data**.
 Only the host OS is upgraded; containers keep running their own images. To
@@ -31,7 +31,7 @@ The release image `ziro-initramfs-<arch>[-custom].cpio.gz` is the complete OS:
 the kernel, the matching modules, and the userland. It is unpacked next to the live root
 on the same filesystem and swapped in with atomic `rename(2)` calls.
 
-| Path | Behaviour |
+| Path | Behavior |
 |---|---|
 | `/bin /sbin /lib /lib64 /usr /opt /init` | Replaced. Old files are moved to the rollback tree |
 | `/etc` | Only **new** files are added. Existing config is never overwritten; `os-release` and `ziro-release` are updated |
@@ -76,7 +76,7 @@ The command stops at the first failed step, and nothing on the host changes befo
 
 ## Upgrade from bootable media
 
-1. Boot the new Ziro-OS ISO on the host.
+1. Boot the new Ziro OS ISO on the host.
 2. Choose **Upgrade Existing Ziro-OS Install (keep all data)**, or run `ziro-install` and
    pick **[U]pgrade** when it reports an existing installation.
 3. When it finishes, remove the media and reboot.
@@ -84,7 +84,7 @@ The command stops at the first failed step, and nothing on the host changes befo
 For unattended use, pass `ziro.autoinstall ziro.upgrade` on the kernel command line, or run
 `ziro-install --upgrade -y [--disk /dev/sdX]`.
 
-An unattended install **never wipes** a disk that already holds Ziro-OS. It exits
+An unattended install **never wipes** a disk that already holds Ziro OS. It exits
 unless you pass `--upgrade` to keep the data, or `--erase` (`ziro.erase`) to reinstall.
 
 ## Tools-only versions
@@ -106,6 +106,7 @@ Restarting `ziro-sandboxd` leaves the sandboxes running; exec streams and SSH se
 
 `ziroctl update` only moves forward: `--version` with an older version is refused unless you add
 `--allow-downgrade`, and a binary that does not report the release's version when run is never installed.
+
 ## Rollback
 
 ```sh

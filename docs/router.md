@@ -1,6 +1,8 @@
 # Ziro Router: global mesh networks
 
-The router connects devices anywhere — laptops, CI runners, servers in other clouds, other Ziro clusters — into private networks, like a global network switch. Devices run **zirocd**, join with a key, get a stable address and name (`<device>.<network>.ziro`), and reach the peers the network's ACL allows over WireGuard.
+The router connects devices anywhere (laptops, CI runners, servers in other clouds, other Ziro clusters) into private
+networks, like a global network switch. Devices run `zirocd`, join with a key, get a stable address and name
+(`<device>.<network>.ziro`), and reach the peers the network's ACL allows over WireGuard.
 
 | Piece | What it is | Status |
 |---|---|---|
@@ -11,11 +13,14 @@ The router connects devices anywhere — laptops, CI runners, servers in other c
 | Ziro OS hosts, subnet routers | `ziroctl router join` (zirocd ships in the full image), routed LANs and cluster meshes | shipped (R4) |
 | SSO | OIDC device-code sign-in (`zirocd up --sso`), expiring device keys, `user:` ACL selectors | shipped (R5) |
 
-**Running it in production** (planets in several regions, moons, monitoring, upgrades, failure drills): [router-deploy.md](router-deploy.md).
+**Running it in production** (planets in several regions, moons, monitoring, upgrades, failure drills):
+[router-deploy.md](router-deploy.md).
 
 ## Operator quick start
 
-The router runs on the cluster masters. A standalone router is a one-master cluster (`ziroctl cluster init`). Masters must be reachable on the cluster port (tcp/7443) from wherever devices are. If devices dial a public name or a load balancer, set it once:
+The router runs on the cluster masters. A standalone router is a one-master cluster (`ziroctl cluster init`). Masters
+must be reachable on the cluster port (tcp/7443) from wherever devices are. If devices dial a public name or a load
+balancer, set it once:
 
 ```sh
 ziroctl router endpoints set router.example.com:7443
@@ -33,7 +38,8 @@ On the device: `zirocd up --key zr1_...`
 
 Other ways in:
 
-- **Admin approval:** `ziroctl router network invite office` prints a key without a secret. Each device that uses it waits until `ziroctl router member approve office <device>`.
+- **Admin approval:** `ziroctl router network invite office` prints a key without a secret. Each device that uses it
+  waits until `ziroctl router member approve office <device>`.
 - **Ephemeral devices** (CI, autoscaling): `key create --ephemeral`. They are removed 10 minutes after going offline.
 - **Sign-in:** users join with their company account (`zirocd up --sso`). See [Single sign-on](#single-sign-on).
 
@@ -58,11 +64,16 @@ sudo zirocd down                                 # disconnect, keep the identity
 sudo zirocd logout                               # disconnect and delete the keys
 ```
 
-- **Data plane.** Userspace WireGuard (wireguard-go: batched UDP with GSO/GRO, TUN offload) with MTU 1280, over zirocd's own socket layer (below).
-  - On the same host, this path measured faster than kernel WireGuard: 2.4–2.6 Gbit/s through two NATs with the ACL filter on, against 1.7–1.8 Gbit/s for a plain kernel tunnel in Docker on an M2. CI runners reach 6.6 Gbit/s.
+- **Data plane.** Userspace WireGuard (wireguard-go: batched UDP with GSO/GRO, TUN offload) with MTU 1280, over zirocd's
+  own socket layer (below).
+  - On the same host, this path measured faster than kernel WireGuard: 2.4–2.6 Gbit/s through two NATs with the ACL
+    filter on, against 1.7–1.8 Gbit/s for a plain kernel tunnel in Docker on an M2. CI runners reach 6.6 Gbit/s.
   - A kernel mode would also lose hole punching and relay fallback, so there isn't one.
-  - The ACL filter costs about 47 ns per packet with no allocations (`BenchmarkFilterWrite`). Peers are configured one by one from netmap deltas, so a change never resets sessions it doesn't touch.
-- **Memory.** About 16 MiB idle. At multi-Gbit rates wireguard-go keeps packets in flight, so zirocd sets a soft limit of 256 MiB by default (peak measured 215 MiB at 2.8 Gbit/s; without a limit it reached 474 MiB). On small devices, trade speed for memory with `GOMEMLIMIT` in the service environment:
+  - The ACL filter costs about 47 ns per packet with no allocations (`BenchmarkFilterWrite`). Peers are configured one
+    by one from netmap deltas, so a change never resets sessions it doesn't touch.
+- **Memory.** About 16 MiB idle. At multi-Gbit rates wireguard-go keeps packets in flight, so zirocd sets a soft limit
+  of 256 MiB by default (peak measured 215 MiB at 2.8 Gbit/s; without a limit it reached 474 MiB). On small devices,
+  trade speed for memory with `GOMEMLIMIT` in the service environment:
 
   | `GOMEMLIMIT` | Peak | Direct throughput (Docker, M2) |
   |---|---|---|
@@ -70,24 +81,35 @@ sudo zirocd logout                               # disconnect and delete the key
   | `96MiB` | ~65 MiB | ~1.3 Gbit/s |
   | `48MiB` | ~40 MiB | ~0.8 Gbit/s |
 
-  Memory drops back after a burst. Relays (planets and moons) cost about 15 KB per connected device; a planet's hub about 4 KB per streaming device that sees 100 peers.
-- **Inbound filter.** The router's rules for this device are enforced on every packet. Replies to connections the device opened are let back in; anything else unsolicited is dropped (`zirocd status` counts drops).
-- **Names.** `<device>.<network>.ziro` resolve through a tiny resolver on the device's own tunnel address. Only that domain is sent to it, so other DNS is untouched.
-- **Keys and state.** The WireGuard, disco and TLS private keys are generated on the device. They live in `/var/lib/zirocd` (Linux), `/Library/Application Support/zirocd` (macOS) or `%ProgramData%\zirocd` (Windows, ACL'd to SYSTEM and Administrators). The join key is deleted once used. The CLI talks to the daemon over a root-only socket (an Administrators-only named pipe on Windows).
-- **Endpoints.** A device reports its interface addresses plus the public address the relays see (STUN), and its home relay. See [Relays and NAT traversal](#relays-and-nat-traversal).
+  Memory drops back after a burst. Relays (planets and moons) cost about 15 KB per connected device; a planet's hub
+  about 4 KB per streaming device that sees 100 peers.
+- **Inbound filter.** The router's rules for this device are enforced on every packet. Replies to connections the device
+  opened are let back in; anything else unsolicited is dropped (`zirocd status` counts drops).
+- **Names.** `<device>.<network>.ziro` resolve through a tiny resolver on the device's own tunnel address. Only that
+  domain is sent to it, so other DNS is untouched.
+- **Keys and state.** The WireGuard, disco and TLS private keys are generated on the device. They live in
+  `/var/lib/zirocd` (Linux), `/Library/Application Support/zirocd` (macOS) or `%ProgramData%\zirocd` (Windows, ACL'd to
+  SYSTEM and Administrators). The join key is deleted once used. The CLI talks to the daemon over a root-only socket (an
+  Administrators-only named pipe on Windows).
+- **Endpoints.** A device reports its interface addresses plus the public address the relays see (STUN), and its home
+  relay. See [Relays and NAT traversal](#relays-and-nat-traversal).
 
 ### Updates
 
-zirocd follows the tools release stream (`tools/vX.Y.Z` and `tools/vX.Y.Z.N`), which is built for all six targets by `.github/workflows/tools-release.yml` with build-provenance attestations.
+zirocd follows the tools release stream (`tools/vX.Y.Z` and `tools/vX.Y.Z.N`), which is built for all six targets by
+`.github/workflows/tools-release.yml` with build-provenance attestations.
 
-- Every 6 hours (with jitter) it checks for a newer version, or for the version the network admin pinned (`ziroctl router network set office --client-version X.Y.Z`).
-- It installs only if `SHA256SUMS` carries the Ziro release signature (ed25519) and the binary matches. The swap is atomic, and the previous binary is kept.
+- Every 6 hours (with jitter) it checks for a newer version, or for the version the network admin pinned
+  (`ziroctl router network set office --client-version X.Y.Z`).
+- It installs only if `SHA256SUMS` carries the Ziro release signature (ed25519) and the binary matches. The swap is
+  atomic, and the previous binary is kept.
 - If the new binary fails to reach "connected" in two starts, it is rolled back automatically.
 - `--auto-update notify` only reports in `zirocd status`; `off` disables checks. `sudo zirocd update` installs now.
 
 ## Single sign-on
 
-People sign their devices in with your identity provider, through any OIDC provider with the OAuth 2.0 device authorization grant (RFC 8628): Google, Microsoft Entra ID, Okta, Keycloak, Authentik, Dex and others.
+People sign their devices in with your identity provider, through any OIDC provider with the OAuth 2.0 device
+authorization grant (RFC 8628): Google, Microsoft Entra ID, Okta, Keycloak, Authentik, Dex and others.
 
 ```sh
 # once, on a master: register an OAuth client with the device-code grant at the provider
@@ -100,7 +122,7 @@ ziroctl router network invite office      # the zr1_ invite users sign in with
 
 On a device:
 
-```
+```text
 $ sudo zirocd up --sso --key zr1_...
 To sign in, open https://login.example.com/device
 and enter the code:  WDJB-MJHT
@@ -108,10 +130,13 @@ and enter the code:  WDJB-MJHT
   signed in until 2027-04-02 (zirocd up --sso to renew)
 ```
 
-**How it works.** The router runs the flow, so zirocd never talks to the identity provider and the client secret never leaves the masters (it's stored and sealed with the cluster secrets).
+**How it works.** The router runs the flow, so zirocd never talks to the identity provider and the client secret never
+leaves the masters (it's stored and sealed with the cluster secrets).
+
 1. The leader asks the provider for a device code and hands the URL and user code to zirocd.
 2. The leader polls the provider until the user approves.
-3. It verifies the ID token: issuer, audience (your client ID), signature against the provider's published keys, and expiry.
+3. It verifies the ID token: issuer, audience (your client ID), signature against the provider's published keys, and
+   expiry.
 4. It applies the network's policy, and the device's next poll receives its certificate.
 
 | Policy | Rule |
@@ -134,14 +159,20 @@ ziroctl router status
 ziroctl router leave                                    # logout + stop the service
 ```
 
-- `join` allows WireGuard (udp/41641) and trusts `zr0` in the host firewall. That's safe because zirocd's filter has already applied the network's ACL to every packet that reaches `zr0`.
-- The key never appears in argv: it travels through the environment, and the audit log redacts any `zr1_` string or `--key` value.
-- `<device>.<network>.ziro` names go through Ziro DNS as a forward rule (`ziroctl dns forward`), added and removed by zirocd.
-- **Updates:** on Ziro OS, `ziroctl update` installs zirocd with the other tools and records its hash in the integrity baselines (FIM and IMA). zirocd's own self-update stands down there, so the baselines always know its binary. Elsewhere zirocd updates itself.
+- `join` allows WireGuard (udp/41641) and trusts `zr0` in the host firewall. That's safe because zirocd's filter has
+  already applied the network's ACL to every packet that reaches `zr0`.
+- The key never appears in argv: it travels through the environment, and the audit log redacts any `zr1_` string or
+  `--key` value.
+- `<device>.<network>.ziro` names go through Ziro DNS as a forward rule (`ziroctl dns forward`), added and removed by
+  zirocd.
+- **Updates:** on Ziro OS, `ziroctl update` installs zirocd with the other tools and records its hash in the integrity
+  baselines (FIM and IMA). zirocd's own self-update stands down there, so the baselines always know its binary.
+  Elsewhere zirocd updates itself.
 
 ## Subnet routers
 
-A Linux device can carry a whole subnet into the network: a LAN, a VPC, or a Ziro cluster's mesh and pod networks. Devices that aren't running zirocd are reachable through it.
+A Linux device can carry a whole subnet into the network: a LAN, a VPC, or a Ziro cluster's mesh and pod networks.
+Devices that aren't running zirocd are reachable through it.
 
 ```sh
 # on the router device (Linux; Ziro OS: ziroctl router join ... --advertise-routes)
@@ -155,18 +186,22 @@ Write the ACL rules with the subnet as the destination, for example `dst: ["10.2
 
 - **On approval:**
   - Every device the ACL allows routes the subnet into its tunnel.
-  - The router device turns on IP forwarding and masquerades the network's traffic out of its LAN interfaces (nft table `inet zirocd`, or iptables), so LAN hosts need no route back.
+  - The router device turns on IP forwarding and masquerades the network's traffic out of its LAN interfaces (nft table
+    `inet zirocd`, or iptables), so LAN hosts need no route back.
 - **On revocation, or when the route is withdrawn:** the NAT rules are removed.
 
-**Bridging two Ziro clusters:**
+Bridging two Ziro clusters:
+
 1. Join a gateway node of each cluster.
-2. Advertise each cluster's mesh (`10.200.0.0/16` by default) and pod network (`10.201.0.0/16`). Give the clusters different CIDRs if both use the defaults.
+2. Advertise each cluster's mesh (`10.200.0.0/16` by default) and pod network (`10.201.0.0/16`). Give the clusters
+   different CIDRs if both use the defaults.
 3. Approve both sides.
 4. Allow them in the ACL.
 
 ## Relays and NAT traversal
 
-Most devices sit behind NAT. zirocd finds a direct path when one exists, and uses a relay until then (or when none does), so traffic flows from the first packet.
+Most devices sit behind NAT. zirocd finds a direct path when one exists, and uses a relay until then (or when none
+does), so traffic flows from the first packet.
 
 ```sh
 # on a master with a public address (run it on several masters, in several regions).
@@ -186,21 +221,48 @@ flowchart LR
   W -. disco pings every second keep checking .-> D
 ```
 
-| Mechanism | How |
-|---|---|
-| One socket | WireGuard, path discovery (disco) and STUN share the device's WireGuard UDP port, so the NAT mapping a relay observes is the one peers can use |
-| Public address | Every 20s, STUN to each relay. The device registers with its **two nearest relays** and reports them, with their round trips, to the router, which pushes them to peers |
-| Hole punching | Disco pings (NaCl box between the two devices' disco keys) go to every candidate address of the peer at once. A ping relayed through the home relay asks the peer to ping back now, so both NATs open together. The first pong picks the path; a faster one replaces it |
-| More direct paths | **Port mapping:** zirocd asks the home or office router to forward its WireGuard port, through PCP, NAT-PMP or UPnP IGD, as ZeroTier does. It asks only the default gateway on a private address, for UDP only, with a 2h lease renewed at half-life and removed on exit. **Hard NATs:** when a device's NAT gives each destination its own port (two relays see different ports), a peer behind an easy NAT probes ±32 ports around the ones the relays saw, budgeted to one round per 15s. **IPv6:** relays are probed over both IPv4 and IPv6, and direct paths rank same-LAN, then IPv6, then IPv4, with a 20% round-trip allowance before a lower rank wins |
-| Roaming | A 2s watch on the host's addresses and default gateway. On a change (Wi-Fi to LTE, a new DHCP lease), zirocd forgets the old paths, re-learns its public address, re-binds relay sessions, reconnects to the router at once, and pings every active peer |
-| Path choice | Per packet: the direct address while its last pong is under 7s old (active peers are pinged every second; 3 missed pongs drop a path in about 3s), otherwise a relay. WireGuard never "roams" a peer by itself: the socket layer owns every path. The relay is chosen per peer: of the relays the peer is registered with, the one with the lowest round trip *for the pair* (ours + the peer's), with instant failover to the other. Path changes never interrupt the WireGuard session |
-| Relays | **UDP first, TLS as the fallback.** Each relay connection is TLS 1.3, where the relay checks the device's certificate. Over it, the relay hands out a UDP session (ID + key). The device then binds the session to its WireGuard socket's address with an HMAC-authenticated, timestamped hello, so a replay can't move it. After that, relayed packets are plain UDP datagrams on the same port as STUN, forwarded with batched GRO/GSO I/O and no allocation per packet. Where UDP to the relay is blocked, or a hello goes unanswered for 3s, traffic moves to the TLS connection within seconds, and back once UDP answers again. The relay forwards only within one network, takes the sender's identity from its session (never from the packet), rate-limits each device (`--rate-mbps`, default 1000) and the relay as a whole (`--max-mbps`, default 10000), and drops a device within a second of its removal. It only ever sees WireGuard ciphertext |
+- **One socket.** WireGuard, path discovery (disco) and STUN share the device's WireGuard UDP port, so the NAT
+  mapping a relay observes is the one peers can use.
+- **Public address.** Every 20 s, STUN to each relay. The device registers with its two nearest relays and reports
+  them, with their round trips, to the router, which pushes them to peers.
+- **Hole punching.** Disco pings (NaCl box between the two devices' disco keys) go to every candidate address of the
+  peer at once. A ping relayed through the home relay asks the peer to ping back now, so both NATs open together.
+  The first pong picks the path; a faster one replaces it.
+- **More direct paths.**
+  - **Port mapping:** zirocd asks the home or office router to forward its WireGuard port, through PCP, NAT-PMP or
+    UPnP IGD, as ZeroTier does. It asks only the default gateway on a private address, for UDP only, with a 2 h
+    lease renewed at half-life and removed on exit.
+  - **Hard NATs:** when a device's NAT gives each destination its own port (two relays see different ports), a peer
+    behind an easy NAT probes ±32 ports around the ones the relays saw, budgeted to one round per 15 s.
+  - **IPv6:** relays are probed over both IPv4 and IPv6. Direct paths rank same-LAN first, then IPv6, then IPv4,
+    with a 20% round-trip allowance before a lower rank wins.
+- **Roaming.** A 2 s watch on the host's addresses and default gateway. On a change (Wi-Fi to LTE, a new DHCP
+  lease), zirocd forgets the old paths, re-learns its public address, re-binds relay sessions, reconnects to the
+  router at once, and pings every active peer.
+- **Path choice.** Per packet, the direct address is used while its last pong is under 7 s old (active peers are
+  pinged every second, and 3 missed pongs drop a path in about 3 s). Otherwise a relay is used.
+  - WireGuard never roams a peer by itself: the socket layer owns every path.
+  - The relay is chosen per peer: of the relays the peer is registered with, the one with the lowest round trip for
+    the pair (ours plus the peer's), with instant failover to the other.
+  - Path changes never interrupt the WireGuard session.
+- **Relays.** UDP first, with TLS as the fallback.
+  - Each relay connection is TLS 1.3, and the relay checks the device's certificate. Over it, the relay hands out a
+    UDP session (ID and key).
+  - The device binds the session to its WireGuard socket's address with an HMAC-authenticated, timestamped hello, so
+    a replay cannot move it. After that, relayed packets are plain UDP datagrams on the same port as STUN, forwarded
+    with batched GRO/GSO I/O and no allocation per packet.
+  - Where UDP to the relay is blocked, or a hello goes unanswered for 3 s, traffic moves to the TLS connection within
+    seconds, and back once UDP answers again.
+  - The relay forwards only within one network, takes the sender's identity from its session (never from the
+    packet), rate-limits each device (`--rate-mbps`, default 1000) and the relay as a whole (`--max-mbps`, default
+    10000), and drops a device within a second of its removal. It only ever sees WireGuard ciphertext.
 
 `zirocd status` shows each peer's path: `direct 203.0.113.9:41641 (12ms)`, `relay sg-1 udp`, or `relay sg-1 tls`.
 
 ### Moons
 
-A moon is a relay that isn't a master: a small Linux VM or a container in a region where you have devices but no planet. It needs a public address and nothing else. It holds no cluster state and never needs inbound access to the planets.
+A moon is a relay that isn't a master: a small Linux VM or a container in a region where you have devices but no planet.
+It needs a public address and nothing else. It holds no cluster state and never needs inbound access to the planets.
 
 ```sh
 # on a master: record the moon and get a one-time token (valid 1h)
@@ -238,15 +300,28 @@ sequenceDiagram
   Note over M: no planet for 5 min: stop relaying<br/>removed: drop everyone and exit
 ```
 
-- **Registration.** The moon makes its own key and sends a CSR with the token. The planets certify it (OU `ziro-relay`, name `sg-1.moon.ziro`, 7 days); the moon renews it by itself. The token works once and only its hash is stored. A rebuilt host gets a new one with `ziroctl router moon token sg-1`.
-- **Relay map.** The moon streams, from its nearest planet, only what forwarding needs: each member's ID, certificate key hash, WireGuard key and network. It gets no names, endpoints or ACLs.
-- **Fail closed.** When it's removed, the moon drops every device and exits. When no planet has answered for 5 minutes, it stops relaying until the relay map is back, so it can't keep forwarding for a device that was revoked meanwhile.
-- **Devices** use a moon like any relay (UDP first, TLS fallback). Devices learn about it only once it has registered, and verify it by its own name and OU. A moon certificate can never pass as a planet. Moons need zirocd from this release or later; older clients skip them.
-- **Health.** `--metrics-listen 127.0.0.1:9102` serves `/healthz`, `/readyz` (relay map loaded) and `/metrics` (`ziro_moon_connected`, `ziro_moon_udp_sessions`, `ziro_moon_relayed_bytes_total`, `ziro_moon_relaymap_up`, `ziro_moon_cert_expiry_seconds`, ...).
-- **Ports.** tcp/8443 (TLS) and udp/3478 (relayed datagrams and STUN), set with `--listen` and `--stun-port` and saved with the moon's state. The container runs as an unprivileged user with a read-only root.
+- **Registration.** The moon makes its own key and sends a CSR with the token. The planets certify it (OU `ziro-relay`,
+  name `sg-1.moon.ziro`, 7 days); the moon renews it by itself. The token works once and only its hash is stored. A
+  rebuilt host gets a new one with `ziroctl router moon token sg-1`.
+- **Relay map.** The moon streams, from its nearest planet, only what forwarding needs: each member's ID, certificate
+  key hash, WireGuard key and network. It gets no names, endpoints or ACLs.
+- **Fail closed.** When it's removed, the moon drops every device and exits. When no planet has answered for 5 minutes,
+  it stops relaying until the relay map is back, so it can't keep forwarding for a device that was revoked meanwhile.
+- **Devices** use a moon like any relay (UDP first, TLS fallback). Devices learn about it only once it has registered,
+  and verify it by its own name and OU. A moon certificate can never pass as a planet. Moons need zirocd from this
+  release or later; older clients skip them.
+- **Health.** `--metrics-listen 127.0.0.1:9102` serves `/healthz`, `/readyz` (relay map loaded) and `/metrics`
+  (`ziro_moon_connected`, `ziro_moon_udp_sessions`, `ziro_moon_relayed_bytes_total`, `ziro_moon_relaymap_up`,
+  `ziro_moon_cert_expiry_seconds`, ...).
+- **Ports.** tcp/8443 (TLS) and udp/3478 (relayed datagrams and STUN), set with `--listen` and `--stun-port` and saved
+  with the moon's state. The container runs as an unprivileged user with a read-only root.
 
-**What goes direct:**
-- **Endpoint-independent NATs** (home routers, cloud NAT gateways, most carrier NATs): by hole punching.
+An easy NAT reuses one public port for every destination (endpoint-independent mapping). A hard NAT assigns a
+different public port per destination (endpoint-dependent mapping), which makes hole punching harder.
+
+What goes direct:
+
+- **Easy NATs** (home routers, cloud NAT gateways, most carrier NATs): by hole punching.
 - **Routers that offer PCP, NAT-PMP or UPnP:** through a port mapping.
 - **A hard NAT facing an easy one:** by port probing.
 - **Two hard NATs without port mapping:** the relay (UDP, or TLS where UDP is blocked) carries the traffic, by design.
@@ -260,15 +335,19 @@ Measured in `tests/router/e2e.sh` (two devices, each behind its own firewalled N
 | TLS relay (UDP to the relay blocked too) | 0.6–0.7 Gbit/s |
 
 Each step down happens within seconds, and each recovers on its own when the blocked path returns. The same test checks:
+
 - roaming: direct again within 20s;
 - a hard NAT: a direct path on a port found by probing;
 - port mapping against a real `miniupnpd` (PCP).
 
-`zirocd netcheck` reports the NAT type (easy, hard or unknown), the port-mapping protocol and mapped address, IPv6 reachability, and each relay's latency and transport. Path-discovery debugging: run the daemon with `ZIROCD_DEBUG=disco`.
+`zirocd netcheck` reports the NAT type (easy, hard or unknown), the port-mapping protocol and mapped address, IPv6
+reachability, and each relay's latency and transport. Path-discovery debugging: run the daemon with
+`ZIROCD_DEBUG=disco`.
 
 ## Access control
 
-Networks are **default deny**: devices see and reach nothing until a rule allows it. `network create --policy allow` starts with one rule that lets every device reach every device.
+Networks are **default deny**: devices see and reach nothing until a rule allows it. `network create --policy allow`
+starts with one rule that lets every device reach every device.
 
 ```yaml
 # ziroctl router acl set office -f acl.yaml
@@ -284,15 +363,21 @@ rules:
     dst: ["10.200.0.0/16:22"]      # a subnet routed through a device
 ```
 
-Selectors are `*`, `tag:<t>`, `group:<g>`, `member:<name>`, `user:<email>` (devices signed in by that user) or a CIDR. Destinations add ports: `*`, `443`, `8000-8100` or `22,443`. Unknown keys in the file are an error, so a typo can't silently drop a rule.
+Selectors are `*`, `tag:<t>`, `group:<g>`, `member:<name>`, `user:<email>` (devices signed in by that user) or a CIDR.
+Destinations add ports: `*`, `443`, `8000-8100` or `22,443`. Unknown keys in the file are an error, so a typo can't
+silently drop a rule.
 
 - `ziroctl router acl test office web-1 db-1 5432/tcp` answers from the same code the devices enforce.
-- **Least visibility:** a device's netmap holds only the peers it may talk to (in either direction). Every other member's existence, keys and addresses stay hidden from it.
-- Rules are enforced by the **receiving** device. WireGuard's cryptokey routing already guarantees that a packet's source address belongs to the peer that sent it.
+- **Least visibility:** a device's netmap holds only the peers it may talk to (in either direction). Every other
+  member's existence, keys and addresses stay hidden from it.
+- Rules are enforced by the **receiving** device. WireGuard's cryptokey routing already guarantees that a packet's
+  source address belongs to the peer that sent it.
 
 **Subnet routes.** See [Subnet routers](#subnet-routers).
 
-**Client version.** `ziroctl router network set office --client-version 1.0.21` pins the fleet's zirocd version, `X.Y.Z` or a tools-only build `X.Y.Z.N` (`latest` unpins it). A pin stops automatic updates, including the builds after it. Devices update to it through the signed release stream.
+**Client version.** `ziroctl router network set office --client-version 1.0.21` pins the fleet's zirocd version, `X.Y.Z`
+or a tools-only build `X.Y.Z.N` (`latest` unpins it). A pin stops automatic updates, including the builds after it.
+Devices update to it through the signed release stream.
 
 ## How it works
 
@@ -312,16 +397,29 @@ sequenceDiagram
   P->>Q: this device's endpoints and liveness (planet mesh)
 ```
 
-- **Planets.** Every master runs the netmap hub from its own Raft replica. Devices stream from the nearest one: zirocd times a TLS handshake to each planet at start, every 10 minutes and after a network change, and moves only when another planet is a quarter faster. Only writes (`register`, `renew`) go to the leader. A leader change moves no stream.
-- **State.** Networks, members, join-key hashes, ACLs and approved routes are part of the replicated cluster state (Raft). Liveness and endpoints are soft state: each planet keeps it for the devices streaming from it and streams it to every other planet over master mutual TLS. When a device moves to another planet it starts a newer session (an epoch from its own clock), and the newest session wins everywhere. Soft state never admits a device; membership comes only from Raft.
-- **Replica lag.** A device that registered a moment ago may reach a planet whose replica hasn't applied that write yet. That planet relays the request to the leader instead of answering "unauthorized", which zirocd would take for a revocation.
-- **Netmap stream.** One HTTP/2 stream of JSON lines per device: a `full` message, then `delta` messages (upserted peers, removed peer IDs, the inbound filter when it changes, the planet list when it changes), plus a keepalive every 30s. Each peer is encoded once per change and the same bytes go to every device that sees it. A device that is too slow to read is dropped and resyncs with a full map on reconnect, so a planet never buffers without bound.
+- **Planets.** Every master runs the netmap hub from its own Raft replica. Devices stream from the nearest one: zirocd
+  times a TLS handshake to each planet at start, every 10 minutes and after a network change, and moves only when
+  another planet is a quarter faster. Only writes (`register`, `renew`) go to the leader. A leader change moves no
+  stream.
+- **State.** Networks, members, join-key hashes, ACLs and approved routes are part of the replicated cluster state
+  (Raft). Liveness and endpoints are soft state: each planet keeps it for the devices streaming from it and streams it
+  to every other planet over master mutual TLS. When a device moves to another planet it starts a newer session (an
+  epoch from its own clock), and the newest session wins everywhere. Soft state never admits a device; membership comes
+  only from Raft.
+- **Replica lag.** A device that registered a moment ago may reach a planet whose replica hasn't applied that write yet.
+  That planet relays the request to the leader instead of answering "unauthorized", which zirocd would take for a
+  revocation.
+- **Netmap stream.** One HTTP/2 stream of JSON lines per device: a `full` message, then `delta` messages (upserted
+  peers, removed peer IDs, the inbound filter when it changes, the planet list when it changes), plus a keepalive every
+  30s. Each peer is encoded once per change and the same bytes go to every device that sees it. A device that is too
+  slow to read is dropped and resyncs with a full map on reconnect, so a planet never buffers without bound.
 - **Scale.** Measured with 10,000 streaming devices in 100 team networks on an M2 (`BenchmarkRouterHub`):
   - an endpoint change reaches every viewer on a planet in about 1 ms;
   - a full state reload (ACL recompiled, every device re-diffed) takes about 0.4 s.
 
   Per-device memory is proportional to the number of peers it sees.
-- **Metrics.** `/api/v1/metrics` on each master adds `ziro_router_streams` (devices on this planet), `ziro_router_devices{state}` and `ziro_router_planet_up{planet}`.
+- **Metrics.** `/api/v1/metrics` on each master adds `ziro_router_streams` (devices on this planet),
+  `ziro_router_devices{state}` and `ziro_router_planet_up{planet}`.
 
 ## Security model
 

@@ -65,6 +65,9 @@ jobs:
           tar -xJf /tmp/sc.tar.xz -C /tmp
           /tmp/shellcheck-v0.11.0/shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh tests/router/*.sh tests/release/*.sh
 
+      - name: markdownlint
+        run: npx --yes markdownlint-cli2@0.23.3 "**/*.md" "#node_modules"
+
   unit-tests:
     name: Unit & Audit Tests
     runs-on: ubuntu-latest

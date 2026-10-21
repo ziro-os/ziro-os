@@ -297,6 +297,21 @@ func (c *Client) GatewayStatus(ctx context.Context) (api.GatewayStatus, error) {
 	return out, c.Get(ctx, "/api/v1/gateway/status", &out)
 }
 
+// GatewaySettings returns the gateway-wide settings (trusted proxies, PROXY protocol, drain time).
+func (c *Client) GatewaySettings(ctx context.Context) (schema.GatewaySettings, error) {
+	var out schema.GatewaySettings
+	return out, c.Get(ctx, "/api/v1/gateway/settings", &out)
+}
+
+// PutGatewaySettings replaces the gateway-wide settings. They are validated locally first.
+func (c *Client) PutGatewaySettings(ctx context.Context, s schema.GatewaySettings) (schema.GatewaySettings, error) {
+	if err := s.Validate(); err != nil {
+		return s, err
+	}
+	var out schema.GatewaySettings
+	return out, c.Do(ctx, http.MethodPut, "/api/v1/gateway/settings", s, &out)
+}
+
 // GatewayCA returns the internal CA certificate (PEM) for `tls internal` routes.
 func (c *Client) GatewayCA(ctx context.Context) ([]byte, error) {
 	var out []byte

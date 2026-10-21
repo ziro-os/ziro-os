@@ -1,6 +1,7 @@
-# Ziro-OS Security & Hardening Model
+# Security and hardening model
 
-Security is a foundational design pillar of Ziro-OS. Unlike general-purpose distributions that run dozens of background daemons, cron jobs, and SSH servers by default, Ziro-OS eliminates non-essential attack surfaces.
+Security is a design constraint of Ziro OS. General-purpose distributions run many background daemons, cron jobs and
+services by default. Ziro OS keeps the default host small, so there is less to attack.
 
 ## Lock down a host
 
@@ -23,60 +24,64 @@ ziroctl security audit                        # check the hardening
 | `ssh key add` / `list` / `remove --source` / `clear` | Manage root's authorized keys |
 | `ssh status` | sshd state and host key fingerprints |
 
-## Defence layers
+## Defense layers
 
 ```mermaid
 flowchart TB
   N[Network: default-drop firewall, Ziro Guard flood/scan/brute-force bans] -->
   A[Access: SSH keys only, console login required, API tokens with roles, audit log] -->
-  S[Services: own cgroups, unprivileged plugin users, memory watchdog] -->
+  S[Services: own cgroups, unprivileged module users, memory watchdog] -->
   W[Workloads: containerd + runc, namespaces, seccomp, image policy, egress control] -->
   K[Kernel: hardened sysctls; custom kernel adds lockdown, module signing, LSMs] -->
   B[Boot and supply chain: signed releases and catalogs, sha256-pinned artifacts, rollback]
 ```
 
----
+## Security principles
 
-## Security Principles
+### 1. Minimal attack surface
 
-### 1. Minimal Attack Surface
 - Full hosts include containerd/runc/CNI, OpenSSH, apk/ziropkg, and enabled host services.
 - The minimal container base starts `/bin/sh`; optional API and cluster listeners require configuration.
 
-### 2. Immutable Root Filesystem
+### 2. Immutable root filesystem
+
 - Immutable root is a design target. The current installer mounts ext4 read/write; live boot uses writable tmpfs.
 - `/run` and `/tmp` use tmpfs. Deployments requiring immutable root must provide and verify that enforcement.
 
-### 3. Unified cgroups v2 & Namespaces
+### 3. Unified cgroups v2 and namespaces
+
 - PID 1 enables cgroup2 controllers. Every service runs in its own cgroup: platform daemons in `ziro/system`
-  (memory reservation, OOM score -900), plugin services in `ziro/workloads` (OOM score +300). Plugins and apps
+  (memory reservation, OOM score -900), module services in `ziro/workloads` (OOM score +300). Modules and apps
   declare `resources` (memory, CPUs, PIDs), enforced by the kernel; a sentinel watchdog reacts to sustained memory
   pressure. See [operations](operations.md#memory-how-a-host-protects-itself).
 - Namespace and seccomp support must be paired with verified runtime settings; host binds, privileged mode,
   runtime sockets, and host networking grant additional authority. Local `ctr` fallback uses host networking.
 
-### 4. Kernel Seccomp & Capability Restrictions
+### 4. Kernel seccomp and capability restrictions
+
 - Kernel configurations explicitly enable `CONFIG_SECCOMP` and `CONFIG_SECCOMP_FILTER`.
 - Runtime policy must restrict capabilities and device access. Verify the effective configuration for each workload.
 
-### 5. Network Hardening (Sysctl)
+### 5. Network hardening (sysctl)
+
 Configured in `/etc/sysctl.d/99-ziro.conf`:
+
 - `net.ipv4.conf.all.forwarding = 1`: Controlled IP forwarding for CNI bridge networks.
 - `net.bridge.bridge-nf-call-iptables = 1`: Netfilter packet filtering across container bridges.
 - Automatic recovery parameters (`kernel.panic = 10`, `kernel.panic_on_oops = 1`).
 
----
+## Running security audits
 
-## Running Security Audits
-
-Verify system hardening in real-time using `ziroctl`:
+Check the hardening of a running host with `ziroctl`:
 
 ```bash
 ziroctl security audit
 ```
-Output:
-```
-=== Ziro-OS Security & Hardening Audit ===
+
+Example output:
+
+```text
+=== Ziro OS Security & Hardening Audit ===
  [PASS] Kernel Seccomp Support
  [PASS] Namespaces Enabled (pid, net, ipc, uts, user, mnt)
  [PASS] Unified cgroups v2 Hierarchy
@@ -84,7 +89,7 @@ Output:
  [PASS] /tmp sticky bit configured correctly
 ```
 
-## Secure Defaults (v1.0.10)
+## Secure defaults
 
 - **Console login**: installed systems always require `login` on tty1/ttyS0/ttyAMA0. A locked or empty root
   password means no console login. An unauthenticated root shell exists only on the live ISO, or with the exact
@@ -94,7 +99,7 @@ Output:
   `/root/.ssh/authorized_keys` and runs shell user-data once per instance. It only trusts `169.254.169.254` on
   EC2-compatible clouds detected by DMI (override with `touch /etc/ziro/cloud-init.force`).
 - **Services**: `ziro-init` starts every enabled service (`ziroctl service boot`), so the firewall and Sentinel
-  are active from boot. A service's PID is only signalled when its argv matches the service definition, or, for
+  are active from boot. A service's PID is only signaled when its argv matches the service definition, or, for
   a daemon that rewrites its title (sshd), when its pidfile names a process running that exact binary.
   - `ziro-init` itself supervises containerd and sshd. `ziroctl service stop` leaves a marker in
     `/run/ziro/stopped/`, which holds init's restart, and `start` removes the marker so init respawns the daemon.
@@ -105,11 +110,12 @@ Output:
   are never flushed. ICMP/ICMPv6 are allowed, and so is SSH (22). Inputs are validated, and nft errors are reported.
 - **REST API**: binds `127.0.0.1:8443` by default, CORS is off, and tokens are checked in constant time and never
   logged. To expose it: `ziroctl api start --bind 0.0.0.0` plus `ziroctl firewall allow 8443`.
-  - Tokens are scoped: `ziroctl api token create <name> --role viewer|operator|admin [--ttl 90d]` prints the token
-    once. Only its SHA-256 is stored (`/etc/ziro/api-tokens.json`, 0600).
+  - Tokens are scoped: `ziroctl api token create <name> --role viewer|deployer|operator|admin [--ttl 90d]` prints
+    the token once. Only its SHA-256 is stored (`/etc/ziro/api-tokens.json`, 0600).
   - Every route declares its role, and the server enforces exactly that (each operation's `x-ziro-role` in
     `sdk/openapi.yaml`; a test keeps the two identical).
     - `viewer` reads.
+    - `deployer` also pushes source, redeploys and rolls back deployments (CI, agents).
     - `operator` also runs day-to-day changes: services, containers, DNS records, scaling, cordon/drain.
     - `admin` is needed for anything that grants or removes access, installs software, deletes data, or changes
       where traffic or lookups go (hostname and resolvers included).
@@ -143,8 +149,11 @@ Output:
   - Never limited: loopback, link-local, the cluster mesh (`ziro0`), container bridges and `protect allow` CIDRs.
   - Manage bans with `ziroctl security bans list|ban|unban`, or `GET/POST /api/v1/security/bans` (changes need an
     admin token).
+- **Gateway firewall.** The gateway can screen requests with a web application firewall (SQL injection, XSS, path
+  traversal, command injection, Log4Shell, XXE, SSRF, scanners), refuse deny-listed and banned clients, and ban
+  repeat offenders by itself. It takes the client address from trusted proxies only. See [gateway](gateway.md).
 - **Security alerting**: `ziroctl security alerting add <name> --url https://... [--min-severity high]
-  [--events ban,threat,fim,canary] [--format json|slack]` pushes Sentinel threats, file-integrity and canary
+  [--events ban,threat,fim,canary,gateway] [--format json|slack]` pushes Sentinel threats, file-integrity and canary
   changes, and bans to webhooks.
   - Each request is signed: `X-Ziro-Signature: sha256=HMAC-SHA256(secret, X-Ziro-Timestamp + "." + body)`. The
     secret is shown once at creation. Reject stale timestamps to stop replays.
@@ -184,7 +193,8 @@ Output:
 - **Cluster network policy**: new clusters default to `deny`. Mesh traffic reaches an app's port only from nodes
   that run an app listed in its `allow_from` (`ziroctl cluster deploy --allow-from web`). On the pod network
   (default for new clusters) that means from the allowed apps' own replica IPs, including same-node traffic. It
-  is enforced in each node's `inet ziro_cluster` nftables table, and the agent does not configure the mesh until that table is in
+  is enforced in each node's `inet ziro_cluster` nftables table, and the agent does not configure the mesh until that
+  table is in
   place. Check it with `ziroctl cluster policy ls`.
 - **Image policy**: `ziroctl cluster policy images` limits apps to allowed registries and can require cosign
   signatures by your keys. Verified images are pinned by digest, so nodes run exactly what was verified. The leader
@@ -210,12 +220,15 @@ Output:
   `ziroctl audit log --since 24h --json` exports records. `KEY=VALUE` values and credential flags are redacted.
   The log rotates by rename at 10 MB and keeps 10 generations. Because root can rewrite the whole chain, forward
   the log off-host or store the head hash printed by `verify` when you need non-repudiation.
-- **Kernel & sysctl**: the `custom` kernel flavor (the default) enforces module signing (the persistent Ziro key in releases; unsigned modules are rejected), loads IMA, and zeroes memory on free; see [kernel/README.md](../kernel/README.md#security-defaults). Its config fragments add KASLR, strict RWX, a strong stack protector, hardened
+- **Kernel and sysctl**: the `custom` kernel flavor (the default) enforces module signing (the persistent Ziro key in
+  releases; unsigned modules are rejected), loads IMA, and zeroes memory on free; see
+  [kernel/README.md](../kernel/README.md#security-defaults). Its config fragments add KASLR, strict RWX, a strong stack
+  protector, hardened
   usercopy, FORTIFY, the Yama and lockdown LSMs, unprivileged BPF off, and nftables/WireGuard built in. Shipped
   sysctls set `kptr_restrict=2`, `dmesg_restrict=1`, `unprivileged_bpf_disabled=1`, `ptrace_scope=1`, protected
   links/fifos/regular files, and loose `rp_filter=2` (strict mode breaks WireGuard and multi-homed routing).
 - **Logs**: crond runs `ziroctl service rotate-logs` hourly. It copies and truncates any `/var/log/*.log` over
-  10MB, and Sentinel only logs when the alert set changes.
+  10 MB, and Sentinel only logs when the alert set changes.
 - **CI supply chain**: every GitHub Action is pinned to a commit SHA and each workflow gets least-privilege
   `permissions`. Cloud image builds use OIDC once the `AWS_ROLE_ARN` or `GCP_WIF_PROVIDER` + `GCP_SERVICE_ACCOUNT`
   repo variables are set. After that, delete the static key secrets.
@@ -230,25 +243,25 @@ Output:
 
 ## Security boundary checks
 
-Explicit remote user-data requires HTTPS, including redirects. Installer local files remain supported.
-Automatic metadata is cloud-gated, bypasses environment proxies, and refuses redirects. Image tar/cpio
-members use root ownership independently of the build user's UID. Quarantine rules precede established
-and ICMP accepts; loopback remains trusted and forwarding/NAT policy belongs to container networking.
-The iptables fallback temporarily sets INPUT to DROP during replacement and restores the requested
-policy only after all rules succeed. A failed replacement reports an error and leaves INPUT closed.
-
-`ziroctl security harden` rewrites managed SSH settings in global and Match scopes, preserves stronger
-root-login and retry restrictions, and validates with `sshd -t` before replacement. Active Include
-directives cause a visible failure; consolidate included policy before invoking hardening. The audit
-uses active directives and does not count comments as enforcement.
+- **User data and metadata.** Explicit remote user-data requires HTTPS, including redirects. Installer local files
+  remain supported. Automatic metadata is cloud-gated, bypasses environment proxies, and refuses redirects.
+- **Images.** Image tar and cpio members use root ownership regardless of the build user's UID.
+- **Firewall ordering.** Quarantine rules precede the established and ICMP accepts. Loopback remains trusted, and
+  forwarding and NAT policy belong to container networking.
+- **iptables fallback.** The fallback sets INPUT to DROP during replacement and restores the requested policy only
+  after all rules succeed. A failed replacement reports an error and leaves INPUT closed.
+- **SSH hardening.** `ziroctl security harden` rewrites managed SSH settings in global and `Match` scopes, preserves
+  stronger root-login and retry restrictions, and validates with `sshd -t` before replacement. An active `Include`
+  directive causes a visible failure: consolidate the included policy before hardening. The audit reads active
+  directives and does not count comments as enforcement.
+- **DHCP CNI plugin.** The binary is rebuilt from pinned upstream source with a patched `x/net` in both shipped
+  locations. See [the override recipe](../packages/cni-dhcp/README.md), including the package upgrade limits.
 
 Run `make test-unit`, `python3 tests/security/test-userdata-transport.py`, and
-`python3 tests/security/test-artifact-metadata.py <rootfs.tar.gz> <initramfs.cpio.gz>` for regressions.
-These checks do not establish cloud-image boot correctness, external agent isolation, or absence of all
-vulnerabilities. Agents receiving a host runtime socket or privileged mounts receive corresponding host
-authority; the cluster agent is a workload reconciler rather than an LLM permission sandbox.
+`python3 tests/security/test-artifact-metadata.py <rootfs.tar.gz> <initramfs.cpio.gz>` to check for regressions.
+`tests/security/test-cni-dhcp.py <rootfs-directory> <x86_64|arm64>` checks the DHCP plugin's dependencies, static
+linking and CNI VERSION response; it does not exercise a custom DHCP lease lifecycle.
 
-The DHCP CNI binary is rebuilt from pinned upstream source with patched x/net in both shipped locations.
-See [the override recipe](../packages/cni-dhcp/README.md), including package upgrade limitations.
-`tests/security/test-cni-dhcp.py <rootfs-directory> <x86_64|arm64>` checks its dependencies, static linking,
-and CNI VERSION response; it does not exercise a custom DHCP lease lifecycle.
+These checks do not establish cloud-image boot correctness, external agent isolation, or the absence of all
+vulnerabilities. An agent that receives a host runtime socket or privileged mounts receives the corresponding host
+authority. The cluster agent is a workload reconciler, not a permission sandbox for AI agents.

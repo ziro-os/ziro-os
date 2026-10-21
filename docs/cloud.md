@@ -34,7 +34,7 @@ sequenceDiagram
 
 - **Runs once per instance.** A reboot doesn't re-run user-data, but a new instance from the same image does. To
   run it again on purpose, delete `/var/lib/ziro/cloud-init.instance`.
-- **Only on clouds it recognises.** On any other machine, something on the local network could answer at
+- **Only on clouds it recognizes.** On any other machine, something on the local network could answer at
   169.254.169.254 and get root through SSH keys or user-data, so metadata is skipped. If your platform serves
   EC2-compatible metadata safely, create `/etc/ziro/cloud-init.force` to trust it.
 - **User-data formats:**
@@ -67,6 +67,7 @@ host:
 ## Terraform (AWS)
 
 `deploy/terraform/aws` creates the following:
+
 - a VPC with subnets across availability zones
 - a security group
 - a launch template for Ziro OS AMIs, with IMDSv2 required and hop limit 1, so containers can't reach instance

@@ -1,0 +1,87 @@
+# Prometheus alerting rules for zirogate, the Ziro OS gateway.
+#
+# Load with:  rule_files: [zirogate-alerts.yml]
+# Scrape the gateway's /metrics (loopback :2019, or --metrics-listen with a bearer token), or the
+# API server's /api/v1/metrics, which includes the gateway series.
+groups:
+  - name: zirogate
+    rules:
+      - alert: ZirogateDown
+        expr: absent(zirogate_ready) or zirogate_ready == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: The gateway is not serving traffic
+          description: "zirogate_ready is 0 or missing: no configuration is loaded, the gateway is shutting down, or the process is gone."
+
+      - alert: ZirogateConfigRejected
+        expr: increase(zirogate_config_reload_total{result="rejected"}[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: The gateway rejected a configuration
+          description: "It keeps serving the previous routes. The gateway log has the reason."
+
+      - alert: ZirogateHighErrorRate
+        expr: |
+          sum by (route) (rate(zirogate_requests_total{code=~"5.."}[5m]))
+            / sum by (route) (rate(zirogate_requests_total[5m])) > 0.05
+          and sum by (route) (rate(zirogate_requests_total[5m])) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Route {{ $labels.route }}: more than 5% of responses are 5xx"
+
+      - alert: ZirogateSlowRoute
+        expr: |
+          histogram_quantile(0.99, sum by (route, le) (rate(zirogate_request_duration_seconds_bucket[5m]))) > 2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Route {{ $labels.route }}: p99 latency above 2s"
+
+      - alert: ZirogateNoHealthyUpstream
+        expr: sum by (route) (zirogate_upstream_available) == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Route {{ $labels.route }} has no upstream that takes traffic"
+
+      - alert: ZirogateUpstreamsEjected
+        expr: increase(zirogate_outlier_ejections_total[10m]) > 5
+        labels: { severity: warning }
+        annotations:
+          summary: "Route {{ $labels.route }}: upstreams keep being ejected"
+
+      - alert: ZirogateLoadShedding
+        expr: sum by (route) (rate(zirogate_denied_total{reason="shed"}[5m])) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Route {{ $labels.route }} is refusing requests at its concurrency limit"
+
+      - alert: ZirogateWAFBlockSpike
+        expr: sum by (route) (rate(zirogate_denied_total{reason="waf"}[5m])) > 5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Route {{ $labels.route }}: the WAF is blocking more than 5 requests per second"
+
+      - alert: ZirogateBansRising
+        expr: increase(zirogate_bans_total[15m]) > 20
+        labels: { severity: info }
+        annotations:
+          summary: The gateway banned more than 20 clients in 15 minutes
+
+      - alert: ZirogateCertificateExpiring
+        expr: zirogate_cert_expiry_seconds < 14 * 24 * 3600
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "Certificate {{ $labels.name }} expires in under 14 days"
+
+      - alert: ZirogateLogDropping
+        expr: rate(zirogate_log_dropped_total[5m]) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Access log lines are being dropped because the log disk is too slow"

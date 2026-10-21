@@ -6,7 +6,12 @@
     "tables": false
   },
   "MD033": {
-    "allowed_elements": ["details", "summary", "br"]
+    "allowed_elements": [
+      "details",
+      "summary",
+      "br"
+    ]
   },
-  "MD041": false
+  "MD041": false,
+  "MD060": false
 }

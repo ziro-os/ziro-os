@@ -1,8 +1,8 @@
-# Modules and plugins
+# Modules
 
-Modules (also called plugins: `ziroctl plugin` and `ziroctl module` are the same command) are opt-in feature
-packs. Nothing is preinstalled, so the base image stays small. Enabling a module installs, configures and starts
-everything it needs, and disabling it removes exactly what it added.
+Modules are opt-in feature packs. Nothing is preinstalled, so the base image stays small. Enabling a module
+installs, configures and starts everything it needs, and disabling it removes exactly what it added.
+`ziroctl plugin` is an alias of `ziroctl module`.
 
 Modules come from two places:
 
@@ -11,21 +11,21 @@ Modules come from two places:
   (`s3-ziro`, `rclone-ziro`, ...). You can add third-party catalogs with their signing key.
 
 ```sh
-ziroctl plugin search                     # everything available (refreshes catalogs older than a day)
-ziroctl plugin info s3-ziro               # what it installs, runs (and as which user), and its settings
-ziroctl plugin enable s3-ziro --set capacity=50G
-ziroctl plugin enable security            # the security pack (clamav + auditd)
-ziroctl plugin list                       # status; VERSION shows 1.0→1.1 when an upgrade is available
-ziroctl plugin upgrade                    # upgrade every enabled plugin (or name them)
-ziroctl plugin disable s3-ziro            # data directories are kept
-ziroctl plugin purge s3-ziro              # also deletes its data: dirs it created, logs, secrets
-ziroctl plugin update                     # refresh the catalogs now
-ziroctl plugin enable clamav --background # return at once; progress in /var/log/ziro-modules.log
+ziroctl module search                     # everything available (refreshes catalogs older than a day)
+ziroctl module info s3-ziro               # what it installs, runs (and as which user), and its settings
+ziroctl module enable s3-ziro --set capacity=50G
+ziroctl module enable security            # the security pack (clamav + auditd)
+ziroctl module list                       # status; VERSION shows 1.0→1.1 when an upgrade is available
+ziroctl module upgrade                    # upgrade every enabled module (or name them)
+ziroctl module disable s3-ziro            # data directories are kept
+ziroctl module purge s3-ziro              # also deletes its data: dirs it created, logs, secrets
+ziroctl module update                     # refresh the catalogs now
+ziroctl module enable clamav --background # return at once; progress in /var/log/ziro-modules.log
 ```
 
 API (admin token to change; any token to read):
 
-```
+```text
 GET  /api/v1/modules                      # status of every module, with source and available upgrades
 POST /api/v1/modules/{name}/enable        # 202 Accepted: runs in the background, poll GET for status
 POST /api/v1/modules/{name}/upgrade
@@ -65,37 +65,68 @@ A catalog is a static HTTPS site with `index.json`, its signature `index.json.si
 Third-party catalogs (a module runs as root when enabled; add only publishers you trust):
 
 ```sh
-ziroctl plugin repo add acme https://plugins.acme.example --key acme-catalog.pub
-ziroctl plugin repo list
-ziroctl plugin repo rm acme
+ziroctl module repo add acme https://modules.acme.example --key acme-catalog.pub
+ziroctl module repo list
+ziroctl module repo rm acme
 ```
 
 ## Available modules
 
-| Module | What it does |
-|---|---|
-| `clamav` | ClamAV antivirus. `clamd` listens on a local socket only (`/run/clamav/clamd.sock`, `clamav:clamav 0660`), never on TCP. `freshclam` updates signatures every 2 hours. A daily scan runs at 03:30. Needs 2 GB RAM (`--force` to override). Memory is capped: `clamd` 1.5 GiB, `freshclam` 256 MiB (cgroup limits, no swap), and the signature database is never loaded twice (`ConcurrentDatabaseReload no`, `TestDatabases no`), so a signature update can't push the host into OOM. |
-| `auditd` | Linux audit with CIS-aligned rules: identity files, sudoers, root's SSH keys, `sshd_config`, `/etc/ziro`, `ziroctl` runs, kernel module loads, time and hostname changes, mounts. Rules are reloaded at every boot. |
-| `nfs` | NFSv4.2 server: v2/v3 and UDP off, 30s grace, `rpc.mountd` supervised. Enabled automatically by the first `ziroctl nfs export` or cluster share. See [storage.md](storage.md). |
-| `clamav-onaccess` | Blocks opening infected files: `clamonacc` (fanotify permission events) asks `clamd` about every open under the paths in `/etc/clamav/onaccess-paths` (your edits are kept). Needs `clamav`. |
-| `integrity` | Host integrity. IMA (the default kernel) measures every executable, library and module the host runs (container overlays excluded). `ziroctl security integrity` (daily, and on demand) checks each one against the OS image's baseline (`/etc/ziro/integrity.sha256`) or the signed apk database; anything else raises a critical `integrity` alert. |
-| `dns-cloudflare` | Publishes the gateway's names at Cloudflare DNS: runs `ziroctl gateway dns-sync`, which keeps the records for the base domain and route hosts current (every 5 minutes and on every change; only on the Raft leader in a cluster). Also issues and renews ACME DNS-01 wildcard certificates (`ziroctl dns cert`, `gateway domain set --wildcard-cert`). Needs a provider first: `ziroctl dns provider add cloudflare`. See [dns.md](dns.md#public-dns-provider-cloudflare). |
-| `security` | The security pack: `clamav` + `auditd` + `integrity`. |
-| `s3-ziro` (pkgs) | S3-compatible object storage ([Garage](https://garagehq.deuxfleurs.fr)) for backups, snapshots and apps. Runs as `garage`, S3 API on `127.0.0.1:3900` (`--set bind=0.0.0.0` to expose it; the firewall still applies), RPC and admin API on loopback. Creates the bucket `ziro-backups` and the rclone remote `ziro_s3`. Settings: `capacity` (10G), `bind`, `port`. |
-| `cloudflared` (pkgs) | Cloudflare Tunnel: publish hostnames without a public IP, optional Zero Trust Access. Runs as `cloudflared`; the static upstream binary is sha256-pinned and upgraded daily (`--set auto_update=false` to stop). Managed with `ziroctl cf`: see [cloudflare-tunnel.md](cloudflare-tunnel.md). |
-| `tailscale` (pkgs) | Tailscale: reach the host over your tailnet. Runs as the `tailscale` user with only `CAP_NET_ADMIN` and `CAP_NET_RAW`; the static upstream binaries are sha256-pinned and upgraded daily with rollback. Closed by default: nothing is reachable from the tailnet until `ziroctl tailscale allow`. Managed with `ziroctl tailscale`: see [tailscale.md](tailscale.md). |
-| `rclone-ziro` (pkgs) | rclone for S3, GCS, Azure Blob, B2, SFTP and more. Enables `ziroctl backup create --remote` and `backup restore remote:path`. Your remotes go in `/etc/ziro/rclone.conf` (`rclone --config /etc/ziro/rclone.conf config`). |
+- **`clamav`**: ClamAV antivirus.
+  - `clamd` listens on a local socket only (`/run/clamav/clamd.sock`, `clamav:clamav 0660`), never on TCP.
+  - `freshclam` updates signatures every 2 hours, and a daily scan runs at 03:30.
+  - Needs 2 GB of RAM (`--force` to override).
+  - Memory is capped with cgroup limits and no swap: `clamd` 1.5 GiB, `freshclam` 256 MiB. The signature database is
+    never loaded twice (`ConcurrentDatabaseReload no`, `TestDatabases no`), so a signature update cannot push the
+    host into OOM.
+- **`auditd`**: Linux audit with CIS-aligned rules for identity files, sudoers, root's SSH keys, `sshd_config`,
+  `/etc/ziro`, `ziroctl` runs, kernel module loads, time and hostname changes, and mounts. Rules are reloaded at every
+  boot.
+- **`nfs`**: NFSv4.2 server with v2/v3 and UDP off, a 30 s grace period, and `rpc.mountd` supervised. The first
+  `ziroctl nfs export` or cluster share enables it automatically. See [storage.md](storage.md).
+- **`clamav-onaccess`**: blocks opening infected files. `clamonacc` (fanotify permission events) asks `clamd` about
+  every open under the paths in `/etc/clamav/onaccess-paths` (your edits are kept). Needs `clamav`.
+- **`integrity`**: host integrity.
+  - IMA (the default kernel) measures every executable, library and kernel module the host runs, excluding container
+    overlays.
+  - `ziroctl security integrity` runs daily and on demand. It checks each measurement against the OS image baseline
+    (`/etc/ziro/integrity.sha256`) or the signed apk database. Anything else raises a critical `integrity` alert.
+- **`dns-cloudflare`**: publishes the gateway's names at Cloudflare DNS.
+  - Runs `ziroctl gateway dns-sync`, which keeps the records for the base domain and route hosts current (every
+    5 minutes and on every change; only on the Raft leader in a cluster).
+  - Also issues and renews ACME DNS-01 wildcard certificates (`ziroctl dns cert`,
+    `gateway domain set --wildcard-cert`).
+  - Needs a provider first: `ziroctl dns provider add cloudflare`. See
+    [dns.md](dns.md#public-dns-provider-cloudflare).
+- **`security`**: the security pack, `clamav` + `auditd` + `integrity`.
+- **`s3-ziro`** (pkgs): S3-compatible object storage ([Garage](https://garagehq.deuxfleurs.fr)) for backups,
+  snapshots and apps.
+  - Runs as `garage`. The S3 API is on `127.0.0.1:3900` (`--set bind=0.0.0.0` to expose it; the firewall still
+    applies), and the RPC and admin APIs are on loopback.
+  - Creates the bucket `ziro-backups` and the rclone remote `ziro_s3`.
+  - Settings: `capacity` (default 10G), `bind`, `port`.
+- **`cloudflared`** (pkgs): Cloudflare Tunnel, to publish hostnames without a public IP, with optional Zero Trust
+  Access. Runs as `cloudflared`. The static upstream binary is sha256-pinned and upgraded daily
+  (`--set auto_update=false` to stop). Managed with `ziroctl cf`; see [cloudflare-tunnel.md](cloudflare-tunnel.md).
+- **`tailscale`** (pkgs): reach the host over your tailnet.
+  - Runs as the `tailscale` user with only `CAP_NET_ADMIN` and `CAP_NET_RAW`.
+  - The static upstream binaries are sha256-pinned and upgraded daily, with rollback.
+  - Closed by default: nothing is reachable from the tailnet until `ziroctl tailscale allow`.
+  - Managed with `ziroctl tailscale`; see [tailscale.md](tailscale.md).
+- **`rclone-ziro`** (pkgs): rclone for S3, GCS, Azure Blob, B2, SFTP and more. Enables
+  `ziroctl backup create --remote` and `backup restore remote:path`. Your remotes go in `/etc/ziro/rclone.conf`
+  (`rclone --config /etc/ziro/rclone.conf config`).
 
 ### Off-host backups
 
 ```sh
-ziroctl plugin enable s3-ziro && ziroctl plugin enable rclone-ziro
+ziroctl module enable s3-ziro && ziroctl module enable rclone-ziro
 ziroctl backup create --remote ziro_s3:ziro-backups          # local archive + upload (checksum first)
 ziroctl backup restore ziro_s3:ziro-backups/ziro-backup-20260930-020000.tar.gz
 ziroctl cron add --schedule "15 2 * * *" --command "/usr/bin/ziroctl backup create --remote ziro_s3:ziro-backups"
 ```
 
-Plugin secrets (`/etc/ziro/modules/*.secrets`) and storage credentials (`/etc/ziro/rclone.conf`,
+Module secrets (`/etc/ziro/modules/*.secrets`) and storage credentials (`/etc/ziro/rclone.conf`,
 `/etc/ziro/rclone.d/`) are left out of backups unless you pass `--include-secrets`, so a backup stored in a
 bucket never holds the keys to that bucket.
 
@@ -121,12 +152,12 @@ ausearch -k ssh-keys        # changes to /root/.ssh
 aureport --summary
 ```
 
-## Writing a plugin
+## Writing a module
 
 ```sh
-ziroctl plugin new hello            # scaffolds hello/manifest.json (a small web server as user nobody)
-ziroctl plugin validate hello/manifest.json
-ziroctl plugin install -f hello/manifest.json   # enable it from the file (unsigned; development only)
+ziroctl module new hello            # scaffolds hello/manifest.json (a small web server as user nobody)
+ziroctl module validate hello/manifest.json
+ziroctl module install -f hello/manifest.json   # enable it from the file (unsigned; development only)
 ```
 
 To publish, open a pull request to [ziro-os/pkgs](https://github.com/ziro-os/pkgs) (`modules/<name>/manifest.json`),
@@ -138,7 +169,7 @@ or run your own catalog (below). Built-in modules live in `tools/ziroctl/cmd/mod
 {
   "name": "example",
   "version": "1.0.0",
-  "description": "One line shown in `plugin list`",
+  "description": "One line shown in `module list`",
   "requires": [],
   "packages": ["alpine-package"],
   "min_memory_mb": 0,
@@ -160,18 +191,35 @@ or run your own catalog (below). Built-in modules live in `tools/ziroctl/cmd/mod
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `packages` | Alpine packages from the pinned release repositories (apk verifies signatures). Only packages the module added are removed on disable, and not while another enabled module lists them. |
-| `settings` | Values the operator may set with `--set name=value` and read back with `plugin info`. Each value, the default included, must fully match `pattern` (anchored `^...$`). Settings are kept across upgrades. Use them as `{{setting.name}}`. |
-| `secrets` | Generated once on the host (`hex:N` or `base64:N` random bytes, `alnum:N` characters, N = 12..64), stored in `/etc/ziro/modules/<name>.secrets` (0600), kept across upgrades, removed on disable. Use them as `{{secret.name}}` in `files` only. |
-| `artifacts` | Files that aren't Alpine packages (a static binary, a helper script). Downloaded over HTTPS, checked against `sha256`, placed under `/var/lib/ziro/plugins/<name>/`. `arch` (`x86_64`, `aarch64`) limits one to an architecture. |
-| `files` | Config files, written atomically. A package default is kept as `<file>.ziro-orig` and restored on disable. A file you edit is never overwritten or removed. |
-| `services` | Supervised daemons (`restart=always`). `user` runs it unprivileged; `caps` (`net_admin`, `net_raw`, `net_bind_service`; needs a `user`) lets that user keep exactly those Linux capabilities, with every other capability dropped and `no_new_privs` set; `env_file` (root-owned, not world-readable) passes secrets outside argv. `resources` (`memory` like `512Mi`, `cpus`, `pids`) bounds it in its own cgroup; over its memory limit only the service is killed and restarted ([operations](operations.md#memory-how-a-host-protects-itself)). |
-| `min_memory_mb` | Memory the plugin needs: enabling it is refused unless the host has that much in total *and* available next to what already runs (`--force` overrides). |
-| `prepare`, `post_start`, `stop`, `health` | Commands (absolute path, argument list, no shell) run before services start, after they start (and at every boot), on disable, and as the health check (`expect`: text the output must contain). |
+Fields:
 
-Rules, enforced when a manifest is loaded (`plugin validate`, catalog CI, `go test`):
+- **`packages`**: Alpine packages from the pinned release repositories (apk verifies signatures). Disabling removes
+  only the packages the module added, and not while another enabled module lists them.
+- **`settings`**: values the operator may set with `--set name=value` and read back with `module info`.
+  - Each value, the default included, must fully match `pattern` (anchored `^...$`).
+  - Settings are kept across upgrades. Use them as `{{setting.name}}`.
+- **`secrets`**: generated once on the host (`hex:N` or `base64:N` random bytes, `alnum:N` characters, N = 12..64)
+  and stored in `/etc/ziro/modules/<name>.secrets` (0600). They are kept across upgrades and removed on disable. Use
+  them as `{{secret.name}}` in `files` only.
+- **`artifacts`**: files that are not Alpine packages, such as a static binary or a helper script. They are downloaded
+  over HTTPS, checked against `sha256`, and placed under `/var/lib/ziro/plugins/<name>/`. `arch` (`x86_64`,
+  `aarch64`) limits one to an architecture.
+- **`files`**: config files, written atomically. A package default is kept as `<file>.ziro-orig` and restored on
+  disable. A file you edit is never overwritten or removed.
+- **`services`**: supervised daemons (`restart=always`).
+  - `user` runs it unprivileged.
+  - `caps` (`net_admin`, `net_raw`, `net_bind_service`; needs a `user`) lets that user keep exactly those Linux
+    capabilities, with every other capability dropped and `no_new_privs` set.
+  - `env_file` (root-owned, not world-readable) passes secrets outside argv.
+  - `resources` (`memory` like `512Mi`, `cpus`, `pids`) bounds it in its own cgroup. Over its memory limit, only
+    the service is killed and restarted (see [operations](operations.md#memory-how-a-host-protects-itself)).
+- **`min_memory_mb`**: memory the module needs. Enabling it is refused unless the host has that much in total and
+  available next to what already runs (`--force` overrides).
+- **`prepare`, `post_start`, `stop`, `health`**: commands (absolute path, argument list, no shell). They run before
+  services start, after they start (and at every boot), on disable, and as the health check (`expect` is text the
+  output must contain).
+
+Rules, enforced when a manifest is loaded (`module validate`, catalog CI, `go test`):
 
 - Unknown fields are errors, so a typo can't silently drop a setting.
 - Paths and executables must be absolute and clean. Commands run without a shell; there are no shell strings.
@@ -181,7 +229,7 @@ Rules, enforced when a manifest is loaded (`plugin validate`, catalog CI, `go te
   must not be readable by others (for example `0600`, or `0640` with `owner: root:<daemon>`).
 - A service's pidfile must be under `/run/`, and its log under `/var/log/`. Use a `ziro-` pidfile when the
   daemon writes its own. Daemons run in the foreground.
-- Run daemons as their own user. Never open a network listener unless the plugin exists for that; bind to
+- Run daemons as their own user. Never open a network listener unless the module exists for that; bind to
   loopback by default and let a setting expose it.
 
 ### Enable, upgrade and disable
@@ -204,7 +252,8 @@ Rules, enforced when a manifest is loaded (`plugin validate`, catalog CI, `go te
   - it restores or removes files, but keeps any file you edited
   - it removes the packages this module added, unless another enabled module needs them
   - it disables auto dependencies nothing else needs
-  - it keeps data directories; `purge` also deletes the ones the module created (never one that existed before), its logs and its secrets
+  - it keeps data directories; `purge` also deletes the ones the module created (never one that existed
+    before), its logs and its secrets
 - **After a reboot or `ziroctl upgrade`:** `ziroctl service boot` reinstalls missing packages and artifacts,
   recreates `/run` directories and re-runs post-start steps (for example loading audit rules). It works from the
   installed copies and never needs the network for a module whose packages are still in place.

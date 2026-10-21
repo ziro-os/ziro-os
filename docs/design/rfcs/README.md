@@ -26,6 +26,6 @@ not need one.
 | RFC | Title | Status |
 |---|---|---|
 | [0001](0001-stacks-and-host-config.md) | Stacks and declarative host config | Accepted (implemented in #49) |
-| [0002](0002-dns-provider.md) | Public DNS provider for the gateway's names | Accepted (implemented in #91)|
+| [0002](0002-dns-provider.md) | Public DNS provider for the gateway's names | Accepted (implemented in #91) |
 | [0003](0003-tailscale-module.md) | Tailscale module, service capabilities and interface-bound firewall rules | Draft |
-| [0004](0004-sandboxes.md) | Sandboxes for untrusted code and AI agents | Draft (phases 1–8 implemented) |
+| [0004](0004-sandboxes.md) | Sandboxes for untrusted code and AI agents | Accepted (phases 1–8 implemented) |

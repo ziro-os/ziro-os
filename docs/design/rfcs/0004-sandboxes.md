@@ -1,6 +1,6 @@
 # RFC 0004: Sandboxes for untrusted code and AI agents
 
-- **Status:** Draft (all eight phases implemented; later phases follow, one pull request each)
+- **Status:** Accepted (all eight phases implemented)
 - **Pull request:** sandbox core (phase 1), then one per phase below
 
 ## Summary
@@ -14,7 +14,7 @@ add:
 - an SSH gateway that authenticates with short-lived token sessions
 - HTTPS port previews
 - credential injection
-- a Kata microVM runtime
+- a hardware-isolated runtime (gVisor on its KVM platform)
 - templates, warm pools and an MCP server for agents
 - cluster placement
 
@@ -151,7 +151,8 @@ Each phase is one pull request.
    proportion for this OS, while gVisor's KVM platform gives a hardware boundary with the binary already installed
    and no kernel change (both Ziro kernels have KVM). A slim Kata bundle can still be added later as another
    runtime.
-7. **Agent platform**: templates, warm pools, snapshots (`nerdctl commit` of the rootfs plus an archive of `/workspace`), an MCP server (`ziroctl sandbox mcp`).
+7. **Agent platform**: templates, warm pools, snapshots (`nerdctl commit` of the rootfs plus an archive of
+   `/workspace`), an MCP server (`ziroctl sandbox mcp`).
 8. **Cluster**:
    - placement on runner nodes, with records in Raft
    - the API and SSH gateway forward to the node that owns a sandbox over the mesh with mTLS
@@ -169,7 +170,8 @@ bound what that code can do:
 
 Exec, create and delete are audited by the API. Expiries are audited by the daemon.
 
-**What an attacker who controls the spec could do.**
+What an attacker who controls the spec could do:
+
 - Pick an image (limited by `image_policy`).
 - Set env, user and workdir (validated, and passed as single arguments).
 - Ask for resources up to the host limits.
@@ -179,24 +181,25 @@ Exec, create and delete are audited by the API. Expiries are audited by the daem
 **Secrets.** Phase 1 has no secret store: `env` values are visible to anyone who can read the sandbox. Phase 5 adds
 placeholders that never reach the sandbox.
 
-**Residual risk.**
-- gVisor bugs: a smaller surface than the host kernel, but not zero. Phase 6 adds microVMs for workloads that need a
-  hardware boundary.
-- Disk use inside the copy-on-write layer and `/workspace` isn't capped yet. This is marked `ponytail` and needs
-  project quotas.
+Residual risk:
+
+- gVisor bugs: a smaller surface than the host kernel, but not zero. Phase 6 adds gVisor's KVM platform for workloads
+  that need a hardware boundary.
+- Disk use inside the copy-on-write layer and `/workspace` is not capped. The cap is not implemented yet and needs
+  filesystem project quotas.
 
 ## Compatibility
 
 - **New:** the module, routes, CLI and SDK methods.
 - **API tokens** gain an optional `scopes` field. Older tokens have none and keep every route their role allows.
 - **Module artifacts** gain an optional `extract`. Older manifests are unchanged.
-- **`ziroctld`'s client code** moved into shared helpers (`unix_daemon.go`) without behaviour changes. Daemon errors
+- **`ziroctld`'s client code** moved into shared helpers (`unix_daemon.go`) without behavior changes. Daemon errors
   now also show the API's `message` field.
 
 ## Alternatives
 
 - **Firecracker as the default:** needs KVM, a guest kernel and an in-VM agent. It isn't available on arm64 hosts
-  today or inside most cloud VMs. Kata covers microVMs in phase 6.
+  today or inside most cloud VMs. Phase 6 uses gVisor's KVM platform for hardware isolation instead.
 - **gVisor's own shim (`containerd-shim-runsc-v1`):** nerdctl passes no runtime options to a non-runc shim, so
   runsc's flags would have to come from a containerd configuration change (and a containerd restart). The runc shim
   with `runsc` as its binary is how Docker runs gVisor. It needs no containerd change.

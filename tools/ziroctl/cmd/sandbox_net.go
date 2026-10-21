@@ -38,7 +38,7 @@ import (
 // Network policy is the dynamic part of a sandbox (PUT .../network applies it live); the rest
 // of the spec is fixed at create. A sandbox created without a network can't get one later.
 //
-// ponytail: IPv4 only (IPv6 is off on the sandbox network); domains allow every port;
+// Known limitation: IPv4 only (IPv6 is off on the sandbox network); domains allow every port;
 // addresses learned from DNS are lost when ziro-sandboxd restarts (sandboxes resolve again).
 
 const (

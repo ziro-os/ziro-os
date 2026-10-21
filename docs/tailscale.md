@@ -44,8 +44,10 @@ tailnet's own access rules still apply on top. `ziroctl tailscale ls` shows what
   processes). Its state, including the node key, is a 0700 directory it owns, never part of a
   [backup](operations.md); its control socket is in a 0750 directory.
 - **It does not touch the host firewall.** `tailscaled` is told `--netfilter-mode=off`, so it adds no iptables chains or
-  rules and writes no global sysctl (on, it runs `iptables` as its own user and adds an accept rule for `tailscale0` plus
-  "connmark" rules, an `rp_filter` workaround for exit nodes and subnet routers that this OS's kernel has no modules for).
+  rules and writes no global sysctl (on, it runs `iptables` as its own user and adds an accept rule for `tailscale0`
+  plus
+  "connmark" rules, an `rp_filter` workaround for exit nodes and subnet routers that this OS's kernel has no modules
+  for).
   The firewall (`inet ziro`) is yours alone: it drops by default and opens only what `ziroctl tailscale allow` names. A
   node joined before this was the default is fixed by `ziroctl tailscale setup` or the next boot or `update`, which run
   `tailscale set --netfilter-mode=off` and leave the node's name and tags as they are. (The old symptom was a warning in
@@ -66,9 +68,11 @@ tailnet's own access rules still apply on top. `ziroctl tailscale ls` shows what
 - **Always the newest release, verified.** The binaries come from the signed module catalog: a daily job there takes the
   newest stable Tailscale (an even-minor release that is also an upstream tag), checks the tarball against the checksum
   Tailscale publishes, checks that the binaries are static, of the right architecture and report that version, pins each
-  sha256 and re-signs the catalog. It does not yet verify Tailscale's own package signature (`distsign`). The host checks
+  sha256 and re-signs the catalog. It does not yet verify Tailscale's own package signature (`distsign`). The host
+  checks
   the catalog signature and the sha256 (again at every boot). `ziroctl tailscale update` runs daily from cron, restarts
-  Tailscale and, if the node does not come back connected within 30 seconds, puts the previous version back and raises an
+  Tailscale and, if the node does not come back connected within 30 seconds, puts the previous version back and raises
+  an
   alert. `ziroctl tailscale update --check` shows what is available; `--set auto_update=false` turns the daily job off.
 - **No port clash.** `tailscaled` listens on UDP 41642 (not its default 41641, which `zirocd` uses). `--set port=…`
   changes it, and `ziroctl tailscale up --open-port` opens it so peers can connect directly on a host with a public
@@ -94,7 +98,8 @@ tailnet's own access rules still apply on top. `ziroctl tailscale ls` shows what
 
 ## API and SDK
 
-The same operations over the [REST API](api.md): `GET /api/v1/tailscale` (viewer; `{"enabled": false}` when the module is
+The same operations over the [REST API](api.md): `GET /api/v1/tailscale` (viewer; `{"enabled": false}` when the module
+is
 off), `POST /api/v1/tailscale/up` (admin), `/down` and `/logout` (admin). Ports are opened to the tailnet with
 `POST /api/v1/firewall/allow` and `"iface": "tailscale0"`. Through the API `up` needs an auth key (or an OAuth client
 secret and a tag) in the request body; it is handed to Tailscale as a 0600 file and is never stored, logged or returned.
@@ -111,8 +116,10 @@ The browser login is CLI only. Go clients: `Tailscale`, `TailscaleJoin`, `Tailsc
 | `telemetry` | `off` | `on` lets tailscaled upload logs to Tailscale |
 | `auto_update` | `true` | the daily `ziroctl tailscale update` |
 
-Needs 512 MB of RAM (`--force` to override). Disabling the module (`ziroctl module disable tailscale`) stops tailscaled and
-removes the binaries; `--purge` also removes the node's state. Run `ziroctl tailscale logout` first to remove the node from
+Needs 512 MB of RAM (`--force` to override). Disabling the module (`ziroctl module disable tailscale`) stops tailscaled
+and
+removes the binaries; `--purge` also removes the node's state. Run `ziroctl tailscale logout` first to remove the node
+from
 your tailnet.
 
 Design record: [RFC 0003](design/rfcs/0003-tailscale-module.md).

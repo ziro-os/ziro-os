@@ -80,7 +80,7 @@ func updateModuleBinaries(u binaryUpdate) error {
 
 // restartChecked restarts onto the new binaries and puts the previous ones back when the service
 // does not come back healthy.
-// ponytail: after a rollback the next boot fetches the pinned binary again (one more try); a
+// Known limitation: after a rollback the next boot fetches the pinned binary again (one more try); a
 // held version would need state in the module.
 func restartChecked(u binaryUpdate, version string) error {
 	if u.Restart() {

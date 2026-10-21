@@ -167,7 +167,7 @@ func TestGatewayV2HealthAndRetries(t *testing.T) {
 	g := v2Server(t, route)
 	defer func() {
 		for _, c := range g.checks {
-			c()
+			c.cancel()
 		}
 	}()
 	time.Sleep(300 * time.Millisecond)
@@ -528,9 +528,10 @@ func TestGatewayHTTP3(t *testing.T) {
 		t.Fatal(err)
 	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: g.getCertificate}
-	g.h3 = &http3.Server{Handler: g.handler(true), TLSConfig: http3.ConfigureTLSConfig(tlsCfg)}
-	go g.h3.Serve(pc)
-	defer g.h3.Close()
+	h3 := &http3.Server{Handler: g.handler(true), TLSConfig: http3.ConfigureTLSConfig(tlsCfg)}
+	g.h3.Store(h3)
+	go h3.Serve(pc)
+	defer h3.Close()
 	caPEM, _ := os.ReadFile(filepath.Join(dir, "internal-ca.crt"))
 	if len(caPEM) == 0 { // the CA is created with the first internal certificate
 		g.getCertificate(&tls.ClientHelloInfo{ServerName: "q.internal"})
@@ -551,4 +552,79 @@ func TestGatewayHTTP3(t *testing.T) {
 	if resp.ProtoMajor != 3 || string(b) != "H3 /hello" {
 		t.Fatalf("HTTP/3: proto %s body %q", resp.Proto, b)
 	}
+}
+
+// stubRT answers every upstream request in memory, so a benchmark measures the gateway alone.
+type stubRT struct{}
+
+func (stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/plain"}}, ProtoMajor: 1, ProtoMinor: 1,
+		Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
+}
+
+type discardWriter struct {
+	h http.Header
+	n int
+}
+
+func (w *discardWriter) Header() http.Header         { return w.h }
+func (w *discardWriter) Write(b []byte) (int, error) { w.n += len(b); return len(b), nil }
+func (w *discardWriter) WriteHeader(int)             {}
+
+// BenchmarkGatewayHandler is the gateway's own cost per request: match, policy, pick and the
+// reverse proxy, with an in-memory upstream and response writer.
+func BenchmarkGatewayHandler(b *testing.B) {
+	benchGatewayHandler(b, GatewayRoute{Name: "b", Hosts: []string{"b.test"}})
+}
+
+// With rate limiting, a header rule and gzip: the common production shape.
+func BenchmarkGatewayHandlerPolicy(b *testing.B) {
+	benchGatewayHandler(b, GatewayRoute{Name: "b", Hosts: []string{"b.test"}, RateRPS: 100000, Compress: true,
+		RequestHeaders: &HeaderRules{Set: map[string]string{"X-Env": "prod"}}})
+}
+
+func benchGatewayHandler(b *testing.B, route GatewayRoute) {
+	g := v2Server(b, rs(route, "10.0.0.1:80", "10.0.0.2:80"))
+	for _, r := range g.tbl.Load().all {
+		r.tr = stubRT{}
+		if r.limiter != nil {
+			r.limiter = newTokenBucket(1 << 30) // never limits: the benchmark measures the allowed path
+		}
+	}
+	h := g.handler(false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := &discardWriter{h: http.Header{}}
+		req := httptest.NewRequest("GET", "http://b.test/x/y", nil)
+		req.RemoteAddr = "10.1.2.3:4567"
+		for pb.Next() {
+			clear(w.h)
+			h.ServeHTTP(w, req)
+		}
+	})
+}
+
+// The same path with the WAF in block mode and a realistic browser request.
+func BenchmarkGatewayHandlerWAF(b *testing.B) {
+	g := v2Server(b, rs(GatewayRoute{Name: "b", Hosts: []string{"b.test"}, WAF: &GatewayWAF{Mode: "block"}}, "10.0.0.1:80", "10.0.0.2:80"))
+	for _, r := range g.tbl.Load().all {
+		r.tr = stubRT{}
+	}
+	h := g.handler(false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := &discardWriter{h: http.Header{}}
+		req := httptest.NewRequest("GET", "http://b.test/products?id=42&sort=price&page=3&q=blue+shoes", nil)
+		req.RemoteAddr = "10.1.2.3:4567"
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+		req.Header.Set("Cookie", "session=Zm9vYmFyYmF6MTIzNDU2; theme=dark; lang=en-US")
+		for pb.Next() {
+			clear(w.h)
+			h.ServeHTTP(w, req)
+		}
+	})
 }

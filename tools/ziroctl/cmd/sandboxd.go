@@ -378,7 +378,7 @@ func (m *sandboxManager) serveExec(w http.ResponseWriter, r *http.Request, id st
 	cmd := sandboxExecCommand(ctx, args...)
 	// On timeout or a client hanging up, SIGTERM goes to nerdctl, which forwards it to the
 	// command in the sandbox; killing nerdctl alone would leave the command running there.
-	// ponytail: a command that ignores SIGTERM keeps running until the sandbox's lifetime ends.
+	// Known limitation: a command that ignores SIGTERM keeps running until the sandbox's lifetime ends.
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 5 * time.Second
 	if req.Stdin != "" {
@@ -409,7 +409,7 @@ func (m *sandboxManager) serveExec(w http.ResponseWriter, r *http.Request, id st
 }
 
 // execStream serialises a command's stdout and stderr into one NDJSON stream.
-// ponytail: output is sent as JSON strings, so bytes that aren't UTF-8 become U+FFFD; add a
+// Known limitation: output is sent as JSON strings, so bytes that aren't UTF-8 become U+FFFD; add a
 // base64 encoding when binary output matters (the files API is the way to move binaries).
 type execStream struct {
 	mu     sync.Mutex

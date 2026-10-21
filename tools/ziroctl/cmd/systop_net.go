@@ -68,7 +68,7 @@ type NetSnapshot struct {
 
 type ifPrev struct{ rx, tx, rxp, txp uint64 }
 
-// ponytail: flows past maxTrackedFlows show totals but no rate; raise it if hosts track more.
+// Known limitation: flows past maxTrackedFlows show totals but no rate; raise it if hosts track more.
 const maxTrackedFlows = 16384
 
 type netCollector struct {

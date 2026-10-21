@@ -1,6 +1,6 @@
 # Networking
 
-Without configuration, Ziro-OS runs DHCP on every Ethernet interface. To set static addresses, VLANs, bonds,
+Without configuration, Ziro OS runs DHCP on every Ethernet interface. To set static addresses, VLANs, bonds,
 MTUs and routes, describe them once in `/etc/ziro/network.json`. ziro-init applies that file at every boot
 instead of the blanket DHCP.
 
@@ -12,7 +12,7 @@ ziroctl network status --all    # also container interfaces, IPv6, MACs, errors/
 ziroctl network status --json
 ```
 
-```
+```text
 INTERFACE  STATE  ADDRESS          MTU   RX       TX       ROLE
 eth0       up     172.26.1.108/24  1500  1.2 GiB  310 MiB  primary
 ziro0      up     10.200.0.1/16    1420  88 MiB   92 MiB   mesh
@@ -34,7 +34,7 @@ ziroctl network dns auto                            # follow DHCP again
 ziroctl network dns                                 # show
 ```
 
-Pinned resolvers are recorded in `/etc/udhcpc/udhcpc.conf` (`RESOLV_CONF=no`), which the DHCP client honours on
+Pinned resolvers are recorded in `/etc/udhcpc/udhcpc.conf` (`RESOLV_CONF=no`), which the DHCP client honors on
 every lease renewal.
 
 ## Interfaces, VLANs, bonds and routes

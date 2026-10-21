@@ -18,7 +18,11 @@ import (
 // resolved config: TLS (ACME, uploaded certificates or an internal CA), HTTP/1.1, HTTP/2 and
 // HTTP/3, load balancing with active and passive health checks, header rules, redirects,
 // rate limits, basic auth, TCP and TLS-SNI passthrough, Prometheus metrics, JSON access log.
-// The data plane is gateway_proxy.go; stores, the API and `expose` are gateway_store.go.
+// The data plane is gateway_proxy.go (route table, handler), gateway_lb.go (balancing, health),
+// gateway_traffic.go (retries, ejection, mirroring, CORS), gateway_waf*.go (firewall),
+// gateway_limit.go and gateway_ban.go (rate limits, bans), gateway_metrics.go, gateway_observe.go and
+// gateway_log.go (observability), gateway_l4.go (TCP, passthrough) and gateway_tls.go; stores, the
+// API and `expose` are gateway_store.go.
 
 var (
 	gatewayConfigPath = "/run/ziro/gateway/config.json"
@@ -26,9 +30,11 @@ var (
 )
 
 const (
-	gatewayDownFor     = 10 * time.Second // an upstream that failed a dial is skipped this long
-	gatewayDefaultBody = 10               // MB
-	gatewayMaxTargets  = 64
+	gatewayDownFor      = 10 * time.Second // an upstream that failed a dial is skipped this long
+	gatewayDefaultBody  = 10               // MB
+	gatewayBodyTimeout  = 5 * time.Minute  // a request body must arrive within this
+	gatewayDefaultDrain = 25 * time.Second
+	gatewayMaxTargets   = 64
 )
 
 // gatewaySources returns the gateway nodes' mesh IPs when some route targets app: routing an
@@ -90,12 +96,21 @@ func resolveTargets(r GatewayRoute, appAddrs func(app string) []string) GatewayR
 			rs.Upstreams = append(rs.Upstreams, a)
 		}
 	}
+	if m := r.Mirror; m != nil {
+		addrs := []string{m.Address}
+		if m.App != "" {
+			addrs = appAddrs(m.App)
+		}
+		for _, a := range addrs {
+			rs.MirrorTargets = append(rs.MirrorTargets, GatewayTarget{Addr: a, Weight: 1})
+		}
+	}
 	return rs
 }
 
 // gatewayConfigFor resolves the cluster's routes for gateway nodes.
 func gatewayConfigFor(st *ClusterState) *GatewayConfig {
-	cfg := &GatewayConfig{ACME: st.GatewayACME, Routes: []GatewayRouteState{}}
+	cfg := &GatewayConfig{ACME: st.GatewayACME, Settings: activeSettings(st.GatewaySettings, time.Now()), Routes: []GatewayRouteState{}}
 	eps, pods := appEndpoints(st), podEndpoints(st)
 	for _, r := range st.Routes {
 		r.Normalize()

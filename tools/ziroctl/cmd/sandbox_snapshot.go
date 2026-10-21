@@ -25,7 +25,7 @@ import (
 // A caller can start only from its own snapshots (operators from any), and they skip the host
 // image policy (they come from this host). /tmp (a tmpfs) is not kept.
 //
-// ponytail: filesystem only; memory (runsc checkpoint/restore) when a workload needs it.
+// Known limitation: filesystem only; memory (runsc checkpoint/restore) when a workload needs it.
 
 const snapshotRepo = "ziro.local/sandbox/"
 

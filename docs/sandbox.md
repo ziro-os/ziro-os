@@ -2,8 +2,10 @@
 
 A sandbox is a disposable, isolated machine for code you don't trust: an AI agent's tools, a code interpreter or a CI
 step. Each one is a container that runs under [gVisor](https://gvisor.dev). gVisor is a kernel in user space, so the
-workload's system calls never reach the host kernel. A sandbox keeps a short list of privileges, has no network unless you ask
-for one (and then only what its policy allows), and has resource limits and a lifetime. You manage sandboxes with `ziroctl sandbox`, the REST API or the Go SDK. The
+workload's system calls never reach the host kernel. A sandbox keeps a short list of privileges, has no network unless
+you ask
+for one (and then only what its policy allows), and has resource limits and a lifetime. You manage sandboxes with
+`ziroctl sandbox`, the REST API or the Go SDK. The
 design is [RFC 0004](design/rfcs/0004-sandboxes.md).
 
 ```sh
@@ -128,7 +130,8 @@ ziroctl sandbox exec <id> -- sh -c 'echo $GITHUB_TOKEN'      # zsec_7f3k...: a p
 - **Trusting the sandbox's CA.** The sandbox gets it through `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
   `GIT_SSL_CAINFO` and `NODE_EXTRA_CA_CERTS`, which point to `/etc/ziro/ca-bundle.crt` and
   `/etc/ziro/sandbox-ca.crt`. Tools that ignore these variables need the bundle added to their own trust store.
-- **API:** `"secrets": [{"name": "GITHUB_TOKEN", "value": "...", "hosts": ["api.github.com", "*.githubusercontent.com"]}]`
+- **API:**
+  `"secrets": [{"name": "GITHUB_TOKEN", "value": "...", "hosts": ["api.github.com", "*.githubusercontent.com"]}]`
   in the create body. Secrets need a network (`--allow` or `--net open`).
 - **Policy still applies.** The proxy enforces the sandbox's network policy on what it carries.
 
@@ -337,7 +340,7 @@ Enable the module on the nodes that should run sandboxes (`ziroctl module enable
 as one sandbox platform. Clients, agents and the MCP server talk to the master's API, and users SSH to any node:
 
 - **Placement.** A create through the master's API runs on a ready, schedulable node that has the module (not
-  cordoned, not labelled `runner=false`). It picks the node with the fewest sandboxes, then the one with the most
+  cordoned, not labeled `runner=false`). It picks the node with the fewest sandboxes, then the one with the most
   memory. A sandbox started from a snapshot runs on one of the nodes that hold a copy.
 - **Warm pools.** Each node keeps its own pools (`pools` in its `/etc/ziro/sandbox.json`). For a create that a pool
   can serve (a template, plus at most `timeout`, `idle_timeout` and `metadata`), the master first asks the nodes
@@ -357,7 +360,8 @@ as one sandbox platform. Clients, agents and the MCP server talk to the master's
   of them. On other nodes the CLI manages that node's own sandboxes.
 - **One SSH address.** A token names its sandbox. Any node's gateway asks the owning node to check the token (which
   spends a single-use token there), then relays the session to the owner's gateway. The relay pins the owner's host
-  key, which it fetches over the mesh. `ssh -p 22998 zsbx_...@<any node>` works for every sandbox in the cluster. All gateways present the same
+  key, which it fetches over the mesh. `ssh -p 22998 zsbx_...@<any node>` works for every sandbox in the cluster. All
+  gateways present the same
   cluster host key, created by the master and handed to sandbox nodes over the cluster's pinned TLS, so one
   `known_hosts` line covers every node.
 - **Previews.** Preview URLs become routes on the cluster's gateways, pointing at the owning node's preview proxy

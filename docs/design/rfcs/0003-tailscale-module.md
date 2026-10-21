@@ -34,12 +34,14 @@ one locked OS thread, with per-thread syscalls) drops every capability not liste
 user with no supplementary groups, sets the permitted, effective, inheritable and ambient sets to exactly the list, sets
 `no_new_privs`, and execs the daemon. So the daemon holds those capabilities and nothing else, and neither a setuid
 binary nor a file capability can add to them. Services without `caps` start as before. The conf file key is
-`caps=net_admin,net_raw`; the manifest field is `caps`. Only the validated service name is on the launcher's command line.
+`caps=net_admin,net_raw`; the manifest field is `caps`. Only the validated service name is on the launcher's command
+line.
 
 **Interface-bound firewall rules** (next pull request). `AllowedPort` gains an optional `iface`; the rule matches
 `iifname` as well as the source CIDR. Nothing is added to the trusted interfaces.
 
 **The Tailscale module** (following pull requests).
+
 - Binaries come from the signed catalog (`ziro-os/pkgs`), pinned by sha256 and re-verified on every boot, like
   cloudflared. A daily job there takes the newest stable release, checks Tailscale's own signature, pins it and re-signs
   the catalog. Hosts update daily (`ziroctl tailscale update`) and restore the previous binary if the node does not come
@@ -56,7 +58,8 @@ binary nor a file capability can add to them. Services without `caps` start as b
 
 ## Security
 
-- A compromised tailscaled holds only `CAP_NET_ADMIN`/`CAP_NET_RAW` as the `tailscale` user, cannot gain more, is limited
+- A compromised tailscaled holds only `CAP_NET_ADMIN`/`CAP_NET_RAW` as the `tailscale` user, cannot gain more, is
+  limited
   by a cgroup, and cannot read root's files. Previously the only option was root.
 - The allowlist is short on purpose: adding a capability to it is a security review (a test fails until it is updated).
   Capabilities that load code, read memory or disks raw, override permissions or become root are not available.
@@ -84,7 +87,8 @@ privileges. Existing services and modules are unchanged.
 ## Alternatives
 
 - **Root with cgroup limits only** (what other modules do): simplest, but a compromised daemon owns the host.
-- **Userspace networking (`--tun=userspace-networking`) as an unprivileged user:** needs no capability, but gives the host
+- **Userspace networking (`--tun=userspace-networking`) as an unprivileged user:** needs no capability, but gives the
+  host
   no tailnet interface (only SOCKS/HTTP proxying), so ssh to the host and routing do not work.
 - **The Alpine `tailscale` package:** signed, but months behind upstream and never upgraded after install.
 - **Trusting the whole `tailscale0` interface:** easy, but every peer then reaches every host port and Ziro Guard skips

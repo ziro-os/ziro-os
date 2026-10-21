@@ -217,7 +217,7 @@ func loadSandboxMesh() *sandboxMeshConfig {
 // sandboxPolicyRules open a sandbox node's mesh ports (deny-mode policy) to the other nodes: the
 // sandbox API (masters forward, edges check tokens), the SSH gateway (relays) and the preview
 // proxy (gateways). Each is still authenticated: the cluster token, or a preview token.
-// ponytail: the default ports; a node with other ssh_port/preview_port needs them opened too.
+// Known limitation: the default ports; a node with other ssh_port/preview_port needs them opened too.
 func sandboxPolicyRules(st *ClusterState, nodeID string) []MeshRule {
 	n := st.node(nodeID)
 	if n == nil || !hasCap(n, capSandbox) {

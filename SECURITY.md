@@ -2,9 +2,9 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately through GitHub:
-[Report a vulnerability](https://github.com/ziro-os/ziro-os/security/advisories/new) (Security tab → "Report a
-vulnerability"). Don't open a public issue or pull request for a vulnerability.
+Report vulnerabilities privately through GitHub: open the repository's Security tab and choose
+[Report a vulnerability](https://github.com/ziro-os/ziro-os/security/advisories/new). Do not open a public issue or
+pull request for a vulnerability.
 
 Include the affected version (`ziroctl version`), the steps to reproduce, and the impact you expect. We aim to
 acknowledge a report within 3 working days, agree on a fix and a disclosure date with you, and credit you in the
@@ -26,16 +26,18 @@ Examples: authentication or role bypass in the API, secrets exposed in argv, log
 signature or sha256 check, container-to-host escapes caused by Ziro's configuration, and audit-log tampering that
 `ziroctl audit verify` doesn't detect.
 
-Out of scope: vulnerabilities in upstream projects (Linux, containerd, runc, BusyBox, Alpine packages) that Ziro
-doesn't make worse — report those upstream, though we're glad to hear about them to update quickly — and anything
-that needs root on the host already, unless it defeats a documented control.
+Out of scope:
+
+- Vulnerabilities in upstream projects (Linux, containerd, runc, BusyBox, Alpine packages) that Ziro OS does not make
+  worse. Report those upstream; a heads-up to this project helps it update quickly.
+- Anything that already needs root on the host, unless it defeats a documented control.
 
 ## Automated scanning
 
-Ziro-OS is part of the [Snyk Secure Developer Program](https://snyk.io/open-source/). The
-[Snyk Security workflow](.github/workflows/snyk-security.yml) runs [Snyk](https://snyk.io) Code, Open Source, IaC and Container scans on
-every pull request and on `main`; results go to the repository's code-scanning alerts. Alerts are fixed at their
-source, not suppressed.
+Ziro OS is part of the [Snyk Secure Developer Program](https://snyk.io/open-source/). The
+[Snyk Security workflow](.github/workflows/snyk-security.yml) runs [Snyk](https://snyk.io) Code, Open Source, IaC and
+Container scans on every pull request and on `main`. Results go to the repository's code-scanning alerts. Alerts are
+fixed at their source, not suppressed.
 
 ## Signing keys
 
@@ -43,9 +45,10 @@ source, not suppressed.
 |---|---|---|
 | Tools and OS releases (`SHA256SUMS.sig`, ed25519) | public half in [`sdk/release/release.pub`](sdk/release/release.pub) | `ziroctl update` / `ziroctl upgrade` / `zirocd` self-update before installing |
 | Kernel modules | certificate [`kernel/certs/ziro-modules.crt`](kernel/certs/ziro-modules.crt) | the kernel (`MODULE_SIG_FORCE`) |
-| Official catalogs (ed25519-signed index; separate keys for plugins and apps) | public keys in [`tools/ziroctl/cmd/catalog_keys.go`](tools/ziroctl/cmd/catalog_keys.go) | `ziroctl` on every catalog sync |
+| Official catalogs (ed25519-signed index; separate keys for modules and apps) | public keys in [`tools/ziroctl/cmd/catalog_keys.go`](tools/ziroctl/cmd/catalog_keys.go) | `ziroctl` on every catalog sync |
 
 The private halves are CI secrets: `ZIRO_RELEASE_KEY` and `ZIRO_MODULE_SIGNING_KEY` here, `ZIRO_CATALOG_KEY` in
-[ziro-os/pkgs](https://github.com/ziro-os/pkgs) and [ziro-os/apps](https://github.com/ziro-os/apps). See [docs/security.md](docs/security.md) for the
+[ziro-os/pkgs](https://github.com/ziro-os/pkgs) and [ziro-os/apps](https://github.com/ziro-os/apps). See
+[docs/security.md](docs/security.md) for the
 controls and their known limits, and the [design standard](docs/design/README.md#security-model) for the security
 model.

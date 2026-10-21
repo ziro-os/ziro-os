@@ -31,7 +31,7 @@ import (
 // the whole state, and every master's FSM writes it to its state files. Node liveness
 // (last seen, running containers, ...) changes with every heartbeat and stays in the leader's
 // memory, so heartbeats never touch the log; a new leader gives every node a grace period.
-// ponytail: whole-state entries; switch to deltas if the state grows past ~1 MB.
+// Known limitation: whole-state entries; switch to deltas if the state grows past ~1 MB.
 //
 // Writes from ziroctl on any master go through a root-only unix socket to the local
 // cluster-master, as compare-and-swap proposals keyed on the Raft index; followers forward
@@ -929,7 +929,7 @@ func socketFetch() (*ClusterState, uint64, error) {
 
 // socketMutate is withState for ziroctl on a Raft master: fetch, apply fn, propose; retried
 // when another change landed in between.
-// ponytail: fn's own output repeats on a retry; fine while retries are rare.
+// Known limitation: fn's own output repeats on a retry; fine while retries are rare.
 func socketMutate(fn func(st *ClusterState) error) error {
 	for attempt := 0; ; attempt++ {
 		st, ver, err := socketFetch()

@@ -1,7 +1,7 @@
 # Ziro OS documentation
 
 Ziro OS is a small, hardened Linux for running containers: one static CLI (`ziroctl`), containerd, and opt-in
-plugins for everything else. New here? Read [getting started](getting-started.md), then the
+modules for everything else. New here? Read [getting started](getting-started.md), then the
 [first app tutorial](tutorials/01-first-application.md).
 
 ## Start
@@ -14,7 +14,8 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 ## Run workloads
 
 - [Containers, Compose and cron](containers.md): `ziroctl container`, `compose`, scheduled jobs.
-- [Sandboxes](sandbox.md): isolated gVisor sandboxes for untrusted code and AI agents (`ziroctl sandbox`, opt-in module).
+- [Sandboxes](sandbox.md): isolated gVisor sandboxes for untrusted code and AI agents (`ziroctl sandbox`, opt-in
+  module).
 - [Apps](apps.md): one-command databases and services from signed catalogs.
 - [Deploy from git](deploy.md): build and release your code, with rollback and webhooks.
 - [Stacks and host provisioning](provisioning.md): YAML for apps and whole hosts, `stack up`, `apply`,
@@ -24,7 +25,8 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 
 - [Networking](networking.md): hostname, resolvers, interfaces, VLANs, bonds and routes, with rollback.
 - [Smart DNS](dns.md): caching resolver, split DNS, records, blocklists, egress control.
-- [Gateway](gateway.md): HTTP(S), HTTP/3 and TCP routing with automatic TLS.
+- [Gateway](gateway.md): HTTP(S), HTTP/3 and TCP routing with automatic TLS, traffic management, a web application
+  firewall and metrics.
 - [WireGuard VPN](wireguard.md): remote access to a host.
 - [Cloudflare Tunnel](cloudflare-tunnel.md): publish services without a public IP, with optional Zero Trust
   Access (`ziroctl cf`, opt-in module).
@@ -55,7 +57,7 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 
 ## Extend
 
-- [Modules and plugins](modules.md): opt-in plugins, signed catalogs, writing your own.
+- [Modules](modules.md): opt-in feature packs, signed catalogs, writing your own.
 - [SDK](sdk.md): Go packages, typed API client and OpenAPI spec, `ziroctl dev`.
 
 ## Build and contribute
@@ -63,5 +65,6 @@ plugins for everything else. New here? Read [getting started](getting-started.md
 - [Building](building.md): architectures, kernel flavors, build and test commands.
 - [Architecture](architecture.md): how the pieces fit, with design notes and the threat model.
 - [Design standard](design/README.md) and [RFCs](design/rfcs/README.md): conventions for APIs, CLIs and extensions.
+- [Base OS review](design/os-minimality-review.md): size, boot cost and attack surface of the base image.
 - [Project goals](project-goals.md), [contributing](../community/CONTRIBUTING.md) and
   [governance](../GOVERNANCE.md).

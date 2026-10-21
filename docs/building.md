@@ -1,8 +1,10 @@
-# Building Ziro-OS (Multi-Architecture)
+# Building Ziro OS
 
-Ziro-OS features a fully reproducible, Docker-isolated multi-architecture build system supporting both `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).
+The build runs in Docker containers with pinned base images and produces `x86_64` (Intel/AMD) and `arm64` (Apple
+Silicon, ARM servers) artifacts.
 
-**You need:** Docker (Docker Desktop, Colima or OrbStack, with buildx for multi-arch images), Go 1.27, `make`, and
+**You need:** Docker (Docker Desktop, Colima or OrbStack, with Buildx for multi-architecture images), Go 1.27.1 or
+later, `make`, and
 QEMU for the boot tests. Everything else (Alpine packages, the kernel toolchain) runs inside containers.
 
 ```mermaid
@@ -17,53 +19,47 @@ flowchart LR
   B --> D[Docker image<br/>make docker-image]
 ```
 
-Every bootable image (ISO and initramfs, both kernel flavors) must stay under 300 MB; CI enforces it.
+Every bootable image (ISO and initramfs, both kernel flavors) must stay under 300 MB. CI enforces the limit.
 
-## Target Architectures
+## Target architectures
 
-- `x86_64` (amd64): For Intel/AMD cloud VMs, workstations, and bare metal servers.
-- `arm64` (aarch64): For Apple Silicon machines, AWS Graviton, and ARM-based cloud instances.
+- `x86_64` (amd64): Intel/AMD cloud VMs, workstations, and bare metal servers.
+- `arm64` (aarch64): Apple Silicon machines, AWS Graviton, and ARM-based cloud instances.
 
----
+## Build commands
 
-## Build Commands
+### Host architecture
 
-### Default Build (Current Host Architecture)
 ```bash
 make all
 ```
-Compiles:
-1. `bin/ziroctl`: Statically compiled Go CLI.
-2. `build/ziro-rootfs-<arch>.tar.gz`: Minimal container base (≈16 MB).
-3. `build/ziro-initramfs-<arch>.cpio.gz`: Full container OS initramfs.
-4. `ziro-os:latest`: Local Docker container image.
 
-### Building for a Specific Architecture
+This produces:
 
-#### Build for x86_64
+1. `bin/ziroctl` and `bin/ziropkg`: statically compiled Go CLIs.
+2. `build/ziro-rootfs-<arch>.tar.gz`: the minimal container base (about 16 MB).
+3. `build/ziro-initramfs-<arch>.cpio.gz`: the full host initramfs.
+4. `ziro-os:latest`: the local Docker image.
+
+### A specific architecture
+
 ```bash
 make all TARGET_ARCH=x86_64
-```
-
-#### Build for ARM64
-```bash
 make all TARGET_ARCH=arm64
 ```
 
-### Multi-Architecture Artifacts
+### All architectures
 
 ```bash
-# Build CLI tools for all platforms
+# Build the CLI tools for all architectures
 make tools-all
 
-# Build Rootfs archives for all platforms
+# Build the rootfs archives for all architectures
 make rootfs-all
 
-# Build multi-arch Docker image with buildx (linux/amd64 & linux/arm64)
+# Build a multi-architecture Docker image with Buildx (linux/amd64 and linux/arm64)
 make docker-multiarch
 ```
-
----
 
 ### Building on macOS
 
@@ -81,7 +77,7 @@ git worktree add /Volumes/ziro/ziro-os && cd /Volumes/ziro/ziro-os && make rootf
 Rebuilds are fast: `build/apk-cache` keeps packages, and the custom kernel is only rebuilt when
 `kernel/**` changes (ccache makes a config change a ~10 minute rebuild).
 
-## Verification & Testing
+## Verification and testing
 
 ```bash
 # Run unit tests and container smoke tests
@@ -104,17 +100,17 @@ It needs `qemu-system-x86_64` or `qemu-system-aarch64` and uses KVM (Linux) or H
 Pass `--no-pull` to the script if the machine has no internet access. The serial log is written to
 `build/qemu-boot-<arch>.log`. CI runs this test on every PR.
 
-## Kernel Flavors
+## Kernel flavors
 
-Ziro-OS ships two kernel flavors. Each one produces its own, separately named artifacts. **`custom`, the hardened
-Ziro kernel, is the default** for builds and new installs. `alpine` is the fallback.
+Ziro OS ships two kernel flavors, each producing separately named artifacts. `custom`, the hardened Ziro kernel, is
+the default for builds and new installs. `alpine` is the fallback.
 
 | | `alpine` | `custom` (default) |
 |---|---|---|
 | Kernel | Alpine `linux-virt` LTS package | Ziro kernel built from kernel.org LTS sources (`KERNEL_VERSION`, default 6.18.57) |
 | Config | Alpine's (tuned for VMs) | upstream arch `defconfig` (broad hardware) + `kernel/configs/ziro-common.config` + `ziro-<arch>.config` |
 | Targets | KVM/QEMU, Proxmox, most cloud VMs | bare metal plus KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro (ENA/NVMe), GCP (gVNIC); boot-critical drivers built in |
-| Hardening | Alpine defaults | See [kernel/README.md](../kernel/README.md#security-defaults): lockdown, Yama + Landlock + IMA + BPF LSMs, init-on-alloc/free, page-table checks, KFENCE, no kexec/hibernation/SysRq, **enforced module signing** (persistent Ziro key in releases) |
+| Hardening | Alpine defaults | See [kernel/README.md](../kernel/README.md#security-defaults): lockdown, Yama + Landlock + IMA + BPF LSMs, init-on-alloc/free, page-table checks, KFENCE, no kexec/hibernation/SysRq, enforced module signing (persistent Ziro key in releases) |
 | Performance | Alpine defaults | BBR + fq by default, MPTCP, kTLS, nftables flowtables, THP on madvise, zswap |
 | Artifacts | `vmlinuz-<arch>`, `ziro-initramfs-<arch>.cpio.gz`, `ziro-os-<arch>.iso` | same names with a `-custom` suffix, plus `kernel-config-<arch>-custom` |
 
@@ -131,12 +127,12 @@ the custom flavor natively on x86_64 and arm64, and `ci.yml` builds and boot-tes
 publish both flavors. Hosts keep upgrading within their flavor; `ziroctl upgrade --flavor custom` moves an
 alpine host to the hardened kernel (rollback restores the previous one).
 
-The kernel and its modules always come from **one** source. `build/kernel-release-<arch>[-custom]` records the
+The kernel and its modules always come from one source. `build/kernel-release-<arch>[-custom]` records the
 version, and `images/iso/build-iso.sh` refuses to build an ISO whose kernel has no matching `lib/modules/<version>`
 in the rootfs. All build containers use the pinned `ALPINE_IMAGE` (default `alpine:3.24`).
 
-## Image Size Goal
+## Image size limit
 
-Every bootable host image (ISO and initramfs, both flavors) must stay **under 300 MB** (decimal MB). CI and the
+Every bootable host image (ISO and initramfs, both flavors) must stay under 300 MB (decimal). CI and the
 release workflow fail if an artifact crosses that limit. The minimal container base rootfs is about 16 MB.
-The release page reads real artifact sizes from the GitHub Releases API instead of hardcoding them.
+The release page reads artifact sizes from the GitHub Releases API.

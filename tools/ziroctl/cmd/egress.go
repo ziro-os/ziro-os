@@ -24,7 +24,7 @@ import (
 // is never deleted while apps use it: re-applies flush the chain and static sets but keep the
 // learned addresses, so a pod's cached DNS answers stay valid.
 //
-// ponytail: IPv4 only (the pod network is IPv4); host-network apps are not covered.
+// Known limitation: IPv4 only (the pod network is IPv4); host-network apps are not covered.
 
 const egressTable = "inet ziro_egress"
 

@@ -24,7 +24,7 @@ import (
 // those nodes. Consumer nodes mount the share before starting its containers (a replica whose share
 // isn't mounted is not started, and the empty mount point is immutable), and bind-mount it in.
 //
-// ponytail: no replication. `failover` re-points a share at another node (for data on shared or
+// Known limitation: no replication. `failover` re-points a share at another node (for data on shared or
 // restored storage) and restarts its consumers; replicated storage is a future module.
 
 const (

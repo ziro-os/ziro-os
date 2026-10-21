@@ -1,6 +1,6 @@
-# Ziro-OS Clustering
+# Ziro OS Clustering
 
-A Ziro-OS cluster is one **master** plus any number of **workers**. The master also runs workloads.
+A Ziro OS cluster is one **master** plus any number of **workers**. The master also runs workloads.
 Everything is built into `ziroctl` (Go standard library only). There is no etcd and no extra daemon to install.
 Nodes are joined by an encrypted **WireGuard mesh**, and apps find each other as `<app>.cluster.ziro`.
 
@@ -80,20 +80,24 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - Replicas stay where they are while their node is Ready.
   - New replicas go to the least-loaded Ready node that isn't cordoned.
   - A host port (e.g. `8080/tcp`) is held by one replica per node, across **all** apps.
-  - When a node joins or is uncordoned, one replica at a time moves onto it. Only apps with at least two replicas that are fully running move, so a move never takes an app down.
+  - When a node joins or is uncordoned, one replica at a time moves onto it. Only apps with at least two replicas that
+    are fully running move, so a move never takes an app down.
 - **Rolling updates:**
   - Every spec change (image, port, env, args, secrets) creates a new **revision**.
   - Replicas move to it one at a time: the next one only after the updated replica reports running.
-  - If the new revision fails to start (bad image, port clash), the rollout **pauses**. The error shows in `cluster services`, the remaining replicas keep serving, and `cluster rollback` restores the previous revision.
+  - If the new revision fails to start (bad image, port clash), the rollout **pauses**. The error shows in
+    `cluster services`, the remaining replicas keep serving, and `cluster rollback` restores the previous revision.
 - **Failure handling:**
   - Agents report start failures in their heartbeat. A replica that fails 3 times in a row moves to another node.
-  - A node that misses heartbeats for 30s becomes **NotReady** and its replicas are rescheduled. After 24h it is removed.
+  - A node that misses heartbeats for 30s becomes **NotReady** and its replicas are rescheduled. After 24h it is
+    removed.
   - If the master is unreachable, agents keep existing workloads running.
   - Image pulls run separately from heartbeats, with a 10-minute timeout, so slow pulls never make a node look dead.
 - **Mesh and discovery:**
   - Each node has a WireGuard key and a mesh IP from `--mesh-cidr` (default `10.200.0.0/16`, udp/51821).
   - The master distributes peers in heartbeat replies.
-  - Agents keep an `<app>.cluster.ziro` block in `/etc/hosts` that lists only nodes with a running replica, and cluster containers get the same entries (`--add-host`, refreshed when the container is recreated).
+  - Agents keep an `<app>.cluster.ziro` block in `/etc/hosts` that lists only nodes with a running replica, and cluster
+    containers get the same entries (`--add-host`, refreshed when the container is recreated).
   - `--mesh-only` publishes a port only on the mesh IP.
 
 ## Network policy
@@ -114,10 +118,13 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
 ## Security model
 
 - **Join:**
-  - The joiner pins the SHA-256 of the **cluster CA** (`--ca-hash`, same idea as kubeadm's `--discovery-token-ca-cert-hash`) and presents the join token. Any master whose certificate chains to that CA is trusted, so the pin survives failovers and certificate renewals.
+  - The joiner pins the SHA-256 of the **cluster CA** (`--ca-hash`, same idea as kubeadm's
+    `--discovery-token-ca-cert-hash`) and presents the join token. Any master whose certificate chains to that CA is
+    trusted, so the pin survives failovers and certificate renewals.
   - Both checks are constant-time, and tokens expire.
   - Join is rate-limited per IP, and node descriptions are validated and sanitized.
-- **Node identity:** each node gets its own random 256-bit token. The master stores only its SHA-256. `leave` and `node rm` revoke it.
+- **Node identity:** each node gets its own random 256-bit token. The master stores only its SHA-256. `leave` and
+  `node rm` revoke it.
 - **Secrets:**
   - They are sealed at rest with a cluster data key (AES-256-GCM), in the Raft log, its snapshots and every
     master's files (`sealed.bin`). See [Secrets at rest](#secrets-at-rest).
@@ -126,7 +133,8 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - They never appear in argv or `ps`.
   - Backups contain only the sealed form; the data key is left out unless you pass `--include-secrets`.
 - **Exposure:**
-  - `cluster init`/`join` opens tcp/7443 and udp/51821 and trusts `ziro0`, whose peers are authenticated by their WireGuard keys. The network policy then narrows that trust. A firewall the admin disabled stays disabled.
+  - `cluster init`/`join` opens tcp/7443 and udp/51821 and trusts `ziro0`, whose peers are authenticated by their
+    WireGuard keys. The network policy then narrows that trust. A firewall the admin disabled stays disabled.
   - The admin REST API stays on `127.0.0.1:8443`.
   - `/api/v1/cluster` returns a redacted view with no tokens or secrets.
 - **Input:** app names, images, ports, env keys and secrets are validated, and images are passed after `--`.
@@ -267,7 +275,8 @@ ziroctl cluster network enable          # migrate an existing cluster (apps roll
 
 ## Nodes behind NAT (mesh "anywhere")
 
-By default (`direct`) the mesh is kernel WireGuard. Every node must be able to reach every other node: one network, a VPN, or public addresses.
+By default (`direct`) the mesh is kernel WireGuard. Every node must be able to reach every other node: one network, a
+VPN, or public addresses.
 
 In **anywhere** mode, workers need only outbound internet, and **only the masters need a public address**.
 
@@ -276,11 +285,18 @@ ziroctl router relay enable eu-1 --public relay-eu.example.com:8443   # on a mas
 ziroctl cluster mesh mode anywhere
 ```
 
-- **Same name, new engine.** Each node runs the mesh on the zirocd engine embedded in `cluster-agent`. The interface is still `ziro0`, with the same addresses, so app policy (`ziro_cluster` nft), the pod network, cluster DNS and gateway peers are unchanged.
-- **Paths.** Nodes find each other the way router devices do: hole punching, PCP / NAT-PMP / UPnP port mapping, hard-NAT port probing, IPv6-first, roaming. Where no direct path exists, traffic goes through the relays, as UDP datagrams or over TLS where UDP is blocked. See [router.md](router.md#relays-and-nat-traversal).
-- **Node certificates.** Each node gets one (OU `ziro-node`) through its heartbeat, valid 90 days and renewed automatically. It opens relay sessions only for the cluster mesh: it can never act as a master or a router device, and a relay never forwards between a node and a router device.
+- **Same name, new engine.** Each node runs the mesh on the zirocd engine embedded in `cluster-agent`. The interface is
+  still `ziro0`, with the same addresses, so app policy (`ziro_cluster` nft), the pod network, cluster DNS and gateway
+  peers are unchanged.
+- **Paths.** Nodes find each other the way router devices do: hole punching, PCP / NAT-PMP / UPnP port mapping, hard-NAT
+  port probing, IPv6-first, roaming. Where no direct path exists, traffic goes through the relays, as UDP datagrams or
+  over TLS where UDP is blocked. See [router.md](router.md#relays-and-nat-traversal).
+- **Node certificates.** Each node gets one (OU `ziro-node`) through its heartbeat, valid 90 days and renewed
+  automatically. It opens relay sessions only for the cluster mesh: it can never act as a master or a router device, and
+  a relay never forwards between a node and a router device.
 - **Soft state.** Endpoints, relays and NAT type travel in heartbeats as soft state. They never cause a Raft commit.
-- **MTU.** The mesh MTU becomes 1280, so pod MTUs follow. Switching modes recreates pod-network containers one replica at a time; switch back with `ziroctl cluster mesh mode direct`.
+- **MTU.** The mesh MTU becomes 1280, so pod MTUs follow. Switching modes recreates pod-network containers one replica
+  at a time; switch back with `ziroctl cluster mesh mode direct`.
 - **Requirement.** Relays must be enabled first (the command refuses otherwise).
 
 ## Auto-healing

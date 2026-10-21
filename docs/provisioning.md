@@ -6,7 +6,7 @@ the same file again changes nothing.
 
 | File | What it describes | Command |
 |---|---|---|
-| plugin manifest | a host service and its packages | `ziroctl plugin install -f manifest.yaml` |
+| module manifest | a host service and its packages | `ziroctl module install -f manifest.yaml` |
 | app definition | containers, images pinned by digest | `ziroctl apps deploy -f app.yaml` |
 | stack | several apps deployed together, in order | `ziroctl stack up -f stack.yaml` |
 | host config | a whole host | `ziroctl apply -f host.yaml` |
@@ -18,7 +18,7 @@ the same file again changes nothing.
 - **Strict:** an unknown field is an error, so a typo never silently drops a setting. Duplicate keys and multiple
   YAML documents in one file are refused.
 - **Kind:** what a file is follows from its shape. A top-level `stack:` makes it a stack, `host:` a host config,
-  `components:` an app definition, and anything else a plugin manifest.
+  `components:` an app definition, and anything else a module manifest.
 - **Catalogs:** signed catalogs accept `manifest.yaml` and `app.yaml`. They serve canonical JSON, which is what the
   signature pins.
 - **Tooling:** `ziroctl dev new` writes YAML (`--format json` for JSON), and `ziroctl dev validate` checks all four
@@ -48,7 +48,8 @@ ziroctl stack status shop
 ziroctl stack down shop [--purge]
 ```
 
-**How it deploys:**
+How it deploys:
+
 - Each app becomes an ordinary app instance named `<stack>-<key>` (`shop-cache`, `shop-web`). `apps list`,
   `apps credentials` and the gateway work on it as usual.
 - Apps deploy in dependency order, and each waits until it's healthy before its dependents start.
@@ -59,7 +60,8 @@ ziroctl stack down shop [--purge]
 - An app removed from the file is removed from the host, after the rest is up. Its data is kept unless you run
   `stack down --purge`.
 
-**Per-app options:**
+Per-app options:
+
 - `set` (settings), `replicas`, `publish`, `expose` / `expose_tls`.
 - `resources` applies to every component of the app.
 
@@ -80,7 +82,7 @@ ziroctl stack up openclaw --secret openclaw.ANTHROPIC_API_KEY=@anthropic.key
 To publish your own, add `stacks/<name>/stack.yaml` to your catalog repository. `ziroctl dev new stack <name>`
 scaffolds one, and `ziroctl catalog build . --kind app` signs it with the apps.
 
-**From docker-compose:**
+From docker-compose:
 
 ```sh
 ziroctl stack import docker-compose.yml -o shop   # shop/stack.yaml + shop/apps/<service>/app.yaml
@@ -96,6 +98,7 @@ ziroctl stack import docker-compose.yml -o shop   # shop/stack.yaml + shop/apps/
 | `depends_on` | `depends_on` |
 
 What has no safe equivalent is reported instead of silently dropped:
+
 - bind mounts
 - `build`, `privileged`, `network_mode`, `cap_add`, `devices`
 - additional ports
@@ -107,6 +110,7 @@ Review the result, then run `ziroctl stack up -f shop/stack.yaml --dry-run`.
 `ziroctl compose` still runs a compose file directly: it is `nerdctl compose` (built into nerdctl; no
 docker-compose is installed), so every compose command works (`up -d`, `ps`, `logs -f`, `down`, `pull`, `config`).
 Before `up`, `create` and `run` it checks the file and refuses, unless `--allow-privileged` is given:
+
 - `privileged: true`
 - host `network_mode`, `pid` or `ipc`
 - `cap_add` and `devices`
@@ -116,7 +120,7 @@ Before `up`, `create` and `run` it checks the file and refuses, unless `--allow-
 
 `build:` is refused (there is no image builder on the host), and images must pass the cluster image policy.
 
-**Wiring apps together: links**
+Wiring apps together: links:
 
 An app can receive a dependency's output, such as a connection URL with its password, as an environment variable:
 
@@ -171,7 +175,7 @@ Every section calls the same operation as its command:
 | `ssh` | `ssh key` |
 | `firewall` | `firewall allow` / `firewall block-ip` |
 | `packages` | `pkg install` (kept across OS upgrades) |
-| `plugins` | `plugin enable --set`; a plugin already enabled with other settings is reinstalled with the new ones |
+| `plugins` | `module enable --set`; a module already enabled with other settings is reinstalled with the new ones |
 | `stacks` | `stack up` |
 | `update` | the auto-update switch of `ziroctl update` |
 | `network` | `network apply` (`--confirm-timeout` rolls back unless confirmed) |
@@ -209,7 +213,9 @@ Stack files named by a first-boot config are looked up in `/etc/ziro/provision.d
 | host config | `POST /api/v1/apply?dry_run=true` | admin |
 
 In Go:
-- `client.PlanStack`, `ApplyStack`, `RemoveStack`, `CatalogStacks` and `ApplyHost`. Definitions are validated locally with the
+
+- `client.PlanStack`, `ApplyStack`, `RemoveStack`, `CatalogStacks` and `ApplyHost`. Definitions are validated locally
+  with the
   host's own rules (`schema.ParseStack`, `schema.ParseHostConfig`) before anything is sent.
 - `schema.ToYAML` writes any definition as YAML.
 

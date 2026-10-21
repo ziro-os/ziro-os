@@ -1,15 +1,13 @@
-# Ziro-OS System Architecture
+# Ziro OS system architecture
 
-Ziro-OS is a lightweight Linux host built for OCI container workloads. It uses `containerd` and `runc` at the core;
-Docker and Podman command compatibility is provided through `nerdctl` aliases on the full host. The project is
-under active development and is not ready for production use.
+Ziro OS is a lightweight Linux host built for OCI container workloads. It uses `containerd` and `runc` at the core.
+`nerdctl` aliases provide Docker-style commands on the full host. The project is under active development and is
+not ready for production use.
 
 The rules every component follows (resource model, API and CLI conventions, extension points, security model) are
 in the [design standard](design/README.md); design decisions are recorded as [RFCs](design/rfcs/README.md).
 
----
-
-## 1. Core Architectural Tenets
+## 1. Core architectural tenets
 
 ```mermaid
 flowchart TB
@@ -21,12 +19,14 @@ flowchart TB
   K --> H[hardware or hypervisor: QEMU/KVM, cloud, bare metal]
 ```
 
-1. **Minimal Base**: ≈16 MB minimal container rootfs; full host image (ISO / initramfs, `alpine` or `custom` kernel) < 300 MB.
-2. **Limited mutable state**: An immutable installed root is a design goal. The current installer mounts ext4
+1. **Minimal base:** about 16 MB for the minimal container rootfs, and under 300 MB for the full host image (ISO or
+   initramfs, `alpine` or `custom` kernel).
+2. **Limited mutable state:** an immutable installed root is a design goal. The current installer mounts ext4
    read/write, and live boot uses writable tmpfs. See the [security guide](security.md#2-immutable-root-filesystem).
-3. **Container-Native**: Built-in `containerd`, `runc`, and CNI networking.
-4. **Multi-Architecture**: First-class support for `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM servers).
-5. **Direct-kernel boot**: QEMU uses a kernel and initramfs directly; boot time depends on host and configuration.
+3. **Container-native:** built-in `containerd`, `runc`, and CNI networking.
+4. **Multi-architecture:** support for `x86_64` (Intel/AMD) and `arm64` (Apple Silicon, ARM servers).
+5. **Direct-kernel boot:** QEMU uses a kernel and initramfs directly. Boot time depends on the host and its
+   configuration.
 
 ### Technical choices and extension points
 
@@ -37,16 +37,16 @@ flowchart TB
   plugins provide container networking. `ziroctl` exposes system and container operations; `nerdctl` provides
   Docker-style commands on the full host. This does not imply complete Docker Engine or Podman compatibility.
 - **Storage and extensions:** The host uses Linux filesystems and containerd snapshotters. Networking, storage,
-  logging, and security integrations are packaged as opt-in plugins (see below).
-- **Plugins:** a plugin is a declarative JSON manifest (packages, sha256-pinned artifacts, config files, generated
+  logging, and security integrations are packaged as opt-in modules (see below).
+- **Modules:** a module is a declarative JSON manifest (packages, sha256-pinned artifacts, config files, generated
   secrets, validated settings, unprivileged supervised services, health check), applied and exactly reversed by
-  `ziroctl plugin`. Manifests are built into `ziroctl` or come from signed catalogs ([modules guide](modules.md)).
+  `ziroctl module`. Manifests are built into `ziroctl` or come from signed catalogs ([modules guide](modules.md)).
 - **Resource isolation:** every service runs in its own cgroup (`ziro/system` for the platform, protected and
-  reserved; `ziro/workloads` for plugins, bounded by their `resources`), started directly in it
+  reserved; `ziro/workloads` for modules, bounded by their `resources`), started directly in it
   (`CLONE_INTO_CGROUP`). Containers get the same `resources` as runtime limits. A PSI watchdog in the sentinel
   turns sustained memory stalls into an alert and a controlled restart ([operations](operations.md)).
 - **Declarative definitions:**
-  - Plugins, apps, stacks and host configs share one strict loader in `sdk/schema`: YAML goes to JSON, then
+  - Modules, apps, stacks and host configs share one strict loader in `sdk/schema`: YAML goes to JSON, then
     unknown fields are rejected.
   - `stack up` and `apply` plan first and apply only the differences, by calling the same operations as the CLI
     commands. Applying twice is a no-op.
@@ -56,15 +56,17 @@ flowchart TB
   client and per token), the audit record of every change and JSON errors come from that table. Handlers call the
   same operation functions as the CLI commands, never the CLI binary or copied logic, and the OpenAPI spec is
   checked against the table.
-- **Tools releases:** `ziroctl`/`ziropkg`/`zirocd` ship on their own signed stream (`tools/vX.Y.Z` and
-  `tools/vX.Y.Z.N`, the Nth tools-only build of X.Y.Z; numeric order, one spelling per version); `ziroctl update`
-  swaps them atomically, runs each new binary and installs it only if it reports the release version, refuses
-  older versions unless `--allow-downgrade`, and updates the integrity baselines. Each OS tag `vX.Y.Z` also publishes `tools/vX.Y.Z`;
-  hosts find the newest one from the tag refs, so OS releases never push it off a page of releases. OS releases sign their `SHA256SUMS` with the same key.
-  Changes that touch only the tools stream (`tools/`, `sdk/`, docs) are released as the next
-  `tools/vX.Y.Z.N` and do not need an OS version; an OS tag must have exactly three parts
-  (`scripts/release/check-tag.sh`). `release.yml` skips the kernels and images, decided by
-  `scripts/release/os-changed.sh`; `force_os` on a manual run overrides that.
+- **Tools releases:** `ziroctl`, `ziropkg` and `zirocd` ship on their own signed stream.
+  - Tags are `tools/vX.Y.Z` and `tools/vX.Y.Z.N`, where N counts the tools-only builds of X.Y.Z. Order is numeric,
+    with one spelling per version.
+  - `ziroctl update` swaps the binaries atomically, runs each new binary and installs it only if it reports the
+    release version, refuses older versions unless `--allow-downgrade`, and updates the integrity baselines.
+  - Each OS tag `vX.Y.Z` also publishes `tools/vX.Y.Z`. Hosts find the newest tools tag from the tag refs, so OS
+    releases never push it off a page of releases. OS releases sign their `SHA256SUMS` with the same key.
+  - Changes that touch only the tools stream (`tools/`, `sdk/`, docs) are released as the next `tools/vX.Y.Z.N` and
+    need no OS version. An OS tag must have exactly three parts (`scripts/release/check-tag.sh`). `release.yml`
+    skips the kernels and images when `scripts/release/os-changed.sh` finds no OS change; `force_os` on a manual run
+    overrides that.
 - **Deploy from git (ziroctld):** `ziroctl` run as `/usr/bin/ziroctld` (one binary, so `ziroctl update` keeps it
   current) is the deploy daemon. It clones over https, detects the build or uses the repo's Dockerfile, builds with
   BuildKit's containerd worker (images stay on the host as `ziro.local/<app>:b<N>`, pinned by digest), and releases
@@ -74,17 +76,31 @@ flowchart TB
 - **SDK:** the formats and their validators, catalog signing, the API types and a typed client live in the
   `sdk/` Go module; `ziroctl` imports it, so tools built on the SDK validate with the host's exact rules.
   `sdk/openapi.yaml` describes the API, kept complete by a test ([SDK guide](sdk.md)).
-  `ziroctl dev` reuses the host code paths (the validators, `plugin install -f`, `apps deploy -f`, verified
+  `ziroctl dev` reuses the host code paths (the validators, `module install -f`, `apps deploy -f`, verified
   release downloads) instead of reimplementing them. `dev run` drives a live-mode VM over its serial console,
   like the boot smoke test. The kernel kit (`kernel-devel-<arch>.tar.gz`) comes out of the same kernel build as
   the release kernel, so modules and eBPF programs built against it match exactly.
-- **Gateway:** zirogate is one L4/L7 data plane (HTTP/1.1, HTTP/2, HTTP/3, TCP, TLS passthrough) fed by a
-  route store: cluster state, resolved by the master to running replicas, or a local file on standalone hosts.
-  The CLI and the API server edit routes; the gateway re-validates and hot-swaps them ([gateway guide](gateway.md)).
+- **Gateway:** zirogate is one L4/L7 data plane (HTTP/1.1, HTTP/2, HTTP/3, TCP, TLS passthrough) fed by a route
+  store: cluster state, resolved by the master to running replicas, or a local file on standalone hosts. The CLI
+  and the API server edit routes; the gateway re-validates and hot-swaps them ([gateway guide](gateway.md)).
+  Design decisions:
+  - The route table is an immutable snapshot behind an atomic pointer. A request takes no lock, and a reload cannot
+    drop a request in flight. Unchanged routes keep their rate-limit state, counters and health across reloads.
+  - Per-request state is lock-free or sharded (metrics, limiters, bans), and every table is bounded and swept, so a
+    flood of distinct clients or churning pod addresses cannot grow memory without limit.
+  - The access log is written by one background writer through a bounded queue and drops lines, counted, rather than
+    stalling traffic.
+  - The WAF is native Go with no new dependency. A literal prefilter (Aho-Corasick) decides which RE2 expressions run,
+    so cost follows the request's content, and RE2 keeps worst-case time linear. Coraza and the OWASP CRS were
+    rejected: their dependency weight and per-request cost conflict with a minimal base.
+  - Policy sees one canonical identity: a cleaned path, a normalized host, and a client address that only a trusted
+    proxy may name.
+  - Rate limits, automatic bans and metrics are per node. Sharing them across nodes needs a replicated store and is
+    left out until a deployment needs it.
 - **Cloudflare Tunnel (`ziroctl cf`):**
-  - It's the catalog plugin `cloudflared`: the upstream static binary, sha256-pinned, running as its own user.
+  - It's the catalog module `cloudflared`: the upstream static binary, sha256-pinned, running as its own user.
     The catalog changes the binary and ziroctl changes the commands, so a new upstream release is only a catalog
-    bump, and the commands are always present but refuse to run until the plugin is enabled.
+    bump, and the commands are always present but refuse to run until the module is enabled.
   - One remotely managed tunnel per host. Hostnames, DNS and Access are set through the Cloudflare API.
   - The API token is wrapped by the same file/TPM providers as the cluster data key. The tunnel token reaches
     cloudflared only through a root-only env file.
@@ -93,24 +109,27 @@ flowchart TB
 - **Apps:** a digest-pinned app definition (components, settings, generated secrets, data paths) that
   `ziroctl apps deploy` runs as hardened containers on a host, or as cluster apps through the same scheduler
   and policy as any other ([apps guide](apps.md)).
-- **Updates and security:** Current update and rollback behavior is described in the [upgrade guide](upgrade.md).
-  Runtime controls and the limits of the writable root are described in the [security guide](security.md).
+- **Updates and security:** the [upgrade guide](upgrade.md) describes update and rollback behavior. The
+  [security guide](security.md) describes runtime controls and the limits of the writable root.
 
----
+## 2. PID 1 supervisor (`ziro-init`)
 
-## 2. PID 1 Supervisor (`ziro-init`)
+Many Linux distributions use a full init system (such as `systemd` or SysV init) with a large service graph, dynamic
+libraries, and many background processes. Ziro OS uses `ziro-init` instead, a self-contained, statically compiled C99
+supervisor for container hosts:
 
-Traditional Linux distributions rely on heavy init systems (such as `systemd` or SysV init) that introduce extensive service graphs, dynamic library overhead, and hundreds of background processes.
-
-Ziro-OS utilizes `ziro-init`, a self-contained, statically compiled C99 supervisor designed specifically for container hosts:
-
-- **Early Mounts**: Automatically mounts `/proc`, `/sys`, `/dev` (devtmpfs), `/dev/pts`, `/dev/shm`, `/run` (tmpfs), and `/tmp` (tmpfs 1777).
-- **Cgroups v2 Initialization**: Mounts `cgroup2` on `/sys/fs/cgroup` with `nsdelegate` and auto-enables all available controllers (`+cpu +memory +io +pids`) in `cgroup.subtree_control`.
-- **Network Bootstrap**: Brings up the loopback interface (`lo`) and initializes routing parameters.
-- **Kernel Sysctl Hardening**: Applies container forwarding and memory management optimizations.
-- **Containerd Supervision**: Starts and supervises the `/usr/bin/containerd` daemon, verifying socket readiness at `/run/containerd/containerd.sock`.
-- **Zombie Reaping**: Reaps terminated child processes in a non-blocking `waitpid(-1, &status, WNOHANG)` loop to prevent PID table starvation.
-- **Graceful Shutdown**: Intercepts `SIGTERM`, `SIGINT`, and `SIGPWR` to cleanly terminate container workloads, sync storage, and unmount filesystems before poweroff or reboot.
+- **Early mounts:** mounts `/proc`, `/sys`, `/dev` (devtmpfs), `/dev/pts`, `/dev/shm`, `/run` (tmpfs), and `/tmp` (tmpfs
+  1777).
+- **Cgroups v2:** mounts `cgroup2` on `/sys/fs/cgroup` with `nsdelegate` and enables all available controllers
+  (`+cpu +memory +io +pids`) in `cgroup.subtree_control`.
+- **Network bootstrap:** brings up the loopback interface (`lo`) and sets routing parameters.
+- **Sysctl hardening:** applies container forwarding and memory management settings.
+- **containerd supervision:** starts and supervises `/usr/bin/containerd` and waits for
+  `/run/containerd/containerd.sock`.
+- **Zombie reaping:** reaps terminated children in a non-blocking `waitpid(-1, &status, WNOHANG)` loop, so the PID
+  table cannot fill up.
+- **Graceful shutdown:** handles `SIGTERM`, `SIGINT`, and `SIGPWR` to stop container workloads, sync storage, and
+  unmount filesystems before poweroff or reboot.
 
 ### Boot and host services
 
@@ -125,7 +144,7 @@ flowchart TB
   SB --> FWS[firewall + Ziro Guard]
   SB --> NET[network, DNS]
   SB --> DISK[disk growth]
-  SB --> MOD[reconcile plugins: packages, artifacts, services]
+  SB --> MOD[reconcile modules: packages, artifacts, services]
   SB --> CI[cloud-init: metadata keys, user-data, once]
   SB --> SEN[sentinel: health, memory watchdog, alerts]
   SB --> OPT[optional: API, gateway, cluster agent/master, zirocd]
@@ -135,57 +154,59 @@ Live boot (ISO, QEMU) skips GRUB and the tiny initramfs: the kernel starts ziro-
 initramfs in RAM. `ziro-init` restarts the services it supervises with backoff and runs `ziroctl service heal`
 every minute.
 
----
+## 3. Container runtime stack
 
-## 3. Container Runtime Stack
+Ziro OS uses standard OCI components:
 
-Ziro-OS implements standard OCI specifications:
-
-- **`containerd`**: Core container runtime managing image transfer, snapshotting, and task execution.
-- **`runc`**: Low-level OCI runtime executing containers using kernel namespaces and cgroups.
-- **`cni-plugins`**: Standard container networking plugins including `bridge`, `loopback`, `host-local`, `portmap`, and `firewall`.
-- **`ziroctl`**: the management CLI for containers and apps, networking, security, clusters and upgrades.
-  `ziroctl compose` is `nerdctl compose` behind a security preflight (no docker-compose ships).
+- **`containerd`:** manages image transfer, snapshotting, and task execution.
+- **`runc`:** the low-level OCI runtime. It runs containers with kernel namespaces and cgroups.
+- **`cni-plugins`:** the standard CNI plugins, including `bridge`, `loopback`, `host-local`, `portmap`, and
+  `firewall`.
+- **`ziroctl`:** the management CLI for containers and apps, networking, security, clusters and upgrades.
+  `ziroctl compose` is `nerdctl compose` behind a security preflight. A `docker-compose` wrapper forwards to it; no
+  Docker Compose binary ships.
 - **Sandboxes** (opt-in `sandbox` module, [RFC 0004](design/rfcs/0004-sandboxes.md)): untrusted code runs under
-  gVisor (`runsc`, systrap platform, or its KVM platform with `runtime: gvisor-kvm` where `/dev/kvm` exists), which nerdctl starts through the runc shim (`--runtime` = a wrapper that sets
-  runsc's flags), so containerd's configuration stays unchanged. `ziro-sandboxd` (a root-only unix socket, like
-  `ziroctld`) owns the records, quotas and the reaper. The REST API authenticates, audits and forwards with the
-  caller's identity. The host decides the isolation: all capabilities but a short list are dropped, there are no
-  host mounts and no devices, resources are limited, and every sandbox has a lifetime. A sandbox has no network
-  unless its policy asks for one. Then it gets a routed (CNI ptp) address, and egress is filtered on the host by
-  `inet ziro_sandbox`: default-deny, a domain allowlist learned by the sandbox DNS resolver, and never the host,
-  the LAN, metadata or other sandboxes. The same daemon runs the SSH gateway (`:22998`). Its session token
-  is the SSH user name: the token is hashed at rest, expires, and can be single-use or bound to a key. A session is
-  `nerdctl exec` in that token's sandbox; `ssh -L` reaches only the sandbox's address. A files API reads and writes
-  `/workspace` from the host through `os.Root`. Preview URLs (`https://<port>-<id>.<gateway domain>`) are exact
-  gateway routes to the daemon's loopback preview proxy, which checks a stateless HMAC token (bound to the sandbox,
-  the port, the preview's creation time and an expiry), strips it, and proxies to the sandbox's address. Secrets (credential injection): nftables redirects the
-  port-443 traffic of a sandbox with secrets to the daemon's egress proxy. The proxy enforces the network policy,
-  splices through every server name except the hosts a secret is bound to, and for those terminates TLS with a CA
-  only that sandbox trusts, swapping placeholders for the values (403 when a placeholder goes to another host). Templates (`/etc/ziro/sandbox/templates`),
-  warm pools of paused sandboxes (a create becomes a resume), snapshots (`nerdctl commit` to
-  `ziro.local/sandbox/<owner>/...`), and an MCP server (`ziroctl sandbox mcp`, stdio, through the REST API with the
-  agent's scoped token) are the agent-facing layer. On a cluster, the master keeps a directory (sandbox id → node) in the Raft
-  state, places new sandboxes on runner nodes, and forwards each request to the owning node's mesh sandbox API
-  (`:7446`, cluster token). Any node's SSH gateway relays a token for another node's sandbox after that node checks
-  it, and preview routes point at the owning node over the mesh. The spec only
-  picks the image, the command and sizes within the host limits.
+  gVisor (`runsc`, systrap platform, or its KVM platform with `runtime: gvisor-kvm` where `/dev/kvm` exists).
+  - **Runtime.** nerdctl starts gVisor through the runc shim (`--runtime` is a wrapper that sets runsc's flags), so
+    containerd's configuration stays unchanged. `ziro-sandboxd` (a root-only unix socket, like `ziroctld`) owns the
+    records, quotas and the reaper. The REST API authenticates, audits and forwards with the caller's identity.
+  - **Isolation.** The host decides it: all capabilities but a short list are dropped, there are no host mounts and
+    no devices, resources are limited, and every sandbox has a lifetime. The spec only picks the image, the command
+    and sizes within the host limits.
+  - **Network.** A sandbox has no network unless its policy asks for one. Then it gets a routed (CNI `ptp`)
+    address, and egress is filtered on the host by `inet ziro_sandbox`: default-deny, a domain allowlist learned by
+    the sandbox DNS resolver, and never the host, the LAN, metadata or other sandboxes.
+  - **SSH gateway** (`:22998`), run by the same daemon. The session token is the SSH user name. It is hashed at
+    rest, expires, and can be single-use or bound to a key. A session is `nerdctl exec` in that token's sandbox, and
+    `ssh -L` reaches only the sandbox's address. A files API reads and writes `/workspace` from the host through
+    `os.Root`.
+  - **Previews.** Preview URLs (`https://<port>-<id>.<gateway domain>`) are exact gateway routes to the daemon's
+    loopback preview proxy. The proxy checks a stateless HMAC token (bound to the sandbox, the port, the preview's
+    creation time and an expiry), strips it, and proxies to the sandbox's address.
+  - **Credential injection.** nftables redirects the port-443 traffic of a sandbox with secrets to the daemon's
+    egress proxy. The proxy enforces the network policy and splices through every server name except the hosts a
+    secret is bound to. For those hosts it terminates TLS with a CA only that sandbox trusts and swaps placeholders
+    for the values (403 when a placeholder goes to another host).
+  - **Agent layer.** Templates (`/etc/ziro/sandbox/templates`), warm pools of paused sandboxes (a create becomes a
+    resume), snapshots (`nerdctl commit` to `ziro.local/sandbox/<owner>/...`), and an MCP server
+    (`ziroctl sandbox mcp`, stdio, through the REST API with the agent's scoped token).
+  - **Clusters.** The master keeps a directory (sandbox id → node) in the Raft state, places new sandboxes on runner
+    nodes, and forwards each request to the owning node's mesh sandbox API (`:7446`, cluster token). Any node's SSH
+    gateway relays a token for another node's sandbox after that node checks it, and preview routes point at the
+    owning node over the mesh.
 
----
+## 4. Multi-architecture support matrix
 
-## 4. Multi-Architecture Support Matrix
-
-| Architecture | Kernel Image | Console | Primary Hypervisors / Platforms |
+| Architecture | Kernel image | Console | Primary hypervisors and platforms |
 |---|---|---|---|
 | **x86_64** (amd64) | `vmlinuz-x86_64` (bzImage) | `ttyS0`, `tty0` | QEMU, KVM, VMware, VirtualBox, Proxmox, AWS EC2, GCP Compute |
 | **arm64** (aarch64) | `vmlinuz-arm64` (Image) | `ttyAMA0`, `tty0` | Apple Silicon (QEMU HVF), AWS Graviton, Ampere Altra |
 
----
-
-## 5. Cluster Platform Architecture
+## 5. Cluster platform architecture
 
 Everything below ships inside `ziroctl`: one static Go binary, and no etcd, kube-proxy or sidecar images.
-A component is a subcommand run as a `ziro-init` service. **Status** shows what exists today and what is designed but not yet built.
+A component is a subcommand run as a `ziro-init` service. **Status** shows what exists today. What is not built yet
+is listed in [5.5](#55-not-built-yet).
 
 | Component | Command / service | Runs on | Status |
 |---|---|---|---|
@@ -195,15 +216,15 @@ A component is a subcommand run as a `ziro-init` service. **Status** shows what 
 | Mesh | WireGuard `ziro0`, udp/51821, keys distributed by the master; mode `anywhere` runs it on the zirocd engine (NAT traversal, relays: only masters need a public address) | every node | shipped |
 | App network policy | `allow_from` per app → `inet ziro_cluster` nft table per node | every node | shipped |
 | Audit log | hash-chained JSONL, `/var/log/ziro/audit.log` | every host | shipped |
-| Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labelled gateway | shipped |
+| Gateway (zirogate) | `gateway serve` → `gateway` service, :80/:443 ([gateway.md](gateway.md)) | nodes labeled gateway | shipped |
 | Tailscale | `ziroctl tailscale`; the `tailscale` module (signed catalog, daily update with rollback) runs `tailscaled` as its own user with only `CAP_NET_ADMIN`/`CAP_NET_RAW` (service `caps`, RFC 0003); ports open to the tailnet are interface-bound firewall rules ([tailscale.md](tailscale.md)) | any host, opt-in | shipped |
 | Remote access | `gateway peer add\|rm\|ls`: WireGuard clients relayed into the mesh by the hub (first gateway node) | gateway node | shipped |
 | Pod network + DNS | per-node /24 over WireGuard, CNI `ptp`, master-assigned replica IPs, DNS responder `<app>.cluster.ziro` | every node | shipped |
 | DNS provider | `dns provider`, `dns cloud`, `dns cert`; the `dns-cloudflare` module runs `gateway dns-sync`: records for the gateway's names created at Cloudflare, only ever touching records it owns, and ACME DNS-01 wildcard certificates issued and renewed; leader only in a cluster ([dns.md](dns.md#public-dns-provider-cloudflare)) | masters, or a standalone host | shipped (Cloudflare) |
 | Auto-healing | node agent conditions, `healPass` on the Raft leader, flap guard, partition brake, move cap; every action audited and alerted ([clustering.md](clustering.md#auto-healing)) | agent: every node; healing: leader | shipped |
 | HA control plane | Raft (hashicorp/raft + bbolt), cluster CA, mutual-TLS master links | masters | shipped |
-| Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices anywhere ([router.md](router.md)) | every master; `zirocd` on devices | control plane, zirocd (Linux/macOS/Windows), relays + NAT traversal, Ziro OS integration, subnet routers and SSO shipped |
-| Enterprise controls | scoped API tokens, credential and data-key rotation, signed-image policy, `/api/v1/metrics`, [compliance mapping](compliance.md) | all | shipped |
+| Global router | `router` on `cluster-master` (`/router/v1/*`): networks, join keys, ACLs, netmap streams to `zirocd` devices (Linux, macOS, Windows), relays and NAT traversal, subnet routers, SSO ([router.md](router.md)) | every master; `zirocd` on devices | shipped |
+| Security controls | scoped API tokens, credential and data-key rotation, signed-image policy, `/api/v1/metrics`, [compliance mapping](compliance.md) | all | shipped |
 
 ```mermaid
 flowchart LR
@@ -230,27 +251,40 @@ flowchart LR
 
 ### 5.1 Control loop
 
-1. **Join.** The joiner pins the cluster CA hash (`--ca-hash`) and presents the expiring join token. It receives a node ID, a per-node 256-bit token (the master stores only its SHA-256) and a mesh IP.
-2. **Heartbeat** (every 10s, the only channel). The agent reports running containers, start failures and mesh errors. The reply is the node's complete desired state:
+1. **Join.** The joiner pins the cluster CA hash (`--ca-hash`) and presents the expiring join token. It receives a
+   node ID, a per-node 256-bit token (the master stores only its SHA-256) and a mesh IP.
+2. **Heartbeat** (every 10 s, the only channel). The agent reports running containers, start failures and mesh
+   errors. The reply is the node's complete desired state:
    - container assignments, with secrets only for the apps the node runs
    - WireGuard peers
    - service endpoints
-   - its **MeshPolicy**
-3. **Converge.** The agent applies the policy first, then the mesh, then `/etc/hosts`. Containers run in a separate loop, so slow image pulls never delay heartbeats.
-4. **Schedule** (master). Replicas are placed least-loaded with host-port anti-affinity. Rollouts replace one replica at a time and pause on failure. A replica is rescheduled after 3 failed starts or 30s of node silence.
-5. **Partition behaviour.** Agents keep running workloads as they are while the master is unreachable, and never tear anything down on a network blip.
+   - its mesh policy (`MeshPolicy`)
+3. **Converge.** The agent applies the policy first, then the mesh, then `/etc/hosts`. Containers run in a separate
+   loop, so slow image pulls never delay heartbeats.
+4. **Schedule** (master). Replicas are placed least-loaded with host-port anti-affinity. Rollouts replace one
+   replica at a time and pause on failure. A replica is rescheduled after 3 failed starts or 30 s of node silence.
+5. **Partition behavior.** Agents keep running workloads as they are while the master is unreachable, and never tear
+   anything down on a network blip.
 
 ### 5.2 Network policy
 
-- Rules are attached to the **destination** app: `allow_from: ["web", "worker"]`, or `"*"` for any cluster app. There is no separate policy object to keep in sync.
-- New clusters start with `policy default deny`. Clusters created before policies existed stay on `allow` until an operator switches them.
+- Rules are attached to the destination app: `allow_from: ["web", "worker"]`, or `"*"` for any cluster app. There is
+  no separate policy object to keep in sync.
+- New clusters start with `policy default deny`. Clusters created before policies existed stay on `allow` until an
+  operator switches them.
 - **Enforcement:**
-  - Each agent owns an `inet ziro_cluster` table (input + forward, priority -10). It accepts established traffic and ICMP, then `ip saddr {allowed node mesh IPs}` to each app's published port, matched with `ct original proto-dst` so the rule holds before and after CNI DNAT. Everything else from `ziro0` is dropped.
-  - The host firewall (`inet ziro`) still trusts `ziro0`. In nftables, a drop in any base chain is final, so the cluster table narrows that trust without the two tables conflicting.
-- **Fail closed.** If the policy can't be applied, the agent doesn't configure the mesh and reports `MeshError` (shown in `cluster nodes`). A failed nft transaction leaves the previous rules in place.
-- **Granularity.** On the pod network, sources and destinations are replica IPs, and same-node traffic is policed too. `ptp` routes every container through the host, and a `ct status dnat` exemption keeps published ports public only for clients outside the cluster. Without the pod network, sources are node mesh IPs.
+  - Each agent owns an `inet ziro_cluster` table (input and forward, priority -10). It accepts established traffic
+    and ICMP, then `ip saddr {allowed node mesh IPs}` to each app's published port, matched with
+    `ct original proto-dst` so the rule holds before and after CNI DNAT. Everything else from `ziro0` is dropped.
+  - The host firewall (`inet ziro`) still trusts `ziro0`. In nftables, a drop in any base chain is final, so the
+    cluster table narrows that trust without the two tables conflicting.
+- **Fail closed.** If the policy cannot be applied, the agent does not configure the mesh and reports `MeshError`
+  (shown in `cluster nodes`). A failed nft transaction leaves the previous rules in place.
+- **Granularity.** On the pod network, sources and destinations are replica IPs, and same-node traffic is policed
+  too. `ptp` routes every container through the host, and a `ct status dnat` exemption keeps published ports public
+  only for clients outside the cluster. Without the pod network, sources are node mesh IPs.
 
-### 5.3 Trust boundaries & threat model
+### 5.3 Trust boundaries and threat model
 
 | Boundary | Control |
 |---|---|
@@ -261,49 +295,91 @@ flowchart LR
 | Operator actions | Every mutating `ziroctl` command, ziro-api service action and cluster join/leave is written to the audit chain, with `KEY=VALUE` values and credential flags redacted |
 | Admin API | Loopback by default; scoped bearer tokens (viewer, deployer, operator, admin); rate limited ([api.md](api.md)) |
 | Device → router | TLS 1.3 to the pinned cluster CA; device client certificates (OU `ziro-device`, client-auth only, never accepted as a master); member bound to its TLS key hash; join keys hashed, expiring, single-use by default; followers relay writes with verified identity headers trusted only from master certificates; planets share soft state over master mTLS only, and it can never admit a device; default-deny ACL with least-visibility netmaps ([router.md](router.md#security-model)) |
-| Plugin and app catalogs | ed25519-signed index (keys compiled into `ziroctl`, or added by an admin per third-party repo); every manifest and artifact pinned by sha256; index expiry (freeze) and serial (rollback) checks; cache re-verified on every read; no shadowing of built-in or official names; placeholders substitute values only, settings match anchored patterns, secrets never reach argv or backups |
+| Module and app catalogs | ed25519-signed index (keys compiled into `ziroctl`, or added by an admin per third-party repo); every manifest and artifact pinned by sha256; index expiry (freeze) and serial (rollback) checks; cache re-verified on every read; no shadowing of built-in or official names; placeholders substitute values only, settings match anchored patterns, secrets never reach argv or backups |
 
 Known limits:
 
-- Secrets at rest are sealed with a cluster data key. Its protection is only as strong as each master's key provider (`file`, `tpm` or `command` for KMS/HSM).
+- Secrets at rest are sealed with a cluster data key. Its protection is only as strong as each master's key provider
+  (`file`, `tpm` or `command` for KMS/HSM).
 - Clusters without the pod network police per node rather than per container (`cluster network enable` migrates them).
-- Root on the master can rewrite the whole audit chain. Ship the log off-host, or record `ziroctl audit verify`'s head hash externally.
+- Root on the master can rewrite the whole audit chain. Ship the log off-host, or record `ziroctl audit verify`'s head
+  hash externally.
 
 ### 5.4 Design notes
 
-- **Gateway (zirogate).** This covers HTTP(S) ingress and WireGuard remote-access peers relayed by a hub gateway node; see [gateway.md](gateway.md).
-  - Routes (`host`, `path_prefix` → `app:port`, `tls: auto|off`, `allow_cidrs`, `rate_rps`, `max_body`) live in cluster state and are delivered in heartbeats to nodes labelled `gateway`.
-  - The proxy is `httputil.ReverseProxy`. It round-robins over running endpoints on the mesh, marks an endpoint down for 10s after a dial error, and is itself an `allow_from` source, so apps opt in to being exposed.
-  - TLS: `autocert` (HTTP-01), TLS 1.2 minimum.
-  - Protection: HSTS and security headers; strict header, read and idle timeouts; per-client token bucket; JSON access log.
+- **Gateway (zirogate).** HTTP(S), TCP and TLS-passthrough ingress with traffic management, a web application
+  firewall and Prometheus metrics, plus WireGuard remote-access peers relayed by a hub gateway node. See
+  [gateway.md](gateway.md) for the full feature set.
+  - Routes (`host`, `path_prefix` → `app:port`, `tls: auto|internal|cert:<name>|dns01|off`, `allow_cidrs`,
+    `rate_rps`, `max_body_mb`) live in cluster state and are delivered in heartbeats to nodes labeled `gateway`.
+  - The proxy is `httputil.ReverseProxy`. It balances over running endpoints on the mesh (`round_robin`,
+    `least_conn`, `ip_hash` or `cookie`; newer policies are listed in the gateway guide), and it takes an endpoint
+    out of rotation after dial errors and failed health checks. The gateway is itself an `allow_from` source, so apps
+    opt in to being exposed.
+  - TLS: ACME with HTTP-01 or TLS-ALPN-01 (`autocert`), ACME DNS-01 for wildcards, the gateway's internal CA, or
+    uploaded certificates. TLS 1.2 is the minimum.
+  - Protection: HSTS and security headers, strict header, read and idle timeouts, per-client rate limiting, and a
+    JSON access log.
   - `gateway peer add` issues WireGuard client configs for operator or site access to mesh-only apps.
 - **Pod network** (see [clustering.md](clustering.md#pod-network)).
   - `--pod-cidr` (default `10.201.0.0/16`) gives each node its own /24. WireGuard AllowedIPs become mesh IP + pod CIDR.
-  - The master assigns replica IPs at placement time. It uses a CNI `ptp` network (no bridge, MTU 1420), so even same-node traffic is routed and policed, with masquerade only for traffic leaving the cluster.
+  - The master assigns replica IPs at placement time. It uses a CNI `ptp` network (no bridge, MTU 1420), so even
+    same-node traffic is routed and policed, with masquerade only for traffic leaving the cluster.
   - A stdlib DNS responder in the agent answers `<app>.cluster.ziro` with live container IPs and relays other names.
   - Policy sets are container IPs.
 - **HA control plane** (see [clustering.md](clustering.md#high-availability-control-plane)).
-  - Every master runs `hashicorp/raft` (a single master is a one-voter group; upgrades import the old state automatically). `cluster join --control-plane` adds masters: they join as non-voters and are promoted once caught up.
-  - Raft replicates only the *desired* state (apps, placement, tokens, policy, routes, secrets, CA). Node liveness stays soft state on the leader, so heartbeats never touch the log, and a new leader grants a 30s grace period to Ready nodes.
-  - ziroctl proposes compare-and-swap updates through a root-only local socket. Followers forward them to the leader over mutual TLS, and agents follow HTTP 421 redirects to the leader and fail over across all masters.
-  - A cluster CA replaces the single-certificate pin. Master certificates are issued from CSRs, and existing agents receive the CA over the already-pinned channel (the old certificate is still served to clients without SNI).
-- **Router** (see [router.md](router.md)). Global networks for devices outside the cluster (zirocd), ZeroTier/Tailscale-style.
-  - Desired state (networks, members, key hashes, ACLs, routes) lives in `ClusterState.Router` and goes through Raft. Liveness and endpoints are soft state.
-  - Planets (masters) all serve: each runs a netmap hub from its own Raft replica, and only writes (register, renew) go to the leader. Each planet owns the soft state of the devices streaming from it and streams it to the other planets over master mTLS; the newest device session (`MapRequest.Epoch`, device clock) wins, so planet clocks never matter. Devices stream from their nearest planet (TLS handshake time, re-measured every 10 minutes and after a network change). A leader change moves no stream. A follower whose replica lags a fresh write relays that device to the leader rather than answering "unauthorized".
-  - Each device gets an HTTP/2 netmap stream (full, then deltas). ACLs are compiled once per change, and each device sees only the peers it may talk to.
-  - zirocd (`tools/zirocd`): userspace wireguard-go on Linux, macOS and Windows; a stateful default-deny inbound filter; split DNS; signed self-update with crash-loop rollback. It ships on the tools release stream, and `sdk/release` holds the signature check it shares with `ziroctl update`.
-  - NAT traversal: one UDP socket multiplexes WireGuard, NaCl-boxed disco ping/pong and STUN. Devices punch to each other's candidate addresses and fall back per packet to the peer's home relay (`router relay enable`, TLS on masters: the relay reads the replicated member list, forwards only within a network, rate-limits each device).
-  - Moons: the relay is one package (`tools/zirocd/relay`) run by planets (fed from Raft) and by moons (`zirocd moon`, fed by a relay-map stream from any planet). A moon registers once with a hashed one-time token and gets its own certificate (OU `ziro-relay`, `<name>.moon.ziro`); devices verify relays by name and OU (`zr.Relay.ServerName`) and planets by OU `ziro-master`, so a moon certificate can't stand in for a planet. Moons fail closed (removed: exit; no planet for 5 minutes: stop relaying). The image `ghcr.io/<owner>/zirocd` is `FROM scratch` with the signed release binaries, non-root.
-  - Ziro OS: zirocd ships in the full image (`ziroctl router join|leave|status`, `zirocd` ziro-init service, split DNS through Ziro DNS forward rules) and is updated by `ziroctl update`, which keeps the integrity baselines current. Linux devices act as subnet routers (forwarding + masquerade for approved routes).
-  - No kernel data plane: measured slower than wireguard-go with batching on the same host, and it cannot do hole punching or relay fallback.
-  - Single sign-on: the OAuth 2.0 device-code grant, run by the leader (client secret sealed with the cluster secrets; ID tokens verified with go-oidc). A per-network policy (verified email + domains/groups → tags) admits users, and devices expire (default 180 days); expiry is enforced by the hub and the relays. `user:<email>` ACL selectors.
-- **Enterprise controls.**
-  - Secrets encrypted at rest (cluster data key with `file` / `tpm` / `command` key providers; see [clustering.md](clustering.md#secrets-at-rest)).
+  - Every master runs `hashicorp/raft` (a single master is a one-voter group; upgrades import the old state
+    automatically). `cluster join --control-plane` adds masters: they join as non-voters and are promoted once caught
+    up.
+  - Raft replicates only the *desired* state (apps, placement, tokens, policy, routes, secrets, CA). Node liveness stays
+    soft state on the leader, so heartbeats never touch the log, and a new leader grants a 30 s grace period to Ready
+    nodes.
+  - ziroctl proposes compare-and-swap updates through a root-only local socket. Followers forward them to the leader
+    over mutual TLS, and agents follow HTTP 421 redirects to the leader and fail over across all masters.
+  - A cluster CA replaces the single-certificate pin. Master certificates are issued from CSRs, and existing agents
+    receive the CA over the already-pinned channel (the old certificate is still served to clients without SNI).
+- **Router** (see [router.md](router.md)). Global networks for devices outside the cluster (zirocd),
+  ZeroTier/Tailscale-style.
+  - Desired state (networks, members, key hashes, ACLs, routes) lives in `ClusterState.Router` and goes through Raft.
+    Liveness and endpoints are soft state.
+  - Planets (masters) all serve: each runs a netmap hub from its own Raft replica, and only writes (register, renew) go
+    to the leader. Each planet owns the soft state of the devices streaming from it and streams it to the other planets
+    over master mTLS; the newest device session (`MapRequest.Epoch`, device clock) wins, so planet clocks never matter.
+    Devices stream from their nearest planet (TLS handshake time, re-measured every 10 minutes and after a network
+    change). A leader change moves no stream. A follower whose replica lags a fresh write relays that device to the
+    leader rather than answering "unauthorized".
+  - Each device gets an HTTP/2 netmap stream (full, then deltas). ACLs are compiled once per change, and each device
+    sees only the peers it may talk to.
+  - zirocd (`tools/zirocd`): userspace wireguard-go on Linux, macOS and Windows; a stateful default-deny inbound filter;
+    split DNS; signed self-update with crash-loop rollback. It ships on the tools release stream, and `sdk/release`
+    holds the signature check it shares with `ziroctl update`.
+  - NAT traversal: one UDP socket multiplexes WireGuard, NaCl-boxed disco ping/pong and STUN. Devices punch to each
+    other's candidate addresses and fall back per packet to the peer's home relay (`router relay enable`, TLS on
+    masters: the relay reads the replicated member list, forwards only within a network, rate-limits each device).
+  - Moons: the relay is one package (`tools/zirocd/relay`) run by planets (fed from Raft) and by moons (`zirocd moon`,
+    fed by a relay-map stream from any planet). A moon registers once with a hashed one-time token and gets its own
+    certificate (OU `ziro-relay`, `<name>.moon.ziro`); devices verify relays by name and OU (`zr.Relay.ServerName`) and
+    planets by OU `ziro-master`, so a moon certificate can't stand in for a planet. Moons fail closed (removed: exit; no
+    planet for 5 minutes: stop relaying). The image `ghcr.io/<owner>/zirocd` is `FROM scratch` with the signed release
+    binaries, non-root.
+  - Ziro OS: zirocd ships in the full image (`ziroctl router join|leave|status`, `zirocd` ziro-init service, split DNS
+    through Ziro DNS forward rules) and is updated by `ziroctl update`, which keeps the integrity baselines current.
+    Linux devices act as subnet routers (forwarding + masquerade for approved routes).
+  - No kernel data plane: measured slower than wireguard-go with batching on the same host, and it cannot do hole
+    punching or relay fallback.
+  - Single sign-on: the OAuth 2.0 device-code grant, run by the leader (client secret sealed with the cluster secrets;
+    ID tokens verified with go-oidc). A per-network policy (verified email + domains/groups → tags) admits users, and
+    devices expire (default 180 days); expiry is enforced by the hub and the relays. `user:<email>` ACL selectors.
+- **Security controls.**
+  - Secrets encrypted at rest (cluster data key with `file` / `tpm` / `command` key providers; see
+    [clustering.md](clustering.md#secrets-at-rest)).
   - Scoped API tokens (viewer / deployer / operator / admin).
-  - Rotation: node tokens (30 days or `cluster rotate tokens`) and master certificates (`cluster rotate certs`). The data key rotates in two phases (`cluster keys rotate`); rotating the CA is not planned yet.
+  - Rotation: node tokens (30 days or `cluster rotate tokens`) and master certificates (`cluster rotate certs`). The
+    data key rotates in two phases (`cluster keys rotate`); rotating the CA is not planned yet.
   - Image policy: registry allowlist and cosign signature verification (native, key-based), with digest pinning.
   - Prometheus `/api/v1/metrics` on the admin API (viewer token).
-  - [docs/compliance.md](compliance.md): NIST SP 800-190, CIS Controls v8 and SOC 2 mapping with evidence commands and known gaps.
+  - [docs/compliance.md](compliance.md): NIST SP 800-190, CIS Controls v8 and SOC 2 mapping with evidence commands and
+    known gaps.
 
 ### 5.5 Not built yet
 

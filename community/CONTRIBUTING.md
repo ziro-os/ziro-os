@@ -1,65 +1,55 @@
-# Contributing to Ziro-OS
+# Contributing to Ziro OS
 
-Thank you for your interest in contributing to **Ziro-OS**! We are building an ultra-lightweight, container-native operating system designed from first principles for cloud-native workloads, microVMs, and container infrastructure.
+Thank you for contributing to Ziro OS, a minimal, container-native operating system for cloud workloads. This guide
+covers the development workflow, coding standards, and how changes are reviewed and merged.
 
-This guide outlines our development workflow, coding standards, and how to get your contributions reviewed and merged smoothly.
+## Design principles
 
----
+Every contribution should respect these principles:
 
-## 🌟 Principles & Design Philosophy
+1. **Minimal by design.** Ship only what container workloads need. The minimal container rootfs is about 16 MB, and
+   CI keeps bootable host images under 300 MB.
+2. **Container-native first.** The host exists to run and schedule OCI containers through `containerd` and `runc`.
+3. **Controlled mutable state.** An immutable installed root is a goal. Today the installer mounts ext4 read/write,
+   and live boot uses writable tmpfs. Document and minimize writable paths.
+4. **Multi-architecture.** Support both `x86_64` and `arm64`.
+5. **Static linking.** Prefer statically compiled Go and C99 binaries linked against musl libc.
 
-Every contribution to Ziro-OS should respect our core design tenets:
+The [design standard](../docs/design/README.md) turns these principles into concrete rules: the resource model, API
+and CLI conventions, extension points, and the security model. Larger changes need an
+[RFC](../docs/design/rfcs/README.md).
 
-1. **Minimal by Design**: Ship only what is needed for container workloads. The minimal container rootfs is about
-   16 MB; CI keeps bootable host images under 300 MB.
-2. **Container-Native First**: The host OS exists to host and schedule OCI containers via `containerd` and `runc`. Containers are first-class citizens.
-3. **Controlled mutable state**: An immutable installed root is a goal. Today the installer mounts ext4 read/write,
-   while live boot uses writable tmpfs. Document and minimize writable paths.
-4. **True Multi-Architecture**: Full support for both `x86_64` (Intel/AMD) and `arm64` (Apple Silicon & ARM64 cloud instances).
-5. **Static Linking & Zero Bloat**: Prefer statically compiled Go and C99 binaries with musl libc to avoid runtime dynamic library dependency issues.
-
-The [design standard](../docs/design/README.md) turns these into concrete rules: the resource model, API and CLI
-conventions, extension points and the security model. Larger changes need an [RFC](../docs/design/rfcs/README.md).
-
----
-
-## 🚀 Development Environment Setup
+## Development environment
 
 ### Prerequisites
 
-To build and test Ziro-OS locally, ensure you have the following installed:
+- **Go 1.27.1 or later** for `ziroctl`, `ziropkg`, `zirocd` and the SDK.
+- **Docker 24.0 or later** with Buildx, for rootfs extraction and the container base image.
+- **GCC, Clang or `musl-gcc`** to compile the `ziro-init` PID 1 supervisor.
+- **QEMU** (`qemu-system-x86_64` or `qemu-system-aarch64`) for boot and cluster tests.
+- **xorriso, mtools and dosfstools** (optional) to build the bootable hybrid ISO.
+- **Make**.
 
-- **Go 1.27.1+**: Required by the `ziroctl` and `ziropkg` modules.
-- **Docker 24.0+** (with Buildx support): For rootfs extraction and container base building.
-- **GCC / Clang** (or `musl-gcc`): For compiling `ziro-init` PID 1 supervisor.
-- **QEMU** (`qemu-system-x86_64` and/or `qemu-system-aarch64`): For running microVM tests.
-- **xorriso / mtools / dosfstools** (optional): For generating bootable hybrid ISO images.
-- **Make**: Standard build orchestrator.
-
-### Setup Instructions
+### Setup
 
 ```bash
-# 1. Fork and clone the repository
+# Fork and clone the repository
 git clone https://github.com/<your-username>/ziro-os.git
 cd ziro-os
 
-# 2. Verify build tools
+# Verify the build tools
 go version
 docker version
 make --version
 
-# 3. Build the default target (tools, rootfs, Docker base image)
+# Build the tools, rootfs and Docker base image
 make all
 
-# 4. Run the test suite
+# Run the unit and smoke tests
 make test
 ```
 
----
-
-## 🏗️ Repository Architecture
-
-Understanding the project layout:
+## Repository layout
 
 ```text
 ziro-os/
@@ -78,135 +68,133 @@ ziro-os/
 ├── scripts/                # installer, release and zirocd install scripts
 ├── deploy/terraform/aws/   # example AWS deployment
 ├── security/               # host hardening script
-├── tests/                  # smoke, QEMU boot/cluster, router e2e, security
+├── tests/                  # smoke, QEMU boot and cluster, router end to end, security
 └── community/              # contributing guide
 ```
 
 Keep each directory focused on one responsibility. Put base configuration in `rootfs/etc/`, package recipes in
-`packages/`, image assembly in `images/`, and user-facing technical documentation in `docs/`. Include version and
-dependency metadata with new package or module recipes. Keep optional components independently buildable where
-practical, and document how configuration overrides are applied before relying on them.
+`packages/`, image assembly in `images/`, and technical documentation in `docs/`. Include version and dependency
+metadata with new package or module recipes, keep optional components independently buildable where practical, and
+document how configuration overrides are applied before relying on them.
 
----
-
-## 🛠️ Common Build & Test Commands
-
-We provide standard `make` targets to keep development reproducible:
+## Build and test commands
 
 | Target | Description |
 |---|---|
-| `make all` | Build `ziroctl`, `ziropkg`, rootfs, and Docker base image for host architecture |
+| `make all` | Build `ziroctl`, `ziropkg`, the rootfs and the Docker base image for the host architecture |
 | `make tools` | Compile static `ziroctl` and `ziropkg` binaries into `bin/` |
 | `make tools-all` | Cross-compile `ziroctl` and `ziropkg` for `x86_64` and `arm64` |
-| `make rootfs` | Build minimal rootfs (≈16 MB) and full host initramfs (< 300 MB) |
-| `make rootfs-all` | Build rootfs archives for both `x86_64` and `arm64` |
-| `make docker-image` | Build local `ziro-os:latest` Docker base image |
-| `make docker-multiarch` | Build multi-arch OCI image with Docker buildx (`amd64` + `arm64`) |
-| `make image-iso` | Generate bootable hybrid UEFI/BIOS ISO |
-| `make run-qemu` | Launch local microVM with interactive terminal |
-| `make test` | Run complete unit tests and container smoke test suite |
-| `make test-unit` | Run unit tests for `ziroctl` and `ziropkg` |
-| `make test-smoke` | Run base container verification tests |
-| `make clean` | Clean transient build artifacts in `build/` |
+| `make zirocd-all` | Cross-compile `zirocd` for Linux, macOS and Windows |
+| `make kernel` | Build the kernel (`KERNEL_FLAVOR=custom` by default, `alpine` for the distribution kernel) |
+| `make rootfs` | Build the minimal rootfs (about 16 MB) and the host initramfs (under 300 MB) |
+| `make rootfs-all` | Build rootfs archives for `x86_64` and `arm64` |
+| `make docker-image` | Build the local `ziro-os:latest` Docker base image |
+| `make docker-multiarch` | Build a multi-architecture OCI image with Buildx |
+| `make image-iso` | Build the bootable hybrid UEFI/BIOS ISO |
+| `make run-qemu` | Boot a local virtual machine with an interactive terminal |
+| `make test` | Run the unit tests and the container smoke tests |
+| `make test-unit` | Run the `ziroctl`, `ziropkg` and SDK unit tests |
+| `make test-smoke` | Run the base container verification tests |
+| `make test-boot` | Boot the image in QEMU and check the running host (needs `qemu-system-*`) |
+| `make release`, `release-minor`, `release-major`, `release-force` | Maintainer release targets; see [Releases](#releases) |
+| `make clean` | Remove transient build artifacts in `build/` |
 
----
+## Coding standards
 
-## 📋 Coding Standards
+### Go (`tools/ziroctl`, `tools/ziropkg`, `tools/zirocd`, `sdk`)
 
-### 1. Go (`tools/ziroctl/`, `tools/ziropkg/`)
-
-- Format code using `gofmt` (`go fmt ./...`).
-- Always use `CGO_ENABLED=0` for static compilation without libc dependencies.
-- Organize CLI commands with Cobra subcommands under `cmd/`.
-- Every command should support `--help` and clean error messaging.
-- Write unit tests (`_test.go`) alongside command implementations.
+- Format with `gofmt`.
+- Build with `CGO_ENABLED=0` so binaries link statically without libc.
+- Organize CLI commands as Cobra subcommands under `cmd/`.
+- Every command supports `--help` and returns clear error messages.
+- Write unit tests (`_test.go`) next to the code they cover.
 
 ```bash
-cd tools/ziroctl && go test -v ./...
-cd tools/ziropkg && go test -v ./...
+cd tools/ziroctl && go test ./...
+cd tools/ziropkg && go test ./...
+cd tools/zirocd && go test ./...
+cd sdk && go test ./...
 ```
 
-### 2. C99 (`init/ziro-init.c`)
+### C99 (`init/ziro-init.c`)
 
-- Written in clean, ANSI C99.
-- No dynamic memory allocation (`malloc`/`free`) in critical init/reaping paths to prevent memory leaks or fragmentation during long uptimes.
-- Statically link against musl libc (`musl-gcc -static`).
-- Handle signals properly: `SIGCHLD` for non-blocking zombie reaping (`waitpid(-1, &status, WNOHANG)`), `SIGINT`/`SIGTERM` for graceful shutdown.
+- Write portable C99.
+- Do not call `malloc` or `free` in the init and reaping paths, to avoid leaks and fragmentation over long uptimes.
+- Link statically against musl libc (`musl-gcc -static`).
+- Handle signals correctly: `SIGCHLD` with non-blocking `waitpid(-1, &status, WNOHANG)` to reap zombies, and
+  `SIGINT` and `SIGTERM` for graceful shutdown.
 
-### 3. Shell Scripts (`packages/`, `images/`, `kernel/`)
+### Shell scripts (`packages/`, `images/`, `kernel/`, `scripts/`)
 
-- Always begin with:
-  ```bash
-  #!/bin/bash
-  set -euo pipefail
-  ```
-- Always quote variables to prevent word splitting (`"$VAR"`).
-- Make scripts architecture-aware: support both `x86_64` (or `amd64`) and `arm64` (or `aarch64`).
-- Avoid hardcoded paths; resolve repository roots dynamically via `$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)`.
+- Start with `#!/bin/bash` and `set -euo pipefail`.
+- Quote variables (`"$VAR"`) to prevent word splitting.
+- Support both `x86_64` (`amd64`) and `arm64` (`aarch64`).
+- Avoid hard-coded paths. Resolve the repository root from the script location, for example
+  `$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)`.
+
+### Known limitations in code
+
+Mark a limitation that is accepted on purpose with a comment of this form, on the declaration it limits:
+
+```go
+// Known limitation: whole-state entries; switch to deltas if the state grows past ~1 MB.
+```
+
+State what is not handled and what to change when it starts to matter. Use `TODO` only for unfinished work that
+should not ship. Document limitations that affect users in the relevant guide under `docs/` as well.
 
 ### Lint gate
 
-CI runs these on every pull request; run them before pushing. Fix findings at their source rather than suppressing
-them.
+CI runs the following on every pull request. Run them before pushing, and fix findings at their source rather than
+suppressing them.
 
 ```bash
-gofmt -l tools/ziroctl tools/ziropkg sdk          # must print nothing
-for m in sdk tools/ziroctl tools/ziropkg; do
+gofmt -l tools/ziroctl tools/ziropkg tools/zirocd sdk   # must print nothing
+for m in sdk tools/ziroctl tools/ziropkg tools/zirocd; do
   (cd "$m" && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...)
 done
 shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh
+npx markdownlint-cli2@0.23.3 "**/*.md" "#node_modules"  # Markdown style, see .markdownlint.json
 ```
 
----
+The Go tests also check the documentation: every `ziroctl` command in `docs/` must exist with valid flags, and every
+relative link and heading anchor in the Markdown files must resolve.
 
-## 🧩 How to Add a Command
+## Adding a command
 
-Every operation has one implementation that the CLI, the REST API, declarative files and the SDK share (see the
-[design standard](../docs/design/README.md#how-to-add-a-feature)):
+Every operation has one implementation that the CLI, the REST API, declarative files, and the SDK share (see the
+[design standard](../docs/design/README.md#how-to-add-a-feature)). The steps and their order are defined there.
 
-1. **Operation:** a function in `tools/ziroctl/cmd` that validates its input with `sdk/schema` and does the work.
-2. **CLI:** a Cobra command (noun, then verb) that parses flags, calls the operation, and prints through
-   `printResult` so `--json` works.
-3. **API:** one entry in the route table (`api_routes.go` and the `register*Routes` functions) with the least role
-   that is safe; request and response types in `sdk/api`.
-4. **OpenAPI:** the route and its `x-ziro-role` in `sdk/openapi.yaml` (`TestOpenAPIMatchesRoutes` fails otherwise).
-5. **SDK:** a typed method in `sdk/client`.
-6. **Tests:** unit tests next to the code; `tests/qemu/boot-smoke.py` when it needs a booted host.
-7. **Docs:** the user guide in `docs/`.
+## Testing your changes
 
----
-
-## 🧪 Testing Your Changes
-
-Before opening a pull request, run the test suites locally:
+Before opening a pull request, run:
 
 ```bash
-# 1. Run unit tests
+# Unit tests
 make test-unit
 
-# 2. Run container smoke tests
+# Container smoke tests
 make test-smoke
 
-# 3. Test package manager end-to-end inside the container
+# Package manager end to end, inside the container
 docker run --rm ziro-os:latest /bin/sh -c "ziropkg install curl && curl --version"
 ```
 
-All tests must pass cleanly.
+Changes that touch boot, the kernel, or cluster behavior also need `make test-boot` or the matching script in
+`tests/qemu/`. Documentation changes are checked by `go test ./cmd -run TestDocCommands` in `tools/ziroctl`, which
+verifies that every `ziroctl` example in `docs/` uses real commands and flags. All tests must pass.
 
----
+## Pull requests
 
-## 🔄 Development Workflow & Pull Requests
+### Branch names
 
-### 1. Branch Naming
+- `feature/<name>`, for example `feature/cni-wireguard`
+- `fix/<name>`, for example `fix/apk-tls-ca-cert`
+- `docs/<name>`, for example `docs/boot-instructions`
 
-Follow structured branch names:
-- `feature/<feature-name>` (e.g., `feature/cni-wireguard`)
-- `fix/<issue-name>` (e.g., `fix/apk-tls-ca-cert`)
-- `docs/<doc-update>` (e.g., `docs/quickstart-guide`)
+### Commit messages
 
-### 2. Conventional Commits
-
-We follow [Conventional Commits](https://www.conventionalcommits.org/):
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```text
 feat(ziropkg): add search command with filter flags
@@ -215,78 +203,68 @@ docs(getting-started): clarify QEMU boot instructions
 test(smoke): add package installation verification test
 ```
 
-### 3. Submitting a Pull Request
+### Submitting
 
-1. Push your branch to your GitHub fork.
-2. Open a Pull Request targeting the `main` branch.
-3. Fill out the PR template with:
-   - Summary of changes and motivation.
-   - Architectures tested (`x86_64`, `arm64`).
-   - Test results (`make test` output).
-4. CI checks will run automatically across unit tests, multi-arch rootfs generation, container smoke tests, and security scans.
+1. Push your branch to your fork.
+2. Open a pull request against `main`.
+3. Complete the pull request template: a summary and motivation, the components affected, and the test results.
+4. CI runs unit tests, multi-architecture rootfs generation, container smoke tests, and security scans.
 
----
+## Releases
 
-## 🚀 Release Management & Automation
-
-Maintainers can trigger an automated release using the release utility or `make` targets:
+Maintainers publish releases with the release script or the `make` targets:
 
 ```bash
-# 1. Preview changes without committing or tagging
+# Preview the changes without committing or tagging
 ./scripts/release.sh --dry-run patch
 
-# 2. Automatically bump patch version (e.g., 1.0.0 -> 1.0.1)
-make release
-# or: ./scripts/release.sh patch
+# Bump the patch version (1.0.0 -> 1.0.1)
+make release            # or: ./scripts/release.sh patch
 
-# 3. Force re-release the same tag (e.g., if CI build failed or needs replacing)
-make release-force
-# or: ./scripts/release.sh --force
+# Re-release the same tag, for example after a failed CI build
+make release-force      # or: ./scripts/release.sh --force
 
-# 4. Bump minor or major versions
-make release-minor   # 1.0.0 -> 1.1.0
-make release-major   # 1.0.0 -> 2.0.0
+# Bump the minor or major version
+make release-minor      # 1.0.0 -> 1.1.0
+make release-major      # 1.0.0 -> 2.0.0
 
-# 5. Or specify an exact version
+# Set an exact version
 ./scripts/release.sh 1.2.0
 ```
 
-The script automatically:
-1. Calculates the next semantic version and UTC build date. An OS release also publishes `tools/vX.Y.Z`, which must
-   be higher than every existing tools version (clients install only the newest tag), so `patch`, `minor` and
-   `major` bump from the newest tools version when it is ahead of `VERSION` (tools-only builds do not bump
+The script:
+
+1. Calculates the next semantic version and the UTC build date. An OS release also publishes `tools/vX.Y.Z`, which
+   must be higher than every existing tools version (clients install only the newest tag). `patch`, `minor` and
+   `major` therefore bump from the newest tools version when it is ahead of `VERSION` (tools-only builds do not bump
    `VERSION`), and a version at or below it is refused before anything is tagged.
-2. Updates `VERSION`, `rootfs/etc/os-release`, `tools/ziroctl/cmd/version.go`, `tools/ziropkg/cmd/root.go`, and `images/docker/Dockerfile`.
+2. Updates `VERSION`, `rootfs/etc/os-release`, `tools/ziroctl/cmd/version.go`, `tools/ziropkg/cmd/root.go`, and
+   `images/docker/Dockerfile`.
 3. Commits the changes (`chore(release): bump version to vX.Y.Z`).
-4. Creates an annotated Git tag (`vX.Y.Z`) with an automated changelog summary.
-5. Pushes the branch and tag to the remote repository.
-6. Triggers GitHub Actions to build multi-arch images, publish release assets, push container images to GitHub Container Registry (`ghcr.io`), and deploy the release catalog to GitHub Pages.
+4. Creates an annotated Git tag (`vX.Y.Z`) with a generated changelog summary.
+5. Pushes the branch and the tag.
+6. Triggers GitHub Actions, which build multi-architecture images, publish release assets, push container images to
+   GitHub Container Registry (`ghcr.io`), and deploy the release catalog to GitHub Pages.
 
 ### Tools-only releases (`x.y.z.N`)
 
-A fix that touches only `ziroctl`, `ziropkg`, `zirocd` or the SDK does not need an OS release. It is published as
-the next **tools build**, `tools/vX.Y.Z.N`: `X.Y.Z` is the newest tools version and `N` counts the builds of it
-(`1.0.25` → `1.0.25.1` → `1.0.25.2`). `N` starts at 1, `.0`, leading zeros and a fifth part are invalid, and the order
-is numeric (`.10` is newer than `.9`).
+A fix that touches only `ziroctl`, `ziropkg`, `zirocd` or the SDK does not need an OS release. It is published as the
+next tools build, `tools/vX.Y.Z.N`: `X.Y.Z` is the newest tools version and `N` counts the builds of it
+(`1.0.25` → `1.0.25.1` → `1.0.25.2`). `N` starts at 1. `.0`, leading zeros, and a fifth part are invalid, and the
+order is numeric (`.10` is newer than `.9`).
 
-- **Automatic number:** run the *Tools Release* workflow by hand on `main` with the version left empty. It takes
-  the next `N` of the newest `tools/v*` tag (`scripts/release/tools-version.sh`).
-- **Or push the tag yourself:** `git tag tools/v1.0.25.2 && git push origin tools/v1.0.25.2`. The workflow refuses
-  a version that is not higher than every existing tools tag, because clients install only the newest one.
-- **OS tags stay three parts.** `vX.Y.Z.N` never starts an OS release (`scripts/release/check-tag.sh`); the OS
+- **Automatic number.** Run the Tools Release workflow by hand on `main` with the version left empty. It takes the
+  next `N` of the newest `tools/v*` tag (`scripts/release/tools-version.sh`).
+- **Manual tag.** Push the tag yourself: `git tag tools/v1.0.25.2 && git push origin tools/v1.0.25.2`. The workflow
+  refuses a version that is not higher than every existing tools tag, because clients install only the newest one.
+- **OS tags stay three parts.** `vX.Y.Z.N` never starts an OS release (`scripts/release/check-tag.sh`), and the OS
   workflow ignores it.
-- **Compatibility:** a build must stay wire- and state-compatible with the other builds of its `X.Y.Z`. Nodes of a
-  cluster can run different tools builds, and `ziroctl update --rollback` restores the previous binary. A change to the
-  cluster protocol or to state that needs a migration needs a new OS release.
-- Hosts never go backwards by themselves: `ziroctl update --version <older>` needs `--allow-downgrade`.
+- **Compatibility.** A build must stay wire- and state-compatible with the other builds of its `X.Y.Z`. Nodes of a
+  cluster can run different tools builds, and `ziroctl update --rollback` restores the previous binary. A change to
+  the cluster protocol, or to state that needs a migration, needs a new OS release.
+- **No automatic downgrades.** `ziroctl update --version <older>` needs `--allow-downgrade`.
 
----
+## Security vulnerabilities
 
-## 🔒 Security Vulnerability Reporting
-
-If you discover a security vulnerability in Ziro-OS, please do **NOT** open a public issue. Report it privately as
-described in [SECURITY.md](../SECURITY.md).
-
----
-
-> _Ziro-OS — Minimal by design. Born for the cloud._
+Do not open a public issue for a security vulnerability. Report it privately as described in
+[SECURITY.md](../SECURITY.md).

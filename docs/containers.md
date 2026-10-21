@@ -54,6 +54,7 @@ ziroctl compose down
 ```
 
 Before `up`, `create` and `run`, the file is checked. These are refused unless you pass `--allow-privileged`:
+
 - `privileged`
 - host network, pid or ipc
 - `cap_add`
@@ -78,5 +79,5 @@ ziroctl cron remove 3
 
 - **Format:** a job is one standard 5-field cron line. Newlines in a command are refused, so a job can't inject
   extra crontab entries.
-- **Plugins** add their own jobs, tagged `# ziro-module:<name>`, and remove them when disabled. Don't edit those
+- **Modules** add their own jobs, tagged `# ziro-module:<name>`, and remove them when disabled. Don't edit those
   lines by hand.
