@@ -477,13 +477,13 @@ func TestWAFCommands(t *testing.T) {
 	if err := os.WriteFile(file, wafBuiltinJSON, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := wafTestFile(file, &out); err != nil || !strings.Contains(out.String(), "rules") {
+	if err := wafTestFile(file, "", &out); err != nil || !strings.Contains(out.String(), "rules") {
 		t.Fatalf("waf test: %v %q", err, out.String())
 	}
 	if err := os.WriteFile(file, bytes.Replace(wafBuiltinJSON, []byte(`"nomatch": ["union station timetable"]`), []byte(`"nomatch": ["1 union select 2"]`), 1), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := wafTestFile(file, &out); err == nil || !strings.Contains(err.Error(), "ZW-942100") {
+	if err := wafTestFile(file, "", &out); err == nil || !strings.Contains(err.Error(), "ZW-942100") {
 		t.Fatalf("a failing sample must fail the test: %v", err)
 	}
 	if err := gatewayWAFUpdateCmd.RunE(gatewayWAFUpdateCmd, nil); err != nil {
@@ -491,5 +491,24 @@ func TestWAFCommands(t *testing.T) {
 	}
 	if st := wafStatusNow(); st.InUse.Version != "1" || st.Cached == nil {
 		t.Fatalf("status: %+v", st)
+	}
+}
+
+func TestWAFBenignCorpusCheck(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.txt")
+	if err := os.WriteFile(good, []byte("# legitimate\n/search?q=union+station\n/\tMozilla/5.0 (X11; Linux x86_64) Firefox/126.0\n\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "bad.txt")
+	if err := os.WriteFile(bad, []byte("/search?q=1+union+select+2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := wafTestBenign(wafEng(), good, &out); err != nil || !strings.Contains(out.String(), "2 legitimate") {
+		t.Fatalf("good corpus: %v %q", err, out.String())
+	}
+	if err := wafTestBenign(wafEng(), bad, &out); err == nil || !strings.Contains(err.Error(), "ZW-942100") {
+		t.Fatalf("a corpus the rules block must fail: %v", err)
 	}
 }

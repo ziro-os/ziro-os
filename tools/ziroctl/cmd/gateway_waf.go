@@ -378,14 +378,16 @@ type wafPolicy struct {
 }
 
 // newWAFPolicy compiles a configuration; it returns nil when the WAF is off.
-func newWAFPolicy(w *GatewayWAF) (*wafPolicy, error) {
+func newWAFPolicy(w *GatewayWAF) (*wafPolicy, error) { return newWAFPolicyFor(wafEng(), w) }
+
+// newWAFPolicyFor compiles a configuration against a given engine.
+func newWAFPolicyFor(e *wafEngine, w *GatewayWAF) (*wafPolicy, error) {
 	if w == nil || w.Mode == "off" {
 		return nil, nil
 	}
 	if err := w.Validate(); err != nil {
 		return nil, err
 	}
-	e := wafEng()
 	p := &wafPolicy{block: w.Mode == "block", threshold: w.Threshold, bodyCap: w.InspectBodyKB << 10, skipBody: w.SkipBody, eng: e}
 	if p.threshold == 0 {
 		p.threshold = 5

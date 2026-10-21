@@ -573,7 +573,11 @@ var catalogBuildCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Printf("✓ %d %ss, serial %d, expires %s\n", len(idx.Entries), catalogKind, idx.Serial, idx.Expires.Format(time.RFC3339))
+		noun := catalogKind + "s"
+		if catalogKind == "waf" {
+			noun = "WAF packs"
+		}
+		fmt.Printf("✓ %d %s, serial %d, expires %s\n", len(idx.Entries), noun, idx.Serial, idx.Expires.Format(time.RFC3339))
 		return nil
 	},
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -435,8 +436,52 @@ func wafStatusNow() wafStatus {
 	return st
 }
 
-// wafTestFile checks a pack file the way CI and a host do, and reports what it holds.
-func wafTestFile(path string, out io.Writer) error {
+// wafTestBenign runs a corpus of legitimate requests through an engine, at levels 1 and 2, and
+// reports the ones a block-mode route would refuse. Each line is a request target, optionally
+// followed by a tab and a User-Agent; blank lines and lines starting with # are skipped.
+func wafTestBenign(e *wafEngine, path string, out io.Writer) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var bad []string
+	n := 0
+	for _, level := range []int{1, 2} {
+		p, err := newWAFPolicyFor(e, &GatewayWAF{Mode: "block", Level: level})
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimRight(line, "\r")
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			target, ua, _ := strings.Cut(line, "\t")
+			req, err := http.NewRequest("GET", "http://corpus.test"+target, nil)
+			if err != nil {
+				return fmt.Errorf("corpus line %q: %w", line, err)
+			}
+			if ua != "" {
+				req.Header.Set("User-Agent", ua)
+			}
+			if level == 1 {
+				n++
+			}
+			if v := p.inspect(req, "198.51.100.1", nil, false); p.action(&v) == wafBlocked {
+				bad = append(bad, fmt.Sprintf("level %d: %s is refused by %s", level, target, v.String()))
+			}
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("%d legitimate requests would be blocked:\n  %s", len(bad), strings.Join(bad, "\n  "))
+	}
+	fmt.Fprintf(out, "✓ %d legitimate requests pass at levels 1 and 2\n", n)
+	return nil
+}
+
+// wafTestFile checks a pack file the way CI and a host do, and reports what it holds. With a
+// corpus of legitimate requests it also checks that the pack would not block them.
+func wafTestFile(path, benign string, out io.Writer) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -456,6 +501,9 @@ func wafTestFile(path string, out io.Writer) error {
 		}
 	}
 	fmt.Fprintf(out, "✓ %s %s: %d rules, %d samples pass\n", p.Name, p.Version, len(e.rules), samples)
+	if benign != "" {
+		return wafTestBenign(e, benign, out)
+	}
 	return nil
 }
 

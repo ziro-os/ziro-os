@@ -329,6 +329,7 @@ New rules are fetched about once a day; "waf update" fetches them now.`,
 var (
 	wafRulesGroup                  string
 	wafUpdateCheck, wafUpdateForce bool
+	wafTestBenignFile              string
 )
 
 var gatewayWAFRulesCmd = &cobra.Command{
@@ -451,10 +452,14 @@ var gatewayWAFTestCmd = &cobra.Command{
 	Use:   "test <rules.json>",
 	Short: "Check a WAF rules file and its samples",
 	Long: `Parses a rules file strictly, compiles every rule and runs the match and nomatch samples each rule
-carries. The rules repository runs this on every pull request.`,
-	Example: "  ziroctl gateway waf test waf/zirogate-crs/rules.json",
+carries. With --benign it also checks that none of a list of legitimate requests (one target per line,
+optionally followed by a tab and a User-Agent) would be blocked at level 1 or 2. The rules repository runs this
+on every pull request.`,
+	Example: "  ziroctl gateway waf test waf/zirogate-crs/rules.json --benign waf/zirogate-crs/benign.txt",
 	Args:    cobra.ExactArgs(1),
-	RunE:    func(cmd *cobra.Command, args []string) error { return wafTestFile(args[0], os.Stdout) },
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return wafTestFile(args[0], wafTestBenignFile, os.Stdout)
+	},
 }
 
 var gatewayWAFExportCmd = &cobra.Command{
@@ -547,6 +552,7 @@ func init() {
 	gatewayWAFRulesCmd.Flags().StringVar(&wafRulesGroup, "group", "", "Only this group")
 	gatewayWAFUpdateCmd.Flags().BoolVar(&wafUpdateCheck, "check", false, "Only report whether a newer pack is available")
 	gatewayWAFUpdateCmd.Flags().BoolVar(&wafUpdateForce, "force", false, "Install even if the pack is not newer, or was rolled back")
+	gatewayWAFTestCmd.Flags().StringVar(&wafTestBenignFile, "benign", "", "A file of legitimate requests that must not be blocked")
 	gatewayWAFCmd.AddCommand(gatewayWAFRulesCmd, gatewayWAFUpdateCmd, gatewayWAFStatusCmd, gatewayWAFRollbackCmd, gatewayWAFTestCmd, gatewayWAFExportCmd)
 	gatewayCmd.AddCommand(gatewayBanCmd, gatewayWAFCmd)
 }
