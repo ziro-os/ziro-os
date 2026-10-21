@@ -288,7 +288,7 @@ func TestWAFNormalizeAndPrefilter(t *testing.T) {
 	// The prefilter agrees with strings.Contains on random text.
 	e := wafEng()
 	var naive []acNeedle
-	for i, d := range wafCatalog {
+	for i, d := range wafBuiltinPack().Rules {
 		for _, n := range d.Needles {
 			naive = append(naive, acNeedle{n, i})
 		}
@@ -304,14 +304,14 @@ func TestWAFNormalizeAndPrefilter(t *testing.T) {
 			n := naive[rng.IntN(len(naive))]
 			b = append(b, n.text...)
 		}
-		var want uint64
+		var want wafBits
 		for _, n := range naive {
 			if strings.Contains(string(b), n.text) {
-				want |= 1 << uint(n.rule)
+				want.set(n.rule)
 			}
 		}
 		if got := acScan(e.ac, b); got != want {
-			t.Fatalf("prefilter disagrees on %q: got %b want %b", b, got, want)
+			t.Fatalf("prefilter disagrees on %q: got %v want %v", b, got, want)
 		}
 	}
 }
@@ -329,7 +329,7 @@ func TestWAFCatalogIntegrity(t *testing.T) {
 		if r.Level < 1 || r.Level > 3 || r.Score < 2 || r.Score > 5 || r.Msg == "" {
 			t.Errorf("%s: level %d score %d msg %q", r.ID, r.Level, r.Score, r.Msg)
 		}
-		if (r.re == nil) != (r.Targets == 0) {
+		if (r.re == nil) != (r.mask == 0) {
 			t.Errorf("%s: a rule is implemented either as a regex on request parts or in code", r.ID)
 		}
 		for _, n := range r.Needles {
@@ -338,18 +338,18 @@ func TestWAFCatalogIntegrity(t *testing.T) {
 			}
 		}
 	}
-	if !sort.StringsAreSorted(ids[:0]) || len(ids) > 64 {
+	if !sort.StringsAreSorted(ids[:0]) || len(ids) > wafMaxRules {
 		t.Error("catalog size")
 	}
 	// Every rule's own needles can reach it: the prefilter must report each needle's rule.
 	for i, r := range e.rules {
 		for _, n := range r.Needles {
-			if acScan(e.ac, []byte(n))&(1<<uint(i)) == 0 {
+			if h := acScan(e.ac, []byte(n)); !h.has(i) {
 				t.Errorf("%s: needle %q does not trigger its rule", r.ID, n)
 			}
 		}
 	}
-	if got := len(wafRuleCatalog()); got != len(wafCatalog) {
+	if got := len(wafRuleCatalog()); got != len(wafBuiltinPack().Rules) {
 		t.Errorf("rule listing has %d rules", got)
 	}
 }

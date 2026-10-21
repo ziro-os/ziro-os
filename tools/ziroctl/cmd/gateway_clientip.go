@@ -118,13 +118,15 @@ type gwSettings struct {
 	manual     *cidrSet   // manual bans in force
 	waf        *wafPolicy // default firewall of routes without their own
 	autoBan    *gwAutoBan // nil: clients are never banned automatically
+	wafAuto    bool       // fetch new WAF rules daily
+	wafEpoch   int64      // changes when a cluster master asks every node to fetch WAF rules now
 }
 
 func newGWSettings(s GatewaySettings) (*gwSettings, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
-	out := &gwSettings{proxyProto: s.ProxyProtocol, drain: s.Drain(), autoBan: newAutoBan(s.AutoBan)}
+	out := &gwSettings{proxyProto: s.ProxyProtocol, drain: s.Drain(), autoBan: newAutoBan(s.AutoBan), wafAuto: s.AutoUpdateWAF(), wafEpoch: s.WAFPackEpoch}
 	for _, c := range s.TrustedProxies {
 		p, _ := schema.ParseProxyPrefix(c)
 		out.trusted = append(out.trusted, p)

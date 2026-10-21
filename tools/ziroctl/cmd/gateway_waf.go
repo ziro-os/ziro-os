@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"math"
 	"math/bits"
 	"net/http"
 	"net/url"
@@ -214,8 +216,9 @@ func normalizeStr(s *wafScratch, dst []byte, src string, form bool) []byte {
 type acMachine struct {
 	class [256]uint8
 	k     int
-	next  []uint16 // state*k + class -> state
-	out   []uint64 // rules whose literal ends at the state, including via failure links
+	next  []uint16  // state*k + class -> state
+	out   []uint16  // state -> index into sets: the rules whose literal ends at the state, including via failure links
+	sets  []wafBits // distinct rule sets; sets[0] is empty
 }
 
 type acNeedle struct {
@@ -223,7 +226,7 @@ type acNeedle struct {
 	rule int
 }
 
-func buildAC(needles []acNeedle) *acMachine {
+func buildAC(needles []acNeedle) (*acMachine, error) {
 	m := &acMachine{}
 	for _, n := range needles {
 		for i := 0; i < len(n.text); i++ {
@@ -235,21 +238,24 @@ func buildAC(needles []acNeedle) *acMachine {
 	}
 	m.k++ // class 0: any other byte
 	child := [][]int32{make([]int32, m.k)}
-	out := []uint64{0}
+	out := []wafBits{{}}
 	for _, n := range needles {
 		s := int32(0)
 		for i := 0; i < len(n.text); i++ {
 			c := m.class[n.text[i]]
 			if child[s][c] == 0 {
 				child = append(child, make([]int32, m.k))
-				out = append(out, 0)
+				out = append(out, wafBits{})
 				child[s][c] = int32(len(child) - 1)
 			}
 			s = child[s][c]
 		}
-		out[s] |= 1 << uint(n.rule)
+		out[s].set(n.rule)
 	}
 	states := len(child)
+	if states > math.MaxUint16 {
+		return nil, fmt.Errorf("literal prefilter needs %d states (limit %d)", states, math.MaxUint16)
+	}
 	m.next = make([]uint16, states*m.k)
 	fail := make([]int32, states)
 	queue := make([]int32, 0, states)
@@ -262,7 +268,7 @@ func buildAC(needles []acNeedle) *acMachine {
 	for len(queue) > 0 {
 		s := queue[0]
 		queue = queue[1:]
-		out[s] |= out[fail[s]]
+		out[s].or(&out[fail[s]])
 		for c := 0; c < m.k; c++ {
 			t := child[s][c]
 			if t == 0 {
@@ -274,38 +280,32 @@ func buildAC(needles []acNeedle) *acMachine {
 			queue = append(queue, t)
 		}
 	}
-	m.out = out
-	return m
+	// Most states report nothing and many report the same set: keep each distinct set once.
+	m.sets = []wafBits{{}}
+	ids := map[wafBits]uint16{{}: 0}
+	m.out = make([]uint16, states)
+	for s := range out {
+		id, ok := ids[out[s]]
+		if !ok {
+			id = uint16(len(m.sets))
+			ids[out[s]] = id
+			m.sets = append(m.sets, out[s])
+		}
+		m.out[s] = id
+	}
+	return m, nil
 }
 
-func acScan[T string | []byte](m *acMachine, s T) uint64 {
-	var hit uint64
+func acScan[T string | []byte](m *acMachine, s T) (hit wafBits) {
 	state := 0
 	for i := 0; i < len(s); i++ {
 		state = int(m.next[state*m.k+int(m.class[s[i]])])
-		hit |= m.out[state]
+		if o := m.out[state]; o != 0 {
+			hit.or(&m.sets[o])
+		}
 	}
 	return hit
 }
-
-// ---- the compiled catalog ----
-
-type wafCompiledRule struct {
-	wafRuleDef
-	re *regexp.Regexp
-	fn func([]byte) bool // a hand-written matcher equivalent to re, for the rules that run most often
-}
-
-func (r *wafCompiledRule) matches(b []byte) bool {
-	if r.fn != nil {
-		return r.fn(b)
-	}
-	return r.re.Match(b)
-}
-
-// wafMatchers replace the regular expression of a rule where profiling showed it dominating. The
-// expression stays in the catalog as the definition; a test checks the two agree.
-var wafMatchers = map[string]func([]byte) bool{"ZW-932100": matchShellInjection}
 
 var shellCommands = func() map[string]bool {
 	m := map[string]bool{}
@@ -356,63 +356,6 @@ func matchShellInjection(b []byte) bool {
 	return false
 }
 
-type wafEngine struct {
-	rules    []wafCompiledRule
-	ac       *acMachine
-	byTarget [numWAFTargets]uint64 // rules that apply to each request part
-	groups   [numWAFGroups]uint64
-	index    map[string]int
-	// indexes of the protocol rules
-	iMethod, iTrace, iHeaders, iURI, iNUL, iRange, iProxy int
-}
-
-var wafEng = sync.OnceValue(func() *wafEngine {
-	e := &wafEngine{index: map[string]int{}}
-	var needles []acNeedle
-	for i, d := range wafCatalog {
-		if i >= 64 {
-			panic("WAF catalog exceeds 64 rules")
-		}
-		cr := wafCompiledRule{wafRuleDef: d}
-		if d.Re != "" {
-			cr.re = regexp.MustCompile(d.Re)
-			cr.fn = wafMatchers[d.ID]
-			if len(d.Needles) == 0 {
-				panic("WAF rule " + d.ID + " has no literals")
-			}
-		}
-		for _, n := range d.Needles {
-			needles = append(needles, acNeedle{n, i})
-		}
-		e.rules = append(e.rules, cr)
-		e.index[d.ID] = i
-		e.groups[d.Group] |= 1 << uint(i)
-		for t := 0; t < numWAFTargets; t++ {
-			if d.Targets&(1<<uint(t)) != 0 {
-				e.byTarget[t] |= 1 << uint(i)
-			}
-		}
-	}
-	e.ac = buildAC(needles)
-	e.iMethod, e.iTrace, e.iHeaders = e.index["ZW-920100"], e.index["ZW-920110"], e.index["ZW-920120"]
-	e.iURI, e.iNUL, e.iRange, e.iProxy = e.index["ZW-920130"], e.index["ZW-920170"], e.index["ZW-920190"], e.index["ZW-920200"]
-	return e
-})
-
-// wafKnownExclusion reports whether an exclusion names a real rule or group.
-func wafKnownExclusion(ex string) bool {
-	e := wafEng()
-	if _, ok := e.index[ex]; ok {
-		return true
-	}
-	for _, g := range wafGroupNames {
-		if g == ex {
-			return true
-		}
-	}
-	return false
-}
-
 // ---- policy ----
 
 type wafAction uint8
@@ -427,7 +370,7 @@ const (
 type wafPolicy struct {
 	block     bool // block mode (else detect)
 	threshold int
-	enabled   uint64
+	enabled   wafBits
 	bodyCap   int
 	skipBody  bool
 	custom    []wafCustom
@@ -435,14 +378,16 @@ type wafPolicy struct {
 }
 
 // newWAFPolicy compiles a configuration; it returns nil when the WAF is off.
-func newWAFPolicy(w *GatewayWAF) (*wafPolicy, error) {
+func newWAFPolicy(w *GatewayWAF) (*wafPolicy, error) { return newWAFPolicyFor(wafEng(), w) }
+
+// newWAFPolicyFor compiles a configuration against a given engine.
+func newWAFPolicyFor(e *wafEngine, w *GatewayWAF) (*wafPolicy, error) {
 	if w == nil || w.Mode == "off" {
 		return nil, nil
 	}
 	if err := w.Validate(); err != nil {
 		return nil, err
 	}
-	e := wafEng()
 	p := &wafPolicy{block: w.Mode == "block", threshold: w.Threshold, bodyCap: w.InspectBodyKB << 10, skipBody: w.SkipBody, eng: e}
 	if p.threshold == 0 {
 		p.threshold = 5
@@ -456,18 +401,17 @@ func newWAFPolicy(w *GatewayWAF) (*wafPolicy, error) {
 	}
 	for i, r := range e.rules {
 		if r.Level <= level {
-			p.enabled |= 1 << uint(i)
+			p.enabled.set(i)
 		}
 	}
+	p.enabled.andNot(&e.off)
 	for _, ex := range w.Exclude {
 		if i, ok := e.index[ex]; ok {
-			p.enabled &^= 1 << uint(i)
+			p.enabled.clear(i)
 			continue
 		}
-		for g, name := range wafGroupNames {
-			if name == ex {
-				p.enabled &^= e.groups[g]
-			}
+		if g, ok := groupIndex(ex); ok {
+			p.enabled.andNot(&e.groups[g])
 		}
 	}
 	for _, r := range w.Rules {
@@ -708,27 +652,30 @@ func (p *wafPolicy) inspect(req *http.Request, ip string, body []byte, formBody 
 
 	sc := wafScratchPool.Get().(*wafScratch)
 	defer sc.release()
-	var hit uint64 // catalog rules that already matched
+	var hit wafBits // catalog rules that already matched
 	add := func(i int) {
-		hit |= 1 << uint(i)
+		hit.set(i)
 		r := &e.rules[i]
-		v.add(r.ID, r.Score, r.Group)
+		v.add(r.ID, r.score, r.group)
 	}
 	// scan checks one normalized part: the rules whose literals occur get their expressions run.
 	scan := func(target int, buf []byte) {
 		if len(buf) == 0 {
 			return
 		}
-		cand := acScan(e.ac, buf) & p.enabled & e.byTarget[target] &^ hit
-		for cand != 0 {
-			i := bits.TrailingZeros64(cand)
-			cand &= cand - 1
-			if e.rules[i].matches(buf) {
-				add(i)
+		cand := acScan(e.ac, buf)
+		for w := range cand {
+			x := cand[w] & p.enabled[w] & e.byTarget[target][w] &^ hit[w]
+			for x != 0 {
+				i := w<<6 + bits.TrailingZeros64(x)
+				x &= x - 1
+				if e.rules[i].matches(buf) {
+					add(i)
+				}
 			}
 		}
 	}
-	on := func(i int) bool { return p.enabled&(1<<uint(i)) != 0 }
+	on := func(i int) bool { return p.enabled.has(i) }
 
 	// Protocol checks.
 	switch req.Method {
@@ -831,25 +778,32 @@ func (p *wafPolicy) inspect(req *http.Request, ip string, body []byte, formBody 
 		scan(4, sc.body)
 	}
 
-	if sc.nul && on(e.iNUL) && hit&(1<<uint(e.iNUL)) == 0 {
+	if sc.nul && on(e.iNUL) && !hit.has(e.iNUL) {
 		add(e.iNUL)
 	}
 	return v
 }
 
-// describeWAFRules lists the catalog (for the CLI and the API).
+// wafRuleInfo describes one rule for the CLI and the API.
 type wafRuleInfo struct {
 	ID    string `json:"id"`
 	Group string `json:"group"`
 	Level int    `json:"level"`
 	Score int    `json:"score"`
 	Msg   string `json:"message"`
+	Stage string `json:"stage"`
 }
 
+// wafRuleCatalog lists the rules of the engine in use.
 func wafRuleCatalog() []wafRuleInfo {
-	out := make([]wafRuleInfo, 0, len(wafCatalog))
-	for _, d := range wafCatalog {
-		out = append(out, wafRuleInfo{d.ID, wafGroupNames[d.Group], d.Level, d.Score, d.Msg})
+	e := wafEng()
+	out := make([]wafRuleInfo, 0, len(e.rules))
+	for _, r := range e.rules {
+		stage := r.Stage
+		if stage == "" {
+			stage = wafStageBlock
+		}
+		out = append(out, wafRuleInfo{r.ID, r.Group, r.Level, r.Score, r.Msg, stage})
 	}
 	return out
 }

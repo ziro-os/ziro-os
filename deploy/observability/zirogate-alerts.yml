@@ -85,3 +85,17 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Access log lines are being dropped because the log disk is too slow"
+
+      - alert: ZirogateWAFRulesExpiring
+        expr: zirogate_waf_pack_expiry_seconds{} > 0 and zirogate_waf_pack_expiry_seconds < 7 * 24 * 3600
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: The signed WAF rules expire in under 7 days; run ziroctl gateway waf update
+
+      - alert: ZirogateWAFRulesNotUpdating
+        expr: increase(zirogate_waf_pack_update_total{result=~"error|load_error"}[1d]) > 3 and increase(zirogate_waf_pack_update_total{result="ok"}[1d]) == 0
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: The gateway could not fetch or load new WAF rules several times in a day

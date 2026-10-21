@@ -260,6 +260,14 @@ Rules, enforced when a manifest is loaded (`module validate`, catalog CI, `go te
 - **Failures:** a failed enable leaves status `failed` with the error, and raises a `module` alert. Running
   `enable` again resumes.
 
+### Catalog kinds
+
+`module` catalogs hold modules, `app` catalogs hold apps and stacks. A third kind, `waf`, holds WAF rule packs
+(`waf/<name>/rules.json`). There is one official `waf` catalog, `ziro-waf`, published at
+`https://ziro-os.github.io/pkgs/waf` and signed with the pkgs key. It is refreshed with
+`ziroctl gateway waf update`, not by `module update`, and a third-party catalog cannot be of this kind. See
+[gateway](gateway.md#updating-the-rules).
+
 ### Running your own catalog
 
 A catalog is any HTTPS static host (GitHub Pages works). Lay out `modules/<name>/manifest.json`, then in CI:

@@ -183,7 +183,18 @@ type GatewaySettings struct {
 	Bans []GatewayBan `json:"bans,omitempty"`
 	// AutoBan bans clients that keep getting blocked by the WAF or failing basic auth.
 	AutoBan *GatewayAutoBan `json:"auto_ban,omitempty"`
+
+	// WAFAutoUpdate fetches new WAF rules from the signed rules catalog about once a day (default
+	// true). Without it, rules change only when an administrator runs `ziroctl gateway waf update`.
+	WAFAutoUpdate *bool `json:"waf_auto_update,omitempty"`
+	// WAFPackEpoch is set by `ziroctl gateway waf update` on a cluster master. A gateway node that
+	// sees it change fetches the rules at once. Rule content never travels in the configuration:
+	// every node downloads and verifies the signed pack itself.
+	WAFPackEpoch int64 `json:"waf_pack_epoch,omitempty"`
 }
+
+// AutoUpdateWAF reports whether the gateway keeps its WAF rules up to date by itself.
+func (s GatewaySettings) AutoUpdateWAF() bool { return s.WAFAutoUpdate == nil || *s.WAFAutoUpdate }
 
 const (
 	GatewayDefaultDrainSeconds = 25

@@ -501,7 +501,7 @@ paths:
     put:
       x-ziro-role: admin
       tags: [gateway]
-      summary: 'Replace the gateway-wide settings: trusted_proxies and proxy_protocol (only a trusted proxy may name the real client), drain_seconds, waf (the default firewall), deny_cidrs, bans and auto_ban ({"trusted_proxies": ["10.0.0.0/8"], "waf": {"mode": "detect"}, "auto_ban": {"strikes": 5}})'
+      summary: 'Replace the gateway-wide settings: trusted_proxies and proxy_protocol (only a trusted proxy may name the real client), drain_seconds, waf (the default firewall), waf_auto_update, deny_cidrs, bans and auto_ban ({"trusted_proxies": ["10.0.0.0/8"], "waf": {"mode": "detect"}, "auto_ban": {"strikes": 5}})'
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
@@ -509,7 +509,28 @@ paths:
     get:
       x-ziro-role: viewer
       tags: [gateway]
-      summary: The built-in WAF rules, with their group, level and score
+      summary: The WAF rules in use, with their group, level, score and stage
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/gateway/waf/pack:
+    get:
+      x-ziro-role: viewer
+      tags: [gateway]
+      summary: The installed WAF rule pack, its signed index serial and expiry, staged rules and whether a rollback is possible
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/gateway/waf/update:
+    post:
+      x-ziro-role: admin
+      tags: [gateway]
+      summary: Fetch the newest signed WAF rule pack and install it; gateways switch within a second, and on a cluster master every node fetches it
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/gateway/waf/rollback:
+    post:
+      x-ziro-role: admin
+      tags: [gateway]
+      summary: Return to the WAF rule pack used before the last update
       responses:
         "200": { $ref: "#/components/responses/Object" }
   /api/v1/gateway/bans:

@@ -561,6 +561,9 @@ func (g *gatewayServer) load(cfg *GatewayConfig) error {
 		seenNames[rs.Name] = true
 		fpb, _ := json.Marshal(rs)
 		fp := string(fpb)
+		if rs.WAF != nil {
+			fp += "|waf:" + wafEng().pack.Digest // a new rule pack rebuilds the routes that use it, and only those
+		}
 		prev := oldByName[rs.Name]
 		r := prev
 		if prev == nil || prev.fp != fp {
