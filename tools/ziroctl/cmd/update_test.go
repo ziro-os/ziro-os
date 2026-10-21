@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -405,5 +406,31 @@ func TestMOTDShowsOSAndToolsVersions(t *testing.T) {
 	renderMOTD(&buf, HostSummary{Version: "1.0.21", OSVersion: "1.0.21", Hostname: "h", Mode: "installed"}, termStyle{})
 	if strings.Contains(buf.String(), "Tools") {
 		t.Errorf("tools row shown when they match the OS:\n%s", buf.String())
+	}
+}
+
+// Update restarts the running services that execute a tools binary, directly or through a
+// symlink (ziro-sandboxd -> ziroctl), and nothing else.
+func TestDaemonsOnTools(t *testing.T) {
+	dir := t.TempDir()
+	old := toolsBinDir
+	toolsBinDir = dir
+	defer func() { toolsBinDir = old }()
+	os.WriteFile(filepath.Join(dir, "ziroctl"), []byte("x"), 0755)
+	os.WriteFile(filepath.Join(dir, "containerd"), []byte("x"), 0755)
+	os.Symlink(filepath.Join(dir, "ziroctl"), filepath.Join(dir, "ziro-sandboxd"))
+	execs := map[string]string{"ziro-api": filepath.Join(dir, "ziroctl"), "ziro-sandboxd": filepath.Join(dir, "ziro-sandboxd"),
+		"containerd": filepath.Join(dir, "containerd"), "dns-sync": filepath.Join(dir, "ziroctl"), "gone": filepath.Join(dir, "nope")}
+	got := daemonsOnTools([]ServiceStatusInfo{{Name: "ziro-api", Status: "RUNNING"}, {Name: "ziro-sandboxd", Status: "RUNNING"},
+		{Name: "containerd", Status: "RUNNING"}, {Name: "dns-sync", Status: "STOPPED"}, {Name: "gone", Status: "RUNNING"}},
+		func(n string) string { return execs[n] })
+	if strings.Join(got, ",") != "ziro-api,ziro-sandboxd" {
+		t.Errorf("restart %v", got)
+	}
+	known := knownServiceNames()
+	for _, want := range []string{"ziro-api", "ziro-sandboxd", "dns-sync", "cluster-master"} {
+		if !slices.Contains(known, want) {
+			t.Errorf("%s isn't a known service: %v", want, known)
+		}
 	}
 }

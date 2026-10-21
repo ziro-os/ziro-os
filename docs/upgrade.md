@@ -99,6 +99,11 @@ or kernel. `ziroctl upgrade` keeps reporting the last OS release (`x.y.z`); `zir
 `ziroctl version` shows both (`ziroctl version 1.0.25.2 (os 1.0.21, linux/amd64)`), and `ziroctl upgrade` keeps tools
 that are newer than the image's.
 
+After installing, `ziroctl update` (and `--rollback`) restarts every running service whose program is one of the tools
+binaries, directly or through a symlink: the API, the gateway, the cluster agent and master, and module daemons such as
+`ziro-sandboxd`. A daemon left on the old binary would keep running the old code and answer new requests with 404.
+Restarting `ziro-sandboxd` leaves the sandboxes running; exec streams and SSH sessions open at that moment are cut.
+
 `ziroctl update` only moves forward: `--version` with an older version is refused unless you add
 `--allow-downgrade`, and a binary that does not report the release's version when run is never installed.
 ## Rollback

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -136,6 +137,32 @@ func TestSandboxClusterForwarding(t *testing.T) {
 	}
 	if w := do(other, "GET", "/api/v1/sandboxes", ""); strings.TrimSpace(w.Body.String()) != "[]" {
 		t.Errorf("other's list: %s", w.Body)
+	}
+	// The host CLI on the master sees the whole cluster, as root (no local daemon involved).
+	var cliList []sdkapi.Sandbox
+	if err := sandboxCall("GET", "/v1/sandboxes", nil, &cliList); err != nil || len(cliList) != 2 {
+		t.Errorf("CLI list on the master: %v %d", err, len(cliList))
+	}
+	var cliOne sdkapi.Sandbox
+	if err := sandboxCall("GET", "/v1/sandboxes/"+sb.ID, nil, &cliOne); err != nil || cliOne.ID != sb.ID {
+		t.Errorf("CLI get of n2's sandbox: %v", err)
+	}
+	// Files both ways through the master (sandbox cp).
+	resp, err := sandboxStream(http.MethodPut, "/v1/sandboxes/"+sb.ID+"/files?path=%2Fworkspace%2Fu", io.MultiReader(strings.NewReader("up-via-cp"))) // length unknown, like a file
+	if err == nil {
+		err = daemonDecode("ziro-sandboxd", resp, nil)
+	}
+	if err != nil {
+		t.Fatalf("CLI upload: %v", err)
+	}
+	resp, err = sandboxStream(http.MethodGet, "/v1/sandboxes/"+sb.ID+"/files?path=%2Fworkspace%2Fu", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(got) != "up-via-cp" || !strings.HasPrefix(resp.Header.Get("Content-Type"), "application/octet-stream") {
+		t.Errorf("CLI download: %d %q %v", resp.StatusCode, got, resp.Header)
 	}
 	// Filters apply to the merged list.
 	if w := do(agent, "GET", "/api/v1/sandboxes?state=running", ""); json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list) != 2 {

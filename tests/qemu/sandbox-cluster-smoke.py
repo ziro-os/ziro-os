@@ -81,6 +81,20 @@ def main():
         rc, out = m.run(f"{api}/{remote}/exec -d '{{\"command\":[\"sh\",\"-c\",\"echo on-$(hostname)-$((6*7))\"]}}'", timeout=120)
         check("exec through the master runs on the worker", "on-sandbox-42" in out and '"exit_code":0' in out, out)
 
+        # The host CLI on the master works on the worker's sandbox like on a local one.
+        rc, out = m.run(f"ziroctl sandbox ls --json | grep -c '{remote}'; "
+                        f"ziroctl sandbox exec {remote} -- sh -c 'echo cli-$((6*7)) > /workspace/f; cat /workspace/f'; "
+                        f"echo up-via-cp > /tmp/u && ziroctl sandbox cp /tmp/u {remote}:/workspace/u && ziroctl sandbox cp {remote}:/workspace/u - 2>&1; "
+                        f"ziroctl sandbox stats {remote} --json | grep -o '\"memory_bytes\": [0-9]*'", timeout=180)
+        check("master CLI: ls, exec, cp and stats on the worker's sandbox",
+              out.split()[0] == "1" and "cli-42" in out and "up-via-cp" in out and re.search(r'"memory_bytes": [1-9]', out), out)
+        rc, out = m.run(f"ziroctl sandbox pause {remote} >/dev/null && sleep 20 && echo PAUSED=$(ziroctl sandbox get {remote} --json | grep -c '\"state\": \"paused\"'); "
+                        f"ziroctl sandbox resume {remote} && ziroctl sandbox exec {remote} -- echo RESUMED", timeout=120)
+        check("master CLI: a paused sandbox on the worker stays paused past a reaper pass, and resumes", "RESUMED" in out and "PAUSED=1" in out, out)
+        rc, out = m.run(f"img=$(ziroctl sandbox snapshot create {remote} snapw) && f=$(ziroctl sandbox create $img 2>/dev/null | head -1) && "
+                        "ziroctl sandbox exec $f -- cat /workspace/f /workspace/u && ziroctl sandbox rm $f >/dev/null && ziroctl sandbox snapshot rm $img && echo SNAP_DONE", timeout=600)
+        check("master CLI: a snapshot of the worker's sandbox carries /workspace into a new sandbox", "cli-42" in out and "up-via-cp" in out and "SNAP_DONE" in out, out)
+
         # One SSH address: the master's gateway relays a token for the worker's sandbox.
         rc, out = m.run(f"{api}/{remote}/access -d '{{\"ttl\":\"5m\"}}' > /tmp/acc; "
                         "U=$(grep -o 'zsbx_[a-z2-7]*' /tmp/acc | head -1); "
