@@ -294,4 +294,6 @@ type SandboxSnapshot struct {
 	// WorkspaceSize is the compressed size of the /workspace archive kept with the image (0 for
 	// snapshots taken before workspaces were kept).
 	WorkspaceSize int64 `json:"workspace_size,omitempty"`
+	// Nodes is how many cluster nodes hold a copy (lists from a cluster master).
+	Nodes int `json:"nodes,omitempty"`
 }

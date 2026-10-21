@@ -147,6 +147,9 @@ type ClusterState struct {
 	History    map[string][]ClusteredApp   `json:"history,omitempty"`   // previous specs, newest last
 	NodeTokens map[string]string           `json:"node_tokens"`         // node id -> sha256(node token)
 	Sandboxes  map[string]SandboxPlacement `json:"sandboxes,omitempty"` // sandbox id -> where it runs (sandbox_cluster.go)
+	// SnapshotTombstones are snapshots deleted through the master (image -> when), so a copy that
+	// was in flight is removed instead of replicated back (sandbox_snapshot_sync.go).
+	SnapshotTombstones map[string]time.Time `json:"snapshot_tombstones,omitempty"`
 	// PolicyDefault is "deny" (mesh traffic to app ports needs an allow_from rule) or
 	// "allow"/"" (clusters created before policies existed keep working unchanged).
 	PolicyDefault string         `json:"policy_default,omitempty"`

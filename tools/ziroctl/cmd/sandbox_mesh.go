@@ -142,6 +142,10 @@ func (m *sandboxManager) meshHandler() http.Handler {
 	mux.HandleFunc("GET /v1/pools", func(w http.ResponseWriter, r *http.Request) {
 		apiReply(w, nil, m.warmPools())
 	})
+	// Snapshot replication (sandbox_snapshot_sync.go): the master streams one node's export into
+	// another's import.
+	mux.HandleFunc("GET /v1/snapshots/export", m.exportSnapshot)
+	mux.HandleFunc("PUT /v1/snapshots/import", m.importSnapshot)
 	mux.Handle("/", api)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !m.meshAuthorized(r) {

@@ -338,11 +338,17 @@ as one sandbox platform. Clients, agents and the MCP server talk to the master's
 
 - **Placement.** A create through the master's API runs on a ready, schedulable node that has the module (not
   cordoned, not labelled `runner=false`). It picks the node with the fewest sandboxes, then the one with the most
-  memory. A sandbox started from a snapshot runs on the node that holds the snapshot.
+  memory. A sandbox started from a snapshot runs on one of the nodes that hold a copy.
 - **Warm pools.** Each node keeps its own pools (`pools` in its `/etc/ziro/sandbox.json`). For a create that a pool
   can serve (a template, plus at most `timeout`, `idle_timeout` and `metadata`), the master first asks the nodes
   which have a warm sandbox of that template. It sends the create to one of those, so the sandbox is resumed in
   milliseconds. When no node has one, placement works as above and the sandbox starts cold.
+- **Replicated snapshots.** The cluster leader copies every snapshot (the image and its `/workspace` archive) to
+  every sandbox node of the same architecture, within a minute of it being taken and on nodes that join later.
+  Copies stream from node to node over the mesh, so the master holds nothing in memory. Each node checks that an
+  incoming image carries exactly one name, a snapshot's, before loading it. A snapshot then outlives the node that
+  took it, and `snapshot ls` on the master shows how many nodes hold it. Deleting a snapshot removes every copy, and a
+  copy still in flight at that moment is removed by the next pass instead of spreading again.
 - **Forwarding.** Every request about a sandbox goes to the node that runs it, with the caller's identity, so
   ownership, quotas and audit work as on one host. Lists are merged from all nodes. Each node serves its sandbox API
   only on its mesh address (port 7446, WireGuard), behind a cluster token.

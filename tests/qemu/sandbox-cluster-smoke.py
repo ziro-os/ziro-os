@@ -95,6 +95,17 @@ def main():
                         "ziroctl sandbox exec $f -- cat /workspace/f /workspace/u && ziroctl sandbox rm $f >/dev/null && ziroctl sandbox snapshot rm $img && echo SNAP_DONE", timeout=600)
         check("master CLI: a snapshot of the worker's sandbox carries /workspace into a new sandbox", "cli-42" in out and "up-via-cp" in out and "SNAP_DONE" in out, out)
 
+        # Replicated snapshots: one taken on the worker reaches the master's node too, and a delete removes both.
+        rc, out = m.run(f"ziroctl sandbox snapshot create {remote} repl", timeout=600)
+        img = (re.search(r"ziro\.local/sandbox/\S+", out) or [None])[0] if out else None
+        ok, out = bs.retry(m, "nerdctl images --format '{{.Repository}}:{{.Tag}}' | grep -c 'sandbox/.*/repl:'",
+                           lambda rc, o: o.strip().endswith("1"), 180, every=10)
+        rc, ls = m.run("ziroctl sandbox snapshot ls --json | grep -o '\"nodes\": [0-9]*' | head -1", timeout=60)
+        check("a snapshot on the worker is replicated to the master's node", bool(img) and ok and '"nodes": 2' in ls, out + ls)
+        rc, out = m.run(f"ziroctl sandbox snapshot rm {img}; sleep 75; nerdctl images | grep -c '/repl ' ; true", timeout=200)
+        rc, wout = w.run("nerdctl images | grep -c '/repl ' ; true", timeout=30)
+        check("deleting it removes every copy, and it doesn't come back", out.strip().endswith("0") and wout.strip().endswith("0"), out + wout)
+
         # One SSH address: the master's gateway relays a token for the worker's sandbox.
         rc, out = m.run(f"{api}/{remote}/access -d '{{\"ttl\":\"5m\"}}' > /tmp/acc; "
                         "U=$(grep -o 'zsbx_[a-z2-7]*' /tmp/acc | head -1); "
