@@ -30,7 +30,10 @@ type apiRoute struct {
 	Handler http.HandlerFunc
 }
 
-type apiRouter struct{ routes []apiRoute }
+type apiRouter struct {
+	routes []apiRoute
+	self   http.Handler // the API handler built from routes (newAPIHandler), for routes that call it in process
+}
 
 func (a *apiRouter) handle(method, path, role string, h http.HandlerFunc) {
 	if apiRoleRank[role] == 0 && role != "public" {
@@ -297,7 +300,7 @@ func newAPIHandler(a *apiRouter, c apiServerConfig) http.Handler {
 		}
 		apiError(w, http.StatusNotFound, "no such route")
 	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
@@ -310,6 +313,8 @@ func newAPIHandler(a *apiRouter, c apiServerConfig) http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+	a.self = handler
+	return handler
 }
 
 // pathMatches matches a ServeMux pattern path ({x} = one segment, {x...} = the rest).
