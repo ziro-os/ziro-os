@@ -339,6 +339,10 @@ as one sandbox platform. Clients, agents and the MCP server talk to the master's
 - **Placement.** A create through the master's API runs on a ready, schedulable node that has the module (not
   cordoned, not labelled `runner=false`). It picks the node with the fewest sandboxes, then the one with the most
   memory. A sandbox started from a snapshot runs on the node that holds the snapshot.
+- **Warm pools.** Each node keeps its own pools (`pools` in its `/etc/ziro/sandbox.json`). For a create that a pool
+  can serve (a template, plus at most `timeout`, `idle_timeout` and `metadata`), the master first asks the nodes
+  which have a warm sandbox of that template. It sends the create to one of those, so the sandbox is resumed in
+  milliseconds. When no node has one, placement works as above and the sandbox starts cold.
 - **Forwarding.** Every request about a sandbox goes to the node that runs it, with the caller's identity, so
   ownership, quotas and audit work as on one host. Lists are merged from all nodes. Each node serves its sandbox API
   only on its mesh address (port 7446, WireGuard), behind a cluster token.

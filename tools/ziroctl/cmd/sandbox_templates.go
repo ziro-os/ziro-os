@@ -159,6 +159,19 @@ func poolClaimable(req schema.SandboxSpec) bool {
 	return req.Template != "" && fmt.Sprint(r) == fmt.Sprint(schema.SandboxSpec{})
 }
 
+// warmPools counts the paused (claimable) pool sandboxes per template.
+func (m *sandboxManager) warmPools() map[string]int {
+	m.st.mu.Lock()
+	defer m.st.mu.Unlock()
+	out := map[string]int{}
+	for _, sb := range m.st.all {
+		if t, ok := strings.CutPrefix(sb.Owner, poolOwnerPrefix); ok && sb.State == "paused" {
+			out[t]++
+		}
+	}
+	return out
+}
+
 // claim hands a paused pool sandbox of the template to the caller, or returns false.
 func (m *sandboxManager) claim(ctx context.Context, req schema.SandboxSpec, c sandboxCaller, cfg sandboxConfig) (sdkapi.Sandbox, bool) {
 	if !poolClaimable(req) || cfg.Pools[req.Template] == 0 {

@@ -138,6 +138,10 @@ func (m *sandboxManager) meshHandler() http.Handler {
 		}
 		apiReply(w, nil, map[string]any{"key": string(ssh.MarshalAuthorizedKey(m.ssh.signer().PublicKey())), "port": m.ssh.port})
 	})
+	// The master asks which nodes have warm pool sandboxes before placing a template create.
+	mux.HandleFunc("GET /v1/pools", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, m.warmPools())
+	})
 	mux.Handle("/", api)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !m.meshAuthorized(r) {

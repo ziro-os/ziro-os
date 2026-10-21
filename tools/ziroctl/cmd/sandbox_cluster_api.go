@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
@@ -154,8 +156,13 @@ func (v *sandboxClusterView) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var only map[string]bool
-	if strings.HasPrefix(spec.Image, snapshotRepo) { // a snapshot lives on the node it was taken on
+	switch {
+	case strings.HasPrefix(spec.Image, snapshotRepo): // a snapshot lives on the node it was taken on
 		only = v.nodesWithSnapshot(r, spec.Image)
+	case poolClaimable(spec): // a node with a warm sandbox of the template resumes one instead of starting one
+		if warm := v.nodesWithWarm(r, spec.Template); len(warm) > 0 {
+			only = warm
+		}
 	}
 	n := pickSandboxNode(v.st, only)
 	if n == nil {
@@ -183,6 +190,32 @@ func (v *sandboxClusterView) create(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write(out)
+}
+
+// nodesWithWarm asks every sandbox node, in parallel and briefly, for its warm pools and returns
+// the nodes with a paused sandbox of the template.
+func (v *sandboxClusterView) nodesWithWarm(r *http.Request, template string) map[string]bool {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	rq := r.WithContext(ctx)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	warm := map[string]bool{}
+	for _, n := range v.sandboxNodes() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code, out, err := v.call(rq, n, http.MethodGet, "/v1/pools", nil)
+			var pools map[string]int
+			if err == nil && code == http.StatusOK && json.Unmarshal(out, &pools) == nil && pools[template] > 0 {
+				mu.Lock()
+				warm[n.ID] = true
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return warm
 }
 
 func (v *sandboxClusterView) nodesWithSnapshot(r *http.Request, image string) map[string]bool {
