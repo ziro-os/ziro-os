@@ -1584,8 +1584,9 @@ components:
       properties:
         image: { type: string, description: "ziro.local/sandbox/<owner>/<name>:<unix time>" }
         sandbox: { type: string }
-        size: { type: string }
+        size: { type: string, description: "the image's size" }
         created: { type: string, format: date-time }
+        workspace_size: { type: integer, format: int64, description: "bytes of the /workspace archive kept with the image" }
     SandboxAccess:
       type: object
       properties:
