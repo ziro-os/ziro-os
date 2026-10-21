@@ -105,6 +105,9 @@ type Assignment struct {
 	ImageFrom string            `json:"image_from,omitempty"` // mesh address serving a ziro.local image
 	Resources *Resources        `json:"resources,omitempty"`  // memory/CPU/PID limits
 	Network   string            `json:"network,omitempty"`    // local apps: a named network (stacks)
+	// StopTimeout is the seconds the container gets to stop before it is killed (a label on the
+	// container, so it is known when the replica is later replaced and no longer assigned).
+	StopTimeout int `json:"stop_timeout,omitempty"`
 }
 
 // MeshPeer is another node on the WireGuard mesh.
@@ -176,6 +179,9 @@ func specHash(a ClusteredApp) string {
 	if len(a.Volumes) > 0 || a.VolumeEpoch > 0 {
 		fmt.Fprintf(h, "\x00volumes=%q\x00epoch=%d", a.Volumes, a.VolumeEpoch)
 	}
+	if a.StopTimeout > 0 { // only when set: the default grace period must not roll existing apps
+		fmt.Fprintf(h, "\x00stop=%d", a.StopTimeout)
+	}
 	if a.Resources != nil { // only when set, so existing apps keep their hash
 		fmt.Fprintf(h, "\x00resources=%+v", *a.Resources)
 	}
@@ -239,11 +245,17 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 	brake := heal && partitioned(st, now)
 	hold, dead := map[string]bool{}, map[string]bool{}
 	var gone []string
+	stickyNode := map[string]bool{} // nodes holding data a replica must not leave
+	for _, r := range st.Replicas {
+		if a := st.app(r.App); a != nil && r.Node != "" && r.Index >= 1 && r.Index <= a.Replicas && a.stickyData() {
+			stickyNode[r.Node] = true
+		}
+	}
 	for i := range st.Nodes {
 		n := &st.Nodes[i]
 		if now.Sub(n.LastSeen) > nodeTimeout {
 			n.Status = "NotReady"
-			if n.Role != "master" && now.Sub(n.LastSeen) > nodeGCAfter && !brake {
+			if n.Role != "master" && now.Sub(n.LastSeen) > nodeGCAfter && !brake && !stickyNode[n.ID] {
 				gone = append(gone, n.ID)
 				continue
 			}
@@ -291,10 +303,18 @@ func scheduleReplicas(st *ClusterState, now time.Time) {
 		if r.Hash == "" {
 			r.Hash = specHash(a)
 		}
-		if r.Fails >= maxReplicaFails && r.Node != "" {
+		sticky := r.Node != "" && a.stickyData() && st.node(r.Node) != nil
+		if r.Fails >= maxReplicaFails && r.Node != "" && !sticky {
 			r.Avoid, r.Node, r.Fails = r.Node, "", 0
 		}
 		switch {
+		case sticky:
+			// The data is here: wait for the node rather than start empty somewhere else.
+			if !ready[r.Node] {
+				r.Error = stickyDownPrefix + r.Node + ", which is down; the replica waits for it so the data is not lost"
+			} else if strings.HasPrefix(r.Error, stickyDownPrefix) {
+				r.Error = ""
+			}
 		case dead[r.Node] && (hold[r.Node] || (heal && moves >= healMaxMoves)):
 			held[r.Node]++ // stays assigned: flap guard, partition brake or the per-pass move cap
 		case r.Node != "" && (!ready[r.Node] || !free(r.Node, portOf(r)) || !st.fits(r, r.Node)):
@@ -419,6 +439,9 @@ func rebalance(st *ClusterState, eligible map[string]bool, load map[string]int,
 		if r.Node != busiest || !settled[r.App] || !free(idlest, portOf(r)) {
 			continue
 		}
+		if a := st.app(r.App); a != nil && a.stickyData() {
+			continue
+		}
 		st.Replicas[i].Node = idlest
 		return
 	}
@@ -481,7 +504,7 @@ func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[stri
 		}
 		as := Assignment{Name: replicaName(r.App, r.Index, r.Hash), App: r.App, Image: spec.Image, Args: spec.Args,
 			Port: port, Env: spec.Env, SecretEnv: senv, Hosts: hosts, PrivEsc: spec.AllowPrivilegeEscalation,
-			Volumes: volumeArgs(spec.Volumes), Replica: r.Index, Data: spec.Data, DataUID: spec.DataUID, Resources: spec.Resources}
+			Volumes: volumeArgs(spec.Volumes), Replica: r.Index, Data: spec.Data, DataUID: spec.DataUID, Resources: spec.Resources, StopTimeout: spec.stopTimeout()}
 		if spec.Network == "pod" && r.IP != "" && n != nil && n.PodCIDR != "" {
 			as.IP, as.DNS, as.Hosts = r.IP, podGateway(n.PodCIDR), nil // discovery via DNS instead
 		}
@@ -781,7 +804,7 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		return nil, httpError{http.StatusBadRequest, "invalid heartbeat"}
 	}
 	for k, v := range req.Failed {
-		req.Failed[k] = sanitizeLabel(v, 200)
+		req.Failed[k] = sanitizeLabel(v, clusterErrorMax)
 	}
 	req.MeshError = sanitizeLabel(req.MeshError, 300)
 	req.Conditions = cleanConditions(req.Conditions)

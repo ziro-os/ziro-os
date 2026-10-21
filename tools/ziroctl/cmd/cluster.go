@@ -116,15 +116,55 @@ type ClusteredApp struct {
 	// Data are container paths kept on the replica's node (/var/lib/ziro/apps/<app>/<index>/...).
 	// They follow the replica index, not the node: a replica that moves starts empty and must
 	// recover through the app's own replication or a backup.
-	Data      []string   `json:"data,omitempty"`
-	DataUID   int        `json:"data_uid,omitempty"`  // owner of the data dirs (non-root images)
-	Resources *Resources `json:"resources,omitempty"` // per replica
+	Data    []string `json:"data,omitempty"`
+	DataUID int      `json:"data_uid,omitempty"` // owner of the data dirs (non-root images)
+	// Replicated says the app keeps its replicas' data in step itself (a replicated database), so
+	// adding replicas is safe. Without it, replicas with Data are independent and scaling an app
+	// from one replica up is refused (clusterScale). It is not part of the spec hash.
+	Replicated bool `json:"replicated,omitempty"`
+	// Sticky keeps each replica that has Data on its node. If that node is down the replica waits
+	// for it instead of starting empty on another node, and rebalancing and drain leave it alone.
+	// Unset, it is on for an app with Data that is not replicated and runs at most one replica
+	// (a single database), and off otherwise; an explicit value wins.
+	Sticky *bool `json:"sticky,omitempty"`
+	// StopTimeout is how many seconds a replica gets to shut down (SIGTERM) before it is killed
+	// when it is replaced or removed; 0 means 30 for an app with Data and an immediate kill otherwise.
+	StopTimeout int        `json:"stop_timeout,omitempty"`
+	Resources   *Resources `json:"resources,omitempty"` // per replica
 	// Arch pins replicas to nodes of one architecture (an image built here is single-arch);
 	// ImageNode is the node that holds a ziro.local image, which other nodes fetch over the mesh.
 	Arch      string `json:"arch,omitempty"`
 	ImageNode string `json:"image_node,omitempty"`
 	Revision  int    `json:"revision,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// stickyData reports whether replicas of the app stay on the node that holds their data.
+func (a ClusteredApp) stickyData() bool {
+	if len(a.Data) == 0 {
+		return false
+	}
+	if a.Sticky != nil {
+		return *a.Sticky
+	}
+	return !a.Replicated && a.Replicas <= 1
+}
+
+const (
+	maxStopTimeout   = 600
+	dataStopTimeout  = 30
+	stickyDownPrefix = "data is on node "
+)
+
+// stopTimeout is the grace period a replica of the app gets, in seconds (0: killed at once).
+func (a ClusteredApp) stopTimeout() int {
+	if a.StopTimeout > 0 {
+		return a.StopTimeout
+	}
+	if len(a.Data) > 0 {
+		return dataStopTimeout
+	}
+	return 0
 }
 
 // Replica is one placed (or pending, Node == "") instance of an app.
@@ -397,7 +437,7 @@ func (st *ClusterState) appStatus(app ClusteredApp) string {
 			old++
 		}
 		if r.Error != "" {
-			lastErr = r.Error
+			lastErr = fmt.Sprintf("replica %d on %s: %s", r.Index, r.Node, r.Error)
 		}
 	}
 	s := fmt.Sprintf("%d/%d running", up, app.Replicas)
@@ -450,6 +490,9 @@ func validPortNum(s string) bool {
 }
 
 func validateApp(a *ClusteredApp, secrets map[string]map[string]string) error {
+	if a.StopTimeout < 0 || a.StopTimeout > maxStopTimeout {
+		return fmt.Errorf("stop_timeout must be 0-%d seconds", maxStopTimeout)
+	}
 	if err := validName(a.Name); err != nil {
 		return err
 	}
@@ -1234,9 +1277,11 @@ var clusterScaleCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("replicas must be a number")
 		}
-		return clusterScale(args[0], n)
+		return clusterScaleApp(args[0], n, scaleForce)
 	},
 }
+
+var scaleForce bool
 
 var clusterRollbackCmd = &cobra.Command{
 	Use:     "rollback <app>",
@@ -1392,10 +1437,16 @@ var clusterUncordonCmd = &cobra.Command{
 	},
 }
 
+var drainForceMove bool
+
 var clusterDrainCmd = &cobra.Command{
 	Use: "drain <node>", Short: "Cordon a node and move its replicas away", Example: "  ziroctl cluster node drain worker-2", Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := clusterNodeAction(args[0], "drain"); err != nil {
+		action := "drain"
+		if drainForceMove {
+			action = "force-drain"
+		}
+		if err := clusterNodeAction(args[0], action); err != nil {
 			return err
 		}
 		fmt.Printf("✓ %s cordoned and drained\n", args[0])
@@ -1640,6 +1691,8 @@ func init() {
 	clusterDeployCmd.Flags().BoolVar(&appMeshOnly, "mesh-only", false, "Publish --port only on the node's mesh IP (not the public interface)")
 	clusterDeployCmd.Flags().BoolVar(&appPrivEsc, "allow-privilege-escalation", false, "Run without no-new-privileges and keep NET_RAW (setuid binaries, ping); off by default")
 	clusterDeployCmd.Flags().StringArrayVar(&appVolumes, "volume", nil, "Cluster share to mount: <share>:/path[:ro] (repeatable; '' = none)")
+	clusterDrainCmd.Flags().BoolVar(&drainForceMove, "force-move", false, "Also move replicas whose data stays on the node (they start empty elsewhere)")
+	clusterScaleCmd.Flags().BoolVar(&scaleForce, "force", false, "Scale an app that keeps data on its node and does not replicate it")
 	clusterDeployCmd.Flags().StringSliceVar(&appEgress, "egress", nil, "Only outside destinations the app may reach: IPv4 CIDRs and domains, comma-separated ('' = unrestricted); pod network only")
 	clusterDeployCmd.Flags().StringSliceVar(&appAllow, "allow-from", nil, "Apps allowed to reach --port over the mesh (comma-separated; '*' = any cluster app, 'peer:<name>' or 'peers' = WireGuard remote peers, '' = none)")
 	clusterApplyCmd.Flags().StringVarP(&applyFile, "file", "f", "", "JSON manifest")

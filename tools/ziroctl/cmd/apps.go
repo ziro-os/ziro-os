@@ -83,8 +83,10 @@ type AppInstance struct {
 	Settings   map[string]string `json:"settings,omitempty"`
 	Components []string          `json:"components"` // container (local) or cluster app names
 	Publish    string            `json:"publish,omitempty"`
-	CreatedAt  string            `json:"created_at"`
-	Def        AppDef            `json:"def"` // the definition deployed, for credentials and rm
+	// Replicas is the replica count of each component, kept so a redeploy does not reset a scale.
+	Replicas  map[string]int `json:"replicas,omitempty"`
+	CreatedAt string         `json:"created_at"`
+	Def       AppDef         `json:"def"` // the definition deployed, for credentials and rm
 }
 
 func appInstancePath(name string) string  { return filepath.Join(appStateDir, name+".json") }
@@ -164,6 +166,8 @@ type appDeployOpts struct {
 	// Arch and ImageNode (cluster): an image built in the cluster runs on nodes of its arch,
 	// fetched from the node that built it.
 	Arch, ImageNode string
+	// prevReplicas are the replica counts of the instance being redeployed.
+	prevReplicas map[string]int
 	// Internal (local only): don't publish a host port; the app serves only the containers on
 	// its network (a stack's database).
 	Internal bool
@@ -232,6 +236,7 @@ func deployAppDef(d AppDef, version string, o appDeployOpts) error {
 			return fmt.Errorf("%s runs %s %s; its data may not work with %s. Deploy a new instance (--name) and migrate, or pass --new-version if the app supports in-place upgrades", o.Name, d.Name, prev.Version, version)
 		}
 		prevSettings = prev.Settings
+		o.prevReplicas = prev.Replicas
 	}
 	settings, err := resolveSettings(d.Settings, prevSettings, o.Set)
 	if err != nil {
@@ -257,7 +262,21 @@ func deployAppDef(d AppDef, version string, o appDeployOpts) error {
 	fmt.Printf("==> Deploying %s %s as %s\n", d.Name, version, o.Name)
 	if cluster {
 		in.Mode = "cluster"
-		err = deployAppCluster(in, o)
+		known := map[string]bool{}
+		if prev, perr := loadAppInstance(o.Name); perr == nil {
+			for _, c := range prev.Components {
+				known[c] = true
+			}
+		}
+		if err = deployAppCluster(in, o); err != nil {
+			// Components this deploy created are not recorded anywhere: remove them, or the retry
+			// stops at "exists and isn't part of".
+			for _, c := range in.Components {
+				if !known[c] {
+					_ = clusterRemoveApp(c)
+				}
+			}
+		}
 	} else {
 		in.Mode = "local"
 		err = deployAppLocal(in, o)
@@ -316,8 +335,10 @@ func exposeApp(in *AppInstance, host, tlsMode string) error {
 // componentSpec renders one component: env and args with placeholders expanded.
 func componentSpec(in *AppInstance, c AppComponent, replicas int) (env map[string]string, args, health []string, err error) {
 	app := componentApp(in.Name, in.Def, c)
+	// Replicas are numbered from 1 (ZIRO_REPLICA, the scheduler and <n>.<app>.cluster.ziro agree), so
+	// the peers are 1..replicas: a name that is never assigned would never resolve.
 	var peers []string
-	for i := 0; i < replicas; i++ {
+	for i := 1; i <= replicas; i++ {
 		peers = append(peers, strconv.Itoa(i)+"."+app+"."+meshDomain)
 	}
 	vars := map[string]string{"app": app, "peers": strings.Join(peers, ","), "replicas": strconv.Itoa(replicas), "host": app}
@@ -354,8 +375,11 @@ func componentSpec(in *AppInstance, c AppComponent, replicas int) (env map[strin
 func componentReplicas(c AppComponent, want int) (int, error) {
 	n := max(c.Replicas, 1)
 	if want > 0 && want != n {
-		if c.MaxReplicas == 0 || want > c.MaxReplicas {
-			return 0, fmt.Errorf("component %s: replicas can be set up to %d", c.Name, max(c.MaxReplicas, n))
+		switch {
+		case c.MaxReplicas == 0:
+			return 0, fmt.Errorf("component %s runs %d replica(s) and cannot be scaled: the app does not replicate its data", c.Name, n)
+		case want > c.MaxReplicas:
+			return 0, fmt.Errorf("component %s can run at most %d replicas", c.Name, c.MaxReplicas)
 		}
 		n = want
 	}
@@ -391,18 +415,24 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 		}
 	}
 	published := false
+	in.Replicas = map[string]int{}
 	for _, c := range d.Components {
-		n, err := componentReplicas(c, o.Replicas)
+		want := o.Replicas
+		if want == 0 && c.MaxReplicas > 0 && o.prevReplicas[c.Name] <= c.MaxReplicas {
+			want = o.prevReplicas[c.Name] // a redeploy keeps the scale the operator chose
+		}
+		n, err := componentReplicas(c, want)
 		if err != nil {
 			return err
 		}
+		in.Replicas[c.Name] = n
 		env, args, _, err := componentSpec(in, c, n)
 		if err != nil {
 			return err
 		}
 		name := componentApp(in.Name, d, c)
 		app := ClusteredApp{Name: name, Image: d.Versions[in.Version].Images[c.Name], Replicas: n, Env: env, Args: args,
-			Data: c.Data, DataUID: c.DataUID, Resources: c.Resources, AllowFrom: uniq(append([]string{name}, o.AllowFrom...)), // replicas reach each other
+			Data: c.Data, DataUID: c.DataUID, Resources: c.Resources, Replicated: d.Cluster, AllowFrom: uniq(append([]string{name}, o.AllowFrom...)), // replicas reach each other
 			Arch: o.Arch, ImageNode: o.ImageNode}
 		for _, other := range d.Components { // components of one app reach each other
 			app.AllowFrom = uniq(append(app.AllowFrom, componentApp(in.Name, d, other)))
@@ -429,6 +459,73 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 		in.Components = append(in.Components, name)
 	}
 	return nil
+}
+
+// appScale changes the replica count of one component of a deployed cluster app. Only the replica
+// count and what is derived from it change: for an app whose replicas list each other
+// (ZIRO_PEERS), the members list is re-rendered, which rolls the replicas one at a time.
+func appScale(name string, n int, component string) error {
+	in, err := loadAppInstance(name)
+	if err != nil {
+		return err
+	}
+	if in.Mode != "cluster" {
+		return fmt.Errorf("%s runs on this host only; scaling needs a cluster", name)
+	}
+	c, err := scalableComponent(in.Def, component)
+	if err != nil {
+		return err
+	}
+	if n < 1 {
+		return fmt.Errorf("replicas must be at least 1 (remove the app with: ziroctl apps rm %s)", name)
+	}
+	if _, err := componentReplicas(c, n); err != nil {
+		return err
+	}
+	env, args, _, err := componentSpec(in, c, n)
+	if err != nil {
+		return err
+	}
+	app := componentApp(in.Name, in.Def, c)
+	if err := deployApp(func(st *ClusterState) (*ClusteredApp, error) {
+		cur := st.app(app)
+		if cur == nil {
+			return nil, errNotFound(fmt.Sprintf("cluster app %q of %s is gone: redeploy with ziroctl apps deploy", app, name))
+		}
+		a := *cur
+		a.Replicas, a.Env, a.Args = n, env, args
+		return &a, nil
+	}); err != nil {
+		return err
+	}
+	if in.Replicas == nil {
+		in.Replicas = map[string]int{}
+	}
+	in.Replicas[c.Name] = n
+	return saveAppInstance(in)
+}
+
+// scalableComponent picks the component to scale: the named one, or the only one the definition
+// allows to grow.
+func scalableComponent(d AppDef, name string) (AppComponent, error) {
+	var scalable []AppComponent
+	for _, c := range d.Components {
+		if name != "" && c.Name == name {
+			return c, nil
+		}
+		if c.MaxReplicas > 0 {
+			scalable = append(scalable, c)
+		}
+	}
+	switch {
+	case name != "":
+		return AppComponent{}, fmt.Errorf("%s has no component %q", d.Name, name)
+	case len(scalable) == 1:
+		return scalable[0], nil
+	case len(scalable) == 0:
+		return AppComponent{}, fmt.Errorf("%s cannot be scaled: it does not replicate its data", d.Name)
+	}
+	return AppComponent{}, fmt.Errorf("%s has several components that can be scaled: pick one with --component", d.Name)
 }
 
 // Local backend (package vars so tests can stub nerdctl).
@@ -958,6 +1055,29 @@ var appsCredentialsCmd = &cobra.Command{
 	},
 }
 
+var appsScaleComponent string
+
+var appsScaleCmd = &cobra.Command{
+	Use:   "scale <name> <replicas>",
+	Short: "Change how many replicas a cluster app runs",
+	Long: `Changes the replica count of a deployed app on a cluster, within the limit its definition allows
+(max_replicas). Only apps that replicate their own data can be scaled. Replicas of an app that
+lists its members to each other restart one at a time so the list stays correct.`,
+	Example: "  ziroctl apps scale mysql-cluster 5\n  ziroctl apps scale shop 3 --component web",
+	Args:    cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			return fmt.Errorf("replicas must be a number")
+		}
+		if err := appScale(args[0], n, appsScaleComponent); err != nil {
+			return err
+		}
+		fmt.Printf("✓ %s scaled to %d replicas. Watch it: ziroctl cluster replicas %s\n", args[0], n, args[0])
+		return nil
+	},
+}
+
 var appsPurgeCmd = &cobra.Command{
 	Use:     "purge <name>",
 	Short:   "Remove an app with its data and credentials",
@@ -994,6 +1114,7 @@ func init() {
 	f.StringVar(&appsExpose, "expose", "", "Publish it through the gateway on this hostname (HTTPS)")
 	f.StringVar(&appsExposeTLS, "expose-tls", "auto", "TLS for --expose: auto (ACME), internal, off or cert:<name>")
 	appsRmCmd.Flags().BoolVar(&appsPurge, "purge", false, "Also delete the app's data and credentials")
-	appsCmd.AddCommand(appsSearchCmd, appsInfoCmd, appsDeployCmd, appsListCmd, appsCredentialsCmd, appsRmCmd, appsPurgeCmd)
+	appsScaleCmd.Flags().StringVar(&appsScaleComponent, "component", "", "The component to scale (needed when several can be)")
+	appsCmd.AddCommand(appsSearchCmd, appsInfoCmd, appsDeployCmd, appsListCmd, appsCredentialsCmd, appsScaleCmd, appsRmCmd, appsPurgeCmd)
 	rootCmd.AddCommand(appsCmd)
 }

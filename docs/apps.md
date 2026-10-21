@@ -45,9 +45,13 @@ may do. To deploy your own code from git, see [`ziroctl deploy`](deploy.md).
     env files.
   - Other apps reach it at `<name>.cluster.ziro` on the pod network. Only the app itself and the apps named with
     `--allow-from` may connect. `--publish` also opens a host port.
-  - Data is node-local: `/var/lib/ziro/apps/<name>/<replica>/` on the node running that replica. A replica that
-    moves to another node starts empty and has to recover through the app's replication (for example
-    mysql-cluster) or from a backup.
+  - Data is node-local: `/var/lib/ziro/apps/<name>/<replica>/` on the node running that replica. A replica of an
+    app that does not replicate itself (such as `postgres`) is **sticky**: it stays on its node, and if the node is
+    down it waits there (`ziroctl cluster replicas <name>` says so) rather than starting empty on another node. A
+    replica of an app that replicates (mysql-cluster) can move, and recovers through the app's replication or from
+    a backup.
+  - Containers get time to shut down (30 seconds for an app with data) before they are killed when a replica is
+    replaced or removed, so a database stops cleanly on an update.
 
 A redeploy with the same name updates the app in place and keeps its data, credentials and settings. Catalog
 versions are major lines (`postgres:17`): patch releases arrive as catalog updates, so you pick them up with
@@ -66,17 +70,17 @@ needs a dump and restore). To change major versions, deploy a new instance with 
 
 ### mysql-cluster
 
-The replicas find each other by stable DNS names, `<replica>.<name>.cluster.ziro` (for example
-`0.mysql-cluster.cluster.ziro`).
+The replicas are numbered from 1 and find each other by stable DNS names, `<replica>.<name>.cluster.ziro` (for
+example `1.mysql-cluster.cluster.ziro`).
 
-- **First start:** replica 0 bootstraps the group once every peer answers and none of them is in a group yet. The
+- **First start:** replica 1 bootstraps the group once every peer answers and none of them is in a group yet. The
   other replicas join.
 - **Rejoining:** a restarted member rejoins by itself. A replica that starts empty receives the data from the
   group.
 - **Writes:** writes go to the primary, and any member tells you which one it is:
   `SELECT MEMBER_HOST FROM performance_schema.replication_group_members WHERE MEMBER_ROLE='PRIMARY'`.
 - **Failover:** when the primary fails, the others elect a new one within seconds. Use an odd number of replicas.
-- **After a full outage** where a member is gone for good, replica 0 won't bootstrap on its own. This is on
+- **After a full outage** where a member is gone for good, replica 1 won't bootstrap on its own. This is on
   purpose: under a network partition, it would otherwise start a second group. Bootstrap it by hand on the member
   with the most data:
 
@@ -87,11 +91,26 @@ The replicas find each other by stable DNS names, `<replica>.<name>.cluster.ziro
 
   The password is the `replication_password` shown by `ziroctl apps credentials <name>`.
 
+## Scaling
+
+```sh
+ziroctl apps scale mysql-cluster 5               # the one component the app lets you scale
+ziroctl apps scale shop 4 --component web        # or name it
+ziroctl cluster replicas mysql-cluster           # where each replica runs and why one is not running
+```
+
+Only apps that replicate their own data can be scaled, and only up to the definition's `max_replicas`. A single
+database such as `postgres` cannot: a second replica would be an independent, empty database, and the app's DNS name
+would mix the two. `ziroctl cluster scale` refuses the same thing (`--force` overrides). The scale is remembered, so a
+later `apps deploy` of the same name keeps it. The replicas of an app that lists its members to each other
+(`ZIRO_PEERS`) restart one at a time so the list stays correct.
+
 ## API
 
 ```text
 GET    /api/v1/apps                      # deployed apps and running replicas (any token)
 DELETE /api/v1/apps/{name}[?purge=true]  # admin; remove (and purge) in the background
+POST   /api/v1/apps/{name}/scale         # operator; {"replicas": 5, "component": "mysql"}
 POST /api/v1/apps/deploy     # admin; 202 Accepted, runs in the background (log: /var/log/ziro-apps.log)
      {"app": "postgres:18", "name": "db", "set": {"database": "shop"}, "publish": 5433, "allow_from": ["api"]}
 ```
@@ -145,8 +164,8 @@ Rules, enforced when a definition is loaded (catalog CI and every host):
 - **Placeholders:** `{{setting.x}}`, `{{app}}` (the component's name), `{{peers}}` (every replica's DNS name,
   comma-separated), `{{replicas}}`, and in outputs `{{host}}`, `{{port}}` and `{{secret.x}}`. They substitute values
   only.
-- **Containers:** each container gets `ZIRO_APP`, `ZIRO_REPLICA` (0, 1, ...) and, for `"cluster": true` apps,
-  `ZIRO_PEERS`.
+- **Containers:** each container gets `ZIRO_APP`, `ZIRO_REPLICA` (1, 2, ... on a cluster; 0 on a standalone host)
+  and, for `"cluster": true` apps, `ZIRO_PEERS`.
 - **Data owner:** `data` dirs are 0700 and owned by root; an image that starts as root chowns its own. For an
   image that runs as a fixed user (OpenClaw, Ghost, n8n: uid 1000), set `"data_uid": 1000` on the component.
 - **Replicas:** several replicas need `"cluster": true`. `max_replicas` allows `--replicas`.

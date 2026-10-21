@@ -157,7 +157,7 @@ func TestAppDeployCluster(t *testing.T) {
 	st, _ := readState()
 	a := st.app("mc")
 	if a == nil || a.Replicas != 3 || !slices.Equal(a.Data, []string{"/var/lib/mysql"}) || !slices.Equal(a.Secrets, []string{"app-mc"}) ||
-		a.Env["ZIRO_PEERS"] != "0.mc.cluster.ziro,1.mc.cluster.ziro,2.mc.cluster.ziro" || !slices.Contains(a.AllowFrom, "mc") || !slices.Contains(a.AllowFrom, "web") {
+		a.Env["ZIRO_PEERS"] != "1.mc.cluster.ziro,2.mc.cluster.ziro,3.mc.cluster.ziro" || !slices.Contains(a.AllowFrom, "mc") || !slices.Contains(a.AllowFrom, "web") {
 		t.Fatalf("app %+v", a)
 	}
 	pw := st.Secrets["app-mc"]["GR_PASSWORD"]

@@ -242,6 +242,17 @@ func (c *Client) DeployApp(ctx context.Context, req api.AppDeployRequest) (api.M
 	return m, c.Do(ctx, http.MethodPost, "/api/v1/apps/deploy", req, &m)
 }
 
+// ScaleApp changes the replica count of one component of a cluster app (component "" = the only
+// one the app allows to grow).
+func (c *Client) ScaleApp(ctx context.Context, name string, replicas int, component string) (api.Message, error) {
+	var m api.Message
+	body := map[string]any{"replicas": replicas}
+	if component != "" {
+		body["component"] = component
+	}
+	return m, c.Do(ctx, http.MethodPost, "/api/v1/apps/"+esc(name)+"/scale", body, &m)
+}
+
 // RemoveApp removes an app; purge also deletes its data and credentials.
 func (c *Client) RemoveApp(ctx context.Context, name string, purge bool) (api.Message, error) {
 	var m api.Message

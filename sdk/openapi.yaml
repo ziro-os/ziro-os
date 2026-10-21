@@ -419,6 +419,16 @@ paths:
         - { name: purge, in: query, schema: { type: boolean } }
       responses:
         "202": { $ref: "#/components/responses/Message" }
+  /api/v1/apps/{name}/scale:
+    post:
+      x-ziro-role: operator
+      tags: [apps]
+      summary: 'Change the replicas of a deployed cluster app, {"replicas": n, "component": "web"}; only apps that replicate their data can grow, and replicas that list each other restart one at a time'
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
   /api/v1/nfs:
     get:
       x-ziro-role: viewer
@@ -786,7 +796,7 @@ paths:
     post:
       x-ziro-role: operator
       tags: [cluster]
-      summary: 'Scale an app, {"replicas": n}'
+      summary: 'Scale an app, {"replicas": n}. An app with data on its nodes that does not replicate is refused from one replica up unless "force": true'
       parameters:
         - { name: name, in: path, required: true, schema: { type: string } }
       requestBody: { $ref: "#/components/requestBodies/Object" }

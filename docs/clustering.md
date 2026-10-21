@@ -20,6 +20,7 @@ ziroctl cluster deploy --name web --image nginx:alpine --replicas 3 --port 8080:
 ziroctl cluster deploy --name api --image ghcr.io/acme/api:1.4 --port 9000:9000 --mesh-only \
     --secret db-creds --arg serve --arg --verbose
 ziroctl cluster services           # NAME REV IMAGE PORT STATUS
+ziroctl cluster replicas web       # per replica: node, state and the last start error
 ziroctl cluster endpoints          # web.cluster.ziro:8080 -> 10.200.0.1, 10.200.0.2
 ```
 
@@ -32,9 +33,10 @@ The join token expires after 24 hours (`--token-ttl`, `0` = never). Print the jo
 |---|---|
 | Change only some settings (other flags keep their values) | `ziroctl cluster deploy --name web --image nginx:1.27-alpine` or `-e KEY=` to unset |
 | Declarative deploy (one app or a list, JSON) | `ziroctl cluster apply -f apps.json` |
-| Scale | `ziroctl cluster scale web 5` |
+| Scale | `ziroctl cluster scale web 5` (refused for an app with node-local data that does not replicate; `--force` overrides) |
+| See where replicas run and why one fails | `ziroctl cluster replicas [app]` |
 | Roll back to the previous revision (last 5 kept) | `ziroctl cluster rollback web` |
-| Maintenance | `ziroctl cluster node cordon\|uncordon\|drain <node>` |
+| Maintenance | `ziroctl cluster node cordon\|uncordon\|drain <node>` (`drain` refuses a node that holds sticky data unless `--force-move`) |
 | Split builder, runner and gateway work | `ziroctl cluster node role <node> builder\|runner\|gateway on\|off` ([deploy.md](deploy.md#roles)) |
 | Remove a dead worker and revoke its token | `ziroctl cluster node rm <node>` |
 | See what auto-healing sees and did, or turn it off | `ziroctl cluster heal status\|enable\|disable` ([auto-healing](#auto-healing)) |
@@ -88,7 +90,16 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - If the new revision fails to start (bad image, port clash), the rollout **pauses**. The error shows in
     `cluster services`, the remaining replicas keep serving, and `cluster rollback` restores the previous revision.
 - **Failure handling:**
-  - Agents report start failures in their heartbeat. A replica that fails 3 times in a row moves to another node.
+  - Agents report start failures in their heartbeat, reduced to the cause (up to 600 characters; see `cluster
+    replicas`). A replica that fails 3 times in a row moves to another node, unless it is sticky (below).
+  - A pod-network replica is checked before it starts: the CNI config and plugins must be in place, and an address
+    lease left by a container that no longer exists is released. A node that is not ready says
+    `pod network not ready on this node` instead of failing inside the container runtime.
+  - **Sticky replicas:** a replica of an app with `data` that is not replicated and runs one replica stays on its
+    node. If the node is down it waits there, and the node is not removed automatically, so the data is not lost to
+    an empty copy elsewhere. Set `"sticky": false` in the app JSON to allow it to move anyway.
+  - **Stopping:** a replaced or removed container gets `stop_timeout` seconds (default 30 for an app with data, none
+    otherwise) to stop before it is killed.
   - A node that misses heartbeats for 30s becomes **NotReady** and its replicas are rescheduled. After 24h it is
     removed.
   - If the master is unreachable, agents keep existing workloads running.
@@ -347,7 +358,8 @@ The API: `GET /api/v1/cluster/heal` (viewer) and `POST /api/v1/cluster/heal` (ad
 - Without the pod network, discovery uses hosts entries: a container sees new endpoints only when it is recreated.
 - IPv4 only; one pod /24 per node (253 replicas).
 - An app's `data` paths (`/var/lib/ziro/apps/<app>/<index>/` on the replica's node, `ZIRO_REPLICA` in the
-  container) are node-local: a replica that moves starts empty. Use them for apps that replicate themselves.
+  container) are node-local: a replica that moves starts empty. A single replica stays where its data is (sticky);
+  use `data` with several replicas only for apps that replicate themselves.
 
 ## Cluster DNS records and egress control
 
@@ -355,3 +367,13 @@ The API: `GET /api/v1/cluster/heal` (viewer) and `POST /api/v1/cluster/heal` (ad
 - `ziroctl cluster deploy --egress <domains,CIDRs>` limits where an app's pods may connect outside the cluster.
 
 See [dns.md](dns.md).
+
+## Changes in behavior
+
+- A single replica with `data` that is not replicated is now sticky: it no longer moves to another node when its node
+  is down, rebalanced, or drained (`drain --force-move` overrides). This replaces a silent start on an empty data
+  directory with a visible wait.
+- Containers of apps with `data` are stopped with a 30-second grace period instead of being killed.
+- `ziroctl cluster scale` refuses to take an app with node-local data that does not replicate from one replica up.
+- `ZIRO_PEERS` and `{{peers}}` list replicas `1..n`, matching `ZIRO_REPLICA` and the DNS names. They used to start at
+  0, a name that never resolved. A redeploy or `apps scale` rolls the replicas of apps that use the list.
