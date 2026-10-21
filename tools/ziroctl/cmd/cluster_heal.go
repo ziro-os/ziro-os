@@ -26,7 +26,7 @@ import (
 //     a NotReady node only after a grace period, never all at once, and not at all while half the
 //     cluster looks dead (that is the master's own network, not a mass node failure).
 //
-// ponytail: a dead master is reported, never demoted: removing a voter on a guess can lose data.
+// Known limitation: a dead master is reported, never demoted: removing a voter on a guess can lose data.
 const (
 	healGrace         = 20 * time.Second // NotReady this long beyond nodeTimeout before replicas leave (flap guard)
 	healMaxMoves      = 5                // replicas taken off dead nodes per scheduling pass

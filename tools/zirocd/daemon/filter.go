@@ -131,7 +131,7 @@ func (r *filterRule) match(pk *packet) bool {
 		return true
 	}
 	if !pk.hasPorts {
-		// ponytail: a later IP fragment carries no ports; it passes when the rule's addresses and
+		// Known limitation: a later IP fragment carries no ports; it passes when the rule's addresses and
 		// protocol match. Track fragment IDs if port-scoped rules must hold for fragments too.
 		return pk.isFragment && pk.proto != protoICMP
 	}
@@ -170,7 +170,7 @@ func (f *Filter) SetRules(rules []zr.FilterRule) {
 	f.mu.Unlock()
 }
 
-// ponytail: one mutex over the flow table; shard it if profiles show contention at multi-Gbps.
+// Known limitation: one mutex over the flow table; shard it if profiles show contention at multi-Gbps.
 func (f *Filter) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	n, err := f.Device.Read(bufs, sizes, offset)
 	if n > 0 {

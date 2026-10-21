@@ -12,7 +12,7 @@ import (
 // Roaming: a laptop moving from Wi-Fi to LTE (or a server getting a new address) changes its
 // interfaces or default gateway. A 2-second poll notices, and Rebind finds new paths at once
 // instead of waiting for timeouts.
-// ponytail: polling (cheap: one interface listing); switch to netlink/route-socket events if 2s
+// Known limitation: polling (cheap: one interface listing); switch to netlink/route-socket events if 2s
 // detection ever matters.
 
 // netSignature summarizes what decides this host's paths: its addresses (minus the tunnel) and

@@ -419,7 +419,7 @@ func loadWrapped(path string) ([]byte, error) {
 // The sealed object lives under the owner-hierarchy ECC SRK, which the TPM derives the same way
 // every time. Sessions are salted to the SRK and encrypt the sensitive parameter, so the DEK
 // never crosses the TPM bus in the clear.
-// ponytail: not bound to PCRs (kernel/OS upgrades would lock the key); add a PCR policy for
+// Known limitation: not bound to PCRs (kernel/OS upgrades would lock the key); add a PCR policy for
 // measured-boot deployments.
 func tpmSRK(tpm transport.TPM) (*tpm2.CreatePrimaryResponse, *tpm2.TPMTPublic, error) {
 	srk, err := tpm2.CreatePrimary{PrimaryHandle: tpm2.TPMRHOwner, InPublic: tpm2.New2B(tpm2.ECCSRKTemplate)}.Execute(tpm)

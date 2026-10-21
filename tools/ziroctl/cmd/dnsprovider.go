@@ -26,7 +26,7 @@ import (
 // without a TPM the file is only as private as its 0600 mode). It is never in argv, the environment
 // or logs.
 //
-// ponytail: Cloudflare is the only implementation; another provider is one more DNSProvider.
+// Known limitation: Cloudflare is the only implementation; another provider is one more DNSProvider.
 
 // DNSZone is a zone (a DNS domain) a provider hosts.
 type DNSZone struct {

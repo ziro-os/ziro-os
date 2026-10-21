@@ -29,7 +29,7 @@ import (
 // The values are kept in the sandbox's secrets.json (0600), never in its spec, its record or
 // the container; they are gone with the sandbox.
 //
-// ponytail: request bodies, WebSocket frames and request signing (SigV4) are not rewritten.
+// Known limitation: request bodies, WebSocket frames and request signing (SigV4) are not rewritten.
 
 const (
 	sandboxCABundle  = "/etc/ziro/ca-bundle.crt"  // host roots + the sandbox's CA, inside the sandbox

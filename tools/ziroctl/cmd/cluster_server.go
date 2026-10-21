@@ -227,7 +227,7 @@ func (st *ClusterState) specFor(r Replica) (ClusteredApp, bool) {
 //   - spec changes roll out one replica at a time, only while the app is otherwise healthy,
 //   - one replica per pass moves from the busiest to the idlest node when they differ by > 1.
 //
-// ponytail: least-loaded by replica count, not CPU/memory; add resource-aware scoring when apps declare limits.
+// Known limitation: least-loaded by replica count, not CPU/memory; add resource-aware scoring when apps declare limits.
 func scheduleReplicas(st *ClusterState, now time.Time) {
 	if st.History == nil {
 		st.History = map[string][]ClusteredApp{}
@@ -448,7 +448,7 @@ func appEndpoints(st *ClusterState) map[string][]string {
 }
 
 func assignmentsFor(st *ClusterState, nodeID string, secrets map[string]map[string]string) []Assignment {
-	// ponytail: --add-host entries are fixed when a container is created (not part of the spec
+	// Known limitation: --add-host entries are fixed when a container is created (not part of the spec
 	// hash, so endpoint churn never restarts apps); add a DNS responder on the mesh IP if apps
 	// need live endpoint updates.
 	var hosts []string

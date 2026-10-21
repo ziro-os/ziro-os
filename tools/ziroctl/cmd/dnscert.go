@@ -19,7 +19,7 @@ import (
 // gateway_acme_dns.go; this file is the configuration: which certificates exist and which routes use
 // them (a route with `tls: dns01` is served the certificate that covers its hosts).
 //
-// ponytail: HTTP-01 through autocert stays the default (`tls: auto`); DNS-01 is opt-in per route or
+// Known limitation: HTTP-01 through autocert stays the default (`tls: auto`); DNS-01 is opt-in per route or
 // per base domain, so a host with no DNS provider changes nothing.
 
 // DNSCert is a certificate to keep issued through DNS-01.

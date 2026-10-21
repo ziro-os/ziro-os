@@ -323,7 +323,7 @@ type routerSub struct {
 	planets string // hash of the planet list last sent
 }
 
-// ponytail: each stream keeps the versions of the peers it was sent: O(visible) memory per
+// Known limitation: each stream keeps the versions of the peers it was sent: O(visible) memory per
 // device, fine to a few thousand devices per full-mesh network; members with identical views
 // could share one map past that.
 type routerHub struct {

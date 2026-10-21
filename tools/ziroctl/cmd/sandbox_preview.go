@@ -33,7 +33,7 @@ import (
 // Tokens are HMACs, not stored: hmac(key, id|port|created|expiry). Deleting and re-publishing a
 // preview (a new "created") revokes every token it had; deleting the sandbox revokes them all.
 //
-// ponytail: single host; in a cluster the gateway runs elsewhere (phase 8 routes over the mesh).
+// Known limitation: single host; in a cluster the gateway runs elsewhere (phase 8 routes over the mesh).
 
 const (
 	previewCookie = "ziro_preview"

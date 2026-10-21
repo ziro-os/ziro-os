@@ -685,8 +685,9 @@ func (d *Daemon) maybeRenew(ctx context.Context, c *zr.Client, st *State) error 
 	return err
 }
 
-// localEndpoints lists this host's addresses with the WireGuard port. ponytail: interface
-// addresses only; R3 adds STUN-discovered public endpoints.
+// localEndpoints lists this host's addresses with the WireGuard port.
+//
+// Known limitation: interface addresses only; R3 adds STUN-discovered public endpoints.
 func localEndpoints(port int, tunName string) []string {
 	var out []string
 	ifs, _ := net.Interfaces()

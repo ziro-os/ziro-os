@@ -174,7 +174,7 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-# ponytail: one NAT gateway (cost); add one per AZ if an AZ outage must not cut node egress.
+# Known limitation: one NAT gateway (cost); add one per AZ if an AZ outage must not cut node egress.
 resource "aws_eip" "nat" {
   count  = var.public_node_ips ? 0 : 1
   domain = "vpc"

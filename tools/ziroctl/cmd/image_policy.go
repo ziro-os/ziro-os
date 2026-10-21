@@ -33,7 +33,7 @@ import (
 //
 // Signatures: cosign key-based signatures in the classic layout (tag sha256-<digest>.sig,
 // simple-signing payload, signature annotation), with ECDSA, Ed25519 or RSA public keys.
-// ponytail: keyless (Fulcio/Rekor) and the OCI-referrers bundle format are not verified; add
+// Known limitation: keyless (Fulcio/Rekor) and the OCI-referrers bundle format are not verified; add
 // sigstore-go if those are needed.
 
 type ImagePolicy struct {

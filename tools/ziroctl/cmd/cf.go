@@ -406,7 +406,7 @@ func cfTunnelActive() bool {
 // with the visitor's address in CF-Connecting-IP, so rate limits, allow-lists and logs see the
 // real client. Returns true when the visitor used HTTPS at Cloudflare's edge (no redirect loop to
 // https). Elsewhere the header is dropped so clients can't spoof it to upstreams.
-// ponytail: any local process can also send from loopback; a listener only cloudflared uses
+// Known limitation: any local process can also send from loopback; a listener only cloudflared uses
 // closes that.
 func cfTunnelRequest(req *http.Request) bool {
 	h := req.Header.Get("CF-Connecting-IP")
