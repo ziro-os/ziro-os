@@ -1186,6 +1186,28 @@ paths:
             schema: { $ref: "#/components/schemas/SandboxSpec" }
       responses:
         "200": { $ref: "#/components/responses/Sandbox" }
+  /api/v1/sandboxes/mcp:
+    post:
+      x-ziro-role: deployer
+      tags: [sandboxes]
+      summary: Model Context Protocol (Streamable HTTP, JSON answers) serving the sandbox tools
+      description: |
+        One JSON-RPC 2.0 message per request (MCP 2025-06-18): initialize, ping, tools/list, tools/call.
+        Each tool call goes through this API with the request's own token, so roles, scopes and the audit
+        trail apply as for REST calls. Notifications are accepted with 202. There is no event stream (GET).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [jsonrpc, method], properties: { jsonrpc: { type: string }, id: {}, method: { type: string }, params: { type: object } } }
+      responses:
+        "200":
+          description: The JSON-RPC answer (a tool error is a result with isError, not a JSON-RPC error)
+          content:
+            application/json:
+              schema: { type: object, properties: { jsonrpc: { type: string }, id: {}, result: { type: object }, error: { type: object } } }
+        "202": { description: A notification, accepted }
+        "400": { description: Not a JSON-RPC message }
   /api/v1/sandboxes/templates:
     get:
       x-ziro-role: deployer

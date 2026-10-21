@@ -326,6 +326,15 @@ def sandbox_checks(con, check):
                       "| ZIRO_API_TOKEN=$t ziroctl sandbox mcp | tail -1 | grep -o 'running' | head -1; "
                       "for i in $(ziroctl sandbox ls --json | grep -o '\"id\": \"[a-z2-7]*\"' | cut -d'\"' -f4); do ziroctl sandbox get $i --json | grep -q '\"owner\": \"mcp\"' && ziroctl sandbox rm $i >/dev/null && echo MCP_OWNED; done", timeout=300)
     check("sandbox mcp: an agent creates a sandbox over MCP, owned by its scoped token", "running" in out and "MCP_OWNED" in out, out)
+    # The same tools over Streamable HTTP on the API itself (no ziroctl on the agent's side).
+    rc, out = con.run("t=$(ziroctl api token create mcph --role deployer --scope sandboxes 2>/dev/null) && "
+                      "m() { curl -sk -H \"Authorization: Bearer $t\" -H 'Content-Type: application/json' https://127.0.0.1:8443/api/v1/sandboxes/mcp -d \"$1\"; echo; }; "
+                      "m '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"sandbox_create\",\"arguments\":{\"image\":\"alpine\",\"timeout\":\"5m\"}}}' | grep -o '\"state\": *\"running\"' | head -1; "
+                      "m '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"sandbox_run_code\",\"arguments\":{\"language\":\"sh\",\"code\":\"echo HTTP-MCP-$((6*7))\"}}}' | grep -o 'HTTP-MCP-42' | head -1; "
+                      "m '{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"sandbox_list\",\"arguments\":{}}}' | grep -o '\"id\": *\"[a-z2-7]\\{12\\}\"' | cut -d'\"' -f4 | "
+                      "while read i; do ziroctl sandbox rm $i >/dev/null && echo HTTP_OWNED; done", timeout=300)
+    check("sandbox mcp over HTTP: create and run code through POST /api/v1/sandboxes/mcp with a scoped token",
+          "running" in out and "HTTP-MCP-42" in out and "HTTP_OWNED" in out, out)
     # Paused past a reaper pass (15 s) is still paused, and resumes.
     rc, out = con.run(f"ziroctl sandbox pause {sid} && sleep 20 && ziroctl sandbox get {sid} | grep -c paused && "
                       f"ziroctl sandbox resume {sid} && ziroctl sandbox exec {sid} -- echo RESUMED && ziroctl sandbox rm {sid}; "

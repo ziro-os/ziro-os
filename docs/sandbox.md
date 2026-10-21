@@ -296,17 +296,34 @@ You can snapshot a paused sandbox, and it stays paused. Snapshots belong to the 
 the host's image policy, because they were built on this host. `/tmp` is not saved, and neither are processes or
 memory.
 
-**MCP server.** Any AI agent that speaks the Model Context Protocol gets sandboxes as tools:
+**MCP server.** Any AI agent that speaks the Model Context Protocol gets sandboxes as tools. Give the agent a token
+that can only manage its own sandboxes, then connect it in one of two ways:
 
 ```sh
 ziroctl api token create agent --role deployer --scope sandboxes
+
+# stdio: runs wherever ziroctl runs, and calls the API with the token
 claude mcp add ziro-sandbox -e ZIRO_API_URL=https://sbx.example.com:8443 -e ZIRO_API_TOKEN=ziro_... -- ziroctl sandbox mcp
+
+# Streamable HTTP: nothing to install, served by the API itself
+claude mcp add --transport http ziro-sandbox https://sbx.example.com:8443/api/v1/sandboxes/mcp \
+  --header "Authorization: Bearer ziro_..."
 ```
 
-Tools: `sandbox_create` (image or template, `allow` domains or `network_open`, timeout, memory, cpus),
-`sandbox_exec`, `sandbox_write_file`, `sandbox_read_file`, `sandbox_expose`, `sandbox_list` and `sandbox_delete`.
-The server runs anywhere `ziroctl` runs and calls the REST API with the agent's own token, so every action is owned,
-limited and audited. Set `ZIRO_API_CA` to the API's certificate when it is self-signed.
+| Tools | What they do |
+|---|---|
+| `sandbox_create` | from an `image`, a `template` or a `snapshot`; `allow` domains or `network_open`; `timeout`, `idle_timeout`, `memory`, `cpus`, `env`, `metadata` |
+| `sandbox_exec`, `sandbox_run_code` | a shell command, or a program in python, node, bash or sh passed on stdin: exit code, stdout, stderr |
+| `sandbox_read_file`, `sandbox_write_file`, `sandbox_list_files`, `sandbox_delete_file` | `/workspace`. Content that isn't UTF-8 travels as base64 |
+| `sandbox_get`, `sandbox_list`, `sandbox_pause`, `sandbox_resume`, `sandbox_renew`, `sandbox_delete` | lifecycle |
+| `sandbox_snapshot_create`, `sandbox_snapshot_list`, `sandbox_snapshot_delete` | install once, fork many |
+| `sandbox_expose`, `sandbox_unexpose`, `sandbox_templates` | previews, the host's templates |
+
+A tool that takes an `id` uses your newest running or paused sandbox when you leave it out. Tools carry MCP
+annotations (read-only, destructive, idempotent), and results come back as text and as `structuredContent` JSON.
+Tool calls run concurrently, and a client's `notifications/cancelled` stops a running call. Both transports call
+the REST API with the agent's own token, so every action is owned, limited by the token's role and scope, and
+audited. Set `ZIRO_API_CA` to the API's certificate when it is self-signed.
 
 ## On a cluster
 
