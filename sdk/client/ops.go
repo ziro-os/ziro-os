@@ -402,6 +402,18 @@ func (c *Client) CreateToken(ctx context.Context, name, role, ttl string) (api.T
 	return out, c.Do(ctx, http.MethodPost, "/api/v1/tokens", map[string]string{"name": name, "role": role, "ttl": ttl}, &out)
 }
 
+// RotateToken gives a token a new secret (returned only here); the old one stops working.
+func (c *Client) RotateToken(ctx context.Context, name string) (api.Token, error) {
+	var out api.Token
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/tokens/"+esc(name)+"/rotate", nil, &out)
+}
+
+// WhoAmI describes the client's own token: name, role, scopes, expiry.
+func (c *Client) WhoAmI(ctx context.Context) (api.Token, error) {
+	var out api.Token
+	return out, c.Get(ctx, "/api/v1/whoami", &out)
+}
+
 func (c *Client) RevokeToken(ctx context.Context, name string) (api.Message, error) {
 	return c.del(ctx, "/api/v1/tokens/"+esc(name))
 }

@@ -66,6 +66,11 @@ func lastLine(path string) []byte {
 // auditLog appends one record. Records are bounded and control characters stripped; callers
 // never pass secret values (see redactArgs).
 func auditLog(actor, source, action, target string, err error) error {
+	return auditLogRequest("", actor, source, action, target, err)
+}
+
+// auditLogRequest is auditLog for an API request, with its request id.
+func auditLogRequest(reqID, actor, source, action, target string, err error) error {
 	if e := os.MkdirAll(filepath.Dir(auditPath), 0700); e != nil {
 		return e
 	}
@@ -86,7 +91,7 @@ func auditLog(actor, source, action, target string, err error) error {
 			return e
 		}
 		f.Close()
-		return auditLog(actor, source, action, target, err)
+		return auditLogRequest(reqID, actor, source, action, target, err)
 	}
 	prev := auditGenesis
 	if l := lastLine(auditPath); len(l) > 0 {
@@ -101,6 +106,7 @@ func auditLog(actor, source, action, target string, err error) error {
 	line, e := json.Marshal(auditRecord{
 		TS: time.Now().UTC().Format(time.RFC3339Nano), Actor: sanitizeLabel(actor, 128), Source: sanitizeLabel(source, 128),
 		Action: sanitizeLabel(action, 128), Target: sanitizeLabel(target, 1024), Result: res, Prev: prev,
+		RequestID: reqID,
 	})
 	if e != nil {
 		return e
