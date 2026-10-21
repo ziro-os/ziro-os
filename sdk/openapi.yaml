@@ -16,6 +16,11 @@ info:
     rate limited (120/min per client, 600/min per token) and every change is audited
     (`GET /api/v1/events` streams the audit trail). Errors are `{"status": "error", "code", "message"}`.
 
+    Every answer carries `X-Request-Id`: the client's own when it sends one (1-64 characters of
+    `A-Za-z0-9._-`), otherwise a new one. It is recorded with each change in the audit trail and
+    passed on to the cluster node that serves a forwarded request. `GET /api/v1/whoami` and
+    `GET /api/v1/openapi.yaml` (this document) work with any valid token, whatever its scopes.
+
     Long jobs (module enable, app deploy) answer `202 Accepted` and run in the background; poll the
     matching GET. The Go client is `github.com/ziro-os/ziro-os/sdk/client`.
   license:
@@ -988,6 +993,41 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/tokens/{name}/rotate:
+    post:
+      x-ziro-role: admin
+      tags: [security]
+      summary: Give a token a new secret, returned once; its name, role, scopes and expiry stay, and the old secret stops working at once
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The token, with its new secret in "token"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+  /api/v1/whoami:
+    get:
+      x-ziro-role: viewer
+      tags: [security]
+      summary: The calling token itself (name, role, scopes, expiry; never the secret); allowed whatever the token's scopes
+      responses:
+        "200":
+          description: The token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+  /api/v1/openapi.yaml:
+    get:
+      x-ziro-role: viewer
+      tags: [host]
+      summary: This document; allowed whatever the token's scopes
+      responses:
+        "200":
+          description: The OpenAPI description
+          content:
+            application/yaml:
+              schema: { type: string }
   /api/v1/tokens/{name}:
     delete:
       x-ziro-role: admin
@@ -1502,6 +1542,16 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Sandbox" }
   schemas:
+    Token:
+      type: object
+      properties:
+        name: { type: string }
+        role: { type: string, enum: [viewer, deployer, operator, admin] }
+        id: { type: string }
+        created: { type: string, format: date-time }
+        expires: { type: string, format: date-time, description: "empty: never" }
+        scopes: { type: array, items: { type: string }, description: "API areas the token is limited to (empty: all its role allows)" }
+        token: { type: string, description: "the secret: only when it is created or rotated" }
     SandboxSpec:
       type: object
       additionalProperties: false

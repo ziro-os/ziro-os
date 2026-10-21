@@ -132,6 +132,8 @@ type AuditRecord struct {
 	Target string `json:"target,omitempty"`
 	Result string `json:"result"`
 	Prev   string `json:"prev"`
+	// RequestID is the API request's X-Request-Id (API calls only).
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // Token describes an API token (never the token itself, except Secret once on creation).

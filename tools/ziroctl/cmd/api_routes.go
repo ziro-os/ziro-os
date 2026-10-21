@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -276,7 +277,7 @@ func newAPIHandler(a *apiRouter, c apiServerConfig) http.Handler {
 				_ = json.Unmarshal(rec.body.Bytes(), &m)
 				err = fmt.Errorf("HTTP %d: %s", rec.status, m.Message)
 			}
-			if aerr := auditLog(caller, "api:"+ip, "api "+rt.Method+" "+rt.Path, r.URL.Path, err); aerr != nil {
+			if aerr := auditLogRequest(r.Header.Get(hdrRequestID), caller, "api:"+ip, "api "+rt.Method+" "+rt.Path, r.URL.Path, err); aerr != nil {
 				fmt.Printf("[api] audit log: %v\n", aerr)
 			}
 		})
@@ -299,6 +300,14 @@ func newAPIHandler(a *apiRouter, c apiServerConfig) http.Handler {
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
+		// A request id ties the answer, the audit record and what a cluster master forwards to a
+		// node together: the client's own (if well formed), or a new one.
+		id := r.Header.Get(hdrRequestID)
+		if !requestIDRe.MatchString(id) {
+			id = randomHex(8)
+			r.Header.Set(hdrRequestID, id)
+		}
+		h.Set(hdrRequestID, id)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Cache-Control", "no-store")
@@ -311,6 +320,10 @@ func newAPIHandler(a *apiRouter, c apiServerConfig) http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 }
+
+const hdrRequestID = "X-Request-Id"
+
+var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // pathMatches matches a ServeMux pattern path ({x} = one segment, {x...} = the rest).
 func pathMatches(pattern, path string) bool {

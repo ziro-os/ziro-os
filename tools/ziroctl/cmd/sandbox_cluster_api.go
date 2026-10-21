@@ -96,6 +96,7 @@ func (v *sandboxClusterView) call(r *http.Request, n *ClusterNode, method, path 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(hdrOwner, apiTokenName(r))
 	req.Header.Set(hdrRole, apiRole(r))
+	req.Header.Set(hdrRequestID, r.Header.Get(hdrRequestID))
 	resp, err := sandboxClusterHTTP.Do(req)
 	if err != nil {
 		return 0, nil, err

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ziro-os/ziro-os/sdk"
 	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
 	"io"
 	"net/http"
@@ -456,7 +457,31 @@ func registerOpsRoutes(a *apiRouter) {
 			ttl = d
 		}
 		tok, t, err := createAPIToken(req.Name, req.Role, ttl, req.Scopes...)
-		apiReply(w, err, sdkapi.Token{Name: t.Name, Role: t.Role, ID: t.ID, Created: t.Created, Expires: t.Expires, Secret: tok, Scopes: t.Scopes})
+		v := tokenView(t)
+		v.Secret = tok
+		apiReply(w, err, v)
+	})
+	a.post("/api/v1/tokens/{name}/rotate", "admin", func(w http.ResponseWriter, r *http.Request) {
+		tok, t, err := rotateAPIToken(r.PathValue("name"))
+		v := tokenView(t)
+		v.Secret = tok
+		apiReply(w, err, v)
+	})
+	// Any valid token may ask who it is (and read the API's description), whatever its scopes.
+	a.get("/api/v1/whoami", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		name := apiTokenName(r)
+		v := sdkapi.Token{Name: name, Role: apiRole(r)}
+		ts, err := loadAPITokens()
+		for _, t := range ts {
+			if t.Name == name {
+				v = tokenView(t)
+			}
+		}
+		apiReply(w, err, v)
+	})
+	a.get("/api/v1/openapi.yaml", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write(sdk.OpenAPI)
 	})
 	a.delete("/api/v1/tokens/{name}", "admin", func(w http.ResponseWriter, r *http.Request) {
 		apiReply(w, revokeAPIToken(r.PathValue("name")), APIMessage{Status: "ok", Message: "token revoked"})

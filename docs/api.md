@@ -32,6 +32,9 @@ flowchart LR
 - **One route table:** each route lists its method, path and minimum role. Authentication, role checks, rate limits,
   the audit record and JSON errors all come from that table. A test keeps [`sdk/openapi.yaml`](../sdk/openapi.yaml)
   in step with it.
+- **Request ids:** every answer has an `X-Request-Id` header. It is the client's own when the client sends a
+  well-formed one, otherwise a new one. The audit record of a change and the request a cluster master forwards to a
+  node carry the same id, so one request can be followed end to end.
 - **TLS by default:** the certificate is self-signed for loopback and every host address
   (`/etc/ziro/tls/server.crt`). Replace it with `ziroctl api generate-certs`, or put the API behind the
   [gateway](gateway.md).
@@ -48,11 +51,16 @@ flowchart LR
 ```sh
 ziroctl api token create grafana --role viewer --ttl 720h   # default ttl 90 days; 0 = never expires
 ziroctl api token ls                                        # names, roles, expiry; never the secret
+ziroctl api token rotate grafana                            # a new secret; the old one stops working at once
 ziroctl api token revoke grafana
 ```
 
 - Only the token's SHA-256 is stored (`/etc/ziro/api-tokens.json`, `0600`). A lost token can't be recovered:
   revoke it and create a new one.
+- Rotate a token (`POST /api/v1/tokens/{name}/rotate`) to replace a leaked or old secret without changing its
+  name, role, scopes or expiry. Nothing has to be reconfigured but the secret itself.
+- `GET /api/v1/whoami` tells a client which token it holds: name, role, scopes and expiry. It works with any valid
+  token, whatever its scopes, and so does `GET /api/v1/openapi.yaml`, which serves the API's own description.
 - Give each client its own token, with the lowest role that works. A Prometheus scraper needs only `viewer`.
 - `--scope` limits a token to API areas, whatever its role. An AI agent's token only needs sandboxes:
   `ziroctl api token create agent --role deployer --scope sandboxes` gets `403` everywhere else
@@ -69,4 +77,4 @@ The Go client in the [SDK](sdk.md) is typed from it. Feature guides list the end
 | `api start [--bind ADDR] [--port 8443] [--tls=false] [--cors ORIGIN]` | Start the server |
 | `api status` | Whether it runs and where |
 | `api generate-certs` | Issue a new self-signed certificate |
-| `api token create\|ls\|revoke` | Manage tokens |
+| `api token create\|ls\|rotate\|revoke` | Manage tokens |

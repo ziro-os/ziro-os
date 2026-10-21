@@ -36,9 +36,13 @@ var apiRoleRank = map[string]int{"viewer": 1, "deployer": 2, "operator": 3, "adm
 // apiScopes maps a scope to the API paths it opens.
 var apiScopes = map[string]string{"sandboxes": "/api/v1/sandboxes"}
 
+// apiUnscoped are paths every token may use whatever its scopes: they describe the token itself
+// and the API, nothing else.
+var apiUnscoped = map[string]bool{"/api/v1/whoami": true, "/api/v1/openapi.yaml": true}
+
 // scopeAllows reports whether a token with these scopes (none = unrestricted) may use path.
 func scopeAllows(scopes []string, path string) bool {
-	if len(scopes) == 0 {
+	if len(scopes) == 0 || apiUnscoped[path] {
 		return true
 	}
 	for _, s := range scopes {
@@ -139,13 +143,41 @@ func createAPIToken(name, role string, ttl time.Duration, scopes ...string) (str
 			return "", apiToken{}, fmt.Errorf("a token named %q exists; revoke it first", name)
 		}
 	}
-	tok := "ziro_" + randomHex(4) + "_" + randomHex(24)
-	sum := sha256.Sum256([]byte(tok))
-	t := apiToken{ID: tok[5:13], Name: name, Role: role, Hash: hex.EncodeToString(sum[:]), Created: time.Now().UTC().Format(time.RFC3339), Scopes: scopes}
+	tok, id, hash := newTokenSecret()
+	t := apiToken{ID: id, Name: name, Role: role, Hash: hash, Created: time.Now().UTC().Format(time.RFC3339), Scopes: scopes}
 	if ttl > 0 {
 		t.Expires = time.Now().Add(ttl).UTC().Format(time.RFC3339)
 	}
 	return tok, t, saveAPITokens(append(ts, t))
+}
+
+// newTokenSecret returns a fresh token and its stored id and hash.
+func newTokenSecret() (tok, id, hash string) {
+	tok = "ziro_" + randomHex(4) + "_" + randomHex(24)
+	sum := sha256.Sum256([]byte(tok))
+	return tok, tok[5:13], hex.EncodeToString(sum[:])
+}
+
+// rotateAPIToken gives a token a new secret, keeping its name, role, scopes and expiry; the old
+// secret stops working at once.
+func rotateAPIToken(name string) (string, apiToken, error) {
+	ts, err := loadAPITokens()
+	if err != nil {
+		return "", apiToken{}, err
+	}
+	for i := range ts {
+		if ts[i].Name == name {
+			var tok string
+			tok, ts[i].ID, ts[i].Hash = newTokenSecret()
+			return tok, ts[i], saveAPITokens(ts)
+		}
+	}
+	return "", apiToken{}, errNotFound(fmt.Sprintf("no token named %q", name))
+}
+
+// tokenView is a token without its hash.
+func tokenView(t apiToken) sdkapi.Token {
+	return sdkapi.Token{Name: t.Name, Role: t.Role, ID: t.ID, Created: t.Created, Expires: t.Expires, Scopes: t.Scopes}
 }
 
 // revokeAPIToken removes a token by name or id; "legacy" removes the pre-RBAC admin token.
@@ -177,7 +209,7 @@ func apiTokenViews() []sdkapi.Token {
 	ts, _ := loadAPITokens()
 	view := []sdkapi.Token{}
 	for _, t := range ts {
-		view = append(view, sdkapi.Token{Name: t.Name, Role: t.Role, ID: t.ID, Created: t.Created, Expires: t.Expires, Scopes: t.Scopes})
+		view = append(view, tokenView(t))
 	}
 	return view
 }
@@ -244,11 +276,28 @@ var apiTokenRevokeCmd = &cobra.Command{
 	},
 }
 
+var apiTokenRotateCmd = &cobra.Command{
+	Use: "rotate <name>", Short: "Give a token a new secret; the old one stops working",
+	Example: "  ziroctl api token rotate ci", Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		tok, t, err := rotateAPIToken(args[0])
+		if err != nil {
+			return err
+		}
+		v := tokenView(t)
+		v.Secret = tok
+		return printResult(v, func() {
+			fmt.Println(tok)
+			fmt.Fprintf(os.Stderr, "✓ token %q rotated. Store the new secret now: it is not shown again.\n", t.Name)
+		})
+	},
+}
+
 func init() {
 	apiTokenCreateCmd.Flags().StringVar(&apiTokenRole, "role", "viewer", "viewer (read-only), deployer (+ deploy), operator (+ actions) or admin")
 	apiTokenCreateCmd.Flags().DurationVar(&apiTokenTTL, "ttl", 90*24*time.Hour, "Lifetime (0 = never expires)")
 	apiTokenCreateCmd.Flags().StringSliceVar(&apiTokenScopes, "scope", nil, "Limit the token to these API areas (sandboxes); default: everything its role allows")
-	apiTokenCmd.AddCommand(apiTokenCreateCmd, apiTokenLsCmd, apiTokenRevokeCmd)
+	apiTokenCmd.AddCommand(apiTokenCreateCmd, apiTokenLsCmd, apiTokenRevokeCmd, apiTokenRotateCmd)
 }
 
 func trimBearer(h string) string { return strings.TrimPrefix(h, "Bearer ") }
