@@ -21,12 +21,12 @@ Every managed thing is a named resource with one schema in [`sdk/schema`](../../
 
 | Resource | Schema | Name |
 |---|---|---|
-| plugin (host service + packages) | `ModuleManifest` (`module.go`) | `name` |
+| module (host service + packages) | `ModuleManifest` (`module.go`) | `name` |
 | app (containers) | `AppDef` (`app.go`) | `name` |
 | gateway route | `GatewayRoute` (`gateway.go`) | `name` |
 | stack, host config | `Stack` (`stack.go`), `HostConfig` (`host.go`), see [RFC 0001](rfcs/0001-stacks-and-host-config.md) | `stack:` / the host |
 | cluster app | an `AppDef` placed on the cluster | `name` |
-| catalog | signed index of plugins, apps and stacks (`sdk/catalog`) | repository name |
+| catalog | signed index of modules, apps and stacks (`sdk/catalog`) | repository name |
 
 Rules for every format:
 
@@ -35,9 +35,9 @@ Rules for every format:
 - **Strict:** an unknown field is an error, so a typo never silently drops a setting. Duplicate keys and multi-document
   YAML files are refused.
 - **Kind by shape:** a top-level `stack:` is a stack, `host:` a host config, `components:` an app definition, anything
-  else a plugin manifest. No `kind:` field is needed.
+  else a module manifest. No `kind:` field is needed.
 - **Versions:** stacks and host configs carry `version:` (currently `1`); the validator refuses versions it doesn't
-  know. Plugins carry a package `version`; apps list `versions` with images pinned by digest.
+  know. Modules carry a package `version`; apps list `versions` with images pinned by digest.
 - **Deprecation:** a field is marked deprecated (in its schema comment and in the docs) for at least one minor
   release before it is removed. Removing a field or changing its meaning is a breaking change. The SDK
   follows semantic versioning (`sdk/vX.Y.Z` tags), so a breaking schema change needs a major SDK release.
@@ -55,13 +55,15 @@ being authorized and audited.
   removes it. Bodies are decoded strictly (unknown fields are a 400) with a size limit.
 - **Long work** (deploys, pulls, backups, updates) answers `202 {"status":"accepted","message":...}` and names the
   `GET` that shows the result.
-- **Errors:** `{"status":"error","code":"invalid|unauthorized|forbidden|not_found|conflict|too_large|rate_limited|internal","message":...}`.
+- **Errors:** `{"status":"error","code":...,"message":...}`, where `code` is one of `invalid`, `unauthorized`,
+  `forbidden`, `not_found`, `conflict`, `too_large`, `rate_limited` or `internal`.
 - **Roles** (each includes the ones before it):
 
   | Role | May |
   |---|---|
   | `public` | health only, no token |
   | `viewer` | read state |
+  | `deployer` | viewer, plus pushing source, redeploying and rolling back deployments |
   | `operator` | day-to-day changes: services, containers, DNS records, scaling, cordon/drain, logs |
   | `admin` | anything that grants or removes access, installs software, deletes data, or changes where traffic or lookups go |
 
@@ -82,17 +84,18 @@ being authorized and audited.
 
 | Extend with | What it adds | Trust | Guide |
 |---|---|---|---|
-| Plugin | a host service and its packages, in its own cgroup | signed catalog, or `-f` locally | [modules.md](../modules.md) |
+| Module | a host service and its packages, in its own cgroup | signed catalog, or `-f` locally | [modules.md](../modules.md) |
 | App | containers, images pinned by digest, generated secrets | signed catalog, or `-f` locally | [apps.md](../apps.md) |
 | Stack | several apps deployed together, with links between them | signed catalog, or `-f` locally | [provisioning.md](../provisioning.md) |
-| Catalog | your own repository of plugins, apps and stacks | ed25519-signed index; every entry pinned by sha256 | [modules.md](../modules.md) |
+| Catalog | your own repository of modules, apps and stacks | ed25519-signed index; every entry pinned by sha256 | [modules.md](../modules.md) |
 | Kernel module / eBPF | drivers and programs for the Ziro kernel (kernel kit) | modules must be signed (`MODULE_SIG_FORCE`) | [sdk.md](../sdk.md) |
 | API client | automation in Go or any language | scoped API token | [sdk.md](../sdk.md) |
 
 ## Security model
 
-- **Least privilege.** API tokens are scoped to a role and expire; services can run as a non-root user; plugin
-  services run in their own cgroup and apps take `resources` limits. Host daemons are OOM-protected (score -900) and workloads are
+- **Least privilege.** API tokens are scoped to a role and expire; services can run as a non-root user; module
+  services run in their own cgroup and apps take `resources` limits. Host daemons are OOM-protected (score -900) and
+  workloads are
   reclaimed first (+300), so a runaway container can't take the host down.
 - **Secrets** never go into argv, logs or plain environment variables. Generated credentials reach containers only
   through 0600 env files (or the sealed cluster secret on a cluster). API tokens are shown once; only their SHA-256

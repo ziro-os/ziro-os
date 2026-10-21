@@ -1,6 +1,6 @@
 # Compliance mapping
 
-This page maps Ziro-OS controls to common frameworks, and gives the command that produces evidence for each. It is
+This page maps Ziro OS controls to common frameworks, and gives the command that produces evidence for each. It is
 a starting point for an assessment, not a certification: a control is only effective once it is configured and
 operated. Your organization owns the policies, reviews and processes around it (shared responsibility).
 
@@ -26,12 +26,12 @@ Trust Services Criteria (2017, revised points of focus).
 
 ## NIST SP 800-190
 
-| Risk area (section) | Ziro-OS control |
+| Risk area (section) | Ziro OS control |
 |---|---|
 | Image vulnerabilities and configuration defects (4.1.1–4.1.2) | Minimal base image (musl, BusyBox); `govulncheck` gate in CI for every Go component |
 | Untrusted images (4.1.5) | Registry allowlist and cosign signature verification, with apps pinned to the verified digest (`cluster policy images`) |
 | Insecure registry connections (4.2.1) | HTTPS registries only (the token realm must be HTTPS); pulls by digest |
-| Unbounded administrative access (4.3.1) | Scoped API tokens (`viewer`/`operator`/`admin`) with expiry; CLI through a root-only socket |
+| Unbounded administrative access (4.3.1) | Scoped API tokens (`viewer`/`deployer`/`operator`/`admin`) with expiry; CLI through a root-only socket |
 | Unauthorized access (4.3.2) | Joins pin the cluster CA plus an expiring join token; per-node tokens (hashed, rotated); masters authenticate with mutual TLS |
 | Poorly separated inter-container traffic (4.3.3) | Default-deny app network policy (`allow_from`), enforced per container IP on the pod network, including same-node traffic |
 | Orchestrator node trust (4.3.5) | Only CA-signed master certificates can join Raft; workers can never obtain one; audited data-key fetches |
@@ -42,7 +42,7 @@ Trust Services Criteria (2017, revised points of focus).
 
 ## CIS Controls v8 (selected safeguards)
 
-| Safeguard | Ziro-OS control |
+| Safeguard | Ziro OS control |
 |---|---|
 | 3.10 Encrypt sensitive data in transit | TLS 1.2+ everywhere; WireGuard mesh between nodes; mutual TLS between masters |
 | 3.11 Encrypt sensitive data at rest | Secrets and the CA key sealed with AES-256-GCM; data key wrapped per master (`file`, `tpm`, `command`/KMS); `cluster keys rotate` |
@@ -60,7 +60,7 @@ Trust Services Criteria (2017, revised points of focus).
 
 ## SOC 2 (Trust Services Criteria)
 
-| Criterion | Ziro-OS control |
+| Criterion | Ziro OS control |
 |---|---|
 | CC6.1 Logical access; encryption keys | RBAC API tokens; mutual TLS control plane; data-key custody through the key providers; data-key rotation |
 | CC6.2/CC6.3 Provisioning and removal | `api token create/revoke`; `cluster member rm` and `node rm` revoke credentials immediately |

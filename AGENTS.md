@@ -1,129 +1,93 @@
 # AGENTS.md
 
-## Project Overview
+## Project overview
 
-- **Name**: Ziro‑OS
-- **Purpose**: A cloud‑native, ultra‑lightweight OS built from scratch to host container workloads. Minimal base, fast boot, small footprint, with first‑class support for containerd, Docker/Podman, and OCI runtimes.
+- **Name**: Ziro OS
+- **Purpose**: A minimal, cloud-native Linux host for OCI container workloads. Small base, fast boot, small footprint,
+  with `containerd`, `runc`, CNI networking and the `ziroctl` management CLI.
 - **Design philosophy**: Minimal by design. Born for the cloud.
+- **Status**: Under active development; not ready for production use (see `README.md`).
 
----
+## Repository layout
 
-## Setup & Build
+| Path | Contents |
+|---|---|
+| `kernel/` | Kernel configs and `build-kernel.sh` (`custom` hardened flavor by default, `alpine` as the fallback) |
+| `init/` | `ziro-init`, the static C99 PID 1 supervisor |
+| `rootfs/` | Files copied into the host image (`/etc`, installer) |
+| `packages/` | `build-rootfs.sh` and the pinned base components |
+| `images/` | ISO, QEMU, Docker, `zirocd` and cloud image builders |
+| `tools/` | `ziroctl` (host CLI and daemons), `ziropkg` (package manager), `zirocd` (router client), all in Go |
+| `sdk/` | Go SDK: schemas, catalogs, API client, `openapi.yaml` |
+| `scripts/` | Installer, release and `zirocd` install scripts |
+| `deploy/` | Example deployments (Terraform for AWS) |
+| `security/` | Host hardening script |
+| `tests/` | Smoke tests, QEMU boot and cluster tests, router end to end, security |
+| `docs/` | User and design documentation; technical decisions live in `docs/architecture.md` |
 
-1. **Kernel**
+## Build and test commands
 
-   - Obtain or patch the Linux kernel (or microkernel) with only essential drivers (networking, storage, virtualization).
-   - Configure for fast boot, namespaces, cgroups, seccomp support.
+- Build everything for the host architecture: `make all` (tools, rootfs, Docker base image)
+- Build the CLIs: `make tools` (`ziroctl`, `ziropkg`); cross-compile with `make tools-all`. Build `zirocd` with
+  `make zirocd-all`
+- Build the kernel: `make kernel` (runs `kernel/build-kernel.sh`; set `KERNEL_FLAVOR=alpine` for the distribution
+  kernel)
+- Build images: `make rootfs`, `make image-iso`, `make docker-image`
+- Unit tests: `make test-unit`, or `cd tools/ziroctl && go test ./...` (also `tools/ziropkg`, `tools/zirocd`, `sdk`)
+- Container smoke tests: `make test-smoke`
+- Boot test in QEMU: `make test-boot`
+- Manage modules on a host: `ziroctl module enable|disable|purge|list|info|upgrade`
 
-2. **Userland**
+`community/CONTRIBUTING.md` has the full target list and the lint gate that CI enforces.
 
-   - Use musl libc.
-   - BusyBox‑style utilities for core tools (shell, file utilities, networking tools).
+## Core goals and constraints
 
-3. **Container Runtime Layer**
+- **Minimal base**: every bootable host image (ISO and initramfs, for both kernel flavors) stays under 300 MB, enforced
+  in CI. The minimal container base rootfs is about 16 MB.
+- **Controlled mutable state**: an immutable installed root is a goal, not a current property. The installer mounts
+  ext4 read/write and live boot uses writable tmpfs. Keep writable paths few and documented.
+- **Cloud-native first**: `containerd` and `runc`, with Docker-style commands through `nerdctl`. This is not a
+  complete Docker Engine or Podman replacement.
+- **Modular and extensible**: optional software ships as modules (`ziroctl module`) from signed catalogs, not in the
+  base image.
+- **Security hardened**: least privilege, a default-drop firewall, seccomp, and capability restrictions. The
+  `security/harden-system.sh` script, used by the AWS example deployment, adds AppArmor profiles. SELinux is not
+  supported.
 
-   - Include `containerd` as the core runtime.
-   - Provide or integrate OCI runtime(s) like `runc` or `crun`.
-   - Add wrappers or shims for Docker Engine / Podman CLI compatibility if needed.
+## Code style and conventions
 
-4. **Module & Plugin Support**
+- Prefer static linking (`CGO_ENABLED=0` for Go, musl for C).
+- Keep dependencies minimal. Add one only when a few lines of code cannot do the job.
+- One responsibility per module or file.
+- Configuration is declarative (YAML or JSON), validated by `sdk/schema` at every trust boundary.
+- Format Go with `gofmt`. Run the lint gate in `community/CONTRIBUTING.md` before pushing.
+- Mark an accepted limitation in a code comment as `// Known limitation: <what is not handled>; <what to change when
+  it matters>`. Use `TODO` only for unfinished work that should not ship.
 
-   - Networking (CNI plugins).
-   - Storage / volume drivers.
-   - Logging / telemetry modules.
-   - Security modules (seccomp, optional AppArmor/SELinux).
+## Testing and CI
 
-5. **Image Building**
+- Unit tests live next to the code (`_test.go`). Documentation examples are checked by `TestDocCommands`.
+- CI runs `gofmt`, `go vet`, `staticcheck`, `shellcheck`, unit tests, multi-architecture rootfs builds, container
+  smoke tests, and security scans.
+- QEMU tests in `tests/qemu/` boot an image and check containers, networking, storage and cluster behavior.
 
-   - Scripts to build bootable images (VM, cloud, bare metal).
-   - Build rootfs + kernel bundles.
+## Pull request guidelines
 
-6. **CLI / Tooling**
-   - `ziroctl` (or equivalent) to manage modules, containers, config, images.
+- Run `make test` and the lint gate before submitting.
+- Include a manifest with metadata (name, version, dependencies) for every new module or package recipe.
+- Do not introduce configuration defaults that break existing hosts.
+- Document new features in `docs/`, and record technical decisions in `docs/architecture.md`. Larger changes need an
+  [RFC](docs/design/rfcs/README.md).
 
----
+## Security and deployment notes
 
-## Core Goals & Constraints
+- Keep writable paths minimal and documented.
+- Seccomp and capability restrictions apply by default.
+- Cloud images install SSH keys from instance metadata or user data at first boot.
+- Never embed secrets. Pass them at runtime through the environment or the sealed cluster secrets.
 
-- **Minimal Base**: every bootable host image (ISO and initramfs, for both kernel flavors) must stay **< 300 MB** (enforced in CI); the minimal container base rootfs is ≈16 MB.
-- **Stateless & Immutable by default**: aim for immutable root filesystem, minimal writeable areas.
-- **Cloud‑Native First**: containerd, Docker/Podman support out of the box.
-- **Modular Extensible Architecture**: allow plug‑in modules.
-- **Security Hardened**: use least privileges, seccomp, capability restrictions; optional AppArmor/SELinux.
+## Notes for agents
 
----
-
-## Commands Agents Should Know
-
-- Build kernel: `make kernel` (runs `kernel/build-kernel.sh`; the hardened `custom` flavor by default, `KERNEL_FLAVOR=alpine` for the distro kernel)
-- Build userland: compile musl + BusyBox + essential tools
-- Install container runtime: build or integrate containerd + runtime
-- Build images: via scripts in `images/` for different targets (VM, cloud, bare metal)
-- Run tests: basic smoke tests (e.g. boot image, start container, run container, network ping, storage mount)
-- Manage modules: via `ziroctl module install/remove/enable/disable`
-
----
-
-## Code Style & Conventions
-
-- Prefer static linking where possible (for minimal dependencies).
-- Keep dependencies minimal. No large frameworks unless absolutely needed.
-- Single responsibility per module.
-- Clear versioning of packages/modules.
-- Configuration via declarative manifest (YAML/JSON) where applicable.
-
----
-
-## Testing & CI
-
-- Smoke tests for:
-
-  - Booting images (e.g. via QEMU)
-  - Container runtime functionality (pull, run, stop)
-  - Networking (CNI) tests
-  - Storage / volume mount read/write
-
-- Automated builds for images + modules.
-- Linting / style enforcement (shell scripts, configs).
-- Security checks: check for unnecessary services, privilege escalations.
-
----
-
-## PR / Contribution Guidelines
-
-- Before submitting a PR, run full build + test suite.
-- Include any new module’s manifest/recipe with metadata (name, version, dependencies).
-- Ensure configuration / defaults don’t introduce breakage.
-- Follow versioning schema for modules / packages.
-- Document new features or changes in `docs/`, especially `docs/architecture.md` for technical decisions.
-
----
-
-## Security & Deployment Notes
-
-- Root filesystem should be immutable; writeable paths minimized.
-- Use of seccomp filters by default.
-- Optional support for MAC systems (AppArmor or SELinux) as opt‑in.
-- For cloud images, ensure cloud provider security best practices (user accounts, SSH keys, etc.).
-- Avoid embedding secrets; use environment / runtime injected secrets only.
-
----
-
-## Stretch & Future Features
-
-- Boot support for AWS / GCP / Azure VMs.
-- Integrate observability: Prometheus / OpenTelemetry modules.
-- `ziroctl` enhancements: config management, rollback, atomic updates.
-- Package manager (ZiroPkg) for minimal module/package installation.
-
----
-
-## Agent‑Specific Notes
-
-- If the agent is asked to generate files, scaffold under the defined structure: `kernel/`, `rootfs/`, `packages/`, `images/`, `tools/`, `docs/`.
-- Agent should reference technical decisions in `docs/architecture.md` when generating code or architecture.
-- When in doubt, aim for minimalism and clarity.
-
----
-
-> _Ziro‑OS — built for containers. built for speed. built for clarity._
+- Place generated files under the layout above.
+- Reference `docs/architecture.md` and `docs/design/README.md` when making architectural changes.
+- When in doubt, choose the smaller, clearer design.

@@ -51,7 +51,7 @@ may do. To deploy your own code from git, see [`ziroctl deploy`](deploy.md).
 
 A redeploy with the same name updates the app in place and keeps its data, credentials and settings. Catalog
 versions are major lines (`postgres:17`): patch releases arrive as catalog updates, so you pick them up with
-`ziroctl plugin update` followed by a redeploy. Moving an instance to another version line is refused unless you
+`ziroctl module update` followed by a redeploy. Moving an instance to another version line is refused unless you
 pass `--new-version`, because data written by one major version often can't be read by another (PostgreSQL
 needs a dump and restore). To change major versions, deploy a new instance with `--name` and migrate.
 
@@ -89,7 +89,7 @@ The replicas find each other by stable DNS names, `<replica>.<name>.cluster.ziro
 
 ## API
 
-```
+```text
 GET    /api/v1/apps                      # deployed apps and running replicas (any token)
 DELETE /api/v1/apps/{name}[?purge=true]  # admin; remove (and purge) in the background
 POST /api/v1/apps/deploy     # admin; 202 Accepted, runs in the background (log: /var/log/ziro-apps.log)
@@ -102,7 +102,7 @@ Credentials are never served over the API. Read them on the host with `ziroctl a
 
 Open a pull request to [ziro-os/apps](https://github.com/ziro-os/apps) that adds `apps/<name>/app.json`, or run
 your own catalog (`ziroctl catalog build . --kind app`, see [modules.md](modules.md#running-your-own-catalog))
-and add it with `ziroctl plugin repo add <name> <url> --key <pem> --kind app`.
+and add it with `ziroctl module repo add <name> <url> --key <pem> --kind app`.
 
 To deploy several apps together (in dependency order, as one unit), describe them in a
 [stack](provisioning.md#stacks). Definitions can be YAML or JSON.

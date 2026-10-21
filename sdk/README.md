@@ -1,6 +1,6 @@
 # Ziro OS SDK
 
-Go packages for building on Ziro OS: `schema` (plugin manifests, app definitions, gateway routes and their
+Go packages for building on Ziro OS: `schema` (module manifests, app definitions, gateway routes and their
 validators), `catalog` (build, sign, verify catalogs), `client` (typed API client) and `api` (API types), plus
 [`openapi.yaml`](openapi.yaml). `ziroctl` runs this exact code.
 

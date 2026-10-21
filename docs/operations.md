@@ -7,7 +7,7 @@ reclaiming disk, how it protects itself from running out of memory, and keeping 
 
 Every login (and the boot console) shows a short summary, from `ziroctl motd`:
 
-```
+```text
   ▀▀█ █ █▀█ █▀█  █▀█ █▀▀   1.0.17
   █▄▄ █ █▀▄ █▄█  █▄█ ▄▄█   web-1 · Proxmox VE / QEMU KVM · x86_64 · 6.18.57-ziro · up 3d 4h
 
@@ -99,7 +99,7 @@ turns this off.
 
 ## Services that stay up: `doctor`
 
-Every long-running service (sentinel, crond, cluster-agent, cluster-master, ziro-api, gateway, plugin daemons) is
+Every long-running service (sentinel, crond, cluster-agent, cluster-master, ziro-api, gateway, module daemons) is
 supervised by ziro-init:
 - **Restart:** a daemon that exits is restarted with a crash-loop backoff of 1 s doubling to 60 s, with no limit.
 - **Ownership:** daemons are always children of PID 1, whoever started them, so no exit goes unseen.
@@ -121,35 +121,39 @@ to run. The exit status is non-zero only when a critical check fails (`ziroctl u
 
 ## Memory: how a host protects itself
 
-A small host running a large plugin next to databases is the classic way to run out of memory. Ziro OS
+A small host running a large module next to databases is the classic way to run out of memory. Ziro OS
 handles it in layers.
 
 1. **Service cgroups.** Every service runs in its own cgroup.
    - **Platform daemons** (sshd, containerd, the ziroctl services) live in `/sys/fs/cgroup/ziro/system`. That cgroup
      keeps a memory reservation (5% of RAM, at most 256 MiB) and an OOM score of -900. You can still log in and
      manage a host whose workloads are out of memory.
-   - **Plugin services** live in `/sys/fs/cgroup/ziro/workloads`, with an OOM score of +300, so the kernel reclaims
+   - **Module services** live in `/sys/fs/cgroup/ziro/workloads`, with an OOM score of +300, so the kernel reclaims
      or kills them first.
-2. **Limits.** Plugins and apps declare `resources`. The limit is enforced by the kernel inside that service or
+2. **Limits.** Modules and apps declare `resources`. The limit is enforced by the kernel inside that service or
    container only, and the rest of the host isn't affected. `memory.high` (90% of the limit) throttles and
    reclaims before `memory.max` kills. The limit covers swap too (zram on small hosts), so a
    service can't grow past it into swap:
+
    ```json
    "resources": {"memory": "1Gi", "cpus": 1.5, "pids": 512}
    ```
+
    - For cluster apps, set the limit with `ziroctl cluster deploy --memory 2Gi --cpus 1`.
    - A container without a memory limit gets a positive OOM score. It doesn't inherit containerd's protected one.
-3. **Admission.** A plugin that declares `min_memory_mb` is refused unless that much memory is actually
+3. **Admission.** A module that declares `min_memory_mb` is refused unless that much memory is actually
    *available*, not just installed (`--force` overrides).
 4. **Pressure watchdog.** The sentinel watches the kernel's memory pressure (PSI). When tasks stall on memory for
    15 seconds, it:
    - sends a `memory` alert with the largest consumers
-   - restarts the largest plugin service, which turns a thrashing host into a controlled restart
+   - restarts the largest module service, which turns a thrashing host into a controlled restart
 
    The settings live in `/etc/ziro/sentinel.json` (defaults shown):
+
    ```json
    {"memory_full_percent": 10, "memory_for_seconds": 15, "restart_workloads": true, "disk_prune_percent": 90}
    ```
+
 5. **zram swap and reclaim headroom.**
    - On hosts with 8 GiB of RAM or less, ziro-init enables zstd-compressed swap in RAM (25% of RAM), so a short
      spike costs some CPU instead of a killed process. `touch /etc/ziro/zram.disabled` turns it off.

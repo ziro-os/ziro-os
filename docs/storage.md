@@ -2,7 +2,7 @@
 
 ## Growing disks
 
-Resize the VM or cloud volume, and Ziro-OS grows the partition and ext4 filesystem to fill it. No reboot is
+Resize the VM or cloud volume, and Ziro OS grows the partition and ext4 filesystem to fill it. No reboot is
 needed:
 
 - at boot (for a disk resized while the host was off)

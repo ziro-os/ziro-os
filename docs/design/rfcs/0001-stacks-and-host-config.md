@@ -6,8 +6,9 @@
 ## Summary
 
 Two new resource kinds: a **stack** deploys several apps together, in dependency order, with links between them; a
-**host config** describes a whole host and is applied with `ziroctl apply`. Every definition (plugin, app, stack,
-host config) can be written in YAML or JSON with the same strict rules. User guide: [provisioning.md](../../provisioning.md).
+**host config** describes a whole host and is applied with `ziroctl apply`. Every definition (module, app, stack,
+host config) can be written in YAML or JSON with the same strict rules. User guide:
+[provisioning.md](../../provisioning.md).
 
 ## Motivation
 
@@ -19,7 +20,7 @@ versioned in git.
 
 **Formats** (`sdk/schema`). YAML is converted to JSON (one document, string keys only) and decoded strictly: unknown
 fields are errors. The kind follows from the shape: `stack:` is a stack, `host:` a host config, `components:` an
-app, anything else a plugin manifest. Stacks and host configs carry `version: 1`.
+app, anything else a module manifest. Stacks and host configs carry `version: 1`.
 
 ```yaml
 stack: shop
@@ -84,7 +85,8 @@ script. `docker-compose` files are converted with `ziroctl stack import`, which 
 ## Alternatives
 
 - **Run docker-compose files directly as the deployment format:** rejected. Compose allows privileged containers,
-  bind mounts and credentials in the file, and has no signed catalog or pinned images. `ziroctl compose` (nerdctl compose
+  bind mounts and credentials in the file, and has no signed catalog or pinned images. `ziroctl compose` (nerdctl
+  compose
   behind a security preflight) stays for development; `stack import` converts.
 - **Pass link values as plain environment variables:** rejected. They often hold passwords, and plain env is visible
   in `inspect`.

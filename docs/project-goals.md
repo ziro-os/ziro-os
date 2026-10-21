@@ -1,6 +1,6 @@
 # Project goals
 
-Ziro-OS aims to provide a small, understandable Linux host for OCI container workloads. The project favors a
+Ziro OS aims to provide a small, understandable Linux host for OCI container workloads. The project favors a
 minimal base, clear configuration, and components that can be inspected and replaced independently. It is under
 active development and is not ready for production use.
 

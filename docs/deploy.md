@@ -2,7 +2,7 @@
 
 `ziroctl deploy` builds an app from a git repository and runs it on the host, the way Vercel or Render do. It keeps
 the last builds, so a rollback takes seconds. The work is done by **ziroctld**, the deploy daemon, which ships with
-the `builder` plugin.
+the `builder` module.
 
 ```sh
 ziroctl module enable builder                       # BuildKit + git + ziroctld (needs 2 GB RAM)
@@ -48,7 +48,7 @@ addresses. `--ca-file` does the same from a file you copied. There is no switch 
 token would be exposed to anyone on the path.
 
 The token comes from `--token-file` or the environment, never an argument. Inside a git work tree `zirocd` sends
-what git tracks or could add, so `.gitignore` is honoured; `.env*` files and links are never sent. The command
+what git tracks or could add, so `.gitignore` is honored; `.env*` files and links are never sent. The command
 exits non-zero if the build doesn't go live. See [Pushing source](#pushing-source) for the limits and the role.
 
 ## How a deploy works
@@ -132,7 +132,7 @@ ziroctl deploy https://github.com/acme/web --replicas 3 --expose web.example.com
 ziroctl deploy https://github.com/acme/api --arch amd64       # build on (and run on) amd64 nodes
 ```
 
-- **Build.** The master's ziroctld picks a builder: a Ready node with the plugin. Nodes labelled `builder=true`
+- **Build.** The master's ziroctld picks a builder: a Ready node with the module. Nodes labeled `builder=true`
   come first, then the least busy; `builder=false` is never picked. The build is recorded in the cluster state.
   The builder's agent sees it in its heartbeat and builds through its own ziroctld, then reports the image digest
   and the end of the log back. A private repository's token travels as a sealed cluster secret, only to that

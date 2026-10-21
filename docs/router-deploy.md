@@ -28,7 +28,9 @@ flowchart LR
   A -. relay if needed .- M -.- B
 ```
 
-**1. Boot the planet.** Download `vmlinuz-<arch>` and `ziro-initramfs-<arch>.cpio.gz` from the
+### Boot the planet
+
+Download `vmlinuz-<arch>` and `ziro-initramfs-<arch>.cpio.gz` from the
 [latest release](https://github.com/ziro-os/ziro-os/releases/latest) and boot them with port 7443 forwarded:
 
 ```sh
@@ -44,7 +46,9 @@ qemu-system-x86_64 -accel kvm -cpu host -m 2048 -smp 2 -nographic \
 
 It boots in seconds into a root shell. Everything stays in RAM: nothing is installed.
 
-**2. Make it a planet** (in the VM's shell):
+### Make it a planet
+
+In the VM's shell:
 
 ```sh
 ziroctl cluster init --advertise 10.0.2.15
@@ -54,7 +58,9 @@ ziroctl router key create lab --reusable --expiry 24h         # prints zr1_...
 ziroctl router moon add lab-moon --public moon:8443           # prints zm1_...
 ```
 
-**3. Start the moon and the devices** (on your machine, in a checkout of this repository):
+### Start the moon and the devices
+
+On your machine, in a checkout of this repository:
 
 ```sh
 cd deploy/docker/router
@@ -64,7 +70,8 @@ docker compose exec device-a zirocd up --name device-a
 docker compose exec device-b zirocd up --name device-b
 ```
 
-**4. Check it:**
+### Check it
+
 
 ```sh
 docker compose exec device-a zirocd status          # device-b: direct 172.x.x.x:41641
@@ -106,7 +113,8 @@ flowchart LR
 | Moon | `zirocd moon` on any Linux host or container. It relays traffic between devices that can't reach each other directly | A public address on tcp/8443 and udp/3478 |
 | Leaf | A device running `zirocd` (Linux, macOS, Windows) or a Ziro OS host | Outbound internet only |
 
-Planets never carry device traffic. Devices talk to each other directly, and fall back to the nearest relay only when no direct path exists.
+Planets never carry device traffic. Devices talk to each other directly, and fall back to the nearest relay only when no
+direct path exists.
 
 #### Ports
 
@@ -119,15 +127,21 @@ Planets never carry device traffic. Devices talk to each other directly, and fal
 
 #### Sizing
 
-These numbers are measured, in Docker on an Apple M2, by `BenchmarkRouterHub`, `TestRelayMemoryPerDevice` and `tests/router/e2e.sh`.
+These numbers are measured, in Docker on an Apple M2, by `BenchmarkRouterHub`, `TestRelayMemoryPerDevice` and
+`tests/router/e2e.sh`.
 
-- **Planet:** about 4 KB of memory per connected device. An endpoint change reaches 10,000 devices in about 1 ms. Two vCPUs and 2 GB of RAM are plenty for tens of thousands of devices. Run 3 planets (5 if you need to survive two failures).
-- **Moon:** about 15 KB per connected device, and 0.8–1.3 Gbit/s of relayed traffic. One vCPU and 512 MB carries a region comfortably. Add moons for more relay capacity: devices spread across the relays nearest to them.
-- **Device:** zirocd idles at about 16 MiB and stays under 256 MiB at full speed (see [Memory](router.md#client-zirocd)).
+- **Planet:** about 4 KB of memory per connected device. An endpoint change reaches 10,000 devices in about 1 ms. Two
+  vCPUs and 2 GB of RAM are plenty for tens of thousands of devices. Run 3 planets (5 if you need to survive two
+  failures).
+- **Moon:** about 15 KB per connected device, and 0.8–1.3 Gbit/s of relayed traffic. One vCPU and 512 MB carries a
+  region comfortably. Add moons for more relay capacity: devices spread across the relays nearest to them.
+- **Device:** zirocd idles at about 16 MiB and stays under 256 MiB at full speed (see
+  [Memory](router.md#client-zirocd)).
 
 ### 1. Planets
 
-Install Ziro OS on three hosts, ideally in three regions or availability zones ([installation guide](installation-guide.md)). Then:
+Install Ziro OS on three hosts, ideally in three regions or availability zones ([installation
+guide](installation-guide.md)). Then:
 
 ```sh
 # on the first planet
@@ -139,7 +153,8 @@ ZIRO_CLUSTER_TOKEN=<token> ziroctl cluster join 203.0.113.10:7443 --ca-hash sha2
 ziroctl cluster members
 ```
 
-`cluster members` should list three voters and one leader. Every planet serves devices; the leader only matters for writes.
+`cluster members` should list three voters and one leader. Every planet serves devices; the leader only matters for
+writes.
 
 Open the planet port to the internet, and keep Raft and the admin API private:
 
@@ -159,11 +174,15 @@ Give each planet its own DNS name and list them all:
 ziroctl router endpoints set eu.router.example.com:7443 us.router.example.com:7443 ap.router.example.com:7443
 ```
 
-Don't put the planets behind a single load balancer name. Devices time a TLS handshake to each planet and use the nearest one; a single name hides the distances and sends everyone to whatever the balancer picks. Keys carry this list. Devices also learn about planets added later from their netmap.
+Don't put the planets behind a single load balancer name. Devices time a TLS handshake to each planet and use the
+nearest one; a single name hides the distances and sends everyone to whatever the balancer picks. Keys carry this list.
+Devices also learn about planets added later from their netmap.
 
 ### 3. Router configuration as code
 
-Keep the router's configuration in git and apply it on any planet. Apply shows what it will change, changes only that, and does nothing when the file already matches. It adds and edits networks and moons but never deletes them (use `ziroctl router network rm` or `ziroctl router moon rm` for that).
+Keep the router's configuration in git and apply it on any planet. Apply shows what it will change, changes only that,
+and does nothing when the file already matches. It adds and edits networks and moons but never deletes them (use
+`ziroctl router network rm` or `ziroctl router moon rm` for that).
 
 ```yaml
 # router.yaml
@@ -196,13 +215,15 @@ ziroctl apply -f router.yaml --dry-run
 ziroctl apply -f router.yaml
 ```
 
-New networks deny everything until a rule allows it. For each new moon, apply prints a registration token on stderr. It is shown once and is valid for an hour; `ziroctl router moon token fra-1` issues a fresh one.
+New networks deny everything until a rule allows it. For each new moon, apply prints a registration token on stderr. It
+is shown once and is valid for an hour; `ziroctl router moon token fra-1` issues a fresh one.
 
 ### 4. Moons
 
-A moon needs a public address and nothing else. It keeps its key and certificate in one directory and renews the certificate itself. Pick whichever way of running it suits the host.
+A moon needs a public address and nothing else. It keeps its key and certificate in one directory and renews the
+certificate itself. Pick whichever way of running it suits the host.
 
-**Docker:**
+#### Docker
 
 ```sh
 docker run -d --name moon --read-only --restart unless-stopped \
@@ -210,19 +231,24 @@ docker run -d --name moon --read-only --restart unless-stopped \
   -e ZIROCD_MOON_TOKEN=zm1_... ghcr.io/ziro-os/zirocd
 ```
 
-The token is only needed on the first start. After that the volume holds the moon's identity; recreate the container without the variable.
+The token is only needed on the first start. After that the volume holds the moon's identity; recreate the container
+without the variable.
 
-**Docker Compose:** the `moon` service in [`deploy/docker/router/compose.yaml`](../deploy/docker/router/compose.yaml)
-is production-ready on its own. Run just that service:
+#### Docker Compose
+
+The `moon` service in [`deploy/docker/router/compose.yaml`](../deploy/docker/router/compose.yaml) can run on its own.
+Start only that service:
 
 ```sh
 ZIROCD_MOON_TOKEN=zm1_... docker compose up -d moon
 ```
 
-**Any Linux host with systemd.** Download the binary and check it:
+#### Linux with systemd
+
+Download the binary and check it:
 
 ```sh
-v=1.0.30
+v=1.0.29   # a tools release version (the tools/v* tag without the prefix)
 curl -fsSLO https://github.com/ziro-os/ziro-os/releases/download/tools/v$v/zirocd-linux-amd64
 curl -fsSLO https://github.com/ziro-os/ziro-os/releases/download/tools/v$v/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
@@ -262,13 +288,21 @@ WantedBy=multi-user.target
 systemctl enable --now zirocd-moon
 ```
 
-**Ziro OS host:**
+#### Ziro OS host
 
 ```sh
 ziroctl router moon join --token-file /root/fra-1.token
 ```
 
-**Kubernetes:** run it as a DaemonSet on a few nodes with public addresses. Use `hostNetwork: true`, so the moon sees devices' real source addresses (STUN needs them) and relayed packets skip the extra NAT. Put the token in a Secret mapped to `ZIROCD_MOON_TOKEN`, keep `/var/lib/zirocd-moon` on a hostPath, and set `readOnlyRootFilesystem: true` and `runAsNonRoot: true`. The image already runs as uid 65532.
+#### Kubernetes
+
+Run it as a DaemonSet on a few nodes with public addresses.
+
+- Use `hostNetwork: true`, so the moon sees devices' real source addresses (STUN needs them) and relayed packets skip
+  the extra NAT.
+- Put the token in a Secret mapped to `ZIROCD_MOON_TOKEN`.
+- Keep `/var/lib/zirocd-moon` on a hostPath.
+- Set `readOnlyRootFilesystem: true` and `runAsNonRoot: true`. The image already runs as uid 65532.
 
 Check it from a planet:
 
@@ -276,9 +310,11 @@ Check it from a planet:
 ziroctl router moon ls
 ```
 
-The status shows `registered`, and `ON THIS PLANET` is `true` on the planet the moon streams from. Devices start using the moon within seconds of it registering.
+The status shows `registered`, and `ON THIS PLANET` is `true` on the planet the moon streams from. Devices start using
+the moon within seconds of it registering.
 
-A planet can relay too (`ziroctl router relay enable eu-1 --public eu.router.example.com:8444 --listen :8444`). Give it a port other than 8443, which is the admin API's.
+A planet can relay too (`ziroctl router relay enable eu-1 --public eu.router.example.com:8444 --listen :8444`). Give it
+a port other than 8443, which is the admin API's.
 
 ### 5. Devices
 
@@ -298,7 +334,8 @@ ziroctl router join --key-file /root/office.key
 ziroctl router key create office --reusable --ephemeral --tags ci
 ```
 
-Pass keys through `ZIROCD_KEY` or a key file rather than the command line, where other users of the host can read them in the process list.
+Pass keys through `ZIROCD_KEY` or a key file rather than the command line, where other users of the host can read them
+in the process list.
 
 ### 6. Monitoring
 
@@ -345,9 +382,12 @@ Moons hold nothing worth backing up. A rebuilt moon registers again with `ziroct
 
 ### 8. Upgrades
 
-1. **Planets**, one at a time: `ziroctl update` on each. Wait until `ziroctl cluster members` shows it back as a voter before the next. Devices on the restarting planet move to another planet within seconds.
-2. **Moons**: pull the new image or binary and restart them one at a time. Devices fail over to their second relay meanwhile.
-3. **Devices** update themselves from the signed release stream. Pin a version per network (`client_version` in the file, or `ziroctl router network set office --client-version X.Y.Z`) to roll out in stages.
+1. **Planets**, one at a time: `ziroctl update` on each. Wait until `ziroctl cluster members` shows it back as a voter
+   before the next. Devices on the restarting planet move to another planet within seconds.
+2. **Moons**: pull the new image or binary and restart them one at a time. Devices fail over to their second relay
+   meanwhile.
+3. **Devices** update themselves from the signed release stream. Pin a version per network (`client_version` in the
+   file, or `ziroctl router network set office --client-version X.Y.Z`) to roll out in stages.
 
 ### 9. When something fails
 
@@ -364,7 +404,7 @@ Moons hold nothing worth backing up. A rebuilt moon registers again with `ziroct
 
 | Task | How |
 |---|---|
-| Add a region | install a planet there and `cluster join --control-plane` (keep 3 or 5 voters), add it to `endpoints` in `router.yaml` and `apply`; or just add a moon (`moons:` in the file, then start it with the printed token) |
+| Add a region | install a planet there and `cluster join --control-plane` (keep 3 or 5 voters), add it to `endpoints` in `router.yaml` and `apply`; or add only a moon (`moons:` in the file, then start it with the printed token) |
 | Retire a planet | `ziroctl cluster member rm <id>`, remove it from `endpoints`, `apply`. Devices move to the next nearest planet |
 | Rotate join keys | `ziroctl router key ls`, then `ziroctl router key rm <id>`; devices already admitted stay |
 | Remove a person or device | `ziroctl router member rm <network> <device>`: disconnected within a second, relays included |
@@ -374,12 +414,16 @@ Moons hold nothing worth backing up. A rebuilt moon registers again with `ziroct
 
 ## Security checklist
 
-- [ ] Planets are reachable from the internet only on tcp/7443; Raft (7444) and the admin API (8443) are on private networks or firewalled to known addresses.
+- [ ] Planets are reachable from the internet only on tcp/7443; Raft (7444) and the admin API (8443) are on private
+      networks or firewalled to known addresses.
 - [ ] Every network has an ACL that allows only what's needed (they start denying everything).
 - [ ] Sign-in policies name domains or groups, and signed-in devices expire (`key_expiry_hours`).
 - [ ] Join keys expire. Reusable keys are scoped with tags, and ephemeral keys are used for CI.
-- [ ] Moon tokens, join keys and the SSO client secret never go into git. The router file refers to the secret by path, and tokens are printed once.
-- [ ] Removed people and devices are removed from the router (`ziroctl router member rm`); this ends their sessions within a second.
-- [ ] Backups of a planet are encrypted at rest and kept off the host: they hold the cluster CA key (`--include-secrets` adds app secrets).
+- [ ] Moon tokens, join keys and the SSO client secret never go into git. The router file refers to the secret by path,
+      and tokens are printed once.
+- [ ] Removed people and devices are removed from the router (`ziroctl router member rm`); this ends their sessions
+      within a second.
+- [ ] Backups of a planet are encrypted at rest and kept off the host: they hold the cluster CA key (`--include-secrets`
+      adds app secrets).
 - [ ] Moons run as non-root with a read-only root (the image does by default), and their metrics port isn't public.
 - [ ] `ziroctl audit log` is shipped to your log system; every router change and sign-in is in it.

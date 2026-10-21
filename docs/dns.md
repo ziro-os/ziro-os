@@ -41,7 +41,8 @@ flowchart LR
 - **Split DNS:** forward a domain (and its subdomains) to specific resolvers, for VPNs, on-prem AD/DNS or cloud
   private zones.
 - **Local records:** A, AAAA, CNAME (resolved one hop locally) and TXT, answered authoritatively. A name may start
-  with `*.`: it answers for every name below it that has no record of its own (`ziroctl gateway domain set` uses it). Cluster-wide
+  with `*.`: it answers for every name below it that has no record of its own (`ziroctl gateway domain set` uses it).
+  Cluster-wide
   records come from the cluster (below).
 - **Blocking:** domains and their subdomains get NXDOMAIN. You can subscribe to HTTPS blocklists in hosts or
   domain-per-line format; cron refreshes them daily, and a failed download keeps the previous copy.
@@ -153,7 +154,8 @@ address is the gateway nodes' own; behind a NAT or load balancer, publish the on
 DNS-only (not proxied) unless you add them with `--proxied`, so ACME HTTP-01 still reaches the gateway; point a
 tunnel at a hostname with `ziroctl dns cloud add app.example.com CNAME <id>.cfargotunnel.com --proxied`.
 
-**Only its own records are ever touched.** Each record is created with the comment `ziro:<cluster id>` (`ziro:host-<hostname>` on a standalone host: renaming
+**Only its own records are ever touched.** Each record is created with the comment `ziro:<cluster id>`
+(`ziro:host-<hostname>` on a standalone host: renaming
 the host leaves the records it made behind as ones it no longer owns) and only
 records carrying exactly that comment are updated or deleted. A record you made yourself, one without a comment,
 one from another cluster sharing the zone, an ACME challenge record: none is ever changed. If a record you
@@ -201,7 +203,7 @@ ziroctl dns cert renew --force                                  # issue now (on 
 **How an issuance goes.** The service orders the certificate from the ACME directory (Let's Encrypt, or the one set with
 `gateway acme --directory`), publishes the challenge as a TXT record at `_acme-challenge.<name>` through the provider,
 waits until the provider lists it (it asks the provider, not public resolvers, which cache) and a short pause for its
-name servers, then tells the CA to validate. It finalises with a fresh ECDSA key and stores the chain. The TXT records
+name servers, then tells the CA to validate. It finalizes with a fresh ECDSA key and stores the chain. The TXT records
 are removed afterwards, **whatever happened**, and any a crashed run left are swept at the start of the next one.
 Challenge records carry the comment `ziro-acme:<cluster id>`, which is never the sync's `ziro:<cluster id>`: the
 record sync can't delete one mid-issuance, and an issuance only deletes records with that exact comment.

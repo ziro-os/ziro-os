@@ -32,7 +32,7 @@ flowchart LR
 ```
 
 - **One tunnel per host.** A tunnel carries any number of hostnames. Cloudflare keeps 4 connections to two data
-  centres, so a single edge failure doesn't drop traffic.
+  centers, so a single edge failure doesn't drop traffic.
 - **Ingress is managed at Cloudflare** (remotely managed tunnel), so there is no config file on the host to drift.
   `cf route add` updates the ingress, then creates a proxied `CNAME host → <tunnel-id>.cfargotunnel.com`.
 - **The gateway is the default origin.** It keeps routing by Host as usual. For requests from the tunnel it uses
@@ -70,7 +70,8 @@ Pass it through a prompt, `--token-file` or `$CF_API_TOKEN`, never on the comman
 
 A token with only these permissions can't list your accounts, so `cf login` asks for the account ID (the
 32-character ID in `dash.cloudflare.com/<account-id>`), or takes it from `--account`. It then checks that the token
-can manage tunnels there. Adding Account › Account Settings › Read lets it find the account by itself. Using a dashboard tunnel
+can manage tunnels there. Adding Account › Account Settings › Read lets it find the account by itself. Using a dashboard
+tunnel
 (`cf up --token-file`) needs no API token at all; you then manage hostnames in the dashboard.
 
 ## Security

@@ -1,17 +1,17 @@
 # Ziro OS SDK
 
-The SDK is the toolkit for building on Ziro OS: plugins, apps, catalogs, and programs that manage hosts and
+The SDK is the toolkit for building on Ziro OS: modules, apps, catalogs, and programs that manage hosts and
 clusters. It's the same code `ziroctl` runs, so whatever passes validation in your editor or CI is exactly what
 a host accepts.
 
 | Piece | What it's for |
 |---|---|
-| [`sdk/schema`](../sdk/schema) | The formats: plugin manifests, app definitions, stacks, host configs, gateway routes, supervised services, settings and placeholders, generated secrets. It includes their validators. YAML or JSON (`DecodeStrict`, `ToYAML`, `Kind`). |
+| [`sdk/schema`](../sdk/schema) | The formats: module manifests, app definitions, stacks, host configs, gateway routes, supervised services, settings and placeholders, generated secrets. It includes their validators. YAML or JSON (`DecodeStrict`, `ToYAML`, `Kind`). |
 | [`sdk/catalog`](../sdk/catalog) | Build, sign (ed25519) and verify catalogs, like `ziro-os/pkgs` and `ziro-os/apps`, or your own. |
 | [`sdk/client`](../sdk/client) | A typed Go client for the API server (`ziroctl api`). |
 | [`sdk/api`](../sdk/api) | The API's request and response types, shared by the server and the client. |
 | [`sdk/openapi.yaml`](../sdk/openapi.yaml) | The OpenAPI 3.1 description of every `/api/v1` route, so you can generate a client in any language. |
-| [`ziroctl dev`](#the-dev-toolchain) | Scaffold, validate and run plugins and apps in a throwaway Ziro VM, and sign your own catalog. |
+| [`ziroctl dev`](#the-dev-toolchain) | Scaffold, validate and run modules and apps in a throwaway Ziro VM, and sign your own catalog. |
 | [Kernel kit](#kernel-modules-and-ebpf) | Out-of-tree kernel modules and CO-RE eBPF programs for the Ziro kernel. |
 
 ```sh
@@ -35,7 +35,8 @@ _, err = c.DeployApp(ctx, api.AppDeployRequest{App: "postgres:18", Expose: "db.i
 apps, err := c.Apps(ctx)
 ```
 
-**Calls and errors:**
+Calls and errors:
+
 - The client has a method for every route: services, containers, images, the firewall, WireGuard, security, network,
   DNS, the cluster (apps, nodes, secrets), backups, OS and tools upgrades, audit, tokens, catalogs, system
   top/df/prune.
@@ -66,36 +67,37 @@ err = c.Events(ctx, func(e api.AuditRecord) error {
 [`sdk/examples/canary`](../sdk/examples/canary) is a complete program: it shifts traffic to a new app in steps
 and rolls back on failed health checks.
 
-Tokens and roles (`ziroctl api token create <name> --role viewer|operator|admin`) work as described in the spec's
+Tokens and roles (`ziroctl api token create <name> --role viewer|deployer|operator|admin`) work as described in the
+spec's
 header. Every change made through the API is audited on the host.
 
-## Validate plugins and apps in your own tooling
+## Validate modules and apps in your own tooling
 
 ```go
-m, err := schema.ParseManifest(data)   // a plugin manifest: strict decoding, then every security rule
+m, err := schema.ParseManifest(data)   // a module manifest: strict decoding, then every security rule
 d, err := schema.ParseAppDef(data)     // an app definition: images pinned by digest, no secrets in argv, ...
 r.Normalize(); err = r.Validate()      // a gateway route
 ```
 
-These are the rules in [modules.md](modules.md#writing-a-plugin) and [apps.md](apps.md#writing-an-app-definition).
+These are the rules in [modules.md](modules.md#writing-a-module) and [apps.md](apps.md#writing-an-app-definition).
 
 ## Your own catalog
 
 ```go
-idx, err := catalog.Build("./my-plugins", "public", "acme", "module", 30*24*time.Hour, time.Now(), check)
+idx, err := catalog.Build("./my-modules", "public", "acme", "module", 30*24*time.Hour, time.Now(), check)
 err = catalog.Sign("public", privatePEM)
 idx, err = catalog.VerifyIndex(repo, raw, sig, time.Now())
 ```
 
 `ziroctl catalog build|sign|verify` wraps the same functions for CI. Hosts add your catalog with
-`ziroctl plugin repo add <name> <url> --key <pem>`.
+`ziroctl module repo add <name> <url> --key <pem>`.
 
 ## The dev toolchain
 
 `ziroctl dev` runs on Linux and macOS (it needs QEMU, and Docker for the kernel kit):
 
 ```sh
-ziroctl dev new plugin hello            # modules/hello/manifest.yaml, README.md, .github/workflows/catalog.yml
+ziroctl dev new module hello            # modules/hello/manifest.yaml, README.md, .github/workflows/catalog.yml
 ziroctl dev new app web                 # apps/web/app.yaml (a pinned, non-root web server to start from)
 ziroctl dev validate .                  # the host's rules, plus lints; --strict makes warnings fail (CI)
 ziroctl dev run modules/hello/manifest.yaml --check 'wget -qO- http://127.0.0.1:8080/'
@@ -109,7 +111,7 @@ ziroctl dev run apps/web/app.yaml --forward 8080:8080   # then http://127.0.0.1:
   (`--install-deps` skips the question); elsewhere it prints the install command.
 - `dev run` boots the latest release (`--release vX.Y.Z` for another, `--image-dir build` for a local build). It
   downloads it once into your cache and verifies it against the release's `SHA256SUMS`. The VM boots in live mode,
-  so nothing persists. It installs the plugin (`plugin install -f`) or deploys the app (`apps deploy -f`).
+  so nothing persists. It installs the module (`module install -f`) or deploys the app (`apps deploy -f`).
   - With `--check`, each command runs in the VM, and `dev run` fails if any fails. Use this in CI.
   - Without `--check`, you're attached to the VM's root console. Ctrl-C stops the VM.
   - `--copy file:/path` puts files in the VM first.
@@ -120,7 +122,7 @@ ziroctl dev run apps/web/app.yaml --forward 8080:8080   # then http://127.0.0.1:
   2. Store `acme.key` as the `ZIRO_CATALOG_KEY` secret, and commit `acme.pub` as `catalog.pub`.
   3. The generated workflow validates pull requests. On `main` it builds, signs and verifies the catalog, publishes
      it to GitHub Pages, and re-signs it weekly before the index expires.
-  4. Hosts add it with `ziroctl plugin repo add acme https://<owner>.github.io/<repo> --key catalog.pub`.
+  4. Hosts add it with `ziroctl module repo add acme https://<owner>.github.io/<repo> --key catalog.pub`.
 
 ## Kernel modules and eBPF
 

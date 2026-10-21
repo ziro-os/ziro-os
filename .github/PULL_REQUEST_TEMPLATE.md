@@ -1,80 +1,87 @@
-# Pull Request
+# Pull request
 
 ## Description
-<!-- Provide a brief description of the changes in this PR -->
 
-## Type of Change
-<!-- Mark the relevant option with an "x" -->
-- [ ] 🐛 Bug fix (non-breaking change which fixes an issue)
-- [ ] ✨ New feature (non-breaking change which adds functionality)
-- [ ] 💥 Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] 📚 Documentation update
-- [ ] 🔧 Refactoring (no functional changes)
-- [ ] ⚡ Performance improvement
-- [ ] 🧪 Test addition or improvement
-- [ ] 🔒 Security improvement
+<!-- Summarize the change and the motivation for it. -->
 
-## Component
-<!-- Mark the relevant component(s) with an "x" -->
+## Type of change
+
+<!-- Mark the relevant options with an "x". -->
+
+- [ ] Bug fix (non-breaking change that fixes an issue)
+- [ ] New feature (non-breaking change that adds functionality)
+- [ ] Breaking change (existing functionality changes or stops working)
+- [ ] Documentation
+- [ ] Refactoring (no functional change)
+- [ ] Performance improvement
+- [ ] Tests
+- [ ] Security improvement
+
+## Components
+
+<!-- Mark the affected components with an "x". -->
+
 - [ ] Kernel
-- [ ] Container Runtime (containerd/runc)
-- [ ] ZiroPkg Package Manager
-- [ ] Ziro-Dev SDK
-- [ ] Networking (CNI)
+- [ ] Container runtime (containerd, runc)
+- [ ] Gateway
+- [ ] Cluster
+- [ ] Router
+- [ ] Sandboxes
+- [ ] ziroctl or ziropkg
+- [ ] zirocd
+- [ ] SDK
+- [ ] Networking (CNI, DNS, WireGuard)
 - [ ] Security
-- [ ] Monitoring
-- [ ] Cloud Images
+- [ ] Cloud images
 - [ ] Documentation
 - [ ] CI/CD
-- [ ] Other: ___________
+- [ ] Other:
 
-## Related Issues
-<!-- Link to related issues using "Fixes #123" or "Closes #123" -->
-- Fixes #
-- Related to #
+## Related issues
 
-## Changes Made
-<!-- Describe the changes made in detail -->
-- 
-- 
-- 
+<!-- Link related issues, for example "Fixes owner/repo#123". -->
+
+## Changes
+
+<!-- List the changes in detail. -->
 
 ## Testing
-<!-- Describe how you tested your changes -->
-- [ ] Unit tests pass (`make test`)
-- [ ] Boot test passes where a booted host is involved (`make test-boot`)
-- [ ] Manual testing performed
-- [ ] New tests added for new functionality
 
-### Test Commands Run
+- [ ] Unit tests pass (`make test`)
+- [ ] The boot test passes where a booted host is involved (`make test-boot`)
+- [ ] New tests cover new behavior
+- [ ] Manual testing performed
+
+Commands run:
+
 ```bash
-# List the commands you ran to test your changes
-make test-smoke
-make test-boot
+# List the commands you ran to test the change.
 ```
 
-## Screenshots/Logs
-<!-- If applicable, add screenshots or logs to help explain your changes -->
+## Screenshots or logs
+
+<!-- Optional. Add output that helps explain the change. -->
 
 ## Checklist
-<!-- Mark completed items with an "x" -->
-- [ ] My change follows the [design standard](https://github.com/ziro-os/ziro-os/blob/main/docs/design/README.md) (an accepted [RFC](https://github.com/ziro-os/ziro-os/blob/main/docs/design/rfcs/README.md) for new resource kinds, API/schema or security model changes)
-- [ ] I have performed a self-review of my code
-- [ ] I have added tests (unit, and `tests/qemu/boot-smoke.py` where a booted host is needed); new and existing tests pass locally
-- [ ] Lint gate is clean: `gofmt -l` prints nothing, `go vet`, `staticcheck` and `shellcheck -S warning` report nothing ([commands](https://github.com/ziro-os/ziro-os/blob/main/community/CONTRIBUTING.md#lint-gate))
-- [ ] API changes: route table, `sdk/openapi.yaml` (with `x-ziro-role`) and the `sdk/client` method are updated
-- [ ] I have updated the documentation in `docs/`
-- [ ] Any dependent changes have been merged and published
 
-## Breaking Changes
-<!-- If this is a breaking change, describe what breaks and how to migrate -->
+- [ ] The change follows the [design standard](https://github.com/ziro-os/ziro-os/blob/main/docs/design/README.md). New
+      resource kinds, API or schema changes,
+      and security model changes have an accepted
+      [RFC](https://github.com/ziro-os/ziro-os/blob/main/docs/design/rfcs/README.md).
+- [ ] The author has reviewed the diff.
+- [ ] Tests were added (unit tests, and `tests/qemu/boot-smoke.py` where a booted host is needed), and new and
+      existing tests pass locally.
+- [ ] The [lint gate](https://github.com/ziro-os/ziro-os/blob/main/community/CONTRIBUTING.md#lint-gate) is clean:
+      `gofmt -l` prints nothing, and `go vet`,
+      `staticcheck` and `shellcheck -S warning` report nothing.
+- [ ] API changes update the route table, `sdk/openapi.yaml` (with `x-ziro-role`) and the `sdk/client` method.
+- [ ] Documentation in `docs/` is updated.
+- [ ] Dependent changes are merged and published.
 
-## Additional Notes
-<!-- Any additional information that reviewers should know -->
+## Breaking changes
 
-## Reviewer Notes
-<!-- For maintainers: any specific areas to focus on during review -->
+<!-- If this is a breaking change, describe what breaks and how to migrate. -->
 
----
+## Notes for reviewers
 
-Thank you for contributing to Ziro-OS! 🚀
+<!-- Areas that need particular attention. -->

@@ -60,7 +60,8 @@ Also accepted: `ziro.iface=`, `ziro.erase`, `ziro.noreboot` and `ziro.reboot_tim
 
 ### User-data
 
-- A file starting with `#ziro-config` is a declarative host config: networking, SSH keys, firewall, plugins,
+- A file starting with `#ziro-config` is a declarative host config: networking, SSH keys, firewall, modules (the
+  `plugins:` key),
   stacks, cluster join. It is applied once on first boot; see [provisioning](provisioning.md).
 - Anything else runs once as a shell script.
 
@@ -95,5 +96,5 @@ Next: run something ([containers](containers.md), [apps](apps.md), [deploy](depl
 | | Minimum | Recommended |
 |---|---|---|
 | CPU | 1 × x86_64 (the ISO); arm64 runs from the [images](cloud.md) | 2+ cores |
-| Memory | 512 MB | 2 GB+; some plugins need more, e.g. ClamAV 2 GB |
+| Memory | 512 MB | 2 GB+; some modules need more, e.g. ClamAV 2 GB |
 | Disk | 2 GB | 8 GB+ SSD |

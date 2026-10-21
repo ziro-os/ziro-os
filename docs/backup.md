@@ -9,10 +9,10 @@ ziroctl backup list
 ziroctl backup restore /var/backups/ziro/ziro-backup-20261003.tar.gz
 ```
 
-Off-host copies go to any rclone remote (S3, GCS, Azure Blob, B2, SFTP, …) with the `rclone-ziro` plugin:
+Off-host copies go to any rclone remote (S3, GCS, Azure Blob, B2, SFTP, …) with the `rclone-ziro` module:
 
 ```sh
-ziroctl plugin enable rclone-ziro                       # or s3-ziro, which also creates ziro_s3
+ziroctl module enable rclone-ziro                       # or s3-ziro, which also creates ziro_s3
 ziroctl backup create --remote ziro_s3:ziro-backups
 ziroctl backup restore ziro_s3:ziro-backups/ziro-backup-20261003.tar.gz
 ziroctl cron add -s '0 2 * * *' -c 'ziroctl backup create --remote ziro_s3:ziro-backups' -m nightly-backup
@@ -28,7 +28,7 @@ flowchart LR
   end
   subgraph Out[Left out unless --include-secrets]
     S[cluster app secrets, Raft log,<br/>CA and master keys, data key]
-    P[plugin secrets, rclone credentials]
+    P[module secrets, rclone credentials]
   end
   In --> T[tar.gz + .sha256] --> R[(local dir or rclone remote)]
 ```
