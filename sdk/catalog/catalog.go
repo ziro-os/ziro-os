@@ -51,7 +51,7 @@ type Entry struct {
 type Index struct {
 	Schema  int       `json:"schema"`
 	Repo    string    `json:"repo"`
-	Kind    string    `json:"kind"` // "module" or "app"
+	Kind    string    `json:"kind"` // "module", "app" or "waf"
 	Serial  int64     `json:"serial"`
 	Expires time.Time `json:"expires"`
 	Entries []Entry   `json:"entries"`
@@ -65,8 +65,8 @@ func (r Repo) Validate() error {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("repo %s: URL must be plain https://host/path", r.Name)
 	}
-	if r.Kind != "module" && r.Kind != "app" {
-		return fmt.Errorf("repo %s: kind must be module or app", r.Name)
+	if _, ok := kinds[r.Kind]; !ok {
+		return fmt.Errorf("repo %s: kind must be module, app or waf", r.Name)
 	}
 	_, err = Ed25519Key(r.Key)
 	return err
@@ -129,18 +129,27 @@ func VerifyIndex(r Repo, raw, sigB64 []byte, now time.Time) (*Index, error) {
 	return &idx, nil
 }
 
-// Build writes index.json for the definitions under src/<kind>s/<name>/<file> into out,
-// validating each with check and writing it to out/<kind>s/<name>.json. A definition may be
+// kinds maps a catalog kind to where its definitions live in a source tree (src/<src>/<name>/<file>)
+// and where the built catalog serves them (out/<out>/<name>.json).
+var kinds = map[string]struct{ src, out, file string }{
+	"module": {"modules", "modules", "manifest"},
+	"app":    {"apps", "apps", "app"},
+	"waf":    {"waf", "rules", "rules"}, // WAF rule packs
+}
+
+// Build writes index.json for the definitions under src/<dir>/<name>/<file> into out,
+// validating each with check and writing it to out/<dir>/<name>.json. A definition may be
 // YAML or JSON (manifest.yaml, app.yml, ...); the catalog always serves canonical JSON, which is
 // what the signed index pins.
 func Build(src, out, repo, kind string, ttl time.Duration, now time.Time, check func([]byte) (Entry, error)) (*Index, error) {
-	file := map[string]string{"module": "manifest", "app": "app"}[kind]
-	if file == "" {
-		return nil, fmt.Errorf("kind must be module or app")
+	k, ok := kinds[kind]
+	if !ok {
+		return nil, fmt.Errorf("kind must be module, app or waf")
 	}
+	file := k.file
 	var dirs []string
 	for _, ext := range []string{".json", ".yaml", ".yml"} {
-		m, err := filepath.Glob(filepath.Join(src, kind+"s", "*", file+ext))
+		m, err := filepath.Glob(filepath.Join(src, k.src, "*", file+ext))
 		if err != nil {
 			return nil, err
 		}
@@ -169,8 +178,8 @@ func Build(src, out, repo, kind string, ttl time.Duration, now time.Time, check 
 			return nil, fmt.Errorf("duplicate %s %s", kind, e.Name)
 		}
 		seen[e.Name] = true
-		e.Path, e.SHA256 = kind+"s/"+e.Name+".json", sha256Hex(b)
-		if err := os.MkdirAll(filepath.Join(out, kind+"s"), 0755); err != nil {
+		e.Path, e.SHA256 = k.out+"/"+e.Name+".json", sha256Hex(b)
+		if err := os.MkdirAll(filepath.Join(out, k.out), 0755); err != nil {
 			return nil, err
 		}
 		if err := os.WriteFile(filepath.Join(out, e.Path), b, 0644); err != nil {

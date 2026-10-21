@@ -317,22 +317,154 @@ var gatewayBanLsCmd = &cobra.Command{
 	},
 }
 
-var gatewayWAFCmd = &cobra.Command{Use: "waf", Short: "Inspect the WAF rule catalog", Example: "  ziroctl gateway waf rules"}
+var gatewayWAFCmd = &cobra.Command{
+	Use:   "waf",
+	Short: "Inspect and update the WAF rules",
+	Long: `The WAF rules are a signed pack published in the ziro-os/pkgs repository. Gateways use the built-in
+rules until a pack is installed, and then switch to the pack within a second, without a restart.
+New rules are fetched about once a day; "waf update" fetches them now.`,
+	Example: "  ziroctl gateway waf rules\n  ziroctl gateway waf update",
+}
 
-var wafRulesGroup string
+var (
+	wafRulesGroup                  string
+	wafUpdateCheck, wafUpdateForce bool
+)
 
 var gatewayWAFRulesCmd = &cobra.Command{
-	Use: "rules", Short: "List the built-in WAF rules", Example: "  ziroctl gateway waf rules --group sqli", Args: cobra.NoArgs,
+	Use: "rules", Short: "List the WAF rules in use", Example: "  ziroctl gateway waf rules --group sqli", Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("%-10s %-9s %-5s %-5s %s\n", "ID", "GROUP", "LEVEL", "SCORE", "DESCRIPTION")
+		if _, err := wafLoadPack(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+		p := wafEng().pack
+		fmt.Printf("Rules: %s %s (%s)\n\n", p.Name, p.Version, p.Source)
+		fmt.Printf("%-10s %-9s %-5s %-5s %-7s %s\n", "ID", "GROUP", "LEVEL", "SCORE", "STAGE", "DESCRIPTION")
 		rules := wafRuleCatalog()
 		sort.SliceStable(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {
 			if wafRulesGroup == "" || r.Group == wafRulesGroup {
-				fmt.Printf("%-10s %-9s %-5d %-5d %s\n", r.ID, r.Group, r.Level, r.Score, r.Msg)
+				fmt.Printf("%-10s %-9s %-5d %-5d %-7s %s\n", r.ID, r.Group, r.Level, r.Score, r.Stage, r.Msg)
 			}
 		}
 		return nil
+	},
+}
+
+func printWAFChange(res *wafUpdateResult) {
+	for _, l := range []struct {
+		what string
+		ids  []string
+	}{{"added", res.Added}, {"changed", res.Updated}, {"removed", res.Removed}} {
+		if len(l.ids) > 0 {
+			fmt.Printf("  %s: %s\n", l.what, strings.Join(l.ids, " "))
+		}
+	}
+}
+
+var gatewayWAFUpdateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Fetch the newest signed WAF rules and use them",
+	Long: `Downloads the rules catalog, checks its signature and every rule (each rule's own test samples must
+pass), and installs it. Running gateways switch to the new rules within a second. On a cluster master every
+gateway node fetches the rules too. A pack that fails any check is not installed and the rules in use stay.`,
+	Example: "  ziroctl gateway waf update\n  ziroctl gateway waf update --check",
+	Args:    cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		res, err := wafUpdate(wafUpdateCheck, wafUpdateForce)
+		_ = auditLog("cli", "cli", "gateway waf update", wafRepoName, err)
+		if err != nil {
+			return err
+		}
+		switch {
+		case res.Held != "":
+			fmt.Printf("Held back: %s\n", res.Held)
+		case wafUpdateCheck:
+			fmt.Printf("In use: %s %s (%s). On offer: %s\n", res.Pack.Name, res.Pack.Version, res.Pack.Source, res.Available)
+		case !res.Changed:
+			fmt.Printf("✓ WAF rules are up to date: %s %s, %d rules\n", res.Pack.Name, res.Pack.Version, res.Rules)
+		default:
+			fmt.Printf("✓ WAF rules updated to %s %s: %d rules\n", res.Pack.Name, res.Pack.Version, res.Rules)
+			printWAFChange(res)
+			if err := bumpWAFEpoch(); err != nil {
+				return fmt.Errorf("the local gateway has the rules, but the cluster could not be told to fetch them: %w", err)
+			}
+		}
+		return nil
+	},
+}
+
+var gatewayWAFRollbackCmd = &cobra.Command{
+	Use:   "rollback",
+	Short: "Return to the WAF rules used before the last update",
+	Long: `Reinstalls the previous pack. The pack you rolled back from is not installed again by the daily
+update; a newer pack is.`,
+	Example: "  ziroctl gateway waf rollback",
+	Args:    cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		res, err := wafRollback()
+		_ = auditLog("cli", "cli", "gateway waf rollback", wafRepoName, err)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("✓ WAF rules rolled back to %s %s: %d rules\n", res.Pack.Name, res.Pack.Version, res.Rules)
+		printWAFChange(res)
+		return bumpWAFEpoch()
+	},
+}
+
+var gatewayWAFStatusCmd = &cobra.Command{
+	Use:     "status",
+	Short:   "Show which WAF rules are installed",
+	Example: "  ziroctl gateway waf status",
+	Args:    cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		st := wafStatusNow()
+		if jsonOutput {
+			fmt.Println(jsonString(st))
+			return nil
+		}
+		fmt.Printf("In use:    %s %s (%s), %d rules\n", st.InUse.Name, st.InUse.Version, st.InUse.Source, st.Rules)
+		if st.Cached != nil {
+			fmt.Printf("Installed: serial %d, signed index valid until %s\n", st.Cached.Serial, st.Cached.Expires)
+		} else {
+			fmt.Println("Installed: no downloaded pack (run: ziroctl gateway waf update)")
+		}
+		if len(st.Staged) > 0 {
+			fmt.Printf("Staged:    %s (logged, not scored)\n", strings.Join(st.Staged, " "))
+		}
+		if len(st.Disabled) > 0 {
+			fmt.Printf("Off:       %s\n", strings.Join(st.Disabled, " "))
+		}
+		fmt.Printf("Rollback:  %v\n", st.Previous)
+		if st.Held != 0 {
+			fmt.Printf("Held:      serial %d was rolled back and is not installed again\n", st.Held)
+		}
+		if st.Error != "" {
+			fmt.Printf("Problem:   %s\n", st.Error)
+		}
+		return nil
+	},
+}
+
+var gatewayWAFTestCmd = &cobra.Command{
+	Use:   "test <rules.json>",
+	Short: "Check a WAF rules file and its samples",
+	Long: `Parses a rules file strictly, compiles every rule and runs the match and nomatch samples each rule
+carries. The rules repository runs this on every pull request.`,
+	Example: "  ziroctl gateway waf test waf/zirogate-crs/rules.json",
+	Args:    cobra.ExactArgs(1),
+	RunE:    func(cmd *cobra.Command, args []string) error { return wafTestFile(args[0], os.Stdout) },
+}
+
+var gatewayWAFExportCmd = &cobra.Command{
+	Use:     "export",
+	Short:   "Print the built-in WAF rules as a rules file",
+	Example: "  ziroctl gateway waf export > rules.json",
+	Args:    cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		_, err := os.Stdout.Write(wafBuiltinJSON)
+		return err
 	},
 }
 
@@ -340,7 +472,25 @@ var gatewayWAFRulesCmd = &cobra.Command{
 
 func registerGatewayFirewallRoutes(a *apiRouter) {
 	a.get("/api/v1/gateway/waf/rules", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = wafLoadPack()
 		apiReply(w, nil, wafRuleCatalog())
+	})
+	a.get("/api/v1/gateway/waf/pack", "viewer", func(w http.ResponseWriter, r *http.Request) {
+		apiReply(w, nil, wafStatusNow())
+	})
+	a.post("/api/v1/gateway/waf/update", "admin", func(w http.ResponseWriter, r *http.Request) {
+		res, err := wafUpdate(false, false)
+		if err == nil && res.Changed {
+			err = bumpWAFEpoch()
+		}
+		apiReply(w, err, res)
+	})
+	a.post("/api/v1/gateway/waf/rollback", "admin", func(w http.ResponseWriter, r *http.Request) {
+		res, err := wafRollback()
+		if err == nil {
+			err = bumpWAFEpoch()
+		}
+		apiReply(w, err, res)
 	})
 	a.get("/api/v1/gateway/bans", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		s, err := gatewayStore()
@@ -395,6 +545,8 @@ func init() {
 	gatewayBanAddCmd.Flags().StringVar(&gwBanReason, "reason", "", "Why (shown in the ban list)")
 	gatewayBanCmd.AddCommand(gatewayBanAddCmd, gatewayBanRmCmd, gatewayBanLsCmd)
 	gatewayWAFRulesCmd.Flags().StringVar(&wafRulesGroup, "group", "", "Only this group")
-	gatewayWAFCmd.AddCommand(gatewayWAFRulesCmd)
+	gatewayWAFUpdateCmd.Flags().BoolVar(&wafUpdateCheck, "check", false, "Only report whether a newer pack is available")
+	gatewayWAFUpdateCmd.Flags().BoolVar(&wafUpdateForce, "force", false, "Install even if the pack is not newer, or was rolled back")
+	gatewayWAFCmd.AddCommand(gatewayWAFRulesCmd, gatewayWAFUpdateCmd, gatewayWAFStatusCmd, gatewayWAFRollbackCmd, gatewayWAFTestCmd, gatewayWAFExportCmd)
 	gatewayCmd.AddCommand(gatewayBanCmd, gatewayWAFCmd)
 }

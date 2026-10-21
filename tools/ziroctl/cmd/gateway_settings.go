@@ -70,6 +70,7 @@ var gwSettingsFlags struct {
 	abDuration    string
 	abMax         string
 	abKernel      bool
+	wafAutoUpdate bool
 }
 
 var gatewaySettingsCmd = &cobra.Command{
@@ -239,6 +240,7 @@ func init() {
 	f.StringSliceVar(&gwSettingsFlags.trusted, "trusted-proxy", nil, "Load balancer or CDN address or CIDR in front of the gateway (repeatable; empty clears)")
 	f.BoolVar(&gwSettingsFlags.proxyProtocol, "proxy-protocol", false, "Accept PROXY protocol v1/v2 from trusted proxies (--proxy-protocol=false turns it off)")
 	f.IntVar(&gwSettingsFlags.drain, "drain-seconds", 0, "How long a stopping gateway waits for in-flight requests (default 25, max 60)")
+	f.BoolVar(&gwSettingsFlags.wafAutoUpdate, "waf-auto-update", true, "Fetch new WAF rules about once a day (default on)")
 	registerWAFFlags(f, &gwSettingsFlags.waf, "routes that have none of their own")
 	f.StringSliceVar(&gwSettingsFlags.deny, "deny-cidr", nil, "Refuse these addresses or CIDRs on every route (repeatable; empty clears)")
 	f.BoolVar(&gwSettingsFlags.autoBan, "auto-ban", false, "Ban clients that keep getting blocked by the WAF or failing basic auth (--auto-ban=false turns it off)")

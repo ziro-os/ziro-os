@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -560,6 +561,10 @@ var gatewayServeCmd = &cobra.Command{
 			fmt.Printf("[gateway] admin token: %v (bans cannot be lifted at run time)\n", err)
 		}
 		g.startKernelBans(ctx)
+		if _, err := wafLoadPack(); err != nil {
+			fmt.Printf("[gateway] WAF rules: using the built-in set: %v\n", err)
+		}
+		var forceReload atomic.Bool // a new WAF rule pack: rebuild the routes that use it
 		var last, rejected []byte
 		reload := func() bool {
 			cfg, sig, err := gatewaySourceSig(last)
@@ -619,12 +624,16 @@ var gatewayServeCmd = &cobra.Command{
 					return
 				case <-t.C:
 					if !g.draining.Load() {
+						if forceReload.Swap(false) {
+							last, rejected = nil, nil
+						}
 						reload()
 					}
 				}
 			}
 		}()
 		go g.janitor(ctx)
+		go g.wafPackLoop(ctx, func() { forceReload.Store(true) })
 
 		if err := os.MkdirAll(gatewayCertDir, 0700); err != nil {
 			return err

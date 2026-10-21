@@ -186,6 +186,9 @@ var moduleUpdateCmd = &cobra.Command{
 		}
 		var failed []string
 		for _, r := range repos {
+			if r.Kind == "waf" { // WAF rules have their own command: ziroctl gateway waf update
+				continue
+			}
 			idx, err := refreshRepo(r)
 			if err != nil {
 				fmt.Printf("✗ %s: %v\n", r.Name, err)
@@ -479,6 +482,9 @@ official modules and apps.`,
 		if err := r.Validate(); err != nil {
 			return err
 		}
+		if r.Kind == "waf" {
+			return errors.New("WAF rules come from the official repository only")
+		}
 		repos, err := loadExtraRepos()
 		if err != nil {
 			return err
@@ -676,7 +682,7 @@ func init() {
 
 	for _, c := range []*cobra.Command{catalogBuildCmd, catalogVerifyCmd} {
 		c.Flags().StringVar(&catalogRepo, "repo", "", "Repository name")
-		c.Flags().StringVar(&catalogKind, "kind", "module", "module or app")
+		c.Flags().StringVar(&catalogKind, "kind", "module", "module, app or waf")
 		_ = c.MarkFlagRequired("repo")
 	}
 	catalogBuildCmd.Flags().StringVar(&catalogOut, "out", "public", "Output directory")

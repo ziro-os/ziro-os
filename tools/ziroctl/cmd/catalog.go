@@ -36,6 +36,8 @@ type CatalogItem struct {
 var officialRepos = []CatalogRepo{
 	{Name: "ziro", URL: "https://ziro-os.github.io/pkgs", Kind: "module", Official: true, Key: pkgsCatalogKey},
 	{Name: "ziro-apps", URL: "https://ziro-os.github.io/apps", Kind: "app", Official: true, Key: appsCatalogKey},
+	// WAF rule packs for the gateway (see gateway_waf_update.go), signed with the pkgs key.
+	{Name: wafRepoName, URL: "https://ziro-os.github.io/pkgs/waf", Kind: "waf", Official: true, Key: pkgsCatalogKey},
 }
 
 var (
@@ -112,7 +114,12 @@ func repoCache(r CatalogRepo) string { return filepath.Join(catalogDir, r.Name) 
 
 // refreshRepo downloads and verifies a repo's index and entries into a fresh directory, then
 // swaps it in: a failed or partial refresh never replaces a good cache.
-func refreshRepo(r CatalogRepo) (*CatalogIndex, error) {
+func refreshRepo(r CatalogRepo) (*CatalogIndex, error) { return refreshRepoChecked(r, nil) }
+
+// refreshRepoChecked is refreshRepo with a last check on the downloaded, verified directory
+// (dir holds index.json and entries/): a repo whose entries need more than a hash check, such as a
+// WAF pack that must compile, is refused here, before it can replace a working cache.
+func refreshRepoChecked(r CatalogRepo, check func(idx *CatalogIndex, dir string) error) (*CatalogIndex, error) {
 	if err := os.MkdirAll(catalogDir, 0755); err != nil {
 		return nil, err
 	}
@@ -149,6 +156,11 @@ func refreshRepo(r CatalogRepo) (*CatalogIndex, error) {
 			return nil, fmt.Errorf("repo %s: %s: sha256 mismatch", r.Name, e.Name)
 		}
 	}
+	if check != nil {
+		if err := check(idx, tmp); err != nil {
+			return nil, fmt.Errorf("repo %s: %w", r.Name, err)
+		}
+	}
 	dir := repoCache(r)
 	old := dir + ".old"
 	_ = os.RemoveAll(old)
@@ -163,8 +175,10 @@ func refreshRepo(r CatalogRepo) (*CatalogIndex, error) {
 	return idx, nil
 }
 
-func readCachedIndex(r CatalogRepo) (*CatalogIndex, error) {
-	dir := repoCache(r)
+func readCachedIndex(r CatalogRepo) (*CatalogIndex, error) { return readIndexAt(r, repoCache(r)) }
+
+// readIndexAt reads and verifies the index in a cache directory.
+func readIndexAt(r CatalogRepo, dir string) (*CatalogIndex, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "index.json"))
 	if err != nil {
 		return nil, err

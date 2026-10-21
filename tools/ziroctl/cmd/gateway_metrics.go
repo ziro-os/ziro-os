@@ -117,6 +117,8 @@ type gwMetrics struct {
 	l4conns      atomic.Int64 // open TCP and passthrough connections
 	tlsVersion   [4]atomic.Uint64
 	h3Handshakes atomic.Uint64
+
+	wafUpdates [3]atomic.Uint64 // WAF rule pack fetches: ok, failed; and packs that failed to load
 }
 
 func newGWMetrics() *gwMetrics {
@@ -332,6 +334,19 @@ func (m *gwMetrics) write(w io.Writer) {
 	fmt.Fprintf(bw, "zirogate_bans_total %d\n", m.bansTotal.Load())
 	family("zirogate_log_dropped_total", "Access log lines dropped because the log writer fell behind.", "counter")
 	fmt.Fprintf(bw, "zirogate_log_dropped_total %d\n", m.logDropped.Load())
+	pack := wafEng().pack
+	family("zirogate_waf_pack_info", "The WAF rule pack in use (value 1).", "gauge")
+	fmt.Fprintf(bw, "zirogate_waf_pack_info{pack=%q,version=%q,source=%q} 1\n", pack.Name, pack.Version, pack.Source)
+	family("zirogate_waf_pack_serial", "Serial of the signed index the WAF rules came from (0 for the built-in rules).", "gauge")
+	fmt.Fprintf(bw, "zirogate_waf_pack_serial %d\n", pack.Serial)
+	if t, err := time.Parse(time.RFC3339, pack.Expires); err == nil {
+		family("zirogate_waf_pack_expiry_seconds", "Seconds until the signed index of the WAF rules expires.", "gauge")
+		fmt.Fprintf(bw, "zirogate_waf_pack_expiry_seconds %d\n", int64(time.Until(t).Seconds()))
+	}
+	family("zirogate_waf_pack_update_total", "WAF rule pack fetches and loads, by result.", "counter")
+	for i, res := range [...]string{"ok", "error", "load_error"} {
+		fmt.Fprintf(bw, "zirogate_waf_pack_update_total{result=%q} %d\n", res, m.wafUpdates[i].Load())
+	}
 }
 
 func gwSortedKeys[V any](mp map[string]V) []string {
