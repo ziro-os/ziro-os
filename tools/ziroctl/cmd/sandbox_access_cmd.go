@@ -118,7 +118,7 @@ var sandboxSSHCmd = &cobra.Command{
 		fmt.Fprintf(f, "[127.0.0.1]:%d %s\n", cfg.SSHPort, key)
 		f.Close()
 		argv := []string{"ssh", "-p", fmt.Sprint(cfg.SSHPort), "-o", "UserKnownHostsFile=" + f.Name(), "-o", "StrictHostKeyChecking=yes",
-			"-o", "PubkeyAuthentication=no", "-o", "LogLevel=ERROR"}
+			"-o", "PubkeyAuthentication=no", "-o", "PasswordAuthentication=no", "-o", "LogLevel=ERROR"}
 		if len(args) == 1 {
 			argv = append(argv, "-t")
 		}

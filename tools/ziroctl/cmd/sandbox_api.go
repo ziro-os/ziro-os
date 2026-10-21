@@ -5,11 +5,18 @@ import (
 	"time"
 )
 
-// /api/v1/sandboxes: the REST API authenticates, audits and forwards to ziro-sandboxd, passing
+// /api/v1/sandboxes: the REST API authenticates, audits and forwards to ziro-sandboxd (on a
+// cluster master: to the node's, sandbox_cluster_api.go), passing
 // the caller's token name and role (the daemon scopes every sandbox to its owner). Deployers
 // manage their own sandboxes, so an agent's token can be a deployer limited to --scope sandboxes.
 func registerSandboxRoutes(a *apiRouter) {
-	proxy := daemonProxy(sandboxHTTP, "ziro-sandboxd", "ziro-sandboxd isn't running (ziroctl module enable sandbox)")
+	local := daemonProxy(sandboxHTTP, "ziro-sandboxd", "ziro-sandboxd isn't running (ziroctl module enable sandbox)")
+	// On a cluster master the request goes to the node that runs (or will run) the sandbox.
+	proxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveClusterSandboxes(w, r) {
+			local.ServeHTTP(w, r)
+		}
+	})
 	fwd := func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		proxy.ServeHTTP(w, r)

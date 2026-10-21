@@ -369,6 +369,7 @@ type sandboxManager struct {
 	net    *sandboxNet
 	access *accessStore
 	ssh    *sshGateway // nil when ssh_port is 0
+	mesh   *meshState  // the node's cluster view (sandbox_mesh.go)
 	now    func() time.Time
 
 	previewKey  []byte // nil when preview_port is 0

@@ -141,11 +141,12 @@ type Replica struct {
 
 // ClusterState is the master's source of truth. Secret values live in secrets.json.
 type ClusterState struct {
-	Nodes      []ClusterNode             `json:"nodes"`
-	Apps       []ClusteredApp            `json:"apps"`
-	Replicas   []Replica                 `json:"replicas"`
-	History    map[string][]ClusteredApp `json:"history,omitempty"` // previous specs, newest last
-	NodeTokens map[string]string         `json:"node_tokens"`       // node id -> sha256(node token)
+	Nodes      []ClusterNode               `json:"nodes"`
+	Apps       []ClusteredApp              `json:"apps"`
+	Replicas   []Replica                   `json:"replicas"`
+	History    map[string][]ClusteredApp   `json:"history,omitempty"`   // previous specs, newest last
+	NodeTokens map[string]string           `json:"node_tokens"`         // node id -> sha256(node token)
+	Sandboxes  map[string]SandboxPlacement `json:"sandboxes,omitempty"` // sandbox id -> where it runs (sandbox_cluster.go)
 	// PolicyDefault is "deny" (mesh traffic to app ports needs an allow_from rule) or
 	// "allow"/"" (clusters created before policies existed keep working unchanged).
 	PolicyDefault string         `json:"policy_default,omitempty"`

@@ -28,7 +28,17 @@ import (
 
 const maxSandboxAccess = 16
 
-var sandboxTokenRe = regexp.MustCompile(`^zsbx_[a-z2-7]{26}$`)
+// A token is zsbx_<sandbox id><secret>: the id lets an SSH edge on another cluster node find the
+// owner; the 26-character secret (128 bits) is what authenticates.
+var sandboxTokenRe = regexp.MustCompile(`^zsbx_(?:[a-z2-7]{12})?[a-z2-7]{26}$`)
+
+// tokenSandbox is the sandbox id a token names ("" for one without).
+func tokenSandbox(tok string) string {
+	if len(tok) == 5+12+26 && sandboxTokenRe.MatchString(tok) {
+		return tok[5:17]
+	}
+	return ""
+}
 
 type accessRecord struct {
 	ID        string    `json:"id"`
@@ -100,7 +110,7 @@ func (s *accessStore) create(id string, req sdkapi.SandboxAccessRequest, now, sb
 	if _, err := rand.Read(b); err != nil {
 		return "", accessRecord{}, err
 	}
-	tok := "zsbx_" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
+	tok := "zsbx_" + id + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 	exp := now.Add(ttl)
 	if exp.After(sbExpires) {
 		exp = sbExpires
@@ -225,7 +235,7 @@ func (m *sandboxManager) createAccess(id string, c sandboxCaller, req sdkapi.San
 	v := rec.view()
 	v.Username = tok
 	v.SSH = sshCommand(tok, host, cfg.SSHPort)
-	v.HostKey = knownHostsLine(host, cfg.SSHPort, m.ssh.signer.PublicKey())
+	v.HostKey = knownHostsLine(host, cfg.SSHPort, m.ssh.signer().PublicKey())
 	return v, nil
 }
 

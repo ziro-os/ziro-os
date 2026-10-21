@@ -80,6 +80,8 @@ type heartbeatRequest struct {
 	Relays   []zr.RelayRTT `json:"relays,omitempty"`
 	NAT      string        `json:"nat,omitempty"`
 	NodeCSR  string        `json:"node_csr,omitempty"`
+	// Sandboxes this node holds (nil from agents without the sandbox module).
+	Sandboxes []string `json:"sandboxes,omitempty"`
 }
 
 // Assignment is one container the master wants running on a node.
@@ -143,6 +145,7 @@ type heartbeatResponse struct {
 	MeshMode    string              `json:"mesh_mode,omitempty"`    // "anywhere": run the mesh on the zirocd engine
 	Relays      []zr.Relay          `json:"relays,omitempty"`       // relays for the mesh (anywhere mode)
 	NodeCert    string              `json:"node_cert,omitempty"`    // signed node certificate (answer to NodeCSR)
+	SandboxMesh *sandboxMeshConfig  `json:"sandbox_mesh,omitempty"` // nodes with the sandbox module
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -898,6 +901,12 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		}
 		scheduleReplicas(st, time.Now())
 		resp.Builds, resp.ImageToken = heartbeatBuilds(st, n, req)
+		if hasCap(n, capSandbox) {
+			for _, id := range pruneSandboxes(st, n.ID, req.Sandboxes, time.Now()) {
+				dropClusterPreviewRoutes(st, id)
+			}
+			resp.SandboxMesh = sandboxMeshFor(st, n)
+		}
 		resp.Assignments = assignmentsFor(st, n.ID, st.Secrets)
 		resp.MeshIP, resp.MeshPrefix, resp.Peers = meshView(st, n, meshCIDR(cfg))
 		resp.Endpoints = appEndpoints(st)
