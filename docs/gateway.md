@@ -304,10 +304,11 @@ ziroctl gateway settings set --waf-auto-update=false
 
 To add a rule, open a pull request to `ziro-os/pkgs` (see its `CONTRIBUTING.md`). The repository's CI runs
 `ziroctl gateway waf test` on the rules file, signs the catalog and publishes it; the next `waf update` or daily check
-picks it up. To check a rules file yourself:
+picks it up. `--benign` also checks a list of legitimate requests, so a rule that would block known good traffic does
+not ship. To check a rules file yourself:
 
 ```sh
-ziroctl gateway waf test waf/zirogate-crs/rules.json
+ziroctl gateway waf test waf/zirogate-crs/rules.json --benign waf/zirogate-crs/benign.txt
 ziroctl gateway waf export > rules.json     # the built-in rules, as a starting point
 ```
 
