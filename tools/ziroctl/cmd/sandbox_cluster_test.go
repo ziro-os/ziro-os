@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -75,8 +76,20 @@ type meshNode struct {
 	srv *httptest.Server
 }
 
-// TestSandboxClusterForwarding runs the master's API against two nodes' real mesh handlers.
-func TestSandboxClusterForwarding(t *testing.T) {
+// sandboxClusterHarness is a master with two sandbox nodes (n1 4 GB, n2 8 GB) whose mesh APIs are
+// in-process test servers, and an API with an "agent" token scoped to sandboxes.
+type sandboxClusterHarness struct {
+	m1, m2 *sandboxManager
+	st     *ClusterState
+	routes map[string]GatewayRoute
+	nodes  map[string]*meshNode
+	agent  string
+	other  string
+	do     func(token, method, path, body string) *httptest.ResponseRecorder
+}
+
+func newSandboxClusterHarness(t *testing.T) *sandboxClusterHarness {
+	t.Helper()
 	m1, _, _ := stubSandboxes(t)
 	m2 := &sandboxManager{st: &sandboxStore{all: map[string]*sdkapi.Sandbox{}}, net: m1.net, access: loadAccessStore(nil), now: m1.now}
 	const tok = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -85,7 +98,7 @@ func TestSandboxClusterForwarding(t *testing.T) {
 		m.mesh = &meshState{}
 		m.mesh.cfg.Store(&sandboxMeshConfig{Listen: id, Token: tok})
 		nodes[id] = &meshNode{m: m, srv: httptest.NewServer(m.meshHandler())}
-		defer nodes[id].srv.Close()
+		t.Cleanup(nodes[id].srv.Close)
 	}
 	st := &ClusterState{Nodes: []ClusterNode{
 		{ID: "n1", Status: "Ready", MeshIP: "10.200.0.1", Caps: []string{capSandbox}, MemTotal: 4000},
@@ -98,7 +111,7 @@ func TestSandboxClusterForwarding(t *testing.T) {
 	}
 	sandboxClusterMutate = func(fn func(*ClusterState) error) error { return fn(st) }
 	sandboxMeshAddr = func(n *ClusterNode) string { return strings.TrimPrefix(nodes[n.ID].srv.URL, "http://") }
-	defer func() { sandboxClusterState, sandboxClusterMutate, sandboxMeshAddr = old1, old2, old3 }()
+	t.Cleanup(func() { sandboxClusterState, sandboxClusterMutate, sandboxMeshAddr = old1, old2, old3 })
 
 	api := newAPIHarness(t, registerSandboxRoutes)
 	agent, _, _ := createAPIToken("agent", "deployer", 0, "sandboxes")
@@ -110,6 +123,13 @@ func TestSandboxClusterForwarding(t *testing.T) {
 		api.h.ServeHTTP(w, r)
 		return w
 	}
+	return &sandboxClusterHarness{m1: m1, m2: m2, st: st, routes: routes, nodes: nodes, agent: agent, other: other, do: do}
+}
+
+// TestSandboxClusterForwarding runs the master's API against two nodes' real mesh handlers.
+func TestSandboxClusterForwarding(t *testing.T) {
+	h := newSandboxClusterHarness(t)
+	m2, st, routes, nodes, agent, other, do := h.m2, h.st, h.routes, h.nodes, h.agent, h.other, h.do
 	// Create: placed on the node with the most memory, recorded in the directory.
 	w := do(agent, "POST", "/api/v1/sandboxes", `{"image":"alpine"}`)
 	var sb sdkapi.Sandbox
@@ -240,5 +260,41 @@ func TestSandboxSSHRelay(t *testing.T) {
 			HostKeyCallback: ssh.FixedHostKey(clusterKey.PublicKey()), Timeout: 5 * time.Second}); err == nil {
 			t.Error("relay login without the cluster key")
 		}
+	}
+}
+
+// A template create through the master goes to a node with a warm sandbox of the template (a
+// resume), even when placement by load would pick another node.
+func TestSandboxClusterWarmPools(t *testing.T) {
+	h := newSandboxClusterHarness(t)
+	stubTemplates(t)
+	saveTemplate("py", schema.SandboxSpec{Image: "python:3"})
+	os.WriteFile(sandboxConfigFile, []byte(`{"pools":{"py":1}}`), 0600)
+	// n1 (less memory: load-based placement prefers n2) has a warm sandbox.
+	now := h.m1.now()
+	warm := &sdkapi.Sandbox{ID: "warmwarmwarm", Owner: poolOwnerPrefix + "py", State: "paused",
+		Spec: schema.SandboxSpec{Image: "python:3", Template: "py", Resources: &schema.Resources{Memory: "1Gi"}}, Created: now, Expires: now.Add(time.Hour)}
+	os.MkdirAll(sandboxDir(warm.ID), 0700)
+	h.m1.st.all[warm.ID] = warm
+	if got := h.m1.warmPools(); got["py"] != 1 {
+		t.Fatalf("warm pools %v", got)
+	}
+	w := h.do(h.agent, "POST", "/api/v1/sandboxes", `{"template":"py"}`)
+	var sb sdkapi.Sandbox
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &sb) != nil {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	if sb.ID != warm.ID || h.st.Sandboxes[sb.ID].Node != "n1" || sb.Owner != "agent" || sb.State != "running" {
+		t.Errorf("claimed %+v on %+v", sb, h.st.Sandboxes[sb.ID])
+	}
+	// No warm one left: the next template create is placed by load (n2) and starts cold.
+	w = h.do(h.agent, "POST", "/api/v1/sandboxes", `{"template":"py"}`)
+	json.Unmarshal(w.Body.Bytes(), &sb)
+	if h.st.Sandboxes[sb.ID].Node != "n2" {
+		t.Errorf("cold create on %+v", h.st.Sandboxes[sb.ID])
+	}
+	// The pools endpoint is mesh-only: the REST API has no such route.
+	if w := h.do(h.agent, "GET", "/api/v1/sandboxes/pools", ""); w.Code == 200 {
+		t.Errorf("pools reachable through the API: %d %s", w.Code, w.Body)
 	}
 }

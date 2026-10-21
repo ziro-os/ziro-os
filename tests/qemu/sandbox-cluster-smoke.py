@@ -89,6 +89,22 @@ def main():
                         "$U@127.0.0.1 'echo relayed-from-$(cat /etc/hostname 2>/dev/null || hostname); exit 3'; echo RC=$?", timeout=120)
         check("ssh to the master reaches the worker's sandbox (relay), exit status kept", "relayed-from-sandbox" in out and "RC=3" in out, out)
 
+        # Cluster warm pools: only the worker keeps one; a template create through the master goes there
+        # and is a resume (no new container).
+        w.run("echo '{\"image\":\"alpine\"}' > /tmp/t.json && ziroctl sandbox template add tiny /tmp/t.json >/dev/null && "
+              "echo '{\"pools\":{\"tiny\":1}}' > /etc/ziro/sandbox.json", timeout=60)
+        m.run("echo '{\"image\":\"alpine\"}' > /tmp/t.json && ziroctl sandbox template add tiny /tmp/t.json >/dev/null", timeout=60)
+        ok, out = bs.retry(w, "ziroctl sandbox ls", lambda rc, o: "paused" in o and "pool:tiny" in o, 300, every=5)
+        check("the worker fills its warm pool", ok, out)
+        rc, out = m.run(f"{api} -d '{{\"template\":\"tiny\",\"timeout\":\"10m\"}}'", timeout=120)
+        pid = re.search(r'"id":"([a-z2-7]{12})"', out)
+        rc, wout = w.run(f"ziroctl sandbox get {pid.group(1) if pid else 'none'} --json", timeout=30)
+        check("a template create through the master claims the worker's warm sandbox", pid and '"owner": "agent"' in wout and '"running"' in wout, out + wout)
+        w.run("echo '{}' > /etc/ziro/sandbox.json", timeout=30)
+        if pid:
+            m.run(f"curl -s -X DELETE --cacert /etc/ziro/tls/server.crt -H \"Authorization: Bearer $(cat /tmp/t)\" "
+                  f"https://127.0.0.1:8443/api/v1/sandboxes/{pid.group(1)} >/dev/null", timeout=60)
+
         # Delete through the master: gone on the worker and from the directory.
         rc, out = m.run(f"curl -s -X DELETE --cacert /etc/ziro/tls/server.crt -H \"Authorization: Bearer $(cat /tmp/t)\" "
                         f"https://127.0.0.1:8443/api/v1/sandboxes/{remote}", timeout=120)
