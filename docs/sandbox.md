@@ -342,6 +342,9 @@ as one sandbox platform. Clients, agents and the MCP server talk to the master's
 - **Forwarding.** Every request about a sandbox goes to the node that runs it, with the caller's identity, so
   ownership, quotas and audit work as on one host. Lists are merged from all nodes. Each node serves its sandbox API
   only on its mesh address (port 7446, WireGuard), behind a cluster token.
+- **The host CLI on a master** works on the whole cluster, through the same forwarding: `ziroctl sandbox ls` lists
+  every node's sandboxes, and `get`, `exec`, `cp`, `stats`, `logs`, `pause`, `snapshot` and the rest work on any
+  of them. On other nodes the CLI manages that node's own sandboxes.
 - **One SSH address.** A token names its sandbox. Any node's gateway asks the owning node to check the token (which
   spends a single-use token there), then relays the session to the owner's gateway. The relay pins the owner's host
   key, which it fetches over the mesh. `ssh -p 22998 zsbx_...@<any node>` works for every sandbox in the cluster. All gateways present the same

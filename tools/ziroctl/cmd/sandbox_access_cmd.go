@@ -240,7 +240,7 @@ func sandboxStream(method, path string, body io.Reader) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
-	resp, err := sandboxHTTP.Do(req)
+	resp, err := sandboxCLIHTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ziro-sandboxd isn't answering on %s (ziroctl module enable sandbox): %w", sandboxSocket, err)
 	}

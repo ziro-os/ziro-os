@@ -81,6 +81,12 @@ func daemonDecode(name string, resp *http.Response, out any) error {
 		if json.Unmarshal(raw, &e) == nil && e.Error+e.Message != "" {
 			return errors.New(e.Error + e.Message)
 		}
+		// Our daemons answer errors in JSON; a bare 404/405 is the mux of a daemon that predates
+		// the request (it kept running the old binary after an update).
+		if (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) && resp.Request != nil {
+			return fmt.Errorf("%s doesn't know %s %s: it runs an older ziroctl than this one; restart it: ziroctl service restart %s",
+				name, resp.Request.Method, resp.Request.URL.Path, name)
+		}
 		return fmt.Errorf("%s: HTTP %d", name, resp.StatusCode)
 	}
 	if out == nil {

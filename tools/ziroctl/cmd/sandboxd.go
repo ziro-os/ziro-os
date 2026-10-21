@@ -459,7 +459,36 @@ func startSandboxDaemon(ctx context.Context) error {
 }
 
 func sandboxRaw(ctx context.Context, method, path string, body any) (*http.Response, error) {
-	return daemonRaw(ctx, sandboxHTTP, "ziro-sandboxd", sandboxSocket, startSandboxDaemon, method, path, body)
+	return daemonRaw(ctx, sandboxCLIHTTP, "ziro-sandboxd", sandboxSocket, startSandboxDaemon, method, path, body)
+}
+
+// sandboxCLIHTTP is how the host CLI reaches sandboxes. On a cluster master with sandbox nodes
+// it goes through the cluster (every node's sandboxes, placement, snapshots on any node) with
+// the forwarding the REST API uses, as root; anywhere else to the local daemon.
+var sandboxCLIHTTP = &http.Client{Transport: sandboxCLITransport{}}
+
+type sandboxCLITransport struct{}
+
+func (sandboxCLITransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if v, ok := sandboxClusterState(); ok && v.token != "" && len(v.sandboxNodes()) > 0 {
+		return inProcess{h: http.HandlerFunc(serveCLIOnCluster), ctx: asHostRoot}.RoundTrip(req)
+	}
+	return sandboxHTTP.Transport.RoundTrip(req)
+}
+
+// serveCLIOnCluster answers a daemon request (/v1/sandboxes...) with the master's cluster
+// handler (/api/v1/sandboxes...).
+func serveCLIOnCluster(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = "/api" + r.URL.Path
+	r.Host = "" // no client-facing host name: nodes use their configured ssh_host for access commands
+	if !serveClusterSandboxes(w, r) {
+		apiError(w, http.StatusServiceUnavailable, "this host is no longer a cluster master")
+	}
+}
+
+// asHostRoot gives a request the identity of the host CLI: root, with every sandbox in view.
+func asHostRoot(ctx context.Context) context.Context {
+	return context.WithValue(context.WithValue(ctx, apiNameKey{}, "root"), apiRoleKey{}, "admin")
 }
 
 // sandboxCall sends a request to ziro-sandboxd and decodes its JSON answer into out.

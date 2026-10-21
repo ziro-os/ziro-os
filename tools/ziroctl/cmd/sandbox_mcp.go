@@ -532,7 +532,7 @@ func serveMCPHTTP(self http.Handler) http.HandlerFunc {
 		}
 		c, err := client.New("http://127.0.0.1", trimBearer(r.Header.Get("Authorization")),
 			client.WithUserAgent("ziro-sandbox-mcp-http"),
-			client.WithHTTPClient(&http.Client{Transport: inProcess{self, r.RemoteAddr}}))
+			client.WithHTTPClient(&http.Client{Transport: inProcess{h: self, remote: r.RemoteAddr}}))
 		if err != nil {
 			apiError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -541,57 +541,6 @@ func serveMCPHTTP(self http.Handler) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(mcpAnswer(req.ID, result, rerr))
 	}
 }
-
-// inProcess is an http.RoundTripper that serves requests with a handler instead of a network:
-// the MCP endpoint's tool calls go through the whole API (auth, scopes, rate limits, audit) as
-// the client that called it (remote is its address).
-type inProcess struct {
-	h      http.Handler
-	remote string
-}
-
-// inProcessMax bounds one answer kept in memory (exec output is capped at 64 MiB too).
-const inProcessMax = 80 << 20
-
-func (t inProcess) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	req.RemoteAddr, req.RequestURI = t.remote, req.URL.RequestURI()
-	if req.Body == nil {
-		req.Body = http.NoBody
-	}
-	w := &memResponse{header: http.Header{}, status: http.StatusOK}
-	t.h.ServeHTTP(w, req)
-	if w.over {
-		return nil, fmt.Errorf("answer over %d MiB", inProcessMax>>20)
-	}
-	return &http.Response{StatusCode: w.status, Status: http.StatusText(w.status), Header: w.header,
-		Body: io.NopCloser(&w.body), ContentLength: int64(w.body.Len()), Request: req}, nil
-}
-
-// memResponse is an http.ResponseWriter into memory, up to inProcessMax.
-type memResponse struct {
-	header      http.Header
-	body        bytes.Buffer
-	status      int
-	wroteHeader bool
-	over        bool
-}
-
-func (m *memResponse) Header() http.Header { return m.header }
-func (m *memResponse) WriteHeader(code int) {
-	if !m.wroteHeader {
-		m.status, m.wroteHeader = code, true
-	}
-}
-func (m *memResponse) Write(p []byte) (int, error) {
-	m.wroteHeader = true
-	if m.body.Len()+len(p) > inProcessMax {
-		m.over = true
-		return 0, errors.New("answer too large")
-	}
-	return m.body.Write(p)
-}
-func (m *memResponse) Flush() {}
 
 // ---- stdio: ziroctl sandbox mcp ----
 

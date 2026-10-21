@@ -36,8 +36,6 @@ var (
 	optionalTools   = []string{"zirocd"}
 	updateCheckFile = "/var/lib/ziro/update-check.json"
 	updateConfFile  = "/etc/ziro/update.json"
-	// Long-running ziroctl daemons restarted onto the new binary, one at a time.
-	toolsDaemons = []string{"sentinel", "ziro-api", "gateway", "cluster-agent", "cluster-master", "router-relay", "router-moon", "zirocd", "ziroctld"}
 )
 
 // verifyReleaseSums checks an ed25519 signature (base64) over SHA256SUMS.
@@ -345,17 +343,73 @@ func writeCompletions(root string) error {
 	return errors.Join(errs...)
 }
 
-// restartToolDaemons moves running ziroctl daemons onto the new binary, one at a time.
+// restartToolDaemons moves every running service that executes a binary this update replaced
+// onto the new version, one at a time: ziroctl's own daemons, and module daemons that are
+// symlinks to it (ziro-sandboxd, ...). A daemon left on the old binary answers new requests
+// with 404s and runs old code.
 func restartToolDaemons() {
-	for _, d := range toolsDaemons {
-		if st, err := getServiceStatus(d); err == nil && st.Status == "RUNNING" {
-			if err := restartService(d); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: restart %s: %v\n", d, err)
-			} else {
-				fmt.Printf("  restarted %s\n", d)
+	var running []ServiceStatusInfo
+	for _, n := range knownServiceNames() {
+		if st, err := getServiceStatus(n); err == nil {
+			running = append(running, *st)
+		}
+	}
+	for _, name := range daemonsOnTools(running, func(n string) string {
+		if d, err := loadServiceDef(n); err == nil {
+			return d.Exec
+		}
+		return ""
+	}) {
+		if err := restartService(name); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: restart %s: %v\n", name, err)
+		} else {
+			fmt.Printf("  restarted %s\n", name)
+		}
+	}
+}
+
+// knownServiceNames are the services this binary knows: the built-in ones and those of its
+// built-in modules (names compiled in, never read from the services directory).
+func knownServiceNames() []string {
+	var names []string
+	for _, d := range defaultServices {
+		names = append(names, d.Name)
+	}
+	ents, _ := moduleFS.ReadDir("modules")
+	for _, e := range ents {
+		b, err := moduleFS.ReadFile("modules/" + e.Name())
+		if err != nil {
+			continue
+		}
+		if m, err := parseManifest(b); err == nil {
+			for _, s := range m.Services {
+				names = append(names, s.Name)
 			}
 		}
 	}
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// daemonsOnTools picks the running services whose executable (symlinks resolved) is one of the
+// tools binaries.
+func daemonsOnTools(services []ServiceStatusInfo, execOf func(string) string) []string {
+	tools := map[string]bool{}
+	for _, b := range append(slices.Clone(toolsBinaries), optionalTools...) {
+		if p, err := filepath.EvalSymlinks(filepath.Join(toolsBinDir, b)); err == nil {
+			tools[p] = true
+		}
+	}
+	var out []string
+	for _, st := range services {
+		if st.Status != "RUNNING" {
+			continue
+		}
+		if p, err := filepath.EvalSymlinks(execOf(st.Name)); err == nil && tools[p] {
+			out = append(out, st.Name)
+		}
+	}
+	return out
 }
 
 func checkForUpdate() UpdateCheck {

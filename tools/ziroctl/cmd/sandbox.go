@@ -296,8 +296,9 @@ func sandboxRunArgs(sb *sdkapi.Sandbox, image, gateway string, secretEnv map[str
 // ---- the store: one JSON record per sandbox, next to its workspace ----
 
 type sandboxStore struct {
-	mu  sync.Mutex
-	all map[string]*sdkapi.Sandbox
+	mu      sync.Mutex
+	all     map[string]*sdkapi.Sandbox
+	touched map[string]time.Time // when each record's LastActive was last saved (touch)
 }
 
 func loadSandboxStore() *sandboxStore {
@@ -546,6 +547,7 @@ func (m *sandboxManager) remove(id string, c sandboxCaller) error {
 	dropPreviews(sb)
 	m.st.mu.Lock()
 	delete(m.st.all, id)
+	delete(m.st.touched, id)
 	m.st.mu.Unlock()
 	m.access.drop(id)
 	if m.egress != nil {
@@ -674,8 +676,26 @@ func (m *sandboxManager) setNetwork(ctx context.Context, id string, c sandboxCal
 	return sb, nil
 }
 
+// sandboxTouchSave is how stale a saved LastActive may get: activity is kept in memory at once
+// (the idle reaper reads that), and written out at most this often, not on every exec.
+const sandboxTouchSave = 30 * time.Second
+
 func (m *sandboxManager) touch(id string) {
-	_ = m.st.update(id, func(x *sdkapi.Sandbox) { x.LastActive = m.now().UTC() })
+	now := m.now().UTC()
+	m.st.mu.Lock()
+	defer m.st.mu.Unlock()
+	sb, ok := m.st.all[id]
+	if !ok {
+		return
+	}
+	sb.LastActive = now
+	if m.st.touched == nil {
+		m.st.touched = map[string]time.Time{}
+	}
+	if now.Sub(m.st.touched[id]) >= sandboxTouchSave {
+		m.st.touched[id] = now
+		_ = m.st.save(sb)
+	}
 }
 
 // ---- the reaper ----
@@ -754,6 +774,7 @@ func (m *sandboxManager) reap(ctx context.Context, status map[string]string) {
 		id := strings.Fields(e)[0]
 		gone = append(gone, *m.st.all[id])
 		delete(m.st.all, id)
+		delete(m.st.touched, id)
 	}
 	m.st.mu.Unlock()
 	for _, sb := range gone {

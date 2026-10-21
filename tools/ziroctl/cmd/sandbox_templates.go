@@ -198,6 +198,7 @@ func (m *sandboxManager) claim(ctx context.Context, req schema.SandboxSpec, c sa
 		fmt.Printf("[sandboxd] pool %s: resume %s: %s\n", req.Template, id, cmdError(out, err))
 		m.st.mu.Lock()
 		delete(m.st.all, id)
+		delete(m.st.touched, id)
 		m.st.mu.Unlock()
 		_ = m.destroy(id)
 		return sdkapi.Sandbox{}, false

@@ -467,3 +467,30 @@ func TestSandboxAPIIdentityAndScope(t *testing.T) {
 		t.Error("unknown scope accepted")
 	}
 }
+
+// Activity is current in memory at once but written to disk at most every sandboxTouchSave.
+func TestSandboxTouchThrottle(t *testing.T) {
+	m, _, now := stubSandboxes(t)
+	sb, err := m.create(context.Background(), schema.SandboxSpec{Image: "a"}, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk := func() time.Time {
+		var x sdkapi.Sandbox
+		b, _ := os.ReadFile(filepath.Join(sandboxDir(sb.ID), "sandbox.json"))
+		json.Unmarshal(b, &x)
+		return x.LastActive
+	}
+	m.touch(sb.ID)
+	first := onDisk()
+	*now = now.Add(5 * time.Second)
+	m.touch(sb.ID)
+	if got, _ := m.st.get(sb.ID, alice); !got.LastActive.Equal(*now) || !onDisk().Equal(first) {
+		t.Errorf("within 30s: memory %v, disk %v (first %v)", got.LastActive, onDisk(), first)
+	}
+	*now = now.Add(sandboxTouchSave)
+	m.touch(sb.ID)
+	if !onDisk().Equal(*now) {
+		t.Errorf("after 30s the disk has %v", onDisk())
+	}
+}
