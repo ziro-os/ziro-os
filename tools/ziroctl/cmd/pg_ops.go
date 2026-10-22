@@ -36,10 +36,10 @@ type pgCreateOpts struct {
 // secret.
 func pgCreate(st *ClusterState, o pgCreateOpts, now time.Time) (*PGCluster, error) {
 	if st.PodCIDR == "" {
-		return nil, fmt.Errorf("Postgres clusters need the pod network (ziroctl cluster network enable)")
+		return nil, fmt.Errorf("postgres clusters need the pod network (ziroctl cluster network enable)")
 	}
 	if st.PG[o.Name] != nil {
-		return nil, fmt.Errorf("Postgres cluster %q exists", o.Name)
+		return nil, fmt.Errorf("postgres cluster %q exists", o.Name)
 	}
 	if st.app(pgAppPrefix+o.Name+"-main-m1") != nil {
 		return nil, fmt.Errorf("%q is in use", o.Name)

@@ -285,13 +285,3 @@ func (c *PGCluster) Validate() error {
 }
 
 var pgIdentRe = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
-
-func (c *PGCluster) clone() *PGCluster {
-	cp := *c
-	cp.Groups = make([]PGGroup, len(c.Groups))
-	for i, g := range c.Groups {
-		cp.Groups[i] = g
-		cp.Groups[i].Members = append([]PGMember(nil), g.Members...)
-	}
-	return &cp
-}
