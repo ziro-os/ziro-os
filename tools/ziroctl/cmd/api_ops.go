@@ -265,6 +265,7 @@ func registerClusterRoutes(a *apiRouter) {
 	a.post("/api/v1/cluster/apps/{name}/scale", "operator", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Replicas *int `json:"replicas"`
+			Force    bool `json:"force"`
 		}
 		if !decodeBody(w, r, &req) {
 			return
@@ -273,7 +274,7 @@ func registerClusterRoutes(a *apiRouter) {
 			apiReply(w, fmt.Errorf("replicas is required"), nil)
 			return
 		}
-		apiReply(w, clusterScale(r.PathValue("name"), *req.Replicas), done("scaled"))
+		apiReply(w, clusterScaleApp(r.PathValue("name"), *req.Replicas, req.Force), done("scaled"))
 	})
 	a.post("/api/v1/cluster/apps/{name}/rollback", "operator", func(w http.ResponseWriter, r *http.Request) {
 		apiReply(w, clusterRollback(r.PathValue("name")), done("rolling back"))
@@ -283,7 +284,7 @@ func registerClusterRoutes(a *apiRouter) {
 	})
 	a.post("/api/v1/cluster/nodes/{id}/{action}", "operator", func(w http.ResponseWriter, r *http.Request) {
 		action := r.PathValue("action")
-		if action != "cordon" && action != "uncordon" && action != "drain" {
+		if action != "cordon" && action != "uncordon" && action != "drain" && action != "force-drain" {
 			apiReply(w, errNotFound("unknown node action "+action), nil)
 			return
 		}

@@ -67,6 +67,79 @@ func planReconcile(desired []Assignment, actual map[string]bool) (start []Assign
 	return start, restart, remove
 }
 
+const stopTimeoutLabel = "ziro.stop-timeout"
+
+// removeSteps are the nerdctl commands that take a container away: a container that carries a
+// stop timeout gets that long to shut down cleanly (a database flushes and exits instead of being
+// killed and recovering from its log), then is removed.
+func removeSteps(name string, timeout int) [][]string {
+	var steps [][]string
+	if timeout > 0 {
+		steps = append(steps, []string{"stop", "-t", strconv.Itoa(timeout), name})
+	}
+	return append(steps, []string{"rm", "-f", name})
+}
+
+// containerStopTimeout reads the stop timeout a container was started with (0 if none).
+func containerStopTimeout(name string) int {
+	out, err := exec.Command("nerdctl", "inspect", "-f", `{{index .Config.Labels "`+stopTimeoutLabel+`"}}`, name).Output()
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || n < 0 || n > maxStopTimeout {
+		return 0
+	}
+	return n
+}
+
+func removeContainer(name string) error {
+	var err error
+	for _, step := range removeSteps(name, containerStopTimeout(name)) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(maxStopTimeout+30)*time.Second)
+		err = nerdctl(ctx, step...)
+		cancel()
+	}
+	return err
+}
+
+// clusterFilesDir holds the config files of cluster containers. It is on disk, not in /run: a
+// container restarted by the runtime after a reboot finds its files before the agent has talked to
+// the master.
+var clusterFilesDir = "/var/lib/ziro/cluster-files"
+
+func configDir(container string) string { return filepath.Join(clusterFilesDir, container) }
+
+// writeConfigFiles writes a container's config and dynamic files (atomically, so a reader never sees
+// half a file). The names come from the master and are validated again here.
+func writeConfigFiles(a Assignment) error {
+	if len(a.ConfigFiles) == 0 && len(a.Dynamic) == 0 {
+		return nil
+	}
+	if err := validConfigFiles(a.ConfigFiles); err != nil {
+		return err
+	}
+	if err := validConfigFiles(a.Dynamic); err != nil {
+		return err
+	}
+	dir := configDir(a.Name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	for _, set := range []map[string]string{a.ConfigFiles, a.Dynamic} {
+		for name, content := range set {
+			p := filepath.Join(dir, name)
+			if cur, err := os.ReadFile(p); err == nil && string(cur) == content {
+				continue
+			}
+			if err := writeFileAtomic(p, []byte(content), 0644); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func secretEnvFile(name string) string { return filepath.Join(secretEnvDir, name+".env") }
 
 func runArgs(a Assignment) []string {
@@ -80,6 +153,9 @@ func containerArgs(a Assignment, labels ...string) []string {
 		args = append(args, "--label", l)
 	}
 	args = append(args, "-e", "ZIRO_REPLICA="+strconv.Itoa(a.Replica))
+	if a.StopTimeout > 0 {
+		args = append(args, "--label", stopTimeoutLabel+"="+strconv.Itoa(a.StopTimeout))
+	}
 	if !a.PrivEsc {
 		// Secure by default: setuid binaries can't gain privileges, and no raw sockets (spoofing).
 		args = append(args, "--security-opt", "no-new-privileges", "--cap-drop", "NET_RAW")
@@ -112,6 +188,9 @@ func containerArgs(a Assignment, labels ...string) []string {
 	}
 	for _, d := range a.Data {
 		args = append(args, "-v", dataDir(a.App, a.Replica, d)+":"+d)
+	}
+	if len(a.ConfigFiles) > 0 || len(a.Dynamic) > 0 {
+		args = append(args, "-v", configDir(a.Name)+":"+configMountPoint+":ro")
 	}
 	return append(append(args, "--", a.Image), a.Args...)
 }
@@ -311,6 +390,7 @@ type agent struct {
 	meshNet netip.Prefix      // the cluster mesh: the only place images are fetched from
 	mesh    meshAnywhere      // the mesh engine (mesh mode "anywhere")
 	mode    string            // mesh mode from the last heartbeat
+	pg      *pgAgent          // probes and orders for Postgres members (pg_agent.go)
 }
 
 func (ag *agent) setFailed(name string, err error) {
@@ -333,7 +413,7 @@ func nerdctl(ctx context.Context, args ...string) error {
 		if i := strings.LastIndex(msg, "\n"); i >= 0 {
 			msg = msg[i+1:]
 		}
-		return fmt.Errorf("%v: %s", err, msg)
+		return fmt.Errorf("%v: %s", err, condenseRuntimeError(msg))
 	}
 	return nil
 }
@@ -350,10 +430,16 @@ func (ag *agent) reconcile(desired []Assignment) error {
 		return fmt.Errorf("list containers: %w", err)
 	}
 	start, restart, remove := planReconcile(desired, actual)
+	for _, a := range desired { // dynamic files (a member's role) follow the master while the container runs
+		if len(a.Dynamic) > 0 {
+			_ = writeConfigFiles(a)
+		}
+	}
 	for _, name := range remove {
-		if err := nerdctl(context.Background(), "rm", "-f", name); err == nil {
+		if err := removeContainer(name); err == nil {
 			fmt.Printf("[agent] removed %s\n", name)
 			_ = os.Remove(secretEnvFile(name))
+			_ = os.RemoveAll(configDir(name))
 		}
 		ag.setFailed(name, nil)
 	}
@@ -372,6 +458,12 @@ func (ag *agent) reconcile(desired []Assignment) error {
 			err = nerdctl(ctx, "pull", "-q", a.Image)
 		}
 		cancel()
+		if err == nil {
+			err = podPreflight(a, containerIDs)
+		}
+		if err == nil {
+			err = writeConfigFiles(a)
+		}
 		if err == nil {
 			err = writeSecretEnv(a)
 		}
@@ -406,7 +498,12 @@ var clusterAgentCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		ag := &agent{failed: map[string]string{}}
+		ag := &agent{failed: map[string]string{}, pg: newPGAgent()}
+		go ag.pg.loop(context.Background(), func() []Assignment {
+			ag.mu.Lock()
+			defer ag.mu.Unlock()
+			return ag.desired
+		})
 		fmt.Printf("[agent] node %s reporting to %s every %s\n", cfg.NodeID, cfg.MasterAddr, agentInterval)
 
 		// Reconcile loop: image pulls and container starts can take minutes; they run here so
@@ -463,6 +560,7 @@ var clusterAgentCmd = &cobra.Command{
 			if hasCapList(hb.Caps, capSandbox) {
 				hb.Sandboxes = localSandboxIDs()
 			}
+			hb.PG, hb.PGResults = ag.pg.report(time.Now())
 			if ag.mode == "anywhere" { // path discovery key, endpoints, relays, NAT type; node cert for relays
 				if _, disco, err := meshDiscoKey(); err == nil {
 					hb.DiscoKey = disco
@@ -490,6 +588,7 @@ var clusterAgentCmd = &cobra.Command{
 			}
 			writeAgentStatus(lastOK, err)
 			if err == nil {
+				ag.pg.submit(context.Background(), resp.PGOrders, time.Now())
 				if pending != "" {
 					adoptNodeToken(cfg, pending)
 				}

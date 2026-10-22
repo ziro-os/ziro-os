@@ -444,6 +444,26 @@ func registerAppRoutes(a *apiRouter) {
 		}
 		apiAccepted(w, "deploying "+req.App+"; poll GET /api/v1/apps")
 	})
+	a.post("/api/v1/apps/{name}/scale", "operator", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Replicas  *int   `json:"replicas"`
+			Component string `json:"component"`
+		}
+		if !decodeBody(w, r, &req) {
+			return
+		}
+		if req.Replicas == nil {
+			apiReply(w, fmt.Errorf("replicas is required"), nil)
+			return
+		}
+		if req.Component != "" {
+			if err := validName(req.Component); err != nil {
+				apiReply(w, err, nil)
+				return
+			}
+		}
+		apiReply(w, appScale(r.PathValue("name"), *req.Replicas, req.Component), APIMessage{Status: "ok", Message: "scaled"})
+	})
 	// ?purge=true also deletes the app's data and credentials.
 	a.delete("/api/v1/apps/{name}", "admin", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")

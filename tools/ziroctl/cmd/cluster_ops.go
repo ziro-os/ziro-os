@@ -9,7 +9,20 @@ import (
 // Cluster operations shared by the CLI (`ziroctl cluster ...`) and the API. Each runs on the
 // master, under the state lock, and reschedules replicas.
 
-func clusterScale(name string, replicas int) error {
+func clusterScale(name string, replicas int) error { return clusterScaleApp(name, replicas, false) }
+
+// scaleRefusal explains why an app's replicas cannot be raised: every replica keeps its own data
+// on its own node, so unless the app replicates itself, a second replica would be an independent,
+// empty database that the app's DNS name then mixes in with the first. An app that already runs
+// several replicas was set up on purpose and may grow.
+func scaleRefusal(cur ClusteredApp, replicas int) error {
+	if len(cur.Data) == 0 || cur.Replicated || replicas <= max(cur.Replicas, 1) || cur.Replicas > 1 {
+		return nil
+	}
+	return fmt.Errorf("%s keeps data on its node and does not replicate it: a second replica would be an independent, empty copy. Use an app that replicates (for Postgres: ziroctl pg), or --force to scale anyway", cur.Name)
+}
+
+func clusterScaleApp(name string, replicas int, force bool) error {
 	if _, err := requireMaster(); err != nil {
 		return err
 	}
@@ -17,6 +30,11 @@ func clusterScale(name string, replicas int) error {
 		cur := st.app(name)
 		if cur == nil {
 			return nil, errNotFound(fmt.Sprintf("app %q not found", name))
+		}
+		if !force {
+			if err := scaleRefusal(*cur, replicas); err != nil {
+				return nil, err
+			}
 		}
 		a := *cur
 		a.Replicas = replicas
@@ -84,7 +102,16 @@ func clusterNodeAction(id, action string) error {
 			n.Cordoned, n.AutoCordon = true, false // now the admin's: the heal pass never lifts it
 		case "uncordon":
 			n.Cordoned, n.AutoCordon = false, false
-		case "drain":
+		case "drain", "force-drain":
+			var stuck []string
+			for _, r := range st.Replicas {
+				if a := st.app(r.App); r.Node == n.ID && a != nil && a.stickyData() {
+					stuck = append(stuck, fmt.Sprintf("%s/%d", r.App, r.Index))
+				}
+			}
+			if len(stuck) > 0 && action != "force-drain" {
+				return fmt.Errorf("%s holds data that does not move with its replicas (%s); a replica moved away starts empty. Move the data first, or drain with --force-move", n.ID, strings.Join(stuck, ", "))
+			}
 			n.Cordoned, n.AutoCordon = true, false
 			for i := range st.Replicas {
 				if st.Replicas[i].Node == n.ID {

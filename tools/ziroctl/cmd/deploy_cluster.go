@@ -121,6 +121,9 @@ func builtInCluster(st *ClusterState, image string) bool {
 // and every label the app selects.
 func (st *ClusterState) fits(r Replica, node string) bool {
 	spec, _ := st.specFor(r)
+	if spec.Node != "" && spec.Node != node {
+		return false
+	}
 	if spec.Arch == "" {
 		return true
 	}

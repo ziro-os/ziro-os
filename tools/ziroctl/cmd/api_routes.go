@@ -75,6 +75,7 @@ func apiRoutes() *apiRouter {
 	registerFirewallRoutes(a)
 	registerTailscaleRoutes(a)
 	registerClusterRoutes(a)
+	registerPGRoutes(a)
 	registerOpsRoutes(a)
 	registerStackRoutes(a)
 	registerDeployRoutes(a)

@@ -42,6 +42,7 @@ modules for everything else. New here? Read [getting started](getting-started.md
 ## Clusters
 
 - [Clustering](clustering.md): join, scheduling, HA control plane, pod network, policy, secrets.
+- [Postgres clusters](postgres.md): primary and replicas, automatic failover, replicas added without downtime, Citus sharding.
 
 ## Security
 
