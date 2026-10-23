@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -170,7 +171,20 @@ func initStateMaps(st *ClusterState) {
 // hardKey is the state without per-heartbeat liveness fields: a change here is a Raft commit.
 // It never encrypts (sealing uses a random nonce), so equal states give equal keys.
 func hardKey(st *ClusterState) []byte {
+	b, _ := json.Marshal(struct {
+		State   *ClusterState
+		Secrets map[string]map[string]string
+		CAKey   string
+		Sealed  []byte
+	}{hardView(st), st.Secrets, st.CAKey, st.sealed})
+	return b
+}
+
+// hardView is st without its soft state: what a commit is decided on. It shares everything else
+// with st.
+func hardView(st *ClusterState) *ClusterState {
 	cp := *st
+	cp.nodeIdx, cp.appIdx = nil, nil
 	cp.Nodes = append([]ClusterNode(nil), st.Nodes...)
 	for i := range cp.Nodes {
 		n := &cp.Nodes[i]
@@ -185,34 +199,14 @@ func hardKey(st *ClusterState) []byte {
 	for i := range cp.Replicas {
 		cp.Replicas[i].Fails, cp.Replicas[i].Error = 0, ""
 	}
-	b, _ := json.Marshal(struct {
-		State   *ClusterState
-		Secrets map[string]map[string]string
-		CAKey   string
-		Sealed  []byte
-	}{&cp, st.Secrets, st.CAKey, st.sealed})
-	return b
+	return &cp
 }
 
 // cloneState deep-copies st without any encryption.
 func cloneState(st *ClusterState) *ClusterState {
-	b, err := json.Marshal(st)
-	if err != nil {
-		panic(err) // state always encodes
-	}
 	c := &ClusterState{}
-	if err := json.Unmarshal(b, c); err != nil {
-		panic(err)
-	}
+	deepCopyInto(reflect.ValueOf(c).Elem(), reflect.ValueOf(st).Elem()) // Secrets and CAKey included
 	initStateMaps(c)
-	for name, kv := range st.Secrets {
-		m := make(map[string]string, len(kv))
-		for k, v := range kv {
-			m[k] = v
-		}
-		c.Secrets[name] = m
-	}
-	c.CAKey = st.CAKey
 	if st.sealed != nil {
 		c.sealed = append([]byte(nil), st.sealed...)
 	}
