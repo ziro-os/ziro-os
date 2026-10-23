@@ -275,6 +275,7 @@ type rateLimiter struct {
 	clients map[string][]time.Time
 	limit   int
 	window  time.Duration
+	swept   time.Time // last eviction of idle clients
 }
 
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
@@ -291,20 +292,23 @@ func (rl *rateLimiter) allow(ip string) bool {
 	now := time.Now()
 	cutoff := now.Add(-rl.window)
 
-	var valid []time.Time
-	for _, t := range rl.clients[ip] {
-		if t.After(cutoff) {
-			valid = append(valid, t)
-		}
+	// The timestamps are in order: drop the expired prefix in place (no new slice per request).
+	ts := rl.clients[ip]
+	i := 0
+	for i < len(ts) && !ts[i].After(cutoff) {
+		i++
 	}
-	if len(valid) >= rl.limit {
-		rl.clients[ip] = valid
+	ts = ts[i:]
+	if len(ts) >= rl.limit {
+		rl.clients[ip] = ts
 		return false
 	}
-	rl.clients[ip] = append(valid, now)
+	rl.clients[ip] = append(ts, now)
 
-	// Evict idle clients so the map cannot grow without bound.
-	if len(rl.clients) > 1024 {
+	// Evict idle clients so the map cannot grow without bound: once per window, not on every
+	// request once the map is large.
+	if len(rl.clients) > 1024 && now.Sub(rl.swept) > rl.window {
+		rl.swept = now
 		for k, ts := range rl.clients {
 			if len(ts) == 0 || !ts[len(ts)-1].After(cutoff) {
 				delete(rl.clients, k)
