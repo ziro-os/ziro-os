@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,10 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
@@ -42,7 +45,7 @@ func (m *sandboxManager) exportSnapshot(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer os.Remove(tmp)
-	if out, err := sandboxNerdctl(r.Context(), "save", "-o", tmp, ref); err != nil {
+	if out, err := sandboxNerdctlLow(r.Context(), "save", "-o", tmp, ref); err != nil {
 		apiReply(w, fmt.Errorf("save %s: %s", ref, cmdError(out, err)), nil)
 		return
 	}
@@ -91,6 +94,10 @@ func (m *sandboxManager) importSnapshotTar(ctx context.Context, body io.Reader) 
 	if err != nil || h.Name != "image.tar" || h.Typeflag != tar.TypeReg || h.Size > snapshotImageMax {
 		return "", errors.New("import: the archive must start with image.tar")
 	}
+	// Room for the archive and the unpacked image, and some to spare: a copy never fills a node.
+	if free := diskFree(snapshotsDir()); free >= 0 && free < 2*h.Size+(1<<30) {
+		return "", fmt.Errorf("import: not enough disk (%d MiB free, %d MiB needed)", free>>20, (2*h.Size+(1<<30))>>20)
+	}
 	img, err := snapshotTemp()
 	if err != nil {
 		return "", err
@@ -106,7 +113,7 @@ func (m *sandboxManager) importSnapshotTar(ctx context.Context, body io.Reader) 
 	if len(names) != 1 || !snapshotImageRe.MatchString(names[0]) {
 		return "", fmt.Errorf("import: not a snapshot image (names %q)", names)
 	}
-	if out, err := sandboxNerdctl(ctx, "load", "-i", img); err != nil {
+	if out, err := sandboxNerdctlLow(ctx, "load", "-i", img); err != nil {
 		return "", fmt.Errorf("load: %s", cmdError(out, err))
 	}
 	// From here on the name is the host's own, from its image list.
@@ -209,18 +216,36 @@ func imageTarNames(path string) ([]string, error) {
 
 // ---- the master ----
 
-// snapshotSyncEvery is how often the cluster leader converges snapshots (a pass is one list call
-// per node when nothing is missing).
-const snapshotSyncEvery = time.Minute
+// Snapshots are kept on snapshot_replicas sandbox nodes of their architecture (default 2: the node
+// that took it and one more), not on every node: enough to survive the loss of a node without
+// every snapshot costing every node its disk and a transfer. A create from a snapshot runs on a
+// node that holds it.
+
+// snapshotSyncEvery is how often the cluster leader checks the copies (one list call per node).
+const snapshotSyncEvery = 5 * time.Minute
 
 // snapshotTombstoneTTL is how long a deleted snapshot is remembered (longer than any copy).
 const snapshotTombstoneTTL = 3 * time.Hour
 
 var snapshotSyncing atomic.Bool
 
-// syncSnapshots is the leader's pass: snapshots deleted through the master are removed wherever
-// a copy remains, and every other snapshot is copied to the sandbox nodes of its architecture
-// that don't hold it.
+// snapshotReplication reads the copy count and bandwidth from the master's sandbox config.
+func snapshotReplication() (replicas int, bytesPerSec int64) {
+	cfg, _ := loadSandboxConfig()
+	replicas, mbps := cfg.SnapshotReplicas, cfg.SnapshotCopyMBps
+	if replicas <= 0 {
+		replicas = 2
+	}
+	if mbps <= 0 {
+		mbps = 50
+	}
+	return replicas, int64(mbps) << 20
+}
+
+// syncSnapshots is the leader's pass: snapshots deleted through the master are removed wherever a
+// copy remains, and a snapshot held by fewer nodes than it should be is copied to the least
+// loaded sandbox node of its architecture that lacks it, one transfer at a time, at a bounded
+// rate and low priority on both ends.
 func syncSnapshots(ctx context.Context) {
 	if !snapshotSyncing.CompareAndSwap(false, true) {
 		return // the previous pass is still copying
@@ -231,21 +256,31 @@ func syncSnapshots(ctx context.Context) {
 		return
 	}
 	now := time.Now()
-	_ = sandboxClusterMutate(func(st *ClusterState) error {
-		for img, at := range st.SnapshotTombstones {
-			if now.Sub(at) > snapshotTombstoneTTL {
-				delete(st.SnapshotTombstones, img)
+	expired := false
+	for _, at := range v.st.SnapshotTombstones {
+		expired = expired || now.Sub(at) > snapshotTombstoneTTL
+	}
+	if expired { // no commit at all when there is nothing to forget
+		_ = sandboxClusterMutate(func(st *ClusterState) error {
+			for img, at := range st.SnapshotTombstones {
+				if now.Sub(at) > snapshotTombstoneTTL {
+					delete(st.SnapshotTombstones, img)
+				}
 			}
-		}
-		return nil
-	})
+			return nil
+		})
+	}
 	rq, _ := http.NewRequestWithContext(asHostRoot(ctx), http.MethodGet, "/", nil)
+	nodes := v.sandboxNodes()
 	held := map[string][]*ClusterNode{}
-	for _, n := range v.sandboxNodes() {
+	load := map[string]int{} // node -> snapshots it holds
+	for _, n := range nodes {
 		for _, image := range v.snapshotsOn(rq, n) {
 			held[image] = append(held[image], n)
+			load[n.ID]++
 		}
 	}
+	want, rate := snapshotReplication()
 	for image, holders := range held {
 		if _, gone := v.st.SnapshotTombstones[image]; gone {
 			for _, n := range holders {
@@ -254,17 +289,36 @@ func syncSnapshots(ctx context.Context) {
 			}
 			continue
 		}
-		for _, n := range v.sandboxNodes() {
-			if slices.ContainsFunc(holders, func(h *ClusterNode) bool { return h.ID == n.ID }) || n.Arch != holders[0].Arch {
-				continue
+		for len(holders) < want {
+			to := snapshotTarget(nodes, holders, load)
+			if to == nil {
+				break // every node of its architecture has it
 			}
-			err := v.copySnapshot(ctx, holders[0], n, image)
-			_ = auditLog("cluster-master", "mesh", "sandbox snapshot replicate", image+" "+holders[0].ID+" -> "+n.ID, err)
+			err := v.copySnapshot(ctx, holders[0], to, image, rate)
+			_ = auditLog("cluster-master", "mesh", "sandbox snapshot replicate", image+" "+holders[0].ID+" -> "+to.ID, err)
 			if err != nil {
-				fmt.Printf("[cluster] snapshot %s to %s: %v\n", image, n.ID, err)
+				fmt.Printf("[cluster] snapshot %s to %s: %v\n", image, to.ID, err)
+				break
 			}
+			holders = append(holders, to)
+			load[to.ID]++
 		}
 	}
+}
+
+// snapshotTarget picks the node a snapshot is copied to: same architecture as its holders, not one
+// of them, ready, and holding the fewest snapshots.
+func snapshotTarget(nodes, holders []*ClusterNode, load map[string]int) *ClusterNode {
+	var best *ClusterNode
+	for _, n := range nodes {
+		if n.Status != "Ready" || n.Arch != holders[0].Arch || slices.ContainsFunc(holders, func(h *ClusterNode) bool { return h.ID == n.ID }) {
+			continue
+		}
+		if best == nil || load[n.ID] < load[best.ID] {
+			best = n
+		}
+	}
+	return best
 }
 
 // snapshotSyncHTTP has no overall timeout: a large image takes as long as it takes (ctx bounds it).
@@ -272,7 +326,7 @@ var snapshotSyncHTTP = &http.Client{}
 
 // copySnapshot streams a snapshot from one node's export into another's import. image is a name
 // the source node listed.
-func (v *sandboxClusterView) copySnapshot(ctx context.Context, from, to *ClusterNode, image string) error {
+func (v *sandboxClusterView) copySnapshot(ctx context.Context, from, to *ClusterNode, image string, bytesPerSec int64) error {
 	src, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		"http://"+sandboxMeshAddr(from)+"/v1/snapshots/export?"+url.Values{"image": {image}}.Encode(), nil)
 	if err != nil {
@@ -288,7 +342,8 @@ func (v *sandboxClusterView) copySnapshot(ctx context.Context, from, to *Cluster
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return fmt.Errorf("export from %s: HTTP %d %s", from.ID, resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	dst, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+sandboxMeshAddr(to)+"/v1/snapshots/import", resp.Body)
+	dst, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+sandboxMeshAddr(to)+"/v1/snapshots/import",
+		&rateReader{ctx: ctx, r: resp.Body, perSec: bytesPerSec, start: time.Now()})
 	if err != nil {
 		return err
 	}
@@ -304,4 +359,52 @@ func (v *sandboxClusterView) copySnapshot(ctx context.Context, from, to *Cluster
 		return fmt.Errorf("import on %s: HTTP %d %s", to.ID, out.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// rateReader passes r through at most perSec bytes a second (on average since start): a snapshot
+// copy never takes a node's whole disk or network.
+type rateReader struct {
+	ctx    context.Context
+	r      io.Reader
+	perSec int64
+	start  time.Time
+	n      int64
+}
+
+func (rr *rateReader) Read(p []byte) (int, error) {
+	if len(p) > 256<<10 {
+		p = p[:256<<10]
+	}
+	n, err := rr.r.Read(p)
+	rr.n += int64(n)
+	if ahead := time.Duration(rr.n*int64(time.Second)/rr.perSec) - time.Since(rr.start); ahead > 0 {
+		select {
+		case <-time.After(ahead):
+		case <-rr.ctx.Done():
+			return n, rr.ctx.Err()
+		}
+	}
+	return n, err
+}
+
+// sandboxNerdctlLow runs nerdctl at low CPU and I/O priority (snapshot export and import).
+var sandboxNerdctlLow = func(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "nerdctl", args...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	lowPriority(cmd.Process.Pid)
+	err := cmd.Wait()
+	return out.Bytes(), err
+}
+
+// diskFree is the space available under dir, or -1 when it can't be read.
+var diskFree = func(dir string) int64 {
+	var fs syscall.Statfs_t
+	if err := os.MkdirAll(dir, 0700); err != nil || syscall.Statfs(dir, &fs) != nil {
+		return -1
+	}
+	return int64(fs.Bavail) * int64(fs.Bsize)
 }

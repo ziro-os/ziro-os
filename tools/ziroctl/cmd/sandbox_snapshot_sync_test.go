@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ziro-os/ziro-os/sdk/schema"
 )
@@ -50,6 +52,14 @@ func TestSnapshotExportImport(t *testing.T) {
 		t.Errorf("workspace after import: %q", b)
 	}
 
+	// Not enough disk on this node: refused before anything is written.
+	oldFree := diskFree
+	diskFree = func(string) int64 { return 100 << 20 }
+	if _, err := m.importSnapshotTar(context.Background(), bytes.NewReader(export)); err == nil || !strings.Contains(err.Error(), "not enough disk") {
+		t.Errorf("import on a full disk: %v", err)
+	}
+	diskFree = oldFree
+
 	// Not a snapshot image: refused, nothing loaded.
 	bad := filepath.Join(t.TempDir(), "bad.tar")
 	writeImageTar(bad, "docker.io/library/evil:latest")
@@ -84,5 +94,36 @@ func TestMergeSnapshots(t *testing.T) {
 		raw(`{"image":"ziro.local/sandbox/a/y:2"}`), raw(`bogus`)})
 	if len(got) != 2 || got[0].Nodes != 2 || got[1].Nodes != 1 {
 		t.Errorf("%+v", got)
+	}
+}
+
+// A copy goes to the least loaded ready node of the snapshot's architecture that lacks it.
+func TestSnapshotTarget(t *testing.T) {
+	n := func(id, arch, status string) *ClusterNode { return &ClusterNode{ID: id, Arch: arch, Status: status} }
+	a, b, c, d, e := n("a", "arm64", "Ready"), n("b", "arm64", "Ready"), n("c", "arm64", "Ready"), n("d", "amd64", "Ready"), n("e", "arm64", "NotReady")
+	nodes := []*ClusterNode{a, b, c, d, e}
+	if got := snapshotTarget(nodes, []*ClusterNode{a}, map[string]int{"b": 5, "c": 1}); got != c {
+		t.Errorf("target %v, want c (least loaded)", got)
+	}
+	if got := snapshotTarget(nodes, []*ClusterNode{a, b, c}, nil); got != nil {
+		t.Errorf("target %v: only another architecture or a down node is left", got)
+	}
+}
+
+// The copy rate is bounded on average.
+func TestRateReader(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), 300<<10)
+	start := time.Now()
+	n, err := io.Copy(io.Discard, &rateReader{ctx: context.Background(), r: bytes.NewReader(data), perSec: 1 << 20, start: start})
+	if err != nil || n != int64(len(data)) {
+		t.Fatal(n, err)
+	}
+	if d := time.Since(start); d < 250*time.Millisecond {
+		t.Errorf("300 KiB at 1 MiB/s took %v", d)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := io.Copy(io.Discard, &rateReader{ctx: ctx, r: bytes.NewReader(data), perSec: 1, start: time.Now()}); err == nil {
+		t.Error("a cancelled copy kept going")
 	}
 }
