@@ -178,6 +178,7 @@ func hardKey(st *ClusterState) []byte {
 		n.MeshEPs, n.MeshRelays, n.MeshNAT = nil, nil, "" // path soft state changes often: never a commit
 		n.Conditions, n.CondSince = nil, time.Time{}      // node health is re-reported every heartbeat
 	}
+	cp.PG = pgWithoutProbes(st.PG) // Postgres probes are re-reported every heartbeat too
 	b, _ := json.Marshal(struct {
 		State   *ClusterState
 		Secrets map[string]map[string]string
@@ -410,6 +411,7 @@ func (rs *raftStore) onLeadership(leading bool) {
 			st.Nodes[i].LastSeen = now // grace: a full timeout to report to the new leader
 		}
 	}
+	pgProbesUnknown(st, now)
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	rs.cur, rs.version, rs.leading = st, index, true

@@ -322,6 +322,46 @@ func (g *PGGroup) promoting() *PGMember {
 	return nil
 }
 
+// Probes are soft state: they change on every heartbeat, so they are kept out of the Raft
+// commits (hardKey) and a new leader starts from what the last commit happened to carry.
+
+// pgWithoutProbes copies the Postgres clusters with every member's probe blanked.
+func pgWithoutProbes(pg map[string]*PGCluster) map[string]*PGCluster {
+	if len(pg) == 0 {
+		return pg
+	}
+	out := make(map[string]*PGCluster, len(pg))
+	for name, c := range pg {
+		cc := *c
+		cc.Groups = make([]PGGroup, len(c.Groups))
+		for i, g := range c.Groups {
+			g.Members = append([]PGMember(nil), g.Members...)
+			for j := range g.Members {
+				g.Members[j].Probe = PGProbe{}
+			}
+			cc.Groups[i] = g
+		}
+		out[name] = &cc
+	}
+	return out
+}
+
+// pgProbesUnknown is a new leader's view of probes it hasn't received: not OK (nothing is fresh,
+// ready or a promotion candidate until its agent reports), last heard now (a primary that never
+// reports is failed over one grace period from now), and older reports are ignored by pgIngest.
+func pgProbesUnknown(st *ClusterState, now time.Time) {
+	for _, c := range st.PG {
+		for gi := range c.Groups {
+			for mi := range c.Groups[gi].Members {
+				p := &c.Groups[gi].Members[mi].Probe
+				if !p.At.IsZero() {
+					p.OK, p.At = false, now
+				}
+			}
+		}
+	}
+}
+
 // pgPrimaryFailed: a primary that has been up before and has not answered for the grace period.
 func pgPrimaryFailed(p *PGMember, now time.Time) bool {
 	return !p.Probe.At.IsZero() && now.Sub(p.Probe.At) > pgGrace
@@ -545,7 +585,7 @@ func pgSwitchover(c *PGCluster, g *PGGroup, now time.Time) {
 	case "catchup":
 		// The primary is read-only: its position no longer moves in a way that matters. The target
 		// must have replayed it, as seen by probes taken after the primary stopped accepting writes.
-		if p.Probe.At.After(sw.ReadOnlyAt) && !t.Probe.At.Before(p.Probe.At) && t.Probe.Recovery && t.Probe.LSN >= p.Probe.LSN {
+		if p.Probe.OK && t.Probe.OK && p.Probe.At.After(sw.ReadOnlyAt) && !t.Probe.At.Before(p.Probe.At) && t.Probe.Recovery && t.Probe.LSN >= p.Probe.LSN {
 			pgPromote(c, g, t, now, "planned switchover")
 			g.Switch = nil
 		}
