@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -175,4 +176,88 @@ func loadStateAt(dir string) (*ClusterState, error) {
 		}
 	}
 	return st, err
+}
+
+// A commit waiting for a quorum doesn't block readers: isLeader (every API request) and snapshot
+// answer at once while the leader can't reach its followers.
+func TestRaftReadersDontWaitForQuorum(t *testing.T) {
+	ms := newTestGroup(t, 3, &ClusterState{NodeTokens: map[string]string{}, History: map[string][]ClusteredApp{}, JoinToken: "a"})
+	l := leaderOf(ms)
+	waitFor(t, "followers", func() bool { return l.rs.r.AppliedIndex() > 0 })
+	for _, m := range ms {
+		if m != l {
+			l.trans.Disconnect(m.trans.LocalAddr())
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- l.rs.mutate(func(st *ClusterState) error { st.JoinToken = "b"; return nil })
+	}()
+	time.Sleep(200 * time.Millisecond) // the commit is now waiting for a quorum it can't get
+	start := time.Now()
+	for i := 0; i < 50; i++ {
+		_ = l.rs.isLeader()
+		if _, _, err := l.rs.snapshot(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("readers waited %v behind a commit", d)
+	}
+	select {
+	case err := <-done:
+		t.Logf("commit ended early: %v", err)
+	default:
+	}
+	for _, m := range ms {
+		if m != l {
+			l.trans.Connect(m.trans.LocalAddr(), m.trans)
+		}
+	}
+	if err := <-done; err != nil && !errors.Is(err, errNotLeader) {
+		t.Logf("commit after reconnect: %v", err)
+	}
+}
+
+// A replica's failure counter and message change every heartbeat while it crash-loops: no commit.
+func TestReplicaFailuresAreSoftState(t *testing.T) {
+	st := &ClusterState{Replicas: []Replica{{App: "web", Index: 1, Node: "n1"}}}
+	before := hardKey(st)
+	st.Replicas[0].Fails, st.Replicas[0].Error = 3, "exit 1"
+	if !bytes.Equal(before, hardKey(st)) {
+		t.Error("a failure count would be committed")
+	}
+	if st.Replicas[0].Fails != 3 {
+		t.Error("hardKey changed the live state")
+	}
+	st.Replicas[0].Node, st.Replicas[0].Avoid = "", "n1"
+	if bytes.Equal(before, hardKey(st)) {
+		t.Error("moving the replica wouldn't be committed")
+	}
+}
+
+// Liveness-only changes (every heartbeat) refresh the leader's state.json at most every
+// stateFileEvery, not on each change.
+func TestRaftSoftChangesThrottleTheStateFile(t *testing.T) {
+	ms := newTestGroup(t, 1, &ClusterState{NodeTokens: map[string]string{}, History: map[string][]ClusteredApp{},
+		Nodes: []ClusterNode{{ID: "n1", Status: "Ready"}}})
+	l := ms[0]
+	path := filepath.Join(l.dir, "state.json")
+	waitFor(t, "state file", func() bool { _, err := os.Stat(path); return err == nil })
+	os.Remove(path)
+	for i := 0; i < 20; i++ {
+		if err := l.rs.mutate(func(st *ClusterState) error { st.Nodes[0].LastSeen = time.Now(); return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Error("liveness-only changes rewrote state.json right after a commit")
+	}
+	l.rs.mu.Lock()
+	l.rs.fileAt = time.Now().Add(-stateFileEvery)
+	l.rs.mu.Unlock()
+	l.rs.mutate(func(st *ClusterState) error { st.Nodes[0].LastSeen = time.Now(); return nil })
+	if _, err := os.Stat(path); err != nil {
+		t.Error("state.json is never refreshed for liveness")
+	}
 }
