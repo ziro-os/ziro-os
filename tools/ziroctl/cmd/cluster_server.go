@@ -575,14 +575,18 @@ func meshView(st *ClusterState, self *ClusterNode, cidr string) (string, int, []
 // ---- master HTTP server ----
 
 type clusterServer struct {
-	port    string // cluster API port (for leader redirects)
-	limiter *rateLimiter
+	port    string       // cluster API port (for leader redirects)
+	limiter *rateLimiter // per client address
+	perCred *rateLimiter // per credential (credKey)
 	mu      sync.Mutex
 	denied  map[string]time.Time // ip -> last audited auth failure
 }
 
 func newClusterServer() *clusterServer {
-	return &clusterServer{limiter: newRateLimiter(120, time.Minute), denied: map[string]time.Time{}}
+	// Per client address generously (many nodes can share one NAT address), and per credential at
+	// the old per-address rate: a node heartbeats 6 times a minute.
+	return &clusterServer{limiter: newRateLimiter(1200, time.Minute), perCred: newRateLimiter(120, time.Minute),
+		denied: map[string]time.Time{}}
 }
 
 // auditDenied records a rejected credential at most once per IP per 10 minutes, so a
@@ -626,6 +630,16 @@ type httpError struct {
 
 func (e httpError) Error() string { return e.msg }
 
+// credKey names the caller for the per-credential limit: a digest of its bearer token, or its
+// address when it sends none.
+func credKey(auth, ip string) string {
+	if auth == "" {
+		return "ip:" + ip
+	}
+	sum := sha256.Sum256([]byte(auth))
+	return "cred:" + hex.EncodeToString(sum[:8])
+}
+
 func (s *clusterServer) wrap(h func(r *http.Request) (interface{}, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -635,7 +649,7 @@ func (s *clusterServer) wrap(h func(r *http.Request) (interface{}, error)) http.
 		switch {
 		case r.Method != http.MethodPost:
 			err = httpError{http.StatusMethodNotAllowed, "method not allowed"}
-		case !s.limiter.allow(ip):
+		case !s.limiter.allow(ip) || !s.perCred.allow(credKey(r.Header.Get("Authorization"), ip)):
 			err = httpError{http.StatusTooManyRequests, "rate limit exceeded"}
 		case localRaft != nil && !localRaft.isLeader():
 			// Agents and joiners talk to the leader; tell them where it is.
@@ -1296,12 +1310,9 @@ func clusterPost(addr, caHash, path, auth string, body, out interface{}) error {
 // local cluster CA when this node holds the pinned one, otherwise against the trust anchor the pin
 // names (see pinnedTLS: first join and pre-CA agents).
 func clusterDo(addr, pin, path, auth string, data []byte) (*http.Response, error) {
-	tc := caVerifiedTLS(pin)
-	if tc == nil {
-		var err error
-		if tc, err = pinnedTLS(addr, pin); err != nil {
-			return nil, err
-		}
+	c, err := clusterClient(addr, pin)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequest(http.MethodPost, "https://"+addr+path, bytes.NewReader(data))
 	if err != nil {
@@ -1309,5 +1320,33 @@ func clusterDo(addr, pin, path, auth string, data []byte) (*http.Response, error
 	}
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
-	return (&http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: tc}}).Do(req)
+	return c.Do(req)
+}
+
+// clusterClients reuse their connections: a heartbeat every 10 s used to be a new TCP and TLS
+// handshake on a new Transport (whose idle connection then lingered). One client per trust root:
+// the cluster CA (by its hash, so a new CA gets a new client) or a pinned master.
+var clusterClients sync.Map // key -> *http.Client
+
+func clusterClient(addr, pin string) (*http.Client, error) {
+	key := "pin|" + addr + "|" + pin
+	if b, err := os.ReadFile(clusterCAPath()); err == nil {
+		if h, err := pemHash(string(b)); err == nil && h == pin {
+			key = "ca|" + h
+		}
+	}
+	if c, ok := clusterClients.Load(key); ok {
+		return c.(*http.Client), nil
+	}
+	tc := caVerifiedTLS(pin)
+	if tc == nil {
+		var err error
+		if tc, err = pinnedTLS(addr, pin); err != nil {
+			return nil, err
+		}
+	}
+	c := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: tc,
+		MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ForceAttemptHTTP2: true}}
+	actual, _ := clusterClients.LoadOrStore(key, c)
+	return actual.(*http.Client), nil
 }

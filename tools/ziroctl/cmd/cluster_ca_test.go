@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -138,5 +139,40 @@ func TestLeaderRedirect(t *testing.T) {
 	target = "not-an-address"
 	if err := clusterPost(strings.TrimPrefix(follower.URL, "https://"), pin, "/x", "", struct{}{}, nil); err == nil {
 		t.Fatal("invalid leader address accepted")
+	}
+}
+
+// The master certificate is parsed once per version of its files, not on every handshake.
+func TestMasterTLSIsCached(t *testing.T) {
+	old := clusterDir
+	clusterDir = t.TempDir()
+	defer func() { clusterDir = old }()
+	st := &ClusterState{}
+	if err := ensureCA(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMasterCert(st, "master-1", []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := loadMasterTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := loadMasterTLS(); b != a {
+		t.Error("the certificate was parsed again with unchanged files")
+	}
+	// A renewal (new files) is picked up.
+	time.Sleep(10 * time.Millisecond)
+	os.Remove(masterCertPath())
+	if err := ensureMasterCert(st, "master-2", []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(masterCertPath(), time.Now(), time.Now().Add(time.Second))
+	c, err := loadMasterTLS()
+	if err != nil || c == a {
+		t.Fatalf("renewal not picked up: %v", err)
+	}
+	if leaf, _ := x509.ParseCertificate(c.Certificate[0]); leaf.Subject.CommonName != "master-2" {
+		t.Errorf("still serving %s", leaf.Subject.CommonName)
 	}
 }

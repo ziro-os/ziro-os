@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Cluster mesh: every node runs WireGuard interface ziro0 with a /32 per peer, so apps
@@ -55,11 +57,50 @@ func run(name string, args ...string) error {
 	return nil
 }
 
+// meshApplied is the configuration applyMesh last converged ziro0 to. The master sends the same
+// view every heartbeat; re-running wg and ip for every peer each time cost N+4 forks per node per
+// tick (N² across the cluster) for nothing. It is re-applied when it changes, when the interface
+// is gone, and every meshReapplyEvery in case something else changed the interface.
+var meshApplied struct {
+	key string
+	at  time.Time
+}
+
+const meshReapplyEvery = 5 * time.Minute
+
+// Seams for tests: the real work and the interface check.
+var (
+	meshApplyNow = applyMeshNow
+	meshLinkUp   = linkExists
+)
+
+func meshKey(meshIP string, prefix int, peers []MeshPeer) string {
+	b, _ := json.Marshal(struct {
+		IP     string
+		Prefix int
+		Peers  []MeshPeer
+	}{meshIP, prefix, peers})
+	return string(b)
+}
+
 // applyMesh converges ziro0 to the master's view: own address, listen port, peer set.
 func applyMesh(meshIP string, prefix int, peers []MeshPeer) error {
 	if meshIP == "" || prefix == 0 {
 		return nil
 	}
+	key := meshKey(meshIP, prefix, peers)
+	if key == meshApplied.key && time.Since(meshApplied.at) < meshReapplyEvery && meshLinkUp(meshIface) {
+		return nil
+	}
+	if err := meshApplyNow(meshIP, prefix, peers); err != nil {
+		meshApplied.key = "" // try in full next time
+		return err
+	}
+	meshApplied.key, meshApplied.at = key, time.Now()
+	return nil
+}
+
+func applyMeshNow(meshIP string, prefix int, peers []MeshPeer) error {
 	if _, err := exec.LookPath("wg"); err != nil {
 		return fmt.Errorf("wireguard-tools not installed: %w", err)
 	}
