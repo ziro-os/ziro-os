@@ -432,6 +432,7 @@ type agent struct {
 	pg      *pgAgent          // probes and orders for Postgres members (pg_agent.go)
 	list    containerList     // the last container listing (reconcile and heartbeat share it)
 	kick    chan struct{}     // wakes the reconcile loop when the desired set changes
+	delta   heartbeatDelta    // the parts of the last heartbeat answers (cluster_delta.go)
 }
 
 func (ag *agent) setFailed(name string, err error) {
@@ -631,11 +632,28 @@ var clusterAgentCmd = &cobra.Command{
 				hb.RotateToken = pending
 			}
 			// Last good master first, then the configured one, then every other master (failover).
+			hb.Have = ag.delta.have()
 			var err error
 			for _, addr := range uniqueAddrs(active, cfg.MasterAddr, cfg.Masters) {
 				if err = clusterPost(addr, cfg.CAHash, "/cluster/v1/heartbeat", nodeAuth(cfg), hb, &resp); err == nil {
 					active = addr
 					break
+				}
+			}
+			if err == nil {
+				if pending != "" { // the master took the new token with this heartbeat
+					adoptNodeToken(cfg, pending)
+					pending = ""
+				}
+				if derr := ag.delta.fill(&resp); derr != nil {
+					// Never act on an incomplete answer: ask again for everything.
+					fmt.Printf("[agent] heartbeat: %v; asking for the full state\n", derr)
+					ag.delta.reset()
+					hb.Have, hb.RotateToken = nil, ""
+					resp = heartbeatResponse{}
+					if err = clusterPost(active, cfg.CAHash, "/cluster/v1/heartbeat", nodeAuth(cfg), hb, &resp); err == nil {
+						err = ag.delta.fill(&resp)
+					}
 				}
 			}
 			if err == nil {

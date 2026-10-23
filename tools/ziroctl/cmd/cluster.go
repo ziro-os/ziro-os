@@ -91,6 +91,10 @@ type ClusterNode struct {
 	Arch        string            `json:"arch,omitempty"`           // amd64, arm64 (reported by the agent)
 	Labels      map[string]string `json:"labels,omitempty"`         // ziroctl cluster node label (builder=true, ...)
 	LastSeen    time.Time         `json:"last_seen"`
+	// The set of Running, built by runs (not serialized).
+	runningOf  *string
+	runningLen int
+	runningSet map[string]bool
 }
 
 type ClusteredApp struct {
@@ -262,6 +266,9 @@ type ClusterState struct {
 	Secrets map[string]map[string]string `json:"-"` // name -> KEY -> value
 	CAKey   string                       `json:"-"` // PEM
 	sealed  []byte                       // sealed secrets kept as-is by a process without the data key
+	// Lookup indexes of node and app (not serialized; checked on every use).
+	nodeIdx map[string]int
+	appIdx  map[string]int
 }
 
 type prevNodeToken struct {
@@ -416,9 +423,26 @@ func hashToken(tok string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// node and app are looked up for every replica in every scheduling pass and heartbeat: an index
+// makes them O(1). The index is only a hint, checked on every hit, and rebuilt when the slice
+// grew or shrank, so code that appends, removes or reorders entries stays correct.
 func (st *ClusterState) node(id string) *ClusterNode {
-	for i := range st.Nodes {
+	if i, ok := st.nodeIdx[id]; ok && i < len(st.Nodes) && st.Nodes[i].ID == id {
+		return &st.Nodes[i]
+	}
+	if len(st.nodeIdx) != len(st.Nodes) {
+		st.nodeIdx = make(map[string]int, len(st.Nodes))
+		for i := range st.Nodes {
+			st.nodeIdx[st.Nodes[i].ID] = i
+		}
+		if i, ok := st.nodeIdx[id]; ok {
+			return &st.Nodes[i]
+		}
+		return nil
+	}
+	for i := range st.Nodes { // a miss, or entries changed in place: look, and re-index if found
 		if st.Nodes[i].ID == id {
+			st.nodeIdx = nil
 			return &st.Nodes[i]
 		}
 	}
@@ -426,8 +450,22 @@ func (st *ClusterState) node(id string) *ClusterNode {
 }
 
 func (st *ClusterState) app(name string) *ClusteredApp {
+	if i, ok := st.appIdx[name]; ok && i < len(st.Apps) && st.Apps[i].Name == name {
+		return &st.Apps[i]
+	}
+	if len(st.appIdx) != len(st.Apps) {
+		st.appIdx = make(map[string]int, len(st.Apps))
+		for i := range st.Apps {
+			st.appIdx[st.Apps[i].Name] = i
+		}
+		if i, ok := st.appIdx[name]; ok {
+			return &st.Apps[i]
+		}
+		return nil
+	}
 	for i := range st.Apps {
 		if st.Apps[i].Name == name {
+			st.appIdx = nil
 			return &st.Apps[i]
 		}
 	}
@@ -440,13 +478,23 @@ func (st *ClusterState) replicaRunning(r Replica) bool {
 	if n == nil || n.Status != "Ready" {
 		return false
 	}
-	name := replicaName(r.App, r.Index, r.Hash)
-	for _, c := range n.Running {
-		if c == name {
-			return true
-		}
+	return n.runs(replicaName(r.App, r.Index, r.Hash))
+}
+
+// runs reports whether the node reported the container running. The set is built once per
+// heartbeat's list (a heartbeat replaces the slice, which is how a stale set is noticed).
+func (n *ClusterNode) runs(name string) bool {
+	if len(n.Running) == 0 {
+		return false
 	}
-	return false
+	if n.runningOf != &n.Running[0] || n.runningLen != len(n.Running) {
+		n.runningSet = make(map[string]bool, len(n.Running))
+		for _, c := range n.Running {
+			n.runningSet[c] = true
+		}
+		n.runningOf, n.runningLen = &n.Running[0], len(n.Running)
+	}
+	return n.runningSet[name]
 }
 
 // appStatus reports "<running>/<replicas> running[, N pending][, updating][, last error]".

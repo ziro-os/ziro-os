@@ -84,8 +84,9 @@ type heartbeatRequest struct {
 	// Sandboxes this node holds (nil from agents without the sandbox module).
 	Sandboxes []string `json:"sandboxes,omitempty"`
 	// Postgres members on this node: probes, and the outcome of orders (pg_agent.go).
-	PG        []PGReport `json:"pg,omitempty"`
-	PGResults []PGResult `json:"pg_results,omitempty"`
+	PG        []PGReport        `json:"pg,omitempty"`
+	PGResults []PGResult        `json:"pg_results,omitempty"`
+	Have      map[string]string `json:"have,omitempty"` // hashes of the answer's parts the agent holds (cluster_delta.go)
 }
 
 // Assignment is one container the master wants running on a node.
@@ -158,6 +159,10 @@ type heartbeatResponse struct {
 	Relays      []zr.Relay          `json:"relays,omitempty"`       // relays for the mesh (anywhere mode)
 	NodeCert    string              `json:"node_cert,omitempty"`    // signed node certificate (answer to NodeCSR)
 	SandboxMesh *sandboxMeshConfig  `json:"sandbox_mesh,omitempty"` // nodes with the sandbox module
+	// Deltas (cluster_delta.go): parts left out because the agent holds them, and the hashes of
+	// the parts sent.
+	Same   []string          `json:"same,omitempty"`
+	Hashes map[string]string `json:"hashes,omitempty"`
 }
 
 // specHash changes whenever a replica must be recreated (image, port, env, secrets).
@@ -168,9 +173,16 @@ func specHash(a ClusteredApp) string {
 	}
 	sort.Strings(keys)
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s", a.Image, a.Port)
+	// The common fields are written directly: the same bytes fmt produced, without its cost (this
+	// runs for every replica in every scheduling pass). Rare fields keep fmt.
+	w := func(parts ...string) {
+		for _, p := range parts {
+			_, _ = io.WriteString(h, p)
+		}
+	}
+	w(a.Image, "\x00", a.Port)
 	for _, k := range keys {
-		fmt.Fprintf(h, "\x00%s=%s", k, a.Env[k])
+		w("\x00", k, "=", a.Env[k])
 	}
 	if len(a.Secrets) > 0 || a.MeshOnly || len(a.Args) > 0 {
 		fmt.Fprintf(h, "\x00secrets=%s\x00mesh=%v\x00args=%q", strings.Join(a.Secrets, ","), a.MeshOnly, a.Args)
@@ -194,7 +206,7 @@ func specHash(a ClusteredApp) string {
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			fmt.Fprintf(h, "\x00file=%s\x00%s", n, a.ConfigFiles[n])
+			w("\x00file=", n, "\x00", a.ConfigFiles[n])
 		}
 	}
 	if a.StopTimeout > 0 { // only when set: the default grace period must not roll existing apps
@@ -210,9 +222,10 @@ func specHash(a ClusteredApp) string {
 		fmt.Fprintf(h, "\x00datauid=%d", a.DataUID)
 	}
 	if a.Arch != "" {
-		fmt.Fprintf(h, "\x00arch=%s", a.Arch)
+		w("\x00arch=", a.Arch)
 	}
-	return hex.EncodeToString(h.Sum(nil))[:8]
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:4])
 }
 
 func replicaName(app string, index int, hash string) string {
@@ -858,6 +871,9 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 			return nil, httpError{http.StatusBadRequest, "invalid relay"}
 		}
 	}
+	if len(req.Have) > 16 {
+		return nil, httpError{http.StatusBadRequest, "invalid heartbeat"}
+	}
 	if len(req.Caps) > 16 {
 		req.Caps = req.Caps[:16]
 	}
@@ -996,6 +1012,9 @@ func (s *clusterServer) handleHeartbeat(r *http.Request) (interface{}, error) {
 		}
 		return nil
 	})
+	if err == nil {
+		resp.omitUnchanged(req.Have)
+	}
 	return resp, err
 }
 
