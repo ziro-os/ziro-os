@@ -217,6 +217,14 @@ func dropPreviews(sb sdkapi.Sandbox) {
 	}
 }
 
+// previewTransport keeps connections to the sandboxes' ports alive (the default keeps 2 per
+// sandbox, so a page loading many assets kept reconnecting).
+var previewTransport = &http.Transport{
+	DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	MaxIdleConnsPerHost: 32,
+	IdleConnTimeout:     60 * time.Second,
+}
+
 // previewHandler is the proxy the gateway's preview routes point to.
 func (m *sandboxManager) previewHandler() http.Handler {
 	proxy := &httputil.ReverseProxy{
@@ -230,6 +238,8 @@ func (m *sandboxManager) previewHandler() http.Handler {
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			http.Error(w, "nothing answers on this port of the sandbox (listen on 0.0.0.0)", http.StatusBadGateway)
 		},
+		Transport:  previewTransport,
+		BufferPool: sandboxProxyBuffers,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mm := previewHostRe.FindStringSubmatch(strings.ToLower(r.Host))

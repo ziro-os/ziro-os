@@ -190,7 +190,7 @@ func meshCall(ctx context.Context, addr, token, method, path string, body, out a
 	return resp.StatusCode, nil
 }
 
-var meshHTTP = &http.Client{Timeout: 30 * time.Second}
+var meshHTTP = &http.Client{Timeout: 30 * time.Second, Transport: sandboxMeshTransport} // pooled, as the master's
 
 // remoteAccess asks the node that owns a token's sandbox to check it (the SSH edge).
 func (g *sshGateway) remoteAccess(tok string, key ssh.PublicKey) (owner, sandbox, aid string, err error) {
@@ -209,23 +209,87 @@ func (g *sshGateway) remoteAccess(tok string, key ssh.PublicKey) (owner, sandbox
 	if key != nil {
 		body["key"] = string(ssh.MarshalAuthorizedKey(key))
 	}
+	// Every candidate at once: only the owner knows the token (the others refuse it at once, and
+	// a single-use token is spent only by the owner), so the first acceptance is the answer.
+	type answer struct {
+		ip, sandbox, access string
+		needKey             bool
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	found := make(chan answer, len(ips))
+	var wg sync.WaitGroup
 	for _, ip := range ips {
 		addr := net.JoinHostPort(ip, strconv.Itoa(sandboxMeshPort))
 		if addr == c.Listen {
 			continue // ours, and not found
 		}
-		var res map[string]string
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		code, err := meshCall(ctx, addr, c.Token, "POST", "/v1/access/check", body, &res)
-		cancel()
-		if code == http.StatusUnauthorized && err != nil && err.Error() == "need_key" {
-			return "", "", "", errNeedKey
-		}
-		if err == nil {
-			return ip, res["sandbox"], res["access"], nil
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var res map[string]string
+			code, err := meshCall(ctx, addr, c.Token, "POST", "/v1/access/check", body, &res)
+			switch {
+			case code == http.StatusUnauthorized && err != nil && err.Error() == "need_key":
+				found <- answer{needKey: true}
+			case err == nil:
+				found <- answer{ip: ip, sandbox: res["sandbox"], access: res["access"]}
+			}
+		}()
 	}
-	return "", "", "", errors.New("unknown token")
+	go func() { wg.Wait(); close(found) }()
+	a, ok := <-found // the first answer; closed with none when every node refused the token
+	switch {
+	case !ok:
+		return "", "", "", errors.New("unknown token")
+	case a.needKey:
+		return "", "", "", errNeedKey
+	}
+	return a.ip, a.sandbox, a.access, nil
+}
+
+// ownerHostKeys caches the gateways' host keys (the cluster's, the same everywhere and rarely
+// rotated) per node, so a relayed connection doesn't cost a mesh call before its handshake.
+var ownerHostKeys struct {
+	sync.Mutex
+	m map[string]ownerHostKey
+}
+
+type ownerHostKey struct {
+	key  ssh.PublicKey
+	port int
+	at   time.Time
+}
+
+const ownerHostKeyTTL = 10 * time.Minute
+
+func (g *sshGateway) ownerHostKey(c *sandboxMeshConfig, ownerIP string, fresh bool) (ssh.PublicKey, int, error) {
+	ownerHostKeys.Lock()
+	k, ok := ownerHostKeys.m[ownerIP]
+	ownerHostKeys.Unlock()
+	if ok && !fresh && time.Since(k.at) < ownerHostKeyTTL {
+		return k.key, k.port, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var hk struct {
+		Key  string `json:"key"`
+		Port int    `json:"port"`
+	}
+	if _, err := meshCall(ctx, net.JoinHostPort(ownerIP, strconv.Itoa(sandboxMeshPort)), c.Token, "GET", "/v1/ssh/hostkey", nil, &hk); err != nil {
+		return nil, 0, err
+	}
+	pinned, _, _, _, err := ssh.ParseAuthorizedKey([]byte(hk.Key))
+	if err != nil {
+		return nil, 0, err
+	}
+	ownerHostKeys.Lock()
+	if ownerHostKeys.m == nil {
+		ownerHostKeys.m = map[string]ownerHostKey{}
+	}
+	ownerHostKeys.m[ownerIP] = ownerHostKey{pinned, hk.Port, time.Now()}
+	ownerHostKeys.Unlock()
+	return pinned, hk.Port, nil
 }
 
 // relay serves an SSH connection for a sandbox on another node: it logs in to the owner's
@@ -236,25 +300,20 @@ func (g *sshGateway) relay(sc *ssh.ServerConn, chans <-chan ssh.NewChannel, owne
 	if c == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	var hk struct {
-		Key  string `json:"key"`
-		Port int    `json:"port"`
+	dial := func(fresh bool) (*ssh.Client, error) {
+		pinned, port, err := g.ownerHostKey(c, ownerIP, fresh)
+		if err != nil {
+			return nil, err
+		}
+		return ssh.Dial("tcp", net.JoinHostPort(ownerIP, strconv.Itoa(port)), &ssh.ClientConfig{
+			User: "zrelay_" + id, Auth: []ssh.AuthMethod{ssh.PublicKeys(g.signer())},
+			HostKeyCallback: ssh.FixedHostKey(pinned), Timeout: 10 * time.Second})
 	}
-	_, err := meshCall(ctx, net.JoinHostPort(ownerIP, strconv.Itoa(sandboxMeshPort)), c.Token, "GET", "/v1/ssh/hostkey", nil, &hk)
-	cancel()
-	if err != nil {
-		return
-	}
-	pinned, _, _, _, err := ssh.ParseAuthorizedKey([]byte(hk.Key))
-	if err != nil {
-		return
-	}
-	up, err := ssh.Dial("tcp", net.JoinHostPort(ownerIP, strconv.Itoa(hk.Port)), &ssh.ClientConfig{
-		User: "zrelay_" + id, Auth: []ssh.AuthMethod{ssh.PublicKeys(g.signer())},
-		HostKeyCallback: ssh.FixedHostKey(pinned), Timeout: 10 * time.Second})
-	if err != nil {
-		return
+	up, err := dial(false)
+	if err != nil { // a rotated key or a moved port: once more with what the owner says now
+		if up, err = dial(true); err != nil {
+			return
+		}
 	}
 	defer up.Close()
 	go func() { _ = up.Wait(); sc.Close() }()

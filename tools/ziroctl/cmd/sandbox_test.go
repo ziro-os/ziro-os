@@ -518,3 +518,35 @@ func writeImageTar(path, ref string) {
 	io.WriteString(tw, idx)
 	tw.Close()
 }
+
+// Record writes happen outside the store lock: the newest change wins whatever order the writes
+// land in, and a removed sandbox's record is never written again.
+func TestSandboxRecordWritesInOrder(t *testing.T) {
+	m, _, _ := stubSandboxes(t)
+	sb, err := m.create(context.Background(), schema.SandboxSpec{Image: "a"}, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := func(task string) (string, []byte, uint64) {
+		m.st.mu.Lock()
+		defer m.st.mu.Unlock()
+		m.st.all[sb.ID].Spec.Metadata = map[string]string{"task": task}
+		id, b, n, _ := m.st.stage(m.st.all[sb.ID])
+		return id, b, n
+	}
+	id, older, n1 := stage("1")
+	_, newer, n2 := stage("2")
+	m.st.write(id, newer, n2)
+	m.st.write(id, older, n1) // late, older: skipped
+	if got := loadSandboxStore().all[sb.ID]; got == nil || got.Spec.Metadata["task"] != "2" {
+		t.Fatalf("on disk: %+v", got)
+	}
+	_, late, n3 := stage("3")
+	if err := m.st.removeFiles(sb.ID); err != nil {
+		t.Fatal(err)
+	}
+	m.st.write(sb.ID, late, n3)
+	if _, err := os.Stat(sandboxDir(sb.ID)); !os.IsNotExist(err) {
+		t.Errorf("a write after removal brought the record back: %v", err)
+	}
+}

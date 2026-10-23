@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
@@ -303,6 +304,15 @@ type sandboxStore struct {
 	mu      sync.Mutex
 	all     map[string]*sdkapi.Sandbox
 	touched map[string]time.Time // when each record's LastActive was last saved (touch)
+
+	// Record files are written under fmu, not mu: an fsync no longer holds up every get and
+	// list. Each write carries the sequence number it was given under mu (in change order) and is
+	// skipped when a newer one already landed; a removed sandbox's record is never written again.
+	// Lock order: mu, then fmu.
+	seq     atomic.Uint64
+	fmu     sync.Mutex
+	saved   map[string]uint64 // under fmu
+	removed map[string]bool   // under fmu
 }
 
 func loadSandboxStore() *sandboxStore {
@@ -321,13 +331,46 @@ func loadSandboxStore() *sandboxStore {
 	return st
 }
 
-// save writes a record; the caller holds mu.
+// save writes a record now; the caller holds mu.
 func (st *sandboxStore) save(sb *sdkapi.Sandbox) error {
-	b, err := json.MarshalIndent(sb, "", "  ")
+	id, b, n, err := st.stage(sb)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(filepath.Join(sandboxDir(sb.ID), "sandbox.json"), b, 0600)
+	return st.write(id, b, n)
+}
+
+// stage encodes a record and numbers the write; the caller holds mu. The write itself can then
+// happen after mu is released.
+func (st *sandboxStore) stage(sb *sdkapi.Sandbox) (string, []byte, uint64, error) {
+	b, err := json.MarshalIndent(sb, "", "  ")
+	return sb.ID, b, st.seq.Add(1), err
+}
+
+// write puts a staged record on disk unless a newer write landed or the sandbox was removed.
+func (st *sandboxStore) write(id string, b []byte, n uint64) error {
+	st.fmu.Lock()
+	defer st.fmu.Unlock()
+	if st.removed[id] || n <= st.saved[id] {
+		return nil
+	}
+	if st.saved == nil {
+		st.saved = map[string]uint64{}
+	}
+	st.saved[id] = n
+	return writeFileAtomic(filepath.Join(sandboxDir(id), "sandbox.json"), b, 0600)
+}
+
+// removeFiles deletes a sandbox's directory; no record write for it lands afterwards.
+func (st *sandboxStore) removeFiles(id string) error {
+	st.fmu.Lock()
+	defer st.fmu.Unlock()
+	if st.removed == nil {
+		st.removed = map[string]bool{}
+	}
+	st.removed[id] = true
+	delete(st.saved, id)
+	return os.RemoveAll(sandboxDir(id))
 }
 
 // get returns a copy of a sandbox the caller may see; anyone else's is "not found", so ids
@@ -358,13 +401,18 @@ func (st *sandboxStore) list(c sandboxCaller) []sdkapi.Sandbox {
 // update changes a sandbox under the lock and saves it.
 func (st *sandboxStore) update(id string, f func(sb *sdkapi.Sandbox)) error {
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	sb, ok := st.all[id]
 	if !ok {
+		st.mu.Unlock()
 		return errNotFound("no sandbox " + id)
 	}
 	f(sb)
-	return st.save(sb)
+	_, b, n, err := st.stage(sb)
+	st.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return st.write(id, b, n)
 }
 
 // ---- lifecycle ----
@@ -585,7 +633,7 @@ func (m *sandboxManager) destroy(id string) error {
 		}
 		time.Sleep(time.Second)
 	}
-	return os.RemoveAll(sandboxDir(id))
+	return m.st.removeFiles(id)
 }
 
 // setPaused freezes (pause) or thaws (resume) a sandbox's processes.
@@ -687,18 +735,24 @@ const sandboxTouchSave = 30 * time.Second
 func (m *sandboxManager) touch(id string) {
 	now := m.now().UTC()
 	m.st.mu.Lock()
-	defer m.st.mu.Unlock()
 	sb, ok := m.st.all[id]
 	if !ok {
+		m.st.mu.Unlock()
 		return
 	}
 	sb.LastActive = now
 	if m.st.touched == nil {
 		m.st.touched = map[string]time.Time{}
 	}
-	if now.Sub(m.st.touched[id]) >= sandboxTouchSave {
-		m.st.touched[id] = now
-		_ = m.st.save(sb)
+	if now.Sub(m.st.touched[id]) < sandboxTouchSave {
+		m.st.mu.Unlock()
+		return
+	}
+	m.st.touched[id] = now
+	_, b, n, err := m.st.stage(sb)
+	m.st.mu.Unlock()
+	if err == nil {
+		_ = m.st.write(id, b, n)
 	}
 }
 
