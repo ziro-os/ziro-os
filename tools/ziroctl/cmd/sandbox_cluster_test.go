@@ -325,3 +325,49 @@ func TestSandboxClusterWarmPools(t *testing.T) {
 		t.Errorf("pools reachable through the API: %d %s", w.Code, w.Body)
 	}
 }
+
+// The cluster view is read once per sandboxViewTTL, and again when a change must be seen.
+func TestSandboxViewCache(t *testing.T) {
+	old := readSandboxView
+	t.Cleanup(func() { readSandboxView = old; freshSandboxView() })
+	reads := 0
+	readSandboxView = func() (*sandboxClusterView, bool) {
+		reads++
+		return &sandboxClusterView{st: &ClusterState{}}, true
+	}
+	freshSandboxView()
+	a, _ := cachedSandboxView()
+	b, _ := cachedSandboxView()
+	if reads != 1 || a != b {
+		t.Errorf("%d reads for two requests", reads)
+	}
+	freshSandboxView()
+	if c, _ := cachedSandboxView(); reads != 2 || c == a {
+		t.Errorf("a refresh didn't read again (%d)", reads)
+	}
+}
+
+// A list from the master leaves out a node that doesn't answer (and says so) instead of waiting
+// for it; the other nodes' sandboxes are listed.
+func TestSandboxFanoutSkipsUnreachableNode(t *testing.T) {
+	h := newSandboxClusterHarness(t)
+	h.do(h.agent, "POST", "/api/v1/sandboxes", `{"image":"alpine"}`)
+	h.st.Nodes = append(h.st.Nodes, ClusterNode{ID: "n3", Status: "Ready", MeshIP: "10.200.0.3", Caps: []string{capSandbox}})
+	oldAddr := sandboxMeshAddr
+	t.Cleanup(func() { sandboxMeshAddr = oldAddr })
+	sandboxMeshAddr = func(n *ClusterNode) string {
+		if n.ID == "n3" {
+			return "127.0.0.1:1" // nothing listens
+		}
+		return oldAddr(n)
+	}
+	start := time.Now()
+	w := h.do(h.agent, "GET", "/api/v1/sandboxes", "")
+	var list []sdkapi.Sandbox
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list) != 1 || w.Header().Get("X-Ziro-Unreachable") != "n3" {
+		t.Fatalf("partial list: %d %s %v", w.Code, w.Body, w.Header())
+	}
+	if d := time.Since(start); d > sandboxNodeTimeout {
+		t.Errorf("the list waited %v", d)
+	}
+}

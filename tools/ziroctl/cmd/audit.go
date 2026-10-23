@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -51,16 +52,21 @@ func lastLine(path string) []byte {
 	if err != nil {
 		return nil
 	}
-	off := fi.Size() - 64<<10
-	if off < 0 {
-		off = 0
+	// Records are a few hundred bytes: the last 4 KiB nearly always hold the last one whole; a
+	// longer record falls back to 64 KiB.
+	for _, window := range []int64{4 << 10, 64 << 10} {
+		off := max(fi.Size()-window, 0)
+		buf := make([]byte, fi.Size()-off)
+		if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+			return nil
+		}
+		buf = bytes.TrimRight(buf, "\n")
+		i := bytes.LastIndexByte(buf, '\n')
+		if i >= 0 || off == 0 {
+			return buf[i+1:]
+		}
 	}
-	buf := make([]byte, fi.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-		return nil
-	}
-	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
-	return []byte(lines[len(lines)-1])
+	return nil
 }
 
 // auditLog appends one record. Records are bounded and control characters stripped; callers

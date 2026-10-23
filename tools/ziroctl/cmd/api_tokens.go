@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -65,6 +67,37 @@ type apiToken struct {
 
 var apiTokenRe = regexp.MustCompile(`^ziro_([0-9a-f]{8})_([0-9a-f]{48})$`)
 
+// tokenCache holds the parsed token file while it is unchanged: every API request authenticates,
+// and reading and parsing the file each time was most of a small request's cost. Writers replace
+// the file atomically (saveAPITokens), which changes what the cache is keyed on.
+var tokenCache struct {
+	sync.Mutex
+	key string
+	ts  []apiToken
+}
+
+// cachedAPITokens is loadAPITokens for the request path. Callers must not modify the result.
+func cachedAPITokens() ([]apiToken, error) {
+	fi, err := os.Stat(apiTokensFile)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	key := fmt.Sprintf("%d:%d:%v", fi.Size(), fi.ModTime().UnixNano(), fileIno(fi))
+	tokenCache.Lock()
+	defer tokenCache.Unlock()
+	if tokenCache.key == key {
+		return tokenCache.ts, nil
+	}
+	ts, err := loadAPITokens()
+	if err == nil {
+		tokenCache.key, tokenCache.ts = key, ts
+	}
+	return ts, err
+}
+
 func loadAPITokens() ([]apiToken, error) {
 	b, err := os.ReadFile(apiTokensFile)
 	if os.IsNotExist(err) {
@@ -96,7 +129,7 @@ func apiIdentity(bearer, legacy string, now time.Time) (name, role string, scope
 	if m == nil {
 		return "", "", nil, false
 	}
-	ts, err := loadAPITokens()
+	ts, err := cachedAPITokens()
 	if err != nil {
 		return "", "", nil, false
 	}
@@ -301,3 +334,12 @@ func init() {
 }
 
 func trimBearer(h string) string { return strings.TrimPrefix(h, "Bearer ") }
+
+// fileIno is a file's inode number (0 when unknown): an atomic replace changes it even when the
+// size and modification time happen to match.
+func fileIno(fi os.FileInfo) uint64 {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return uint64(st.Ino)
+	}
+	return 0
+}

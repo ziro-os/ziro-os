@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdkapi "github.com/ziro-os/ziro-os/sdk/api"
@@ -29,20 +31,11 @@ type sandboxClusterView struct {
 	token string
 	nodes []ClusterNode
 	st    *ClusterState
+	fresh bool // just read (forSandbox doesn't read it again)
 }
 
 var (
-	sandboxClusterState = func() (*sandboxClusterView, bool) {
-		cfg, err := loadClusterConfig()
-		if err != nil || cfg.Role != "master" {
-			return nil, false
-		}
-		st, err := readState()
-		if err != nil {
-			return nil, false
-		}
-		return &sandboxClusterView{token: st.Secrets[sandboxSecret]["TOKEN"], nodes: st.Nodes, st: st}, true
-	}
+	sandboxClusterState  = cachedSandboxView
 	sandboxClusterMutate = withState
 	sandboxMeshAddr      = func(n *ClusterNode) string { return net.JoinHostPort(n.MeshIP, strconv.Itoa(sandboxMeshPort)) }
 	sandboxRouteStore    = func() routeStore { return clusterRouteStore{} }
@@ -67,6 +60,97 @@ func (v *sandboxClusterView) sandboxNodes() []*ClusterNode {
 	return out
 }
 
+// The cluster view, cached briefly: reading it costs the config file, a socket round trip and
+// several full-state JSON passes, and an agent sends sandbox requests in bursts. A sandbox the
+// cached view doesn't know yet (just created) refreshes it (forSandbox).
+const sandboxViewTTL = 2 * time.Second
+
+var sandboxView struct {
+	sync.Mutex
+	v  *sandboxClusterView
+	ok bool
+	at time.Time
+}
+
+func cachedSandboxView() (*sandboxClusterView, bool) {
+	sandboxView.Lock()
+	defer sandboxView.Unlock()
+	if time.Since(sandboxView.at) < sandboxViewTTL {
+		return sandboxView.v, sandboxView.ok
+	}
+	sandboxView.v, sandboxView.ok = readSandboxView()
+	sandboxView.at = time.Now()
+	return sandboxView.v, sandboxView.ok
+}
+
+// freshSandboxView drops the cached view (after a change the next request must see).
+func freshSandboxView() {
+	sandboxView.Lock()
+	sandboxView.at = time.Time{}
+	sandboxView.Unlock()
+}
+
+var readSandboxView = func() (*sandboxClusterView, bool) {
+	cfg, err := loadClusterConfig()
+	if err != nil || cfg.Role != "master" {
+		return nil, false
+	}
+	st, err := readState()
+	if err != nil {
+		return nil, false
+	}
+	return &sandboxClusterView{token: st.Secrets[sandboxSecret]["TOKEN"], nodes: st.Nodes, st: st}, true
+}
+
+// sandboxMeshTransport is the one pool of connections to the nodes' mesh APIs (the default
+// transport keeps 2 idle connections per node, so concurrent requests kept reconnecting).
+var sandboxMeshTransport = &http.Transport{
+	DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	MaxIdleConnsPerHost: 64,
+	IdleConnTimeout:     90 * time.Second,
+}
+
+// proxyBuffers are the copy buffers of forwarded requests, reused.
+type proxyBuffers struct{ p sync.Pool }
+
+func (b *proxyBuffers) Get() []byte {
+	if v, ok := b.p.Get().(*[]byte); ok {
+		return *v
+	}
+	return make([]byte, 32<<10)
+}
+func (b *proxyBuffers) Put(v []byte) { b.p.Put(&v) }
+
+var sandboxProxyBuffers = &proxyBuffers{}
+
+// sandboxNodeTimeout bounds one node's answer to a fan-out (lists, snapshot lookups): a slow or
+// unreachable node is left out instead of holding up the answer.
+const sandboxNodeTimeout = 10 * time.Second
+
+// eachNode calls fn for every sandbox node at once, each with its own deadline, and returns the
+// nodes fn reported as failed.
+func (v *sandboxClusterView) eachNode(r *http.Request, timeout time.Duration, fn func(rq *http.Request, n *ClusterNode) bool) []string {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var failed []string
+	for _, n := range v.sandboxNodes() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			defer cancel()
+			if !fn(r.WithContext(ctx), n) {
+				mu.Lock()
+				failed = append(failed, n.ID)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	sort.Strings(failed)
+	return failed
+}
+
 // forwardTo proxies a request to a node's mesh sandbox API with the caller's identity.
 func (v *sandboxClusterView) forwardTo(w http.ResponseWriter, r *http.Request, n *ClusterNode) {
 	proxy := &httputil.ReverseProxy{
@@ -83,6 +167,8 @@ func (v *sandboxClusterView) forwardTo(w http.ResponseWriter, r *http.Request, n
 			pr.Out.Header.Set(hdrHost, strings.Trim(host, "[]"))
 		},
 		FlushInterval: -1,
+		Transport:     sandboxMeshTransport,
+		BufferPool:    sandboxProxyBuffers,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			apiError(w, http.StatusBadGateway, "node "+n.ID+" doesn't answer: "+err.Error())
 		},
@@ -110,7 +196,7 @@ func (v *sandboxClusterView) call(r *http.Request, n *ClusterNode, method, path 
 	return resp.StatusCode, b, err
 }
 
-var sandboxClusterHTTP = &http.Client{Timeout: 11 * time.Minute} // a create may pull an image
+var sandboxClusterHTTP = &http.Client{Timeout: 11 * time.Minute, Transport: sandboxMeshTransport} // a create may pull an image
 
 // serveClusterSandboxes answers /api/v1/sandboxes* on a master. It returns false when this
 // host isn't a cluster master (the caller serves the local daemon).
@@ -196,38 +282,32 @@ func (v *sandboxClusterView) create(w http.ResponseWriter, r *http.Request) {
 // nodesWithWarm asks every sandbox node, in parallel and briefly, for its warm pools and returns
 // the nodes with a paused sandbox of the template.
 func (v *sandboxClusterView) nodesWithWarm(r *http.Request, template string) map[string]bool {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	rq := r.WithContext(ctx)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 	warm := map[string]bool{}
-	for _, n := range v.sandboxNodes() {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			code, out, err := v.call(rq, n, http.MethodGet, "/v1/pools", nil)
-			var pools map[string]int
-			if err == nil && code == http.StatusOK && json.Unmarshal(out, &pools) == nil && pools[template] > 0 {
-				mu.Lock()
-				warm[n.ID] = true
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
+	v.eachNode(r, 2*time.Second, func(rq *http.Request, n *ClusterNode) bool {
+		code, out, err := v.call(rq, n, http.MethodGet, "/v1/pools", nil)
+		var pools map[string]int
+		if err == nil && code == http.StatusOK && json.Unmarshal(out, &pools) == nil && pools[template] > 0 {
+			mu.Lock()
+			warm[n.ID] = true
+			mu.Unlock()
+		}
+		return err == nil
+	})
 	return warm
 }
 
 func (v *sandboxClusterView) nodesWithSnapshot(r *http.Request, image string) map[string]bool {
+	var mu sync.Mutex
 	only := map[string]bool{}
-	for _, n := range v.sandboxNodes() {
-		for _, s := range v.snapshotsOn(r, n) {
-			if s == image {
-				only[n.ID] = true
-			}
+	v.eachNode(r, sandboxNodeTimeout, func(rq *http.Request, n *ClusterNode) bool {
+		if slices.Contains(v.snapshotsOn(rq, n), image) {
+			mu.Lock()
+			only[n.ID] = true
+			mu.Unlock()
 		}
-	}
+		return true
+	})
 	return only
 }
 
@@ -253,21 +333,22 @@ func (v *sandboxClusterView) snapshotsOn(r *http.Request, n *ClusterNode) []stri
 func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path string) {
 	if r.Method == http.MethodDelete { // a snapshot: on every node that holds a copy
 		want := r.URL.Query().Get("image")
-		removed := 0
-		for _, n := range v.sandboxNodes() {
+		var removed atomic.Int32
+		v.eachNode(r, sandboxNodeTimeout, func(rq *http.Request, n *ClusterNode) bool {
 			// The name sent to the node is the node's own (from its list, as the caller may
 			// see it), never the request's text.
-			for _, image := range v.snapshotsOn(r, n) {
+			for _, image := range v.snapshotsOn(rq, n) {
 				if image != want {
 					continue
 				}
 				q := path + "?" + url.Values{"image": {image}}.Encode()
-				if code, _, err := v.call(r, n, http.MethodDelete, q, nil); err == nil && code == http.StatusOK {
-					removed++
+				if code, _, err := v.call(rq, n, http.MethodDelete, q, nil); err == nil && code == http.StatusOK {
+					removed.Add(1)
 				}
 			}
-		}
-		if removed == 0 {
+			return true
+		})
+		if removed.Load() == 0 {
 			apiReply(w, errNotFound("no such snapshot"), nil)
 			return
 		}
@@ -279,16 +360,24 @@ func (v *sandboxClusterView) fanout(w http.ResponseWriter, r *http.Request, path
 			st.SnapshotTombstones[want] = time.Now().UTC()
 			return nil
 		})
-		apiReply(w, nil, APIMessage{Status: "ok", Message: fmt.Sprintf("snapshot removed from %d node(s)", removed)})
+		apiReply(w, nil, APIMessage{Status: "ok", Message: fmt.Sprintf("snapshot removed from %d node(s)", removed.Load())})
 		return
 	}
+	var mu sync.Mutex
 	merged := []json.RawMessage{}
-	for _, n := range v.sandboxNodes() {
-		code, out, err := v.call(r, n, http.MethodGet, path, nil)
+	failed := v.eachNode(r, sandboxNodeTimeout, func(rq *http.Request, n *ClusterNode) bool {
+		code, out, err := v.call(rq, n, http.MethodGet, path, nil)
 		var items []json.RawMessage
-		if err == nil && code == http.StatusOK && json.Unmarshal(out, &items) == nil {
-			merged = append(merged, items...)
+		if err != nil || code != http.StatusOK || json.Unmarshal(out, &items) != nil {
+			return false
 		}
+		mu.Lock()
+		merged = append(merged, items...)
+		mu.Unlock()
+		return true
+	})
+	if len(failed) > 0 { // a partial list says which nodes it is missing
+		w.Header().Set("X-Ziro-Unreachable", strings.Join(failed, ","))
 	}
 	if path == "/v1/sandboxes/snapshots" {
 		apiReply(w, nil, mergeSnapshots(merged))
@@ -349,6 +438,16 @@ func (v *sandboxClusterView) forSandbox(w http.ResponseWriter, r *http.Request, 
 	var n *ClusterNode
 	if ok {
 		n = v.node(p.Node)
+	}
+	if !ok && !v.fresh && sandboxIDRe.MatchString(parts[0]) {
+		// The cached view may predate this sandbox: look again in a fresh one.
+		freshSandboxView()
+		if nv, ok := sandboxClusterState(); ok && nv != v {
+			again := *nv // the cached view is shared: mark a copy
+			again.fresh = true
+			again.forSandbox(w, r, parts)
+			return
+		}
 	}
 	if !ok || n == nil || (!(apiRoleRank[apiRole(r)] >= apiRoleRank["operator"]) && p.Owner != apiTokenName(r)) {
 		apiReply(w, errNotFound("no such sandbox"), nil)
