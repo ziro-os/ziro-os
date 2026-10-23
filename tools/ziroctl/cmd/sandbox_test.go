@@ -89,7 +89,9 @@ func stubSandboxes(t *testing.T) (*sandboxManager, *fakeNerdctl, *time.Time) {
 	oldRoot, oldCfg, oldN, oldAudit, oldNft := sandboxRoot, sandboxConfigFile, sandboxNerdctl, auditPath, sandboxNft
 	sandboxRoot, sandboxConfigFile, auditPath = filepath.Join(dir, "sbx"), filepath.Join(dir, "sandbox.json"), filepath.Join(dir, "audit.log")
 	f := &fakeNerdctl{ps: map[string]string{}, sticky: map[string]int{}}
-	sandboxNerdctl = f.run
+	oldLow := sandboxNerdctlLow
+	sandboxNerdctl, sandboxNerdctlLow = f.run, f.run
+	t.Cleanup(func() { sandboxNerdctlLow = oldLow })
 	sandboxNft = func(script string) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()

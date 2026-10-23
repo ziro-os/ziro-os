@@ -91,6 +91,10 @@ type sandboxConfig struct {
 	PreviewPort    int              `json:"preview_port"`         // the loopback port the gateway's preview routes use (0: previews off)
 	SecretPort     int              `json:"secret_proxy_port"`    // the egress proxy for credential injection (0: secrets off)
 	ImagePolicy    ImagePolicy      `json:"image_policy,omitempty"`
+	// On a cluster master: how many sandbox nodes keep each snapshot (default 2), and the rate a
+	// copy may use in MiB/s (default 50).
+	SnapshotReplicas int `json:"snapshot_replicas,omitempty"`
+	SnapshotCopyMBps int `json:"snapshot_copy_mbps,omitempty"`
 }
 
 func defaultSandboxConfig() sandboxConfig {

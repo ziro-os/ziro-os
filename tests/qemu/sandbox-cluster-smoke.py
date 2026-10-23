@@ -99,7 +99,7 @@ def main():
         rc, out = m.run(f"ziroctl sandbox snapshot create {remote} repl", timeout=600)
         img = (re.search(r"ziro\.local/sandbox/\S+", out) or [None])[0] if out else None
         ok, out = bs.retry(m, "nerdctl images --format '{{.Repository}}:{{.Tag}}' | grep -c 'sandbox/.*/repl:'",
-                           lambda rc, o: o.strip().endswith("1"), 180, every=10)
+                           lambda rc, o: o.strip().endswith("1"), 420, every=15)  # the leader checks every 5 min
         rc, ls = m.run("ziroctl sandbox snapshot ls --json | grep -o '\"nodes\": [0-9]*' | head -1", timeout=60)
         check("a snapshot on the worker is replicated to the master's node", bool(img) and ok and '"nodes": 2' in ls, out + ls)
         rc, out = m.run(f"ziroctl sandbox snapshot rm {img}; sleep 75; nerdctl images | grep -c '/repl ' ; true", timeout=200)
