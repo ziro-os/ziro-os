@@ -179,6 +179,12 @@ func hardKey(st *ClusterState) []byte {
 		n.Conditions, n.CondSince = nil, time.Time{}      // node health is re-reported every heartbeat
 	}
 	cp.PG = pgWithoutProbes(st.PG) // Postgres probes are re-reported every heartbeat too
+	// A crash-looping replica is reported every heartbeat: its counter and message are soft. What
+	// they lead to (moving it, Avoid) is a placement change and commits.
+	cp.Replicas = append([]Replica(nil), st.Replicas...)
+	for i := range cp.Replicas {
+		cp.Replicas[i].Fails, cp.Replicas[i].Error = 0, ""
+	}
 	b, _ := json.Marshal(struct {
 		State   *ClusterState
 		Secrets map[string]map[string]string
@@ -309,7 +315,12 @@ func (s *fsmSnapshot) Release() {}
 // ---- store ----
 
 type raftStore struct {
+	// mu guards the fields below and is held only briefly, never across Raft I/O, so readers
+	// (isLeader on every API request, snapshot, the router's version tick) never wait for a
+	// quorum. wmu serializes the writers (mutate, propose, the import) across their commit.
 	mu      sync.Mutex
+	wmu     sync.Mutex
+	fileAt  time.Time // when state.json was last written for a liveness-only change
 	r       *raft.Raft
 	fsm     *raftFSM
 	id      string
@@ -412,18 +423,23 @@ func (rs *raftStore) onLeadership(leading bool) {
 		}
 	}
 	pgProbesUnknown(st, now)
+	rs.wmu.Lock() // no writer runs on this state until it is in place (and, if new, committed)
+	defer rs.wmu.Unlock()
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
 	rs.cur, rs.version, rs.leading = st, index, true
+	rs.hardKey = nil
+	if len(payload) > 0 {
+		rs.hardKey = hardKey(st)
+	}
+	rs.mu.Unlock()
 	if len(payload) == 0 { // first leader of a new group: commit the imported state
-		rs.hardKey = nil
-		if err := rs.commitLocked(st); err != nil {
+		if err := rs.commit(st); err != nil {
 			fmt.Printf("[cluster] import state: %v\n", err)
+			rs.mu.Lock()
 			rs.leading, rs.cur = false, nil
+			rs.mu.Unlock()
 			return
 		}
-	} else {
-		rs.hardKey = hardKey(st)
 	}
 	fmt.Printf("[cluster] %s is the Raft leader (index %d)\n", rs.id, rs.version)
 }
@@ -434,9 +450,22 @@ func (rs *raftStore) isLeader() bool {
 	return rs.leading
 }
 
-func (rs *raftStore) commitLocked(st *ClusterState) error {
+// stateFileEvery is how often a liveness-only change refreshes the leader's state.json (a commit
+// writes it at once, through the FSM). Readers of the file are the file-mode fallback and backups.
+const stateFileEvery = 30 * time.Second
+
+// commit makes st the live state: a Raft entry when its hard part changed, waited for without
+// holding mu. The caller holds wmu.
+func (rs *raftStore) commit(st *ClusterState) error {
 	key := hardKey(st)
-	if !bytes.Equal(key, rs.hardKey) {
+	rs.mu.Lock()
+	hard, leading := !bytes.Equal(key, rs.hardKey), rs.leading
+	rs.mu.Unlock()
+	if !leading {
+		return errNotLeader
+	}
+	var index uint64
+	if hard {
 		data, err := encodePayload(st)
 		if err != nil {
 			return err
@@ -448,24 +477,43 @@ func (rs *raftStore) commitLocked(st *ClusterState) error {
 		if resp, ok := f.Response().(error); ok && resp != nil {
 			return resp
 		}
-		rs.hardKey, rs.version = key, f.Index()
+		index = f.Index()
+	}
+	rs.mu.Lock()
+	if !rs.leading { // lost the leadership while committing: the new leader has the state
+		rs.mu.Unlock()
+		return errNotLeader
+	}
+	if hard {
+		rs.hardKey, rs.version = key, index
 	}
 	rs.cur = st
-	// Liveness-only changes are not committed; keep the local file fresh for readers here.
-	return writeJSONAtomic(filepath.Join(rs.dir, "state.json"), st)
+	// A commit's file was written by the FSM; liveness-only changes refresh it now and then.
+	write := !hard && time.Since(rs.fileAt) >= stateFileEvery
+	if hard || write {
+		rs.fileAt = time.Now()
+	}
+	rs.mu.Unlock()
+	if write {
+		return writeJSONAtomic(filepath.Join(rs.dir, "state.json"), st)
+	}
+	return nil
 }
 
 func (rs *raftStore) mutate(fn func(st *ClusterState) error) error {
+	rs.wmu.Lock()
+	defer rs.wmu.Unlock()
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	if !rs.leading || rs.cur == nil {
+	cur, leading := rs.cur, rs.leading
+	rs.mu.Unlock()
+	if !leading || cur == nil {
 		return errNotLeader
 	}
-	st := cloneState(rs.cur)
+	st := cloneState(cur) // the live state is never changed in place: a copy is safe without mu
 	if err := fn(st); err != nil {
 		return err
 	}
-	return rs.commitLocked(st)
+	return rs.commit(st)
 }
 
 // snapshot returns the live state and its version (leader), or the last applied state.
@@ -487,16 +535,19 @@ func (rs *raftStore) snapshot() (*ClusterState, uint64, error) {
 // propose applies a full state computed by ziroctl from version. Liveness and the CA key
 // always come from the live state: the CLI never sees or changes them.
 func (rs *raftStore) propose(version uint64, st *ClusterState) error {
+	rs.wmu.Lock()
+	defer rs.wmu.Unlock()
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	if !rs.leading || rs.cur == nil {
+	cur, curVersion, leading := rs.cur, rs.version, rs.leading
+	rs.mu.Unlock()
+	if !leading || cur == nil {
 		return errNotLeader
 	}
-	if version != rs.version {
+	if version != curVersion {
 		return errConflict
 	}
 	for i := range st.Nodes {
-		if live := rs.cur.node(st.Nodes[i].ID); live != nil {
+		if live := cur.node(st.Nodes[i].ID); live != nil {
 			n := &st.Nodes[i]
 			n.Status, n.LastSeen, n.Containers, n.Running, n.Failed, n.MeshError =
 				live.Status, live.LastSeen, live.Containers, live.Running, live.Failed, live.MeshError
@@ -504,11 +555,11 @@ func (rs *raftStore) propose(version uint64, st *ClusterState) error {
 			n.Conditions, n.CondSince = live.Conditions, live.CondSince
 		}
 	}
-	st.CAKey = rs.cur.CAKey
+	st.CAKey = cur.CAKey
 	// Defense in depth: every changed image passes the network-free part of the image policy here,
 	// whoever proposed the change.
 	for _, a := range st.Apps {
-		if cur := rs.cur.app(a.Name); (cur == nil || cur.Image != a.Image) && !builtInCluster(st, a.Image) {
+		if cur := cur.app(a.Name); (cur == nil || cur.Image != a.Image) && !builtInCluster(st, a.Image) {
 			if err := checkImage(st.ImagePolicy, a.Image); err != nil {
 				return err
 			}
@@ -517,7 +568,7 @@ func (rs *raftStore) propose(version uint64, st *ClusterState) error {
 	if st.Secrets == nil {
 		st.Secrets = map[string]map[string]string{}
 	}
-	return rs.commitLocked(st)
+	return rs.commit(st)
 }
 
 func (rs *raftStore) addNonvoter(id, addr string) error {
