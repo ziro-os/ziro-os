@@ -845,15 +845,10 @@ func (rs *raftStore) forwarder(cfg *ClusterConfig) func(path string, body []byte
 		if err != nil {
 			return nil, err
 		}
-		st, _, err := rs.snapshot()
+		c, err := rs.masterClient(30 * time.Second)
 		if err != nil {
 			return nil, err
 		}
-		tc, err := masterClientTLS(st.CACert)
-		if err != nil {
-			return nil, err
-		}
-		c := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tc}}
 		req, err := http.NewRequest(http.MethodPost, "https://"+addr+"/cluster/v1/internal"+path, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -882,12 +877,44 @@ func serveLocalSocket(h http.Handler) error {
 	return nil
 }
 
-func socketClient() *http.Client {
-	return &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", clusterSock())
-		},
-	}}
+// socketHTTP is the one client for the local master socket (a new Transport per call left an
+// idle connection behind each time).
+var socketHTTP = &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{
+	DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", clusterSock())
+	},
+	IdleConnTimeout: 30 * time.Second,
+}}
+
+func socketClient() *http.Client { return socketHTTP }
+
+// masterClients: master-to-master mutual TLS clients, one per cluster CA and timeout.
+var masterClients sync.Map // CA hash|timeout -> *http.Client
+
+// masterClient returns the client for the internal API of other masters. The CA comes from the
+// CA file this master keeps (no full state copy per request).
+func (rs *raftStore) masterClient(timeout time.Duration) (*http.Client, error) {
+	ca, err := os.ReadFile(clusterCAPath())
+	if err != nil {
+		st, _, serr := rs.snapshot() // a master without the file yet
+		if serr != nil {
+			return nil, serr
+		}
+		ca = []byte(st.CACert)
+	}
+	h, _ := pemHash(string(ca))
+	key := h + "|" + timeout.String()
+	if c, ok := masterClients.Load(key); ok {
+		return c.(*http.Client), nil
+	}
+	tc, err := masterClientTLS(string(ca))
+	if err != nil {
+		return nil, err
+	}
+	c := &http.Client{Timeout: timeout, Transport: &http.Transport{TLSClientConfig: tc, MaxIdleConnsPerHost: 4,
+		IdleConnTimeout: 90 * time.Second, ForceAttemptHTTP2: true}}
+	actual, _ := masterClients.LoadOrStore(key, c)
+	return actual.(*http.Client), nil
 }
 
 func socketCall(method, path string, in, out any) (int, error) {
@@ -1054,11 +1081,10 @@ func fetchDEK(rs *raftStore, cfg *ClusterConfig, id string) error {
 	if err != nil {
 		return err
 	}
-	tc, err := masterClientTLS(st.CACert)
+	c, err := rs.masterClient(10 * time.Second)
 	if err != nil {
 		return err
 	}
-	c := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tc}}
 	self := net.JoinHostPort(cfg.NodeIP, clusterPortOf(cfg))
 	var last error = errors.New("no other master holds it")
 	for _, addr := range masterAddrs(st, cfg) {

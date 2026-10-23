@@ -209,9 +209,39 @@ func ensureMasterCert(st *ClusterState, nodeID string, ips []net.IP) error {
 	return writeFileAtomic(masterCertPath(), []byte(crt), 0644)
 }
 
+// masterTLSCache holds the parsed certificate while its files are unchanged: every TLS handshake
+// asks for it, and parsing the key pair each time is the expensive part of a handshake here.
+var masterTLSCache struct {
+	sync.Mutex
+	key  string
+	cert *tls.Certificate
+}
+
 // loadMasterTLS returns this master's certificate with the CA appended to the chain, so
-// clients that pin the CA by hash can find it in the handshake.
+// clients that pin the CA by hash can find it in the handshake. It is re-read when one of its
+// files changes (renewal, a new CA).
 func loadMasterTLS() (*tls.Certificate, error) {
+	key := ""
+	for _, p := range []string{masterCertPath(), clusterCAPath(), masterKeyPath()} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return nil, err
+		}
+		key += fmt.Sprintf("%s:%d:%d;", p, fi.Size(), fi.ModTime().UnixNano())
+	}
+	masterTLSCache.Lock()
+	defer masterTLSCache.Unlock()
+	if masterTLSCache.key == key && masterTLSCache.cert != nil {
+		return masterTLSCache.cert, nil
+	}
+	c, err := readMasterTLS()
+	if err == nil {
+		masterTLSCache.key, masterTLSCache.cert = key, c
+	}
+	return c, err
+}
+
+func readMasterTLS() (*tls.Certificate, error) {
 	crt, err := os.ReadFile(masterCertPath())
 	if err != nil {
 		return nil, err

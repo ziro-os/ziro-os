@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -21,28 +22,66 @@ import (
 
 const (
 	agentInterval    = 10 * time.Second
-	reconcileEvery   = 3 * time.Second
+	reconcileEvery   = 3 * time.Second  // while something is to be done
+	reconcileIdle    = 15 * time.Second // once converged (containers restart themselves: --restart always)
 	imagePullTimeout = 10 * time.Minute
 )
 
 // secretEnvDir is tmpfs (/run): secret values never touch disk on workers or appear in argv.
 var secretEnvDir = "/run/ziro/cluster/secrets"
 
-// listClusterContainers returns cluster-managed containers on this node: name -> running.
-func listClusterContainers() (map[string]bool, error) {
-	out, err := exec.Command("nerdctl", "ps", "-a", "--filter", "label=ziro.cluster=true",
-		"--format", "{{.Names}}\t{{.Status}}").Output()
+// listNodeContainers lists this node's containers with one nerdctl run: the cluster-managed ones
+// (name -> running) and how many containers run in all.
+var listNodeContainers = func() (cluster map[string]bool, running int, err error) {
+	out, err := exec.Command("nerdctl", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Labels}}").Output()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	actual := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		name, status, _ := strings.Cut(line, "\t")
-		if name = strings.TrimSpace(name); name != "" {
-			actual[name] = strings.HasPrefix(strings.TrimSpace(status), "Up")
+	cluster, running = parseContainerList(string(out))
+	return cluster, running, nil
+}
+
+// parseContainerList reads `nerdctl ps -a --format '{{.Names}}\t{{.Status}}\t{{.Labels}}'`.
+func parseContainerList(out string) (cluster map[string]bool, running int) {
+	cluster = map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.SplitN(line, "\t", 3)
+		if len(f) < 2 || strings.TrimSpace(f[0]) == "" {
+			continue
+		}
+		up := strings.HasPrefix(strings.TrimSpace(f[1]), "Up")
+		if up {
+			running++
+		}
+		if len(f) == 3 && slices.Contains(strings.Split(strings.TrimSpace(f[2]), ","), "ziro.cluster=true") {
+			cluster[strings.TrimSpace(f[0])] = up
 		}
 	}
-	return actual, nil
+	return cluster, running
+}
+
+// containerList is the last listing, shared by the reconcile loop and the heartbeat, so an idle
+// node doesn't run nerdctl for each of them (every nerdctl run is a whole process start).
+type containerList struct {
+	mu      sync.Mutex
+	at      time.Time
+	cluster map[string]bool
+	running int
+}
+
+// get returns a listing no older than maxAge, listing again when needed.
+func (c *containerList) get(maxAge time.Duration) (map[string]bool, int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cluster != nil && time.Since(c.at) <= maxAge {
+		return c.cluster, c.running, nil
+	}
+	cluster, running, err := listNodeContainers()
+	if err != nil {
+		return nil, 0, err
+	}
+	c.cluster, c.running, c.at = cluster, running, time.Now()
+	return cluster, running, nil
 }
 
 // planReconcile diffs desired assignments against local containers.
@@ -391,6 +430,8 @@ type agent struct {
 	mesh    meshAnywhere      // the mesh engine (mesh mode "anywhere")
 	mode    string            // mesh mode from the last heartbeat
 	pg      *pgAgent          // probes and orders for Postgres members (pg_agent.go)
+	list    containerList     // the last container listing (reconcile and heartbeat share it)
+	kick    chan struct{}     // wakes the reconcile loop when the desired set changes
 }
 
 func (ag *agent) setFailed(name string, err error) {
@@ -421,15 +462,26 @@ func nerdctl(ctx context.Context, args ...string) error {
 // reconcileContainers converges local cluster containers to desired.
 // Stale containers are removed first so a replaced replica can reuse its host port.
 func reconcileContainers(desired []Assignment) error {
-	return (&agent{failed: map[string]string{}}).reconcile(desired)
+	_, err := (&agent{failed: map[string]string{}}).reconcile(desired)
+	return err
 }
 
-func (ag *agent) reconcile(desired []Assignment) error {
-	actual, err := listClusterContainers()
+// reconcile converges the local containers to desired; converged reports that there was
+// nothing to do.
+func (ag *agent) reconcile(desired []Assignment) (converged bool, err error) {
+	actual, _, err := ag.list.get(0)
 	if err != nil {
-		return fmt.Errorf("list containers: %w", err)
+		return false, fmt.Errorf("list containers: %w", err)
 	}
 	start, restart, remove := planReconcile(desired, actual)
+	converged = len(start)+len(restart)+len(remove) == 0
+	defer func() {
+		if !converged { // what was done changed the containers: the next listing must see it
+			ag.list.mu.Lock()
+			ag.list.cluster = nil
+			ag.list.mu.Unlock()
+		}
+	}()
 	for _, a := range desired { // dynamic files (a member's role) follow the master while the container runs
 		if len(a.Dynamic) > 0 {
 			_ = writeConfigFiles(a)
@@ -482,7 +534,7 @@ func (ag *agent) reconcile(desired []Assignment) error {
 		}
 		ag.setFailed(a.Name, err)
 	}
-	return nil
+	return converged, nil
 }
 
 var clusterAgentCmd = &cobra.Command{
@@ -498,7 +550,7 @@ var clusterAgentCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		ag := &agent{failed: map[string]string{}, pg: newPGAgent()}
+		ag := &agent{failed: map[string]string{}, pg: newPGAgent(), kick: make(chan struct{}, 1)}
 		go ag.pg.loop(context.Background(), func() []Assignment {
 			ag.mu.Lock()
 			defer ag.mu.Unlock()
@@ -514,12 +566,19 @@ var clusterAgentCmd = &cobra.Command{
 				desired, synced := ag.desired, ag.synced
 				ag.mu.Unlock()
 				// Before the first successful heartbeat the desired set is unknown: never tear down.
+				wait := reconcileEvery
 				if synced {
-					if err := ag.reconcile(desired); err != nil {
+					converged, err := ag.reconcile(desired)
+					if err != nil {
 						fmt.Printf("[agent] reconcile: %v\n", err)
+					} else if converged {
+						wait = reconcileIdle
 					}
 				}
-				time.Sleep(reconcileEvery)
+				select {
+				case <-ag.kick: // the master changed what this node runs
+				case <-time.After(wait):
+				}
 			}
 		}()
 
@@ -529,7 +588,7 @@ var clusterAgentCmd = &cobra.Command{
 		var lastOK time.Time
 		var policyAt time.Time
 		for {
-			actual, _ := listClusterContainers()
+			actual, total, _ := ag.list.get(agentInterval) // the reconcile loop's listing, if recent
 			running := []string{}
 			for name, up := range actual {
 				if up {
@@ -537,10 +596,6 @@ var clusterAgentCmd = &cobra.Command{
 				}
 			}
 			sort.Strings(running)
-			total := 0
-			if out, err := exec.Command("nerdctl", "ps", "-q").Output(); err == nil {
-				total = len(strings.Fields(string(out)))
-			}
 			ag.mu.Lock()
 			failed := make(map[string]string, len(ag.failed))
 			for k, v := range ag.failed {
@@ -677,8 +732,15 @@ var clusterAgentCmd = &cobra.Command{
 				}
 				if podOK {
 					ag.mu.Lock()
+					changed := !ag.synced || !reflect.DeepEqual(ag.desired, resp.Assignments)
 					ag.desired, ag.synced = resp.Assignments, true
 					ag.mu.Unlock()
+					if changed {
+						select {
+						case ag.kick <- struct{}{}:
+						default:
+						}
+					}
 					purgeAppData(resp.PurgeData, resp.Assignments)
 				}
 				if merr == nil {
