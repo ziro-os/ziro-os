@@ -400,7 +400,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
             add --cache-dir "/out/apk-cache/$TARGET_ARCH" \
             ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
             iptables openssh-server openssh-client linux-pam \
-            e2fsprogs e2fsprogs-extra dosfstools util-linux sfdisk parted curl kmod wireguard-tools nftables $GRUB_PKGS; then
+            e2fsprogs e2fsprogs-extra dosfstools util-linux sfdisk parted curl git jq bash kmod wireguard-tools nftables $GRUB_PKGS; then
             ok=1
             break
         fi
