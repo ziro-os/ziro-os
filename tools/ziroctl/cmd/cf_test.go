@@ -307,4 +307,8 @@ func TestTraversableArtifactDirs(t *testing.T) {
 	if err := traversable(filepath.Join(root, "elsewhere", "bin")); err != nil {
 		t.Fatal("paths outside the plugin root must be left alone")
 	}
+	traversableRoot = filepath.Join(root, "fresh") // a fresh install has no state dir yet
+	if err := traversable(filepath.Join(traversableRoot, "plugins", "x", "bin")); err != nil {
+		t.Fatalf("a missing state dir is not an error: %v", err)
+	}
 }
