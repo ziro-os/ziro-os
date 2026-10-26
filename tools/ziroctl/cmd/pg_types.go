@@ -49,7 +49,8 @@ const (
 	pgMaxLagBytes      = 16 << 20         // a replica further behind is not promoted without --force, and is not served reads
 	pgReadyLagMillis   = 5000             // a replica serves reads when it replays within this many ms
 	pgCommandTimeout   = 60 * time.Second
-	pgStopTimeout      = 120 // seconds Postgres gets to shut down cleanly
+	pgNodeGoneAfter    = 10 * time.Minute // a node unseen this long no longer holds a member: it is replaced
+	pgStopTimeout      = 120              // seconds Postgres gets to shut down cleanly
 	pgDataPath         = "/var/lib/postgresql/data"
 	pgDataUID          = 999 // the postgres user of the official image
 	pgSecretPrefix     = "pg-"
