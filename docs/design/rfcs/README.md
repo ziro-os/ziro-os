@@ -30,3 +30,4 @@ not need one.
 | [0003](0003-tailscale-module.md) | Tailscale module, service capabilities and interface-bound firewall rules | Draft |
 | [0004](0004-sandboxes.md) | Sandboxes for untrusted code and AI agents | Accepted (phases 1–8 implemented) |
 | [0005](0005-postgres-clusters.md) | Postgres clusters: replicas, failover and Citus sharding | Draft |
+| [0006](0006-docker-api-socket.md) | An opt-in Docker Engine API socket | Draft |
