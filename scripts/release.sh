@@ -277,6 +277,7 @@ for rel in "$REPO_ROOT/rootfs/etc/os-release" "$REPO_ROOT/rootfs/etc/ziro-releas
 NAME="Ziro-OS"
 VERSION="${NEW_VERSION}"
 ID=ziro-os
+ID_LIKE=alpine
 PRETTY_NAME="Ziro-OS ${NEW_VERSION}"
 HOME_URL="https://github.com/ziro-os/ziro-os"
 BUILD_DATE="${BUILD_TIMESTAMP}"
