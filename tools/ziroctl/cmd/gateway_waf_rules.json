@@ -367,6 +367,28 @@
       "tests": {"match": ["/wp-login.php"], "nomatch": ["/wp-content/uploads"]}
     },
     {
+      "id": "ZW-913120",
+      "group": "scanner",
+      "level": 2,
+      "score": 3,
+      "msg": "Headless browser or automation framework",
+      "targets": ["ua"],
+      "needles": ["headlesschrome", "phantomjs", "selenium", "puppeteer", "playwright", "scrapy", "casperjs"],
+      "re": "headlesschrome|phantomjs|selenium|puppeteer|playwright|scrapy|casperjs",
+      "tests": {"match": ["mozilla/5.0 headlesschrome/118.0 safari/537.36", "scrapy/2.11 (+https://scrapy.org)"], "nomatch": ["mozilla/5.0 (x11; linux) chrome/118.0 safari/537.36"]}
+    },
+    {
+      "id": "ZW-913130",
+      "group": "scanner",
+      "level": 3,
+      "score": 2,
+      "msg": "Scripted HTTP client",
+      "targets": ["ua"],
+      "needles": ["python-requests", "python-urllib", "aiohttp", "go-http-client", "libwww-perl", "okhttp", "node-fetch", "axios", "curl/", "wget/", "java/"],
+      "re": "python-requests|python-urllib|aiohttp|go-http-client|libwww-perl|okhttp|node-fetch|axios|\\bcurl/|\\bwget/|\\bjava/[0-9]",
+      "tests": {"match": ["python-requests/2.31.0", "curl/8.4.0"], "nomatch": ["mozilla/5.0 (macintosh) applewebkit/605.1.15 safari/605.1.15"]}
+    },
+    {
       "id": "ZW-920100",
       "group": "protocol",
       "level": 1,

@@ -114,6 +114,8 @@ var wafAttacks = []wafCase{
 	{name: "internal url", target: "/?url=http://192.168.1.10/admin", want: []string{"ZW-934120"}, level: 2},
 	{name: "scanner ua", target: "/", hdr: map[string]string{"User-Agent": "sqlmap/1.7.2#stable (https://sqlmap.org)"}, want: []string{"ZW-913100"}},
 	{name: "probe path", target: "/wp-login.php", want: []string{"ZW-913110"}, level: 2},
+	{name: "headless browser", target: "/", hdr: map[string]string{"User-Agent": "Mozilla/5.0 HeadlessChrome/118.0 Safari/537.36"}, want: []string{"ZW-913120"}, level: 2},
+	{name: "scripted client", target: "/", hdr: map[string]string{"User-Agent": "python-requests/2.31.0"}, want: []string{"ZW-913130"}, level: 3},
 	{name: "trace", method: "TRACE", target: "/", want: []string{"ZW-920110"}},
 	{name: "unknown method", method: "BREW", target: "/", want: []string{"ZW-920100"}},
 	{name: "httpoxy", target: "/", hdr: map[string]string{"Proxy": "http://evil.example:8080"}, want: []string{"ZW-920200"}},
