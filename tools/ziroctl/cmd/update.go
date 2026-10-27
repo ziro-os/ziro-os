@@ -472,6 +472,10 @@ func runToolsUpdate(tag string, allowDowngrade bool) (string, error) {
 	if err != nil || rel == nil {
 		return "", err
 	}
+	// A fresh install has no /var/lib/ziro yet: nothing else creates it before the first update.
+	if err := os.MkdirAll("/var/lib/ziro", 0o755); err != nil {
+		return "", err
+	}
 	dir, err := os.MkdirTemp("/var/lib/ziro", ".update-")
 	if err != nil {
 		return "", err

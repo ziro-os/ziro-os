@@ -942,7 +942,7 @@ EOF
     rm -rf "$TARGET_MNT/var/lib/containerd" "$TARGET_MNT/var/lib/nerdctl" "$TARGET_MNT/var/lib/cni" \
            "$TARGET_MNT/var/lib/ziro/upgrade"
     find "$TARGET_MNT/var/log" -type f -delete 2>/dev/null || true
-    mkdir -p "$TARGET_MNT/var/lib/containerd" "$TARGET_MNT/var/log"
+    mkdir -p "$TARGET_MNT/var/lib/containerd" "$TARGET_MNT/var/lib/ziro" "$TARGET_MNT/var/log"
 
     # Create virtual mountpoint directories
     mkdir -p "$TARGET_MNT/dev" "$TARGET_MNT/proc" "$TARGET_MNT/sys" \

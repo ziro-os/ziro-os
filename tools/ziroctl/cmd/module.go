@@ -530,6 +530,9 @@ func traversable(p string) error {
 	for _, part := range append([]string{"."}, strings.Split(rel, string(filepath.Separator))...) {
 		d = filepath.Join(d, part)
 		fi, err := os.Stat(d)
+		if os.IsNotExist(err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}

@@ -443,6 +443,7 @@ static void init_filesystems(void) {
     safe_mkdir("/var", 0755);
     safe_mkdir("/var/log", 0755);
     safe_mkdir("/var/lib", 0755);
+    safe_mkdir("/var/lib/ziro", 0755);
     safe_mkdir("/var/lib/containerd", 0755);
     safe_mkdir("/var/lib/containers", 0755);
     safe_mkdir("/var/empty", 0700);
