@@ -103,6 +103,13 @@ func pgSteps(o PGOrder) ([][]string, error) {
 	switch o.Op {
 	case opPromote:
 		return [][]string{ctl("promote", "-D", pgDataDirIn, "-w", "-t", "60"), psqlArgs(c, sqlResetRO, sqlReload)}, nil
+	case opReinit:
+		// Only a replica is rebuilt: the first statement divides by zero on a member that is not in
+		// recovery, and ON_ERROR_STOP ends the order before anything is touched. The marker makes the
+		// entry script take a new base backup when the container comes back.
+		return [][]string{psqlArgs(c, "select 1 / (select pg_is_in_recovery()::int)"),
+			{"exec", "-u", "postgres", c, "touch", pgDataDirIn + "/ziro-reinit"},
+			ctl("stop", "-m", "fast", "-D", pgDataDirIn, "-w", "-t", "60")}, nil
 	case opReadonly:
 		return [][]string{psqlArgs(c, sqlSetRO, sqlReload, sqlEndClient)}, nil
 	case opWritable:
@@ -147,7 +154,7 @@ func pgExecute(ctx context.Context, run pgRunner, o PGOrder) error {
 	for _, argv := range steps {
 		if out, err := run(ctx, argv...); err != nil {
 			// Stopping Postgres ends the container's exec session: that is the order succeeding.
-			if o.Op == opDemote && len(argv) > 4 && argv[4] == pgPgCtl {
+			if (o.Op == opDemote || o.Op == opReinit) && len(argv) > 4 && argv[4] == pgPgCtl {
 				continue
 			}
 			return fmt.Errorf("%s: %v: %s", o.Op, err, condenseRuntimeError(lastOutputLine(out)))

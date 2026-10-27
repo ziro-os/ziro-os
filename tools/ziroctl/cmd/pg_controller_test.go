@@ -34,6 +34,7 @@ type simPG struct {
 	sync     string
 	slots    map[string]bool
 	restart  bool // came back from a demote: restarts as a replica
+	reinits  int  // times its data directory was discarded for a new base backup
 }
 
 func newPGWorld(t *testing.T, nodes int) *pgWorld {
@@ -198,6 +199,12 @@ func (w *pgWorld) exec(o PGOrder) PGResult {
 		s.primary, s.tli, s.readonly = true, s.tli+1, false
 	case opDemote:
 		s.up, s.restart, s.readonly = false, true, false
+	case opReinit:
+		if s.primary {
+			return PGResult{ID: o.ID, Msg: "not a replica"} // the agent's first step fails on a member that is not in recovery
+		}
+		s.up, s.restart, s.lsn = false, true, 0
+		s.reinits++
 	case opReadonly:
 		s.readonly = true
 	case opWritable:

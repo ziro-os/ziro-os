@@ -363,7 +363,8 @@ func (c *Client) CreatePGCluster(ctx context.Context, req map[string]any) (map[s
 }
 
 // PGAction changes a cluster: action is scale ({"replicas": n}), add-replica, rm-replica
-// ({"member": "m3"}), switchover ({"to": "m2"}), add-shard, pause or resume.
+// ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit
+// ({"member": "m3"}), add-shard, pause or resume.
 func (c *Client) PGAction(ctx context.Context, name, action string, body map[string]any) (map[string]any, error) {
 	var out map[string]any
 	return out, c.Do(ctx, http.MethodPost, "/api/v1/pg/"+esc(name)+"/"+esc(action), body, &out)
