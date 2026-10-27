@@ -303,6 +303,8 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 		if p := g.primary(); p == nil || pgPrimaryFailed(p, now) {
 			if !braked {
 				pgFailover(c, g, now)
+			} else if g.last(now, 60*time.Second, "braked") {
+				g.alert(now, "high", "primary is down, but too many nodes are unreachable to tell a failure from a partition; not promoting")
 			}
 		}
 	}
@@ -440,8 +442,19 @@ func pgSafeToPromote(reachable, total, k int) bool {
 func pgFailover(c *PGCluster, g *PGGroup, now time.Time) {
 	best, reachable, total := pgCandidate(g, now)
 	if best == nil {
+		// Replicas answer a beat after a leader change or a long step: only a lasting silence is news.
+		if g.Notes == nil {
+			g.Notes = map[string]time.Time{}
+		}
+		since, ok := g.Notes["nocandidate-since"]
+		if !ok {
+			g.Notes["nocandidate-since"] = now
+		} else if now.Sub(since) > pgGrace && g.last(now, 60*time.Second, "nocandidate") {
+			g.alert(now, "high", "primary is down and no joined replica answers; nothing can be promoted")
+		}
 		return
 	}
+	delete(g.Notes, "nocandidate-since")
 	k := 0
 	if c.Sync == pgSyncQuorum {
 		k = pgQuorum(total)
@@ -474,6 +487,10 @@ func pgPromote(c *PGCluster, g *PGGroup, target *PGMember, now time.Time, why st
 		old.Cmd = nil
 	}
 	g.Epoch++
+	if g.Notes == nil {
+		g.Notes = map[string]time.Time{}
+	}
+	g.Notes["promoting"] = now
 	target.Role = pgPromoting
 	target.Cmd = newPGCommand(opPromote, "", g.Epoch, now)
 	g.Sync = "" // the new primary starts without synchronous standbys; pgSyncAndSlots sets them
@@ -499,9 +516,14 @@ func pgFinishPromotion(c *PGCluster, g *PGGroup, now time.Time) {
 			g.note(now, "%s is the primary (epoch %d)", m.ID, g.Epoch)
 			return
 		}
-		m.Role = pgReplica
+		// Not confirmed yet: pg_ctl may have timed out on a slow promotion that still completes, and
+		// reverting now would leave a writable replica nobody fences. Wait for a probe.
 		m.Cmd = nil
 		g.alert(now, "high", "promoting %s failed: %s", m.ID, cmd.Msg)
+	case cmd == nil && now.Sub(g.Notes["promoting"]) > pgCommandTimeout+pgGrace:
+		// No answer and no probe that shows it out of recovery: give the group back to the failover.
+		m.Role = pgReplica
+		g.alert(now, "high", "promoting %s did not complete; trying again", m.ID)
 	}
 }
 
@@ -620,6 +642,16 @@ func pgPickNode(st *ClusterState, c *PGCluster, g *PGGroup, exclude ...string) s
 	return best
 }
 
+// pgNodeGone: the node was removed, or has not been seen for pgNodeGoneAfter.
+func pgNodeGone(st *ClusterState, id string, now time.Time) bool {
+	for _, n := range st.Nodes {
+		if n.ID == id {
+			return n.Status != "Ready" && now.Sub(n.LastSeen) > pgNodeGoneAfter
+		}
+	}
+	return true
+}
+
 // pgAdjustMembers adds or drains replicas until the group has the declared number, and finishes the
 // removal of drained ones.
 func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) {
@@ -627,6 +659,16 @@ func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) 
 	for i := range g.Members {
 		if m := &g.Members[i]; m.Role != pgPrimary && !m.Draining {
 			replicas = append(replicas, m)
+		}
+	}
+	// A member whose node has been gone a long time is replaced: drained (its data is a copy), which
+	// makes room for a new replica on a live node. Only when there is such a node, and one at a time.
+	for i := range g.Members {
+		m := &g.Members[i]
+		if m.Role != pgPrimary && !m.Draining && pgNodeGone(st, m.Node, now) && pgPickNode(st, c, g) != "" {
+			m.Draining = true
+			g.note(now, "replacing %s: node %s is gone", m.ID, m.Node)
+			return
 		}
 	}
 	switch {

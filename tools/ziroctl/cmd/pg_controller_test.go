@@ -937,3 +937,78 @@ func TestCitusOrdersAreValidated(t *testing.T) {
 		t.Fatalf("steps: %v %v", steps, err)
 	}
 }
+
+// A promotion whose command fails but which Postgres completes anyway must be adopted, not reverted
+// to a replica nobody fences.
+func TestPGFailedPromoteThatCompletesIsAdopted(t *testing.T) {
+	w := newPGWorld(t, 3)
+	w.create(pgCreateOpts{Replicas: 1})
+	w.settle(6)
+	w.down[w.member("main", "m1").Node] = true
+	w.step(pgGrace + 5*time.Second)
+	g := w.cluster().group("main")
+	m2 := g.member("m2")
+	// The controller's order times out; Postgres promotes on its own a little later.
+	w.fails[opPromote] = true
+	w.settle(2)
+	if m2.Role != pgPromoting {
+		t.Fatalf("a failed, unconfirmed promotion must stay pending: %s (%s)", m2.Role, w.events("main"))
+	}
+	w.pg[w.app("main", "m2")].primary, w.pg[w.app("main", "m2")].tli = true, 2
+	w.settle(3)
+	if w.primaryOf("main") != "m2" {
+		t.Fatalf("late promotion not adopted: %s", w.events("main"))
+	}
+}
+
+// A promotion that neither answers nor shows up as promoted is given back to the failover, loudly.
+func TestPGPromotionTimesOut(t *testing.T) {
+	w := newPGWorld(t, 3)
+	w.create(pgCreateOpts{Replicas: 2})
+	w.settle(6)
+	w.fails[opPromote] = true
+	w.down[w.member("main", "m1").Node] = true
+	w.step(pgGrace + 5*time.Second)
+	w.settle(2)
+	g := w.cluster().group("main")
+	if g.promoting() == nil {
+		t.Fatalf("no promotion pending: %s", w.events("main"))
+	}
+	w.step(pgCommandTimeout + pgGrace + time.Second)
+	w.step(time.Second)
+	if !strings.Contains(w.events("main"), "did not complete") {
+		t.Fatalf("a stuck promotion must be given up: %s", w.events("main"))
+	}
+}
+
+// A replica whose node is gone for good is replaced on a live node.
+func TestPGReplacesAMemberOnAGoneNode(t *testing.T) {
+	w := newPGWorld(t, 4)
+	w.create(pgCreateOpts{Replicas: 2})
+	w.settle(8)
+	g := w.cluster().group("main")
+	gone := g.member("m2").Node
+	w.down[gone] = true
+	for i := range w.st.Nodes {
+		if w.st.Nodes[i].ID == gone {
+			w.st.Nodes[i].Status = "NotReady"
+		}
+	}
+	w.step(pgNodeGoneAfter + time.Minute)
+	w.settle(12)
+	if g.member("m2") != nil {
+		t.Fatalf("m2 on the gone node was not replaced: %s", w.events("main"))
+	}
+	n := 0
+	for _, m := range g.Members {
+		if m.Role != pgPrimary {
+			n++
+			if m.Node == gone {
+				t.Errorf("%s still on the gone node", m.ID)
+			}
+		}
+	}
+	if n != 2 {
+		t.Fatalf("want 2 replicas, got %d (%s)", n, w.events("main"))
+	}
+}
