@@ -71,3 +71,22 @@ func TestFirewallAllowOnInterface(t *testing.T) {
 		t.Error("denying a rule that is not there succeeded")
 	}
 }
+
+func TestNftSetsForBlocksAndPorts(t *testing.T) {
+	script, err := buildNftScript(FirewallConfig{
+		BlockedIPs: []BlockedIP{{IP: "203.0.113.9"}, {IP: "198.51.100.0/24"}, {IP: "203.0.113.9"}},
+		AllowedPorts: []FirewallRule{{Port: 443, Protocol: "tcp"}, {Port: 80, Protocol: "tcp"}, {Port: 443, Protocol: "tcp"},
+			{Port: 53, Protocol: "udp"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"elements = { 198.51.100.0/24, 203.0.113.9 }", "tcp dport { 80, 443 } accept", "    udp dport 53 accept\n", "auto-merge"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "blocked6") {
+		t.Errorf("an empty IPv6 set was declared:\n%s", script)
+	}
+}

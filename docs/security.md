@@ -69,6 +69,11 @@ Configured in `/etc/sysctl.d/99-ziro.conf`:
 - `net.ipv4.conf.all.forwarding = 1`: Controlled IP forwarding for CNI bridge networks.
 - `net.bridge.bridge-nf-call-iptables = 1`: Netfilter packet filtering across container bridges.
 - Automatic recovery parameters (`kernel.panic = 10`, `kernel.panic_on_oops = 1`).
+- Connection tracking and socket limits for busy hosts: a 262144-entry conntrack table, established flows that
+  expire after a day, `tcp_tw_reuse`, a 30 s `tcp_fin_timeout` and `fs.file-max`.
+
+The firewall keeps blocked sources in nftables interval sets (`blocked4`, `blocked6`) and groups unscoped allowed ports
+into one rule per protocol, so lookup cost does not grow with the length of the lists.
 
 ## Running security audits
 

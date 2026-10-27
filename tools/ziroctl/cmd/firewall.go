@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -463,17 +464,40 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 	sb.WriteString("table " + nftTable + "\n")
 	sb.WriteString("delete table " + nftTable + "\n")
 	sb.WriteString("table " + nftTable + " {\n")
-	sb.WriteString("  chain input {\n")
-	sb.WriteString("    type filter hook input priority 0; policy " + policy + ";\n")
-	sb.WriteString("    iif \"lo\" accept\n")
-	sb.WriteString("    ct state invalid drop\n")
-
+	// Blocked sources live in interval sets: one hash/tree lookup however long the list is, instead of
+	// one rule per address walked in order for every packet.
+	var block4, block6 []string
 	for _, b := range cfg.BlockedIPs {
 		fam, target, err := canonicalBlockTarget(b.IP)
 		if err != nil {
 			return "", err
 		}
-		sb.WriteString(fmt.Sprintf("    %s saddr %s drop\n", fam, target))
+		if fam == "ip" {
+			block4 = append(block4, target)
+		} else {
+			block6 = append(block6, target)
+		}
+	}
+	for _, set := range []struct {
+		name, typ string
+		els       []string
+	}{{"blocked4", "ipv4_addr", block4}, {"blocked6", "ipv6_addr", block6}} {
+		if len(set.els) == 0 {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("  set %s {\n    type %s\n    flags interval\n    auto-merge\n    elements = { %s }\n  }\n",
+			set.name, set.typ, strings.Join(slices.Compact(slices.Sorted(slices.Values(set.els))), ", ")))
+	}
+	sb.WriteString("  chain input {\n")
+	sb.WriteString("    type filter hook input priority 0; policy " + policy + ";\n")
+	sb.WriteString("    iif \"lo\" accept\n")
+	sb.WriteString("    ct state invalid drop\n")
+
+	if len(block4) > 0 {
+		sb.WriteString("    ip saddr @blocked4 drop\n")
+	}
+	if len(block6) > 0 {
+		sb.WriteString("    ip6 saddr @blocked6 drop\n")
 	}
 	// Loopback remains trusted; quarantine every other source before broad accepts.
 	for _, ifc := range cfg.TrustedInterfaces {
@@ -485,6 +509,7 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 	sb.WriteString("    ct state established,related accept\n")
 	sb.WriteString("    ip protocol icmp accept\n")
 	sb.WriteString("    ip6 nexthdr icmpv6 accept\n")
+	plain := map[string][]int{}
 	for _, r := range cfg.AllowedPorts {
 		if r.Port < 1 || r.Port > 65535 || (r.Protocol != "tcp" && r.Protocol != "udp") {
 			return "", fmt.Errorf("invalid port rule %d/%s", r.Port, r.Protocol)
@@ -504,7 +529,26 @@ func buildNftScript(cfg FirewallConfig) (string, error) {
 			sb.WriteString(fmt.Sprintf("    %sip saddr %s %s dport %d accept\n", match, p.Masked(), r.Protocol, r.Port))
 			continue
 		}
+		if match == "" {
+			plain[r.Protocol] = append(plain[r.Protocol], r.Port)
+			continue
+		}
 		sb.WriteString(fmt.Sprintf("    %s%s dport %d accept\n", match, r.Protocol, r.Port))
+	}
+	// Unscoped ports: one rule per protocol, the ports in an anonymous set.
+	for _, proto := range []string{"tcp", "udp"} {
+		ports := slices.Compact(slices.Sorted(slices.Values(plain[proto])))
+		switch len(ports) {
+		case 0:
+		case 1:
+			sb.WriteString(fmt.Sprintf("    %s dport %d accept\n", proto, ports[0]))
+		default:
+			list := make([]string, len(ports))
+			for i, p := range ports {
+				list[i] = strconv.Itoa(p)
+			}
+			sb.WriteString(fmt.Sprintf("    %s dport { %s } accept\n", proto, strings.Join(list, ", ")))
+		}
 	}
 	sb.WriteString("  }\n}\n")
 	return sb.String(), nil
