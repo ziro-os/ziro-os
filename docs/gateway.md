@@ -258,7 +258,7 @@ ziroctl gateway route add upload --host files.example.com --app files --waf bloc
 | `java` | Log4Shell and JNDI lookups, class loading, OGNL, serialized objects |
 | `xxe` | External entities and DTDs in XML |
 | `ssrf` | Cloud metadata endpoints, dangerous URL schemes, URLs pointing at internal addresses |
-| `scanner` | Known attack tools in the user agent, probes for sensitive paths |
+| `scanner` | Known attack tools in the user agent, probes for sensitive paths; at level 2 headless browsers and automation frameworks, at level 3 scripted HTTP clients (`curl`, `python-requests`) |
 | `protocol` | Unknown methods, TRACE, oversized URIs, many-range requests, the `Proxy` header (httpoxy), NUL bytes |
 
 `ziroctl gateway waf rules` lists every rule in use with its ID (`ZW-942100`), group, level, score and stage. IDs are
@@ -351,7 +351,10 @@ inspection stops as soon as the threshold is reached.
 ### Limits
 
 The WAF is a filter for known attack patterns, not a substitute for fixing the application. It does not provide bot
-scoring, geo-blocking or response inspection.
+geo-blocking or response inspection. Bot detection is limited to user-agent rules (levels 2 and 3 of the `scanner`
+group, scored below the default threshold so they add to other signals instead of blocking alone); there is no
+behavioural or fingerprint scoring. Deny a country with a custom rule on its address ranges, since the gateway ships no
+GeoIP database.
 
 ## TLS
 
