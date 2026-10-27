@@ -156,6 +156,10 @@ type PGReport struct {
 	AgeMs int64 `json:"age_ms,omitempty"`
 	// ReadOnly: default_transaction_read_only is on (a primary left read-only by an aborted switchover).
 	ReadOnly bool `json:"ro,omitempty"`
+	// Detail says what the node sees of a member that does not answer (container state, the entry
+	// script's last error); Busy: a base backup or rewind is running in it, so it is not stuck.
+	Detail string `json:"detail,omitempty"`
+	Busy   bool   `json:"busy,omitempty"`
 }
 
 // PGResult is the outcome of an order.
@@ -174,6 +178,7 @@ type PGOrder struct {
 	Arg       string `json:"arg,omitempty"`
 	Epoch     int64  `json:"epoch"`
 	DB        string `json:"db,omitempty"`
+	Index     int    `json:"index,omitempty"` // the replica index of the member's app on this node (its data directory)
 }
 
 // pgFind locates the member that runs app.
@@ -201,6 +206,7 @@ func pgIngest(st *ClusterState, nodeID string, reports []PGReport, results []PGR
 		if m == nil || m.Node != nodeID {
 			continue
 		}
+		m.Detail, m.Busy = sanitizeLabel(r.Detail, 200), r.Busy
 		if !r.OK {
 			m.Probe.OK = false // the time of the last good probe stays: failure is judged by its age
 			continue
@@ -252,7 +258,7 @@ func pgOrdersFor(st *ClusterState, nodeID string) []PGOrder {
 				for _, r := range st.Replicas {
 					if r.App == app && r.Node == nodeID {
 						out = append(out, PGOrder{ID: m.Cmd.ID, App: app, Container: replicaName(app, r.Index, r.Hash),
-							Op: m.Cmd.Op, Arg: m.Cmd.Arg, Epoch: m.Cmd.Epoch, DB: m.Cmd.DB})
+							Op: m.Cmd.Op, Arg: m.Cmd.Arg, Epoch: m.Cmd.Epoch, DB: m.Cmd.DB, Index: r.Index})
 					}
 				}
 			}
@@ -319,7 +325,7 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 		}
 	}
 	pgFence(c, g, now)
-	pgSelfHeal(c, g, now)
+	pgSelfHeal(st, c, g, now)
 	if g.primary() != nil && g.promoting() == nil && g.Switch == nil {
 		pgAdjustMembers(st, c, g, now)
 		pgSyncAndSlots(c, g, now)
@@ -329,7 +335,7 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 // pgSelfHeal is the controller acting on its own for what would otherwise wait for an operator: it
 // remembers a member that has held a database, makes a primary left read-only writable again, rebuilds
 // a replica that answers but cannot follow, and says so when a primary never reports.
-func pgSelfHeal(c *PGCluster, g *PGGroup, now time.Time) {
+func pgSelfHeal(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) {
 	p := g.primary()
 	if p != nil && p.fresh(now) && !p.Probe.Recovery && p.Probe.Timeline > 0 && !p.Initialised {
 		// From now on an empty data directory on this member is a loss, not a new cluster: the entry
@@ -360,18 +366,23 @@ func pgSelfHeal(c *PGCluster, g *PGGroup, now time.Time) {
 			g.alert(now, "medium", "primary %s is read-only and no switchover is running: making it writable", p.ID)
 		}
 	}
-	pgTrackProgress(g, now)
+	pgTrackProgress(st, g, now)
 	pgAutoRebuild(c, g, now)
 }
 
-// pgTrackProgress keeps UnreadySince honest: it runs while a replica answers but does not follow the
-// primary, and starts over whenever its WAL position moves (a long catch-up is progress). A silent
-// replica is a different problem (its node or container is down) and is not counted.
-func pgTrackProgress(g *PGGroup, now time.Time) {
+// pgTrackProgress keeps UnreadySince honest. It runs while a replica does not follow the primary and
+// starts over whenever its WAL position moves (a long catch-up is progress) or the node says a base
+// backup is running in it. A replica that is silent while its node is up (its container crash-loops or
+// never started) is counted too: that is a container problem a rebuild can cure, and nothing else
+// would ever look at it. A silent replica on a node that is down is the node's problem (pgAdjustMembers).
+func pgTrackProgress(st *ClusterState, g *PGGroup, now time.Time) {
 	for i := range g.Members {
 		m := &g.Members[i]
+		silent := !m.fresh(now)
 		switch {
-		case m.Role != pgReplica || m.Draining || m.ready(now) || !m.fresh(now):
+		case m.Role != pgReplica || m.Draining || m.ready(now) || m.Busy:
+			m.UnreadySince = time.Time{}
+		case silent && !pgNodeReady(st, m.Node):
 			m.UnreadySince = time.Time{}
 		case m.UnreadySince.IsZero() || m.Probe.LSN > m.UnreadyLSN:
 			m.UnreadySince, m.UnreadyLSN = now, m.Probe.LSN
@@ -379,9 +390,21 @@ func pgTrackProgress(g *PGGroup, now time.Time) {
 	}
 }
 
-// pgAutoRebuild rebuilds a replica that has made no progress for pgRebuildAfter, one at a time and only
-// while the primary answers (it is the copy source). A second rebuild within pgRebuildCooldown is left
-// to an operator: the cause is then not the data.
+// pgNodeReady: the node is known and Ready.
+func pgNodeReady(st *ClusterState, id string) bool {
+	for _, n := range st.Nodes {
+		if n.ID == id {
+			return n.Status == "Ready"
+		}
+	}
+	return false
+}
+
+// pgAutoRebuild rebuilds a replica that has made no progress for pgRebuildAfter (twice that for one that
+// has never reported: its first image pull and base backup take time), one at a time and only while the
+// primary answers (it is the copy source). A member that still does not work between one and six hours
+// after its rebuild is replaced by a new one (at most one replacement per pgReplaceEvery): the cause is
+// then not its data. Later than that it is a new problem and is rebuilt again.
 func pgAutoRebuild(c *PGCluster, g *PGGroup, now time.Time) {
 	p := g.primary()
 	if p == nil || !p.fresh(now) {
@@ -395,7 +418,11 @@ func pgAutoRebuild(c *PGCluster, g *PGGroup, now time.Time) {
 	var worst *PGMember
 	for i := range g.Members {
 		m := &g.Members[i]
-		if m.Role == pgReplica && !m.Draining && m.Cmd == nil && !m.UnreadySince.IsZero() && now.Sub(m.UnreadySince) >= pgRebuildAfter &&
+		wait := pgRebuildAfter
+		if m.Probe.At.IsZero() {
+			wait *= 2
+		}
+		if m.Role == pgReplica && !m.Draining && m.Cmd == nil && !m.UnreadySince.IsZero() && now.Sub(m.UnreadySince) >= wait &&
 			(worst == nil || m.UnreadySince.Before(worst.UnreadySince)) {
 			worst = m
 		}
@@ -405,8 +432,13 @@ func pgAutoRebuild(c *PGCluster, g *PGGroup, now time.Time) {
 	}
 	if !worst.RebuiltAt.IsZero() && now.Sub(worst.RebuiltAt) < pgRebuildCooldown {
 		if g.last(now, 30*time.Minute, "rebuilt-"+worst.ID) {
-			g.alert(now, "high", "%s was rebuilt less than an hour ago and still does not follow the primary: leaving it to an operator (ziroctl pg status %s)", worst.ID, c.Name)
+			g.alert(now, "high", "%s was rebuilt less than an hour ago and still does not follow the primary: it is replaced if that still holds after the hour, otherwise it is left to an operator (ziroctl pg status %s)", worst.ID, c.Name)
 		}
+		return
+	}
+	if !worst.RebuiltAt.IsZero() && now.Sub(worst.RebuiltAt) < pgReplaceEvery && g.last(now, pgReplaceEvery, "autoreplace") {
+		worst.Draining = true
+		g.alert(now, "high", "%s still does not work after a rebuild: replacing it with a new member", worst.ID)
 		return
 	}
 	worst.issue(opReinit, "", g.Epoch, now)
@@ -439,6 +471,7 @@ func pgWithoutProbes(pg map[string]*PGCluster) map[string]*PGCluster {
 			g.Members = append([]PGMember(nil), g.Members...)
 			for j := range g.Members {
 				g.Members[j].Probe = PGProbe{}
+				g.Members[j].Detail, g.Members[j].Busy = "", false
 				// The progress timer moves with every probe of a replica that is catching up: soft too.
 				g.Members[j].UnreadySince, g.Members[j].UnreadyLSN = time.Time{}, 0
 			}
@@ -876,17 +909,16 @@ func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) 
 	}
 	switch {
 	case len(replicas) < c.Replicas:
-		node := pgPickNode(st, c, g)
-		if node == "" {
-			if g.last(now, 5*time.Minute, "nonode") {
-				g.alert(now, "medium", "no node is free for another replica (members of a group are spread over nodes)")
-			}
-			return
+		// With no free node the drained members below must still be removed: one of them may be what
+		// holds the node the new replica needs.
+		if node := pgPickNode(st, c, g); node != "" {
+			g.Next++
+			id := "m" + strconv.Itoa(g.Next)
+			g.Members = append(g.Members, PGMember{ID: id, Node: node, Role: pgReplica, Init: pgReplica})
+			g.note(now, "adding replica %s on %s", id, node)
+		} else if !pgDraining(g) && g.last(now, 5*time.Minute, "nonode") {
+			g.alert(now, "medium", "no node is free for another replica (members of a group are spread over nodes)")
 		}
-		g.Next++
-		id := "m" + strconv.Itoa(g.Next)
-		g.Members = append(g.Members, PGMember{ID: id, Node: node, Role: pgReplica, Init: pgReplica})
-		g.note(now, "adding replica %s on %s", id, node)
 	case len(replicas) > c.Replicas:
 		// Drain the replica that is furthest behind (or the newest).
 		sort.Slice(replicas, func(i, j int) bool {
@@ -938,6 +970,16 @@ func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) 
 		g.Members = slices.Delete(g.Members, i, i+1)
 		return
 	}
+}
+
+// pgDraining: a member of the group is being removed.
+func pgDraining(g *PGGroup) bool {
+	for i := range g.Members {
+		if g.Members[i].Draining {
+			return true
+		}
+	}
+	return false
 }
 
 // pgSyncAndSlots keeps the primary's synchronous standbys and the replicas' slots right.

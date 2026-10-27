@@ -76,9 +76,15 @@ is an alert in the category `database` and is listed in `ziroctl pg status`.
 
 - **A replica that cannot follow.** A replica that answers but has not made progress for 10 minutes (it is not
   streaming, or its WAL position does not move) is rebuilt from the primary, as `ziroctl pg reinit` does. A long
-  catch-up that is still gaining is progress and is left alone. A replica that was rebuilt less than an hour ago and
-  is still stuck is left to an operator, with an alert: the cause is then not its data. A silent replica (node or
-  container down) is not rebuilt; one on a node that has been gone for 10 minutes is replaced on another node.
+  catch-up that is still gaining is progress and is left alone.
+- **A replica whose container does not come up** (it crash-loops, its data directory is unusable, it never
+  started) is rebuilt the same way after 10 minutes, 20 for one that has never reported (its first image pull and
+  base backup take time), as long as its node is up and the primary answers. A member that is copying the primary's
+  data is not stuck and is never interrupted, however long the copy takes. A member still broken between one and
+  six hours after its rebuild is replaced by a new member (at most one replacement per group every six hours).
+  One on a node that has been gone for 10 minutes is replaced on another node.
+- **A replica that is stuck again** within an hour of its rebuild is left alone, with an alert: the cause is then
+  not its data.
 - **A primary left read-only** by an aborted switchover is made writable again.
 - **The synchronous standby list** is sent to every new primary after a promotion, even when it is empty, so commits
   never wait for replicas that are not there.
@@ -118,6 +124,15 @@ Discards the replica's data directory and takes a new base backup from the prima
 up (a replication slot lost to WAL growth, a diverged timeline). The primary is never touched: the command is
 refused for any member that is not a replica, and the agent checks that the member is in recovery before it changes
 anything.
+
+It also works on a replica that shows `down` or `starting` in `pg status`. Its container cannot be asked, so the node
+leaves a marker on the data directory and restarts the container; the entry script then copies the primary. The
+`!` line for such a member says what the node sees (the container's state, and the last error its start script
+recorded, for example `no primary at shop-main-rw.cluster.ziro yet`).
+
+A start that is cut short never leaves a half-copied data directory in use: a marker next to the data directory is
+set before a base backup or rewind and removed when it finishes, and a replica that has started four times without
+once running healthy for a minute takes a new base backup, but only while a primary answers.
 
 ### Planned switchover
 

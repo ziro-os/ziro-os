@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -155,6 +157,20 @@ func pgExecute(ctx context.Context, run pgRunner, o PGOrder) error {
 	if err != nil {
 		return err
 	}
+	if o.Op == opReinit {
+		// The first step proves the member is a replica. When the container does not answer at all (it is
+		// crash-looping, or never started) there is nothing to ask: leave the marker on the data directory
+		// instead, which is what a rebuild is for.
+		out, err := run(ctx, steps[0]...)
+		switch {
+		case err == nil:
+			steps = steps[1:]
+		case strings.Contains(out, "division by zero"):
+			return fmt.Errorf("reinit: not a replica: a primary is never rebuilt")
+		default:
+			return pgReinitOffline(ctx, run, o)
+		}
+	}
 	for _, argv := range steps {
 		if out, err := run(ctx, argv...); err != nil {
 			// Stopping Postgres ends the container's exec session: that is the order succeeding.
@@ -165,6 +181,46 @@ func pgExecute(ctx context.Context, run pgRunner, o PGOrder) error {
 		}
 	}
 	return nil
+}
+
+// pgReinitOffline asks for a rebuild of a member whose container cannot be asked: the entry script finds
+// the marker when the container next starts, and a container that is up but stuck is restarted to do so.
+func pgReinitOffline(ctx context.Context, run pgRunner, o PGOrder) error {
+	if err := validName(o.App); err != nil || !strings.HasPrefix(o.App, pgAppPrefix) || o.Index < 0 || o.Index > 99 {
+		return fmt.Errorf("reinit: not a Postgres member")
+	}
+	dir := filepath.Join(dataDir(o.App, o.Index, pgDataPath), "pgdata")
+	if _, err := os.Stat(dir); err != nil {
+		return nil // never had a data directory: the first start takes a base backup anyway
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ziro-reinit"), nil, 0600); err != nil {
+		return fmt.Errorf("reinit: %v", err)
+	}
+	run(ctx, "restart", "-t", "20", o.Container) // best effort: a container that does not exist yet starts with the marker in place
+	return nil
+}
+
+// pgWhy is what this node can say about a member that does not answer: whether a copy is running (so it
+// is not stuck), the container's state, and the entry script's last error or the last line of its log.
+func pgWhy(ctx context.Context, run pgRunner, a Assignment, now time.Time) (detail string, busy bool) {
+	dir := dataDir(a.App, a.Replica, pgDataPath)
+	if fi, err := os.Stat(filepath.Join(dir, "ziro-busy")); err == nil && now.Sub(fi.ModTime()) < 45*time.Second {
+		busy = true
+	}
+	state, err := run(ctx, "inspect", "-f", "{{.State.Status}} (exit {{.State.ExitCode}})", a.Name)
+	if err != nil {
+		return "the container does not exist yet", busy
+	}
+	detail = "container " + strings.TrimSpace(lastOutputLine(state))
+	if b, err := os.ReadFile(filepath.Join(dir, "ziro-last-error")); err == nil && len(b) > 0 {
+		return detail + ": " + strings.TrimSpace(string(b)), busy
+	}
+	if out, err := run(ctx, "logs", "--tail", "1", a.Name); err == nil {
+		if l := strings.TrimSpace(lastOutputLine(out)); l != "" {
+			detail += ": " + l
+		}
+	}
+	return detail, busy
 }
 
 func lastOutputLine(s string) string {
@@ -187,8 +243,10 @@ type pgAgent struct {
 }
 
 type pgStamped struct {
-	r  PGReport
-	at time.Time
+	r      PGReport
+	at     time.Time
+	detail string
+	busy   bool
 }
 
 type pgDone struct {
@@ -233,7 +291,7 @@ func (p *pgAgent) report(now time.Time) ([]PGReport, []PGResult) {
 	var reps []PGReport
 	for app, s := range p.reports {
 		r := s.r
-		r.App, r.AgeMs = app, now.Sub(s.at).Milliseconds()
+		r.App, r.AgeMs, r.Detail, r.Busy = app, now.Sub(s.at).Milliseconds(), s.detail, s.busy
 		reps = append(reps, r)
 	}
 	sort.Slice(reps, func(i, j int) bool { return reps[i].App < reps[j].App })

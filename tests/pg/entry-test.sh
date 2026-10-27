@@ -205,4 +205,51 @@ wait "$(cat "$work/m3/pid")" || rc=$?
 grep -q "refusing to create a new one" "$work/m3/log" || fail "the refusal was not logged"
 ok "an empty data directory on a member that served before is refused, not re-initialised"
 
+# 8. a base backup that died half way left a PG_VERSION behind: without the marker the next start would
+# run Postgres on it for ever. The marker makes the entry script copy the primary again
+stop_clean m1
+echo half-copied >"$work/m1/data/pgdata/M1-ONLY"
+touch "$work/m1/data/ziro-building" "$work/m1/data/ziro-busy"
+start m1 $ip1 replica
+wait_for "m1 to be copied again" ready m1
+wait_for "m1 to stream again" streaming m1
+[ ! -e "$work/m1/data/pgdata/M1-ONLY" ] || fail "the unfinished copy was kept"
+[ ! -e "$work/m1/data/ziro-building" ] || fail "the building marker was left behind"
+[ ! -e "$work/m1/data/ziro-busy" ] || fail "the busy file was left behind"
+grep -q "did not finish: discarding" "$work/m1/log" || fail "the discard was not logged"
+ok "an unfinished base backup is discarded and taken again"
+
+# 9. starts that never ran healthy, but no primary answers: the data stays (it may be the only copy)
+stop_clean m1
+echo keep-me >"$work/m1/data/pgdata/M1-ONLY"
+echo 9 >"$work/m1/data/ziro-starts"
+set_rw 127.0.0.99
+start m1 $ip1 replica
+wait_for "m1 to accept connections" ready m1
+[ -e "$work/m1/data/pgdata/M1-ONLY" ] || fail "a replica was rebuilt although no primary answered"
+grep -q "no primary answers: keeping the data directory" "$work/m1/log" || fail "the decision was not logged"
+ok "a crash-looping replica is not rebuilt while no primary answers"
+
+# 10. the same, with a primary: the replica takes a new base backup instead of looping
+stop_clean m1
+set_rw $ip2
+echo 9 >"$work/m1/data/ziro-starts"
+start m1 $ip1 replica
+wait_for "m1 to be rebuilt" ready m1
+wait_for "m1 to stream again" streaming m1
+[ ! -e "$work/m1/data/pgdata/M1-ONLY" ] || fail "the data directory was kept"
+grep -q "starts in a row did not run healthy: taking a new base backup" "$work/m1/log" || fail "the rebuild was not logged"
+ok "a replica that never runs healthy is rebuilt from the primary"
+
+# 11. a start that cannot proceed says why where the agent can read it
+member m4
+printf 'role=replica\nepoch=2\n' >"$work/m4/cfg/role"
+set_rw 127.0.0.99
+ZIRO_PG_MAX_STARTS=4 start m4 $ip2 replica
+rc=0
+wait "$(cat "$work/m4/pid")" || rc=$?
+[ "$rc" -ne 0 ] || fail "a replica with no primary to copy started"
+grep -q "^no primary at rw.pgtest" "$work/m4/data/ziro-last-error" || fail "the reason was not written for the agent"
+ok "a start that fails records its reason"
+
 echo "pass: $pass checks against PostgreSQL $major"
