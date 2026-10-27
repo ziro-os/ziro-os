@@ -20,9 +20,50 @@ ziroctl security audit                        # check the hardening
 | `firewall enable` / `disable` / `status` / `list` | Default-drop inbound firewall (its own `inet ziro` nftables table) |
 | `firewall allow` / `deny <port[/proto]>` | Open or close a port |
 | `firewall block-ip` / `unblock-ip <ip-or-cidr>` | Drop everything from an address |
+| `security protect set --synproxy 80,443` | The kernel completes TCP handshakes to these host ports with SYN cookies (see below) |
+| `firewall flowtable <interface>... \| off` | Fast path for established forwarded flows (see below) |
 | `ssh key import <gh:u\|gl:u\|lp:u>... [--sync]` | Authorize published keys; `--sync` drops the ones the user removed upstream |
 | `ssh key add` / `list` / `remove --source` / `clear` | Manage root's authorized keys |
 | `ssh status` | sshd state and host key fingerprints |
+
+## SYN flood protection and the forwarding fast path
+
+Two kernel features, both off until you ask for them.
+
+**SYN proxy.** Under a SYN flood every half-open connection costs the host connection-tracking state. With a SYN proxy
+the kernel answers a SYN with a cookie and creates the connection only when the client's ACK proves its address is
+real, so a flood costs nothing but the replies.
+
+```sh
+ziroctl security protect set --synproxy 80,443      # ports of services on this host, such as the gateway
+ziroctl security protect set --no-synproxy
+```
+
+- List only ports served by a process **on this host** (the gateway, `sshd`). Do not list a port a container
+  publishes with `-p`: the proxy handles the handshake before address translation, so those connections would not
+  be translated.
+- The per-source limits of Ziro Guard still apply first. Trusted interfaces, the mesh, containers' bridges and the
+  Guard allowlist skip the proxy, as they skip the limits.
+- Turning it on sets `nf_conntrack_tcp_loose=0` (a packet in the middle of a connection no longer creates one), and
+  `tcp_syncookies` and `tcp_timestamps` to 1.
+- It needs the `nft_synproxy` kernel feature; the custom kernel has it built in.
+
+**Flow offload.** Once a forwarded TCP or UDP connection is established, its packets can skip most of the netfilter
+hooks and go straight from one interface to the other. It helps routed and NATed traffic (containers reaching out, the
+mesh), not traffic to this host.
+
+```sh
+ziroctl firewall flowtable eth0 nerdctl0            # the uplink and the container bridge
+ziroctl firewall flowtable                          # show the setting
+ziroctl firewall flowtable off
+```
+
+- Name the interfaces the traffic crosses. An interface that does not exist yet is skipped with a message and picked
+  up the next time the firewall is applied (`ziroctl firewall apply`).
+- It lives in its own table (`inet ziro_flow`), so a failure to load it never affects the firewall. The counter in
+  `nft list chain inet ziro_flow forward` shows how many packets still take the slow path: an offloaded flow is seen
+  only at its start.
+- API: `PUT /api/v1/firewall/flowtable` with `{"interfaces": ["eth0", "nerdctl0"]}` (admin).
 
 ## Defense layers
 

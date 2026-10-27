@@ -40,7 +40,13 @@ type GuardConfig struct {
 	SSHWindow  string   `json:"ssh_window,omitempty"`       // (10m)
 	SSHBan     string   `json:"ssh_ban,omitempty"`          // first ban; doubles per repeat offense, max 24h (1h)
 	Allow      []string `json:"allow,omitempty"`            // CIDRs never banned or rate-limited
+	// SynProxy lists TCP ports of services that run on this host (the gateway on 80 and 443) whose
+	// handshakes the kernel completes itself with SYN cookies before a connection is tracked, so a SYN
+	// flood costs no connection state. Ports published by containers (DNAT) must not be listed.
+	SynProxy []int `json:"synproxy,omitempty"`
 }
+
+const maxSynProxyPorts = 16
 
 func (g GuardConfig) withDefaults() GuardConfig {
 	def := func(v *int, d int) {
@@ -81,6 +87,16 @@ func (g GuardConfig) validate() error {
 		if _, err := netip.ParsePrefix(c); err != nil {
 			return fmt.Errorf("invalid guard allow CIDR %q", c)
 		}
+	}
+	if len(g.SynProxy) > maxSynProxyPorts {
+		return fmt.Errorf("guard synproxy takes at most %d ports", maxSynProxyPorts)
+	}
+	seenPort := map[int]bool{}
+	for _, p := range g.SynProxy {
+		if p < 1 || p > 65535 || seenPort[p] {
+			return fmt.Errorf("guard synproxy port %d must be 1..65535 and listed once", p)
+		}
+		seenPort[p] = true
 	}
 	return nil
 }
@@ -129,13 +145,15 @@ func buildGuardScript(cfg FirewallConfig) (string, error) {
 		w("  set conn%s { type %s; flags dynamic; size 65536; }", fam.n, fam.t)
 	}
 	w("  set tcp_open { type inet_service; }")
+	w("  set synproxy_ports { type inet_service; }")
 	w("  chain input { type filter hook input priority -10; policy accept; }")
 	w("  chain forward { type filter hook forward priority -10; policy accept; }")
+	w("  chain raw { type filter hook prerouting priority raw; policy accept; }")
 	w("}")
-	for _, c := range []string{"input", "forward"} {
+	for _, c := range []string{"input", "forward", "raw"} {
 		w("flush chain %s %s", guardTable, c)
 	}
-	for _, s := range []string{"allow4", "allow6", "tcp_open"} {
+	for _, s := range []string{"allow4", "allow6", "tcp_open", "synproxy_ports"} {
 		w("flush set %s %s", guardTable, s)
 	}
 	if len(allow4) > 0 {
@@ -148,15 +166,35 @@ func buildGuardScript(cfg FirewallConfig) (string, error) {
 		w("add element %s tcp_open { %s }", guardTable, strings.Join(open, ", "))
 	}
 	in := "add rule " + guardTable + " input "
-	w(in + `iif "lo" accept`)
+	// The raw chain (SYN proxy) exempts exactly what the input chain accepts before any limit: a SYN
+	// that is left untracked here but accepted there would never get a connection and its ACK would
+	// be dropped as invalid. So both chains start with the same exemptions.
+	raw := "add rule " + guardTable + " raw "
+	var synPorts []string
+	for _, p := range g.SynProxy {
+		synPorts = append(synPorts, strconv.Itoa(p))
+	}
+	if len(synPorts) > 0 {
+		w("add element %s synproxy_ports { %s }", guardTable, strings.Join(synPorts, ", "))
+	}
+	exempt := func(rule string) {
+		w(in + rule)
+		if len(synPorts) > 0 {
+			w(raw + rule)
+		}
+	}
+	exempt(`iif "lo" accept`)
 	for _, ifc := range append(append([]string{}, guardSkipIfaces...), cfg.TrustedInterfaces...) {
 		if !ifaceNameRe.MatchString(strings.TrimSuffix(ifc, "*")) {
 			return "", fmt.Errorf("invalid interface %q", ifc)
 		}
-		w(in+"iifname %q accept", ifc)
+		exempt(fmt.Sprintf("iifname %q accept", ifc))
 	}
-	w(in + "ip saddr @allow4 accept")
-	w(in + "ip6 saddr @allow6 accept")
+	exempt("ip saddr @allow4 accept")
+	exempt("ip6 saddr @allow6 accept")
+	if len(synPorts) > 0 {
+		w(raw + "tcp dport @synproxy_ports tcp flags & (fin|syn|rst|ack) == syn notrack")
+	}
 	w(in + "ip saddr @ban4 drop")
 	w(in + "ip6 saddr @ban6 drop")
 	w(in + "ct state established,related accept")
@@ -173,6 +211,12 @@ func buildGuardScript(cfg FirewallConfig) (string, error) {
 			w(in+syn+"tcp dport != @tcp_open update @scan%s { %s limit rate over %d/minute burst %d packets } add @ban%s { %s timeout %ds } drop",
 				f.n, f.a, g.ScanRate, g.ScanRate/2+1, f.n, f.a, nftSeconds(g.ScanBan))
 		}
+	}
+	// The kernel answers a SYN to these ports with a cookie and creates the connection only when the
+	// client's ACK proves the address is real. Last, so the per-source limits above still apply.
+	if len(synPorts) > 0 {
+		w(in + "tcp dport @synproxy_ports ct state invalid,untracked synproxy mss 1460 wscale 7 timestamp sack-perm")
+		w(in + "tcp dport @synproxy_ports ct state invalid drop")
 	}
 	// Banned sources can't reach published container ports either (DNAT'd traffic is forwarded).
 	w("add rule %s forward ip saddr @ban4 drop", guardTable)
@@ -201,7 +245,34 @@ func applyGuard(cfg FirewallConfig) error {
 	if err != nil {
 		return err
 	}
-	return nftRun(script)
+	if err := nftRun(script); err != nil {
+		return err
+	}
+	if len(cfg.Guard.SynProxy) > 0 {
+		if err := tuneSynProxy(procSysDir); err != nil {
+			fmt.Fprintf(os.Stderr, "firewall: SYN proxy sysctls: %v\n", err)
+		}
+	}
+	return nil
+}
+
+var procSysDir = "/proc/sys"
+
+// tuneSynProxy sets what the kernel's SYN proxy needs: SYN cookies and TCP timestamps on, and
+// connection tracking strict (a packet in the middle of a connection never creates one, or an ACK
+// without a handshake would be tracked and skip the proxy).
+func tuneSynProxy(dir string) error {
+	var firstErr error
+	for path, v := range map[string]string{
+		"net/netfilter/nf_conntrack_tcp_loose": "0",
+		"net/ipv4/tcp_syncookies":              "1",
+		"net/ipv4/tcp_timestamps":              "1",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, path), []byte(v), 0o644); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // guardActive reports whether the guard table is actually loaded (not just configured).
@@ -709,6 +780,13 @@ var protectStatusCmd = &cobra.Command{
 		fmt.Printf("ICMP flood:   > %d packets/s per source are dropped\n", g.ICMPRate)
 		fmt.Printf("Port scans:   > %d SYNs/min to closed ports -> ban %s\n", g.ScanRate, g.ScanBan)
 		fmt.Printf("SSH:          %d failures in %s -> ban %s (doubling per repeat, max 24h)\n", g.SSHMaxFail, g.SSHWindow, g.SSHBan)
+		if len(g.SynProxy) > 0 {
+			var ps []string
+			for _, p := range g.SynProxy {
+				ps = append(ps, strconv.Itoa(p))
+			}
+			fmt.Printf("SYN proxy:    handshakes to tcp/%s are completed by the kernel with SYN cookies\n", strings.Join(ps, ", tcp/"))
+		}
 		fmt.Printf("Allowlist:    %s\n", strings.Join(append([]string{"loopback", "link-local", "cluster mesh"}, g.Allow...), ", "))
 		fmt.Printf("Banned now:   %d\n", len(bans))
 		return nil
@@ -716,12 +794,14 @@ var protectStatusCmd = &cobra.Command{
 }
 
 var guardSet GuardConfig
+var noSynProxy bool
 
 var protectSetCmd = &cobra.Command{
 	Use:   "set",
 	Short: "Tune guard thresholds",
 	Example: `  ziroctl security protect set --ssh-max-failures 3 --ssh-ban 2h
-  ziroctl security protect set --syn-rate 500 --conn-limit 1024`,
+  ziroctl security protect set --syn-rate 500 --conn-limit 1024
+  ziroctl security protect set --synproxy 80,443`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return updateGuard(func(g *GuardConfig) {
 			fl := cmd.Flags()
@@ -748,6 +828,12 @@ var protectSetCmd = &cobra.Command{
 			}
 			if fl.Changed("ssh-ban") {
 				g.SSHBan = guardSet.SSHBan
+			}
+			if fl.Changed("synproxy") {
+				g.SynProxy = guardSet.SynProxy
+			}
+			if noSynProxy {
+				g.SynProxy = nil
 			}
 		})
 	},
@@ -846,6 +932,8 @@ func init() {
 	f.IntVar(&guardSet.SSHMaxFail, "ssh-max-failures", 0, "Failed SSH logins before a ban")
 	f.StringVar(&guardSet.SSHWindow, "ssh-window", "", "Window for counting SSH failures (e.g. 10m)")
 	f.StringVar(&guardSet.SSHBan, "ssh-ban", "", "First SSH ban duration (doubles per repeat, max 24h)")
+	f.IntSliceVar(&guardSet.SynProxy, "synproxy", nil, "TCP ports of host services (not container ports) whose handshake the kernel completes with SYN cookies, e.g. 80,443")
+	f.BoolVar(&noSynProxy, "no-synproxy", false, "Turn the SYN proxy off")
 	securityProtectCmd.AddCommand(protectStatusCmd, protectSetCmd, protectAllowCmd, protectDisallowCmd, protectEnableCmd, protectDisableCmd)
 	securityCmd.AddCommand(securityBansCmd, securityProtectCmd)
 }

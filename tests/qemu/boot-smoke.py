@@ -349,6 +349,64 @@ def backup_checks(con, check):
     con.run("rm -f /etc/ziro/zz-backup-test.json /etc/ziro/zz-new.json; rm -rf /var/lib/ziro/gateway/certs/t.pem /var/lib/ziro/volumes /var/lib/ziro/upgrade /var/lib/ziro/apps/db /var/lib/ziro/sandbox/s1 /var/lib/ziro/tailscale", timeout=60)
 
 
+def nft_accel_checks(con, check):
+    """The SYN proxy and the flow offload table, against the kernel: real handshakes and forwarded flows."""
+    setup = r"""unshare -n sleep 900 & echo $! > /tmp/spx.pid; sleep 1; A=$(cat /tmp/spx.pid)
+/sbin/ip link add spx0 type veth peer name spx1 && /sbin/ip link set spx1 netns $A
+/sbin/ip addr add 10.96.0.1/24 dev spx0 && /sbin/ip link set spx0 up
+nsenter -t $A -n sh -c '/sbin/ip addr add 10.96.0.2/24 dev spx1; /sbin/ip link set spx1 up; /sbin/ip link set lo up'
+ziroctl firewall allow 18080/tcp >/dev/null 2>&1; echo SETUP=$?"""
+    rc, out = con.run(setup, timeout=120)
+    check("syn proxy: test network up", "SETUP=0" in out, out)
+    rc, out = con.run("ziroctl security protect set --synproxy 18080 2>&1 | tail -1; "
+                      "nft list table inet ziro_guard | grep -c 'synproxy mss 1460'; "
+                      "nft list table inet ziro_guard | grep -c 'notrack'; "
+                      "cat /proc/sys/net/netfilter/nf_conntrack_tcp_loose; ziroctl security protect status | grep 'SYN proxy'", timeout=120)
+    check("syn proxy: rules loaded, conntrack strict, shown in status", re.findall(r"^\d$", out, re.M)[:3] == ["1", "1", "0"] and "tcp/18080" in out, out)
+    rc, out = con.run(r"""A=$(cat /tmp/spx.pid); (echo hello-synproxy | nc -l -p 18080 >/dev/null 2>&1 &); sleep 1
+nsenter -t $A -n nc -w 3 10.96.0.1 18080 </dev/null | head -c 20; echo
+t=0; while read -r e syn bad valid rest; do [ "$e" = entries ] && continue; t=$((t + 0x$valid)); done </proc/net/stat/synproxy; echo COOKIES=$t""", timeout=120)
+    check("syn proxy: a client still connects and the kernel's cookie counter moved",
+          "hello-synproxy" in out and (re.search(r"COOKIES=([0-9]+)", out) is not None and int(re.search(r"COOKIES=([0-9]+)", out).group(1)) >= 1), out)
+    rc, out = con.run(r"""ziroctl security protect set --no-synproxy >/dev/null 2>&1
+nft list table inet ziro_guard | grep -c 'synproxy mss'
+A=$(cat /tmp/spx.pid); (echo hello-plain | nc -l -p 18080 >/dev/null 2>&1 &); sleep 1
+nsenter -t $A -n nc -w 3 10.96.0.1 18080 </dev/null | head -c 20""", timeout=120)
+    check("syn proxy off: rules gone and connections still work", "hello-plain" in out and re.findall(r"^\d$", out, re.M)[:1] == ["0"], out)
+    con.run("ziroctl firewall deny 18080/tcp >/dev/null 2>&1; kill $(cat /tmp/spx.pid); /sbin/ip link del spx0 2>/dev/null; true", timeout=60)
+
+    # flow offload: a host that forwards between two namespaces
+    fsetup = r"""sysctl -w net.ipv4.ip_forward=1 >/dev/null
+unshare -n sleep 900 & echo $! > /tmp/fa.pid
+unshare -n sleep 900 & echo $! > /tmp/fb.pid
+sleep 1; A=$(cat /tmp/fa.pid); B=$(cat /tmp/fb.pid)
+/sbin/ip link add ft0 type veth peer name ft1; /sbin/ip link set ft1 netns $A
+/sbin/ip link add ft2 type veth peer name ft3; /sbin/ip link set ft3 netns $B
+/sbin/ip addr add 10.97.0.1/24 dev ft0; /sbin/ip link set ft0 up
+/sbin/ip addr add 10.98.0.1/24 dev ft2; /sbin/ip link set ft2 up
+nsenter -t $A -n sh -c '/sbin/ip addr add 10.97.0.2/24 dev ft1; /sbin/ip link set ft1 up; /sbin/ip link set lo up; /sbin/ip route add default via 10.97.0.1'
+nsenter -t $B -n sh -c '/sbin/ip addr add 10.98.0.2/24 dev ft3; /sbin/ip link set ft3 up; /sbin/ip link set lo up; /sbin/ip route add default via 10.98.0.1'
+echo FSETUP=$?"""
+    rc, out = con.run(fsetup, timeout=120)
+    check("flowtable: forwarding test network up", "FSETUP=0" in out, out)
+    rc, out = con.run(r"""ziroctl firewall flowtable ft0 ft2 2>&1 | tail -1; ziroctl firewall flowtable
+nft list table inet ziro_flow | grep devices | grep -c 'ft0.*ft2'""", timeout=120)
+    check("flowtable: loaded for the named interfaces and shown", "flow offload on ft0, ft2" in out and re.findall(r"^\d$", out, re.M)[-1:] == ["1"], out)
+    rc, out = con.run(r"""A=$(cat /tmp/fa.pid); B=$(cat /tmp/fb.pid)
+(nsenter -t $B -n nc -l -p 9000 >/dev/null 2>&1 &); sleep 1
+(sh -c 'dd if=/dev/zero bs=1k count=800 2>/dev/null; sleep 3' | nsenter -t $A -n nc -w 8 10.98.0.2 9000 >/dev/null 2>&1 &)
+sleep 6
+echo SLOWPATH=$(nft list chain inet ziro_flow forward | sed -n 's/.*counter packets \([0-9]*\).*/\1/p' | head -1)""", timeout=120)
+    m = re.search(r"SLOWPATH=([0-9]+)", out)
+    check("flowtable: a forwarded 800 KB transfer is offloaded (only the handshake takes the slow path)", m is not None and int(m.group(1)) < 40, out)
+    rc, out = con.run(r"""ziroctl firewall flowtable off 2>&1 | tail -1; nft list table inet ziro_flow >/dev/null 2>&1; echo GONE=$?
+ziroctl firewall flowtable nothere0 2>&1 | tail -2; nft list table inet ziro_flow >/dev/null 2>&1; echo ABSENT=$?
+ziroctl firewall flowtable off >/dev/null 2>&1; ziroctl firewall status | head -3""", timeout=120)
+    check("flowtable: off removes the table; an interface that does not exist breaks nothing",
+          "GONE=1" in out and "ABSENT=1" in out and "inet ziro" not in out.replace("inet ziro_", ""), out)
+    con.run("kill $(cat /tmp/fa.pid) $(cat /tmp/fb.pid); /sbin/ip link del ft0 2>/dev/null; /sbin/ip link del ft2 2>/dev/null; true", timeout=60)
+
+
 def sandbox_checks(con, check):
     rc, out = con.run("ziroctl module enable sandbox 2>&1 | tail -2", timeout=900)
     check("module enable sandbox: gVisor runsc + ziro-sandboxd", "Module sandbox enabled" in out, out)
@@ -465,6 +523,7 @@ def main():
     ap.add_argument("--installed", action="store_true", help="also install to a disk and boot it (tiny initramfs)")
     ap.add_argument("--modules", action="store_true", help="also test the clamav module (downloads ~250 MB of signatures)")
     ap.add_argument("--sandbox", action="store_true", help="also test the sandbox module (gVisor, downloads ~170 MB)")
+    ap.add_argument("--nft-accel", action="store_true", help="also test the SYN proxy and the flow offload table against the kernel")
     ap.add_argument("--backup", action="store_true", help="also test backup, verify, restore and retention from a host without /var/backups/ziro")
     ap.add_argument("--docker-api", action="store_true", help="also test the Docker API socket and Coolify's docker commands")
     ap.add_argument("--apps", action="store_true",
@@ -919,6 +978,8 @@ def main():
             check("module disable clamav", "Module clamav disabled" in out, out)
         if args.sandbox and not args.no_pull:
             sandbox_checks(con, check)
+        if args.nft_accel:
+            nft_accel_checks(con, check)
         if args.backup:
             backup_checks(con, check)
         if args.docker_api and not args.no_pull:

@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -45,6 +46,10 @@ type FirewallConfig struct {
 	TrustedInterfaces []string `json:"trusted_interfaces,omitempty"`
 	// Flood/scan limits and bans (Ziro Guard, protect.go); on by default with the firewall.
 	Guard GuardConfig `json:"guard,omitempty"`
+	// Flowtable lists the network interfaces whose forwarded TCP and UDP flows take the kernel's
+	// flow offload fast path once established (routed and NATed traffic: containers, the mesh). Off
+	// (empty) by default.
+	Flowtable []string `json:"flowtable,omitempty"`
 }
 
 var (
@@ -567,7 +572,144 @@ func applyNftables(cfg FirewallConfig) error {
 	if err := applyGuard(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "firewall: Ziro Guard not active: %v\n", err)
 	}
+	// The same for the flow offload table: a missing device or kernel feature never takes the firewall down.
+	if err := applyFlowtable(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "firewall: flow offload not active: %v\n", err)
+	}
 	return nil
+}
+
+// flowTable is the table of the flow offload fast path, separate from the firewall's own so that
+// loading it can fail (an interface that is not there yet, a kernel without the feature) harmlessly.
+const flowTable = "inet ziro_flow"
+
+const maxFlowDevices = 8
+
+func validFlowDevices(devs []string) error {
+	if len(devs) > maxFlowDevices {
+		return fmt.Errorf("at most %d flowtable interfaces", maxFlowDevices)
+	}
+	seen := map[string]bool{}
+	for _, d := range devs {
+		if !ifaceNameRe.MatchString(d) || strings.HasSuffix(d, "*") || seen[d] {
+			return fmt.Errorf("invalid or repeated flowtable interface %q", d)
+		}
+		seen[d] = true
+	}
+	return nil
+}
+
+// buildFlowScript declares the flowtable on devs and adds established TCP and UDP flows to it. The
+// counter shows how many packets still take the slow path: an offloaded flow is seen only while it
+// starts.
+func buildFlowScript(devs []string) (string, error) {
+	if err := validFlowDevices(devs); err != nil {
+		return "", err
+	}
+	if len(devs) == 0 {
+		return "", fmt.Errorf("no flowtable interfaces")
+	}
+	var sb strings.Builder
+	sb.WriteString("table " + flowTable + "\ndelete table " + flowTable + "\n")
+	sb.WriteString("table " + flowTable + " {\n")
+	sb.WriteString("  flowtable ft { hook ingress priority 0; devices = { " + strings.Join(devs, ", ") + " }; }\n")
+	sb.WriteString("  chain forward { type filter hook forward priority 0; policy accept;\n")
+	sb.WriteString("    meta l4proto { tcp, udp } counter flow add @ft\n  }\n}\n")
+	return sb.String(), nil
+}
+
+// applyFlowtable installs the flow offload table for the configured interfaces that exist, or removes it.
+func applyFlowtable(cfg FirewallConfig) error {
+	if _, err := exec.LookPath("nft"); err != nil {
+		return nil
+	}
+	if !cfg.Enabled || len(cfg.Flowtable) == 0 {
+		return removeFlowtable()
+	}
+	if err := validFlowDevices(cfg.Flowtable); err != nil {
+		return err
+	}
+	var present, missing []string
+	for _, d := range cfg.Flowtable {
+		if _, err := net.InterfaceByName(d); err == nil {
+			present = append(present, d)
+		} else {
+			missing = append(missing, d)
+		}
+	}
+	if len(present) == 0 {
+		_ = removeFlowtable()
+		return fmt.Errorf("none of the interfaces %s exists", strings.Join(cfg.Flowtable, ", "))
+	}
+	script, err := buildFlowScript(present)
+	if err != nil {
+		return err
+	}
+	if err := nftRun(script); err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "firewall: flow offload skips %s (no such interface yet; run `ziroctl firewall apply` once it exists)\n", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func removeFlowtable() error {
+	if exec.Command("nft", "list", "table", "inet", "ziro_flow").Run() != nil {
+		return nil // nothing to remove
+	}
+	return nftRun("table " + flowTable + "\ndelete table " + flowTable + "\n")
+}
+
+// setFlowtable saves the interface list and re-applies the firewall.
+func setFlowtable(devs []string) error {
+	if err := validFlowDevices(devs); err != nil {
+		return err
+	}
+	cfg := loadFirewallConfig()
+	cfg.Flowtable = devs
+	if err := saveFirewallConfig(cfg); err != nil {
+		return err
+	}
+	if cfg.Enabled {
+		return applyFirewallRules(cfg)
+	}
+	return nil
+}
+
+var fwFlowtableCmd = &cobra.Command{
+	Use:   "flowtable [interface... | off]",
+	Short: "Fast path for forwarded flows",
+	Long: `Once a forwarded TCP or UDP connection is established, its packets skip most of the netfilter hooks and
+go straight from one interface to the other. It helps routed and NATed traffic (containers, the mesh), not traffic
+to this host. Name the interfaces the traffic crosses (the uplink and the container bridge); off removes it.
+Without arguments it shows the current setting.`,
+	Example: `  ziroctl firewall flowtable eth0 nerdctl0
+  ziroctl firewall flowtable off`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		switch {
+		case len(args) == 0:
+			cfg := loadFirewallConfig()
+			return printResult(map[string]any{"interfaces": cfg.Flowtable}, func() {
+				if len(cfg.Flowtable) == 0 {
+					fmt.Println("flow offload is off")
+				} else {
+					fmt.Printf("flow offload on %s\n", strings.Join(cfg.Flowtable, ", "))
+				}
+			})
+		case len(args) == 1 && args[0] == "off":
+			if err := setFlowtable(nil); err != nil {
+				return err
+			}
+			fmt.Println("✓ flow offload is off")
+		default:
+			if err := setFlowtable(args); err != nil {
+				return err
+			}
+			fmt.Printf("✓ flow offload on %s\n", strings.Join(args, ", "))
+		}
+		return nil
+	},
 }
 
 func applyIptables(cfg FirewallConfig) error {
@@ -652,5 +794,6 @@ func init() {
 	firewallCmd.AddCommand(fwUnblockIPCmd)
 	firewallCmd.AddCommand(fwListCmd)
 	firewallCmd.AddCommand(fwApplyCmd)
+	firewallCmd.AddCommand(fwFlowtableCmd)
 	rootCmd.AddCommand(firewallCmd)
 }

@@ -215,6 +215,14 @@ func registerFirewallRoutes(a *apiRouter) {
 		Comment string `json:"comment,omitempty"`
 	}
 	ok := func(msg string) APIMessage { return APIMessage{Status: "ok", Message: msg} }
+	a.put("/api/v1/firewall/flowtable", "admin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Interfaces []string `json:"interfaces"` // empty turns flow offload off
+		}
+		if decodeBody(w, r, &req) {
+			apiReply(w, setFlowtable(req.Interfaces), ok("flow offload updated"))
+		}
+	})
 	a.post("/api/v1/firewall/allow", "admin", func(w http.ResponseWriter, r *http.Request) {
 		var req portReq
 		if decodeBody(w, r, &req) {
