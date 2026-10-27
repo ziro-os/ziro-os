@@ -24,8 +24,36 @@ export PGDATA="${PGDATA:?PGDATA is not set}"
 PGPASSFILE="${ZIRO_PG_PASSFILE:-/tmp/.ziro-pgpass}"
 export PGPASSFILE
 
+# STATE holds what must survive a wipe of PGDATA (it is the volume PGDATA lives in).
+STATE="$(dirname "$PGDATA")"
+BUILD="$STATE/ziro-building" # present while a base backup or rewind is under way: PGDATA is not to be trusted
+STARTS="$STATE/ziro-starts"  # starts since this member last ran healthy for a minute
+LASTERR="$STATE/ziro-last-error"
+BUSY="$STATE/ziro-busy" # touched every 10 s while a copy runs: the agent reports it so a slow copy is not mistaken for a stuck member
+BUSY_PID=
+
 log() { echo "[ziro-pg] $*" >&2; }
 as_pg() { gosu postgres "$@"; }
+# fail MESSAGE: say why this start ends, where the agent and `ziroctl pg status` can read it.
+fail() {
+	log "$*"
+	idle
+	echo "$*" >"$LASTERR" 2>/dev/null || true
+	exit 1
+}
+busy() {
+	touch "$BUSY"
+	(while :; do
+		sleep 10
+		touch "$BUSY"
+	done) &
+	BUSY_PID=$!
+}
+idle() {
+	[ -n "$BUSY_PID" ] && kill "$BUSY_PID" 2>/dev/null
+	BUSY_PID=
+	rm -f "$BUSY"
+}
 
 role=replica
 epoch=0
@@ -98,27 +126,39 @@ basebackup() {
 	local host=$1
 	log "taking a base backup from $host"
 	if ! wait_for_primary "$host"; then
-		log "no primary at $host"
-		exit 1
+		fail "no primary at $host"
 	fi
+	# The marker goes down before anything is deleted and comes up only when the copy is whole: a copy
+	# that dies half way leaves a PG_VERSION behind, and without the marker the next start would run
+	# Postgres on it for ever.
+	touch "$BUILD"
+	busy
 	rm -rf "${PGDATA:?}"/* "${PGDATA:?}"/.[!.]* 2>/dev/null || true
 	as_pg mkdir -p "$PGDATA"
 	psql_at "$host" -Atc "select pg_drop_replication_slot('$slot') from pg_replication_slots where slot_name = '$slot' and not active" >/dev/null 2>&1 || true
-	as_pg env PGPASSFILE="$PGPASSFILE" pg_basebackup -h "$host" -p "$PORT" -U replicator -D "$PGDATA" \
-		-X stream -C -S "$slot" --checkpoint=fast --no-password
+	if ! as_pg env PGPASSFILE="$PGPASSFILE" pg_basebackup -h "$host" -p "$PORT" -U replicator -D "$PGDATA" \
+		-X stream -C -S "$slot" --checkpoint=fast --no-password; then
+		fail "pg_basebackup from $host failed (see the container log)"
+	fi
+	idle
+	rm -f "$BUILD"
 }
 
 # rejoin: this data directory was a primary (or diverged); make it follow the current primary.
 rejoin() {
 	log "rejoining the primary at $rw_host"
 	if ! wait_for_primary "$rw_host"; then
-		log "no primary at $rw_host yet"
-		exit 1
+		fail "no primary at $rw_host yet"
 	fi
+	touch "$BUILD"
+	busy
 	if as_pg env PGPASSFILE="$PGPASSFILE" pg_rewind --target-pgdata="$PGDATA" \
 		--source-server="host=$rw_host port=$PORT user=replicator dbname=postgres" >&2; then
+		idle
+		rm -f "$BUILD"
 		log "rewound to the primary's timeline"
 	else
+		idle
 		log "pg_rewind failed; copying the primary"
 		basebackup "$rw_host"
 	fi
@@ -136,13 +176,35 @@ if [ -f "$PGDATA/ziro-reinit" ]; then
 	fi
 fi
 
+# A copy or rewind that did not finish: whatever is in PGDATA is not a database.
+if [ -f "$BUILD" ]; then
+	log "an earlier base backup or rewind did not finish: discarding this data directory"
+	rm -f "$PGDATA/PG_VERSION"
+fi
+
+# A replica that has started over and over without once running healthy has data it cannot use (a
+# lost WAL segment, a timeline that is not a child of the primary's): copy the primary again. Only while
+# a primary answers, so the copy being thrown away is never the only one.
+starts=$(cat "$STARTS" 2>/dev/null || echo 0)
+case "$starts" in '' | *[!0-9]*) starts=0 ;; esac
+starts=$((starts + 1))
+if [ "$starts" -gt "${ZIRO_PG_MAX_STARTS:-4}" ] && [ "$role" = replica ] && [ -f "$PGDATA/PG_VERSION" ]; then
+	if serving_primary "$rw_host"; then
+		log "$((starts - 1)) starts in a row did not run healthy: taking a new base backup"
+		rm -f "$PGDATA/PG_VERSION"
+		starts=1
+	else
+		log "$((starts - 1)) starts in a row did not run healthy, but no primary answers: keeping the data directory"
+	fi
+fi
+echo "$starts" >"$STARTS"
+
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
 	if [ "${ZIRO_PG_INIT:-replica}" = primary ] && [ "$role" = primary ]; then
 		if [ "$initialised" = 1 ]; then
 			# This member served a database before: an empty data directory is a loss, and a new empty
 			# database here would silently replace it. Stay down so the controller fails over to a replica.
-			log "the data directory is empty but this member already served a database: refusing to create a new one"
-			exit 1
+			fail "the data directory is empty but this member already served a database: refusing to create a new one"
 		fi
 		init_primary
 	else
@@ -217,6 +279,17 @@ SQL
 		log "accounts are in place"
 	) &
 fi
+
+# Healthy means: a primary, or a replica whose receiver is streaming, for a minute. Then the start
+# count and the last error are forgotten.
+(
+	until [ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc "select (not pg_is_in_recovery()) or exists (select from pg_stat_wal_receiver where status = 'streaming')" 2>/dev/null || true)" = t ]; do sleep 2; done
+	sleep 60
+	if [ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc "select (not pg_is_in_recovery()) or exists (select from pg_stat_wal_receiver where status = 'streaming')" 2>/dev/null || true)" = t ]; then
+		echo 0 >"$STARTS"
+		rm -f "$LASTERR"
+	fi
+) &
 
 log "starting as $role (epoch $epoch)"
 exec gosu postgres postgres -D "$PGDATA" -c "listen_addresses=$LISTEN" -c "port=$PORT" -c "unix_socket_directories=$SOCK" \

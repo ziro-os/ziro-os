@@ -55,6 +55,7 @@ const (
 	pgRebuildAfter      = 10 * time.Minute // a replica that answers but makes no progress this long is rebuilt from the primary
 	pgRebuildCooldown   = time.Hour        // ... and not again within this: something else is wrong
 	pgHoldAfterElection = 2 * pgGrace      // a new cluster leader waits for the members to report before it fails anything over
+	pgReplaceEvery      = 6 * time.Hour    // a group replaces a member that a rebuild did not mend at most this often
 	pgNodeGoneAfter     = 10 * time.Minute // a node unseen this long no longer holds a member: it is replaced
 	pgStopTimeout       = 120              // seconds Postgres gets to shut down cleanly
 	pgDataPath          = "/var/lib/postgresql/data"
@@ -130,6 +131,9 @@ type PGMember struct {
 	UnreadySince time.Time `json:"unready_since,omitempty"`
 	UnreadyLSN   uint64    `json:"unready_lsn,omitempty"`
 	RebuiltAt    time.Time `json:"rebuilt_at,omitempty"`
+	// Detail and Busy are what the node last said about the member (PGReport): soft state, like Probe.
+	Detail string `json:"detail,omitempty"`
+	Busy   bool   `json:"busy,omitempty"`
 }
 
 // PGProbe is what the member's agent last read from Postgres.

@@ -23,6 +23,11 @@ type pgWorld struct {
 	fails map[string]bool // ops that fail ("promote")
 	// replicate: replicas follow the primary's WAL (false simulates a lagging replica set).
 	stalled map[string]bool // member apps whose replication is stuck
+	// broken: member apps whose container never comes up (a crash loop); busy: ones that are copying the
+	// primary. A rebuild (reinit) cures a broken member when rebuildFixes is set.
+	broken       map[string]bool
+	busy         map[string]bool
+	rebuildFixes bool
 }
 
 type simPG struct {
@@ -45,7 +50,7 @@ func newPGWorld(t *testing.T, nodes int) *pgWorld {
 		st.Nodes = append(st.Nodes, ClusterNode{ID: fmt.Sprintf("n%d", i), Status: "Ready", LastSeen: now, PodCIDR: fmt.Sprintf("10.200.%d.0/24", i), MeshIP: fmt.Sprintf("10.100.0.%d", i)})
 	}
 	w := &pgWorld{t: t, st: st, now: now, down: map[string]bool{}, pg: map[string]*simPG{}, done: map[string]bool{},
-		fails: map[string]bool{}, stalled: map[string]bool{}}
+		fails: map[string]bool{}, stalled: map[string]bool{}, broken: map[string]bool{}, busy: map[string]bool{}}
 	old := pgNow
 	pgNow = func() time.Time { return w.now }
 	t.Cleanup(func() { pgNow = old })
@@ -105,6 +110,12 @@ func (w *pgWorld) step(d time.Duration) {
 			for _, g := range c.Groups {
 				for _, m := range g.Members {
 					app := c.memberApp(g.Name, m.ID)
+					if m.Node == n.ID && w.broken[app] {
+						reports = append(reports, PGReport{App: app, Detail: "container running (exit 1): the data directory is not usable"})
+					}
+					if m.Node == n.ID && w.busy[app] {
+						reports = append(reports, PGReport{App: app, Busy: true, Detail: "container running (exit 0)"})
+					}
 					if s := w.pg[app]; s != nil && s.up && m.Node == n.ID {
 						primaryUp := false
 						for _, o := range w.pg {
@@ -144,7 +155,7 @@ func (w *pgWorld) runPostgres() {
 					}
 				}
 				nodeUp := !w.down[m.Node]
-				if !nodeUp {
+				if !nodeUp || w.broken[app] || w.busy[app] {
 					s.up = false
 					continue
 				}
@@ -205,6 +216,9 @@ func (w *pgWorld) exec(o PGOrder) PGResult {
 		}
 		s.up, s.restart, s.lsn = false, true, 0
 		s.reinits++
+		if w.rebuildFixes {
+			delete(w.broken, o.App)
+		}
 	case opReadonly:
 		s.readonly = true
 	case opWritable:

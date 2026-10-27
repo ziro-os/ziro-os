@@ -331,9 +331,9 @@ func pgRequestReinit(st *ClusterState, name, groupName, member string, now time.
 		return fmt.Errorf("%s has an order in progress (%s)", m.ID, m.Cmd.Op)
 	case p == nil || !p.fresh(now):
 		return fmt.Errorf("group %s has no answering primary to copy from", g.Name)
-	case !m.fresh(now):
-		return fmt.Errorf("%s is not answering: reinit needs its container running", m.ID)
 	}
+	// A member that does not answer is rebuilt too: the node leaves the marker on its data directory
+	// (pgReinitOffline) and the entry script copies the primary when the container next starts.
 	m.issue(opReinit, "", g.Epoch, now)
 	g.note(now, "operator requested a rebuild of %s", m.ID)
 	return nil
@@ -397,11 +397,12 @@ func pgGroupReasons(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) [
 			}
 		}
 		if m.Role == pgReplica && !m.Draining && !m.ready(now) {
+			why := pgMemberWhy(st, c, g, m)
 			switch {
 			case !m.fresh(now) && m.Probe.At.IsZero():
-				r = append(r, fmt.Sprintf("%s has not reported yet", m.ID))
+				r = append(r, fmt.Sprintf("%s has not reported yet%s", m.ID, why))
 			case !m.fresh(now):
-				r = append(r, fmt.Sprintf("%s is not answering", m.ID))
+				r = append(r, fmt.Sprintf("%s is not answering%s", m.ID, why))
 			case !m.Probe.Streaming:
 				r = append(r, fmt.Sprintf("%s is not streaming from the primary (ziroctl pg reinit %s %s rebuilds it)", m.ID, c.Name, m.ID))
 			case m.Probe.LagMs > pgReadyLagMillis:
@@ -410,6 +411,23 @@ func pgGroupReasons(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) [
 		}
 	}
 	return r
+}
+
+// pgMemberWhy is what is known about a member that does not answer, as a suffix for a reason: a copy
+// that is running, the node's report of the container, or the start error the cluster recorded for it.
+func pgMemberWhy(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) string {
+	switch {
+	case m.Busy:
+		return " (copying the primary's data; this takes as long as the database is big)"
+	case m.Detail != "":
+		return " (" + m.Detail + "; ziroctl pg reinit " + c.Name + " " + m.ID + " rebuilds it)"
+	}
+	for _, r := range st.Replicas {
+		if r.App == c.memberApp(g.Name, m.ID) && r.Error != "" {
+			return fmt.Sprintf(" (%s, %d failed starts)", r.Error, r.Fails)
+		}
+	}
+	return ""
 }
 
 // pgView is one cluster for `pg status` and the API.
@@ -450,6 +468,7 @@ type pgMemberView struct {
 	Timeline int    `json:"timeline,omitempty"`
 	LagMs    int64  `json:"lag_ms,omitempty"`
 	Joined   bool   `json:"joined,omitempty"` // counts toward the synchronous standbys and is a promotion candidate
+	Detail   string `json:"detail,omitempty"` // what the node says about a member that does not answer
 }
 
 func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
@@ -463,7 +482,7 @@ func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
 			gv.Sync = ""
 		}
 		for _, m := range g.Members {
-			mv := pgMemberView{ID: m.ID, Node: m.Node, Role: m.Role, Timeline: m.Probe.Timeline, LagMs: m.Probe.LagMs, Joined: m.Joined}
+			mv := pgMemberView{ID: m.ID, Node: m.Node, Role: m.Role, Timeline: m.Probe.Timeline, LagMs: m.Probe.LagMs, Joined: m.Joined, Detail: m.Detail}
 			if m.Probe.OK {
 				mv.LSN = formatLSN(m.Probe.LSN)
 			}
