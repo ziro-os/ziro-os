@@ -153,7 +153,8 @@ func TestCanonicalQuarantineTargets(t *testing.T) {
 			t.Fatalf("%s: %s %s %v", c.input, family, target, err)
 		}
 		script, err := buildNftScript(FirewallConfig{BlockedIPs: []BlockedIP{{IP: c.input}}})
-		if err != nil || !strings.Contains(script, family+" saddr "+target+" drop") {
+		set := map[string]string{"ip": "blocked4", "ip6": "blocked6"}[family]
+		if err != nil || !strings.Contains(script, family+" saddr @"+set+" drop") || !strings.Contains(script, "elements = { "+target+" }") {
 			t.Fatalf("wrong generated rule: %s %v", script, err)
 		}
 	}
@@ -211,7 +212,7 @@ func TestQuarantinePrecedesBroadAccepts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, drop := range []string{"ip saddr 203.0.113.0/24 drop", "ip6 saddr 2001:db8::/32 drop"} {
+	for _, drop := range []string{"ip saddr @blocked4 drop", "ip6 saddr @blocked6 drop"} {
 		for _, accept := range []string{"ct state established,related accept", "ip protocol icmp accept", "ip6 nexthdr icmpv6 accept", "tcp dport 22 accept"} {
 			if strings.Index(script, drop) >= strings.Index(script, accept) {
 				t.Fatalf("%s follows %s", drop, accept)

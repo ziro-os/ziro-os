@@ -47,7 +47,7 @@ func TestBuildNftScript(t *testing.T) {
 	if strings.Contains(script, "flush ruleset") {
 		t.Errorf("must never flush the global ruleset (breaks CNI/NAT)")
 	}
-	for _, want := range []string{"policy drop", "tcp dport 22 accept", "ip saddr 203.0.113.0/24 drop", "ip6 saddr 2001:db8::/32 drop"} {
+	for _, want := range []string{"policy drop", "tcp dport 22 accept", "ip saddr @blocked4 drop", "ip6 saddr @blocked6 drop", "elements = { 203.0.113.0/24 }", "elements = { 2001:db8::/32 }"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q", want)
 		}
