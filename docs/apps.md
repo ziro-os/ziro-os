@@ -28,7 +28,9 @@ ziroctl apps deploy openclaw --secret ANTHROPIC_API_KEY=@anthropic.key   # an in
 ```
 
 Coolify isn't in the catalog. It needs the host's Docker socket, which is root on the host and outside what an app
-may do. To deploy your own code from git, see [`ziroctl deploy`](deploy.md).
+may do. A host administrator can turn on the opt-in [Docker API socket](containers.md#docker-api-socket), but it
+covers only part of the Docker API and Coolify has not been validated against it. To deploy your own code from git,
+see [`ziroctl deploy`](deploy.md).
 
 ## Where apps run
 

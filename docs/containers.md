@@ -22,7 +22,8 @@ flowchart LR
 ```
 
 - **No Docker daemon.** `ziroctl container` drives containerd through `nerdctl`, or falls back to `ctr`. Each
-  container is a runc process in its own cgroup. Nothing long-running is added beyond containerd.
+  container is a runc process in its own cgroup. Nothing long-running is added beyond containerd. Tools that need
+  the Docker socket can use the opt-in [Docker API](#docker-api-socket).
 - **Short image names** resolve like Docker: `nginx` becomes `docker.io/library/nginx:latest`, and
   `redis/redis-stack` becomes `docker.io/redis/redis-stack:latest`.
 - **Networking:** containers join the CNI bridge by default (`--net` picks another). `-p host:container`
@@ -81,3 +82,23 @@ ziroctl cron remove 3
   extra crontab entries.
 - **Modules** add their own jobs, tagged `# ziro-module:<name>`, and remove them when disabled. Don't edit those
   lines by hand.
+
+## Docker API socket
+
+Some tools that manage a Docker host (Coolify's proxy, Traefik's Docker provider) talk to `/var/run/docker.sock`.
+Ziro OS has no Docker daemon, so the socket is off. An administrator can turn on a small translation layer that
+serves part of the Docker Engine API on `/run/docker.sock` and runs the matching `nerdctl` commands:
+
+```bash
+ziroctl docker-api enable
+ziroctl docker-api status
+ziroctl docker-api disable
+```
+
+Anyone who can use this socket is root on the host, so it is off by default, readable by root only, and never
+mounted into apps, stacks, sandboxes or cluster replicas. Every call that changes something is written to the audit
+log (`ziroctl audit`).
+
+Supported calls: `_ping`, `version`, `info`, `events`, container list, inspect, start, stop, restart, kill and
+remove, and network list and inspect. Other calls, including container create, exec, logs, image pull and volumes,
+answer `501` with the route in the message. The design is RFC 0006 (`docs/design/rfcs`).
