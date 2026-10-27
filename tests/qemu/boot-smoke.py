@@ -272,9 +272,32 @@ def docker_api_checks(con, check):
                       "nerdctl ps -q | wc -l", timeout=60)
     check("docker-api stop: 204 and the container is stopped", out.split()[0] == "204" and out.split()[-1] == "0", out)
     rc, out = con.run(f"{sock} -o /dev/null -w '%{{http_code}}' -X DELETE http://d/containers/dk-web; echo; "
-                      f"{sock} -o /dev/null -w '%{{http_code}}' -X POST http://d/containers/create; echo; "
+                      f"{sock} -o /dev/null -w '%{{http_code}}' -X POST http://d/containers/dk-web/exec; echo; "
                       "grep -c 'POST /containers/dk-web/stop' /var/log/ziro/audit.log", timeout=60)
-    check("docker-api remove 204, create 501, mutations audited", out.split() == ["204", "501", "1"], out)
+    check("docker-api remove 204, exec 501, mutations audited", out.split() == ["204", "501", "1"], out)
+    # Phase 2: what a deploy tool does through the API: pull, create, start, read logs and inspect, volumes, networks.
+    js = "-H 'Content-Type: application/json'"
+    rc, out = con.run(f"{sock} -X POST 'http://d/images/create?fromImage=docker.io/library/busybox&tag=1.36' | tail -2", timeout=600)
+    check("docker-api image pull streams progress", "Downloaded newer image" in out, out)
+    rc, out = con.run(f"{sock} http://d/images/json | head -c 600; echo; {sock} http://d/images/docker.io/library/busybox:1.36/json | head -c 200", timeout=120)
+    check("docker-api images list and inspect (name with slashes)", "busybox" in out and '"Id"' in out, out)
+    body = ('{"Image":"docker.io/library/busybox:1.36","Cmd":["sh","-c","echo hello-from-api; sleep 3600"],"Env":["FOO=bar"],'
+            '"Labels":{"via":"api"},"HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8098"}]},"RestartPolicy":{"Name":"no"}}}')
+    rc, out = con.run(f"{sock} -X POST {js} -d '{body}' 'http://d/containers/create?name=dk-api'; echo; "
+                      f"{sock} -o /dev/null -w '%{{http_code}}' -X POST http://d/containers/dk-api/start; echo; sleep 3", timeout=120)
+    check("docker-api container create (env, labels, port) and start", '"Id"' in out and "204" in out, out)
+    rc, out = con.run(f"{sock} 'http://d/containers/dk-api/logs?stdout=1&stderr=1' | grep -a -c hello-from-api; "
+                      f"{sock} http://d/containers/dk-api/json | grep -a -c 'FOO=bar'; "
+                      f"{sock} 'http://d/containers/json' | grep -a -c '\"via\":\"api\"'", timeout=120)
+    check("docker-api logs (multiplexed), inspect env, list labels", out.split() == ["1", "1", "1"], out)
+    rc, out = con.run(f"{sock} -X POST {js} -d '{{\"Name\":\"dk-vol\"}}' -o /dev/null -w '%{{http_code}}' http://d/volumes/create; echo; "
+                      f"{sock} http://d/volumes | grep -a -c dk-vol; {sock} -o /dev/null -w '%{{http_code}}' -X DELETE http://d/volumes/dk-vol", timeout=120)
+    check("docker-api volume create, list, remove", out.split() == ["201", "1", "204"], out)
+    rc, out = con.run(f"{sock} -X POST {js} -d '{{\"Name\":\"dk-net\",\"Driver\":\"bridge\"}}' -o /dev/null -w '%{{http_code}}' http://d/networks/create; echo; "
+                      f"nerdctl network ls | grep -c dk-net; {sock} -o /dev/null -w '%{{http_code}}' -X DELETE http://d/networks/dk-net; echo; "
+                      "nerdctl network ls | grep -c dk-net", timeout=120)
+    check("docker-api network create and remove", out.split() == ["201", "1", "204", "0"], out)
+    con.run("nerdctl rm -f dk-api >/dev/null 2>&1", timeout=60)
     # What Coolify's Validate Server runs over SSH (non-interactive: a plain sh with its default PATH).
     for cmd in ("docker --version", "docker version", "docker info --format '{{.ServerVersion}}'",
                 "docker network ls", "docker compose version", "command -v docker git jq bash curl"):

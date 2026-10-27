@@ -166,8 +166,8 @@ func TestDockerAPILifecycleIsAudited(t *testing.T) {
 		{"POST", "/containers/gone/start", 404, ""},
 		{"POST", "/containers/web/stop?t=x", 400, ""},
 		{"POST", "/containers/web/kill?signal=-9", 400, ""},
-		{"POST", "/containers/create", 501, ""},
-		{"GET", "/images/json", 501, ""},
+		{"POST", "/containers/web/exec", 501, ""},
+		{"GET", "/swarm", 501, ""},
 	} {
 		r := do(h, c.m, c.p)
 		if r.Code != c.code {
@@ -182,8 +182,8 @@ func TestDockerAPILifecycleIsAudited(t *testing.T) {
 		t.Fatalf("audit: %q", f.logs)
 	}
 	var msg map[string]string
-	r := do(h, "POST", "/containers/create")
-	if json.Unmarshal(r.Body.Bytes(), &msg) != nil || !strings.Contains(msg["message"], "/containers/create") {
+	r := do(h, "POST", "/containers/web/exec")
+	if json.Unmarshal(r.Body.Bytes(), &msg) != nil || !strings.Contains(msg["message"], "/containers/web/exec") {
 		t.Fatalf("501 must name the route: %s", r.Body)
 	}
 }

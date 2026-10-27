@@ -66,12 +66,13 @@ func dockerNerdctl(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 type dockerAPI struct {
-	run   nerdctlFunc
-	audit func(action, target string, err error)
+	run    nerdctlFunc
+	stream streamFunc
+	audit  func(action, target string, err error)
 }
 
 func newDockerAPI() *dockerAPI {
-	return &dockerAPI{run: dockerNerdctl, audit: func(action, target string, err error) {
+	return &dockerAPI{run: dockerNerdctl, stream: streamNerdctl, audit: func(action, target string, err error) {
 		_ = auditLog("root", "docker-api", action, target, err)
 	}}
 }
@@ -93,6 +94,12 @@ func (d *dockerAPI) fail(w http.ResponseWriter, err error) {
 	if strings.Contains(strings.ToLower(msg), "no such") || strings.Contains(strings.ToLower(msg), "not found") {
 		dockerError(w, http.StatusNotFound, msg)
 		return
+	}
+	for _, s := range []string{"already in use", "already exists", "already used", "is in use"} {
+		if strings.Contains(strings.ToLower(msg), s) {
+			dockerError(w, http.StatusConflict, msg)
+			return
+		}
 	}
 	dockerError(w, http.StatusInternalServerError, msg)
 }
@@ -124,6 +131,7 @@ func (d *dockerAPI) handler() http.Handler {
 	mux.HandleFunc("GET /networks", d.networks)
 	mux.HandleFunc("GET /networks/{id}", d.networkInspect)
 	mux.HandleFunc("GET /events", d.events)
+	d.registerWrite(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		dockerError(w, http.StatusNotImplemented, fmt.Sprintf("ziro-dockerd: %s %s is not supported", r.Method, r.URL.Path))
 	})

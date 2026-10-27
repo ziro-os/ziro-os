@@ -100,6 +100,10 @@ Anyone who can use this socket is root on the host, so it is off by default, rea
 mounted into apps, stacks, sandboxes or cluster replicas. Every call that changes something is written to the audit
 log (`ziroctl audit`).
 
-Supported calls: `_ping`, `version`, `info`, `events`, container list, inspect, start, stop, restart, kill and
-remove, and network list and inspect. Other calls, including container create, exec, logs, image pull and volumes,
-answer `501` with the route in the message. The design is RFC 0006 (`docs/design/rfcs`).
+Supported calls: `_ping`, `version`, `info` and `events`; containers (list, inspect, create, start, stop, restart,
+kill, remove and logs); images (list, inspect and pull); volumes (list, inspect, create and remove, local driver);
+networks (list, inspect, create and remove, bridge driver). Other calls, including exec, attach, build, stats and
+the registry auth header, answer `501` with the route in the message; pull private images with `docker login` on the
+host. Container create maps the common fields (image, command, entrypoint, environment, labels, ports, binds,
+networks and aliases, restart policy, memory, CPUs, capabilities, DNS, tmpfs, sysctls) and ignores the rest, such
+as health checks and devices. The design is RFC 0006 (`docs/design/rfcs`).
