@@ -22,6 +22,9 @@ const (
 	pgFenced    = "fenced"    // a former primary: must rejoin as a replica before it serves again
 )
 
+// pgSyncUnknown is a group's Sync when nobody knows what synchronous_standby_names holds (after a promotion).
+const pgSyncUnknown = "?"
+
 // Sync policies.
 const (
 	pgSyncQuorum = "quorum" // synchronous_standby_names = 'ANY 1 (*)'
@@ -44,18 +47,21 @@ const (
 	// decides whether a replica counts as reachable, which keeps the two judgements consistent: a
 	// replica is never reachable while the primary it would replace is already declared dead for
 	// the same silence.
-	pgGrace            = 30 * time.Second
-	pgReadyAge         = 20 * time.Second // a probe older than this does not make a replica serve reads
-	pgMaxLagBytes      = 16 << 20         // a replica further behind is not promoted without --force, and is not served reads
-	pgReadyLagMillis   = 5000             // a replica serves reads when it replays within this many ms
-	pgCommandTimeout   = 60 * time.Second
-	pgNodeGoneAfter    = 10 * time.Minute // a node unseen this long no longer holds a member: it is replaced
-	pgStopTimeout      = 120              // seconds Postgres gets to shut down cleanly
-	pgDataPath         = "/var/lib/postgresql/data"
-	pgDataUID          = 999 // the postgres user of the official image
-	pgSecretPrefix     = "pg-"
-	pgAppPrefix        = "pgc-"
-	pgConfigMountPoint = "/etc/ziro-config"
+	pgGrace             = 30 * time.Second
+	pgReadyAge          = 20 * time.Second // a probe older than this does not make a replica serve reads
+	pgMaxLagBytes       = 16 << 20         // a replica further behind is not promoted without --force, and is not served reads
+	pgReadyLagMillis    = 5000             // a replica serves reads when it replays within this many ms
+	pgCommandTimeout    = 60 * time.Second
+	pgRebuildAfter      = 10 * time.Minute // a replica that answers but makes no progress this long is rebuilt from the primary
+	pgRebuildCooldown   = time.Hour        // ... and not again within this: something else is wrong
+	pgHoldAfterElection = 2 * pgGrace      // a new cluster leader waits for the members to report before it fails anything over
+	pgNodeGoneAfter     = 10 * time.Minute // a node unseen this long no longer holds a member: it is replaced
+	pgStopTimeout       = 120              // seconds Postgres gets to shut down cleanly
+	pgDataPath          = "/var/lib/postgresql/data"
+	pgDataUID           = 999 // the postgres user of the official image
+	pgSecretPrefix      = "pg-"
+	pgAppPrefix         = "pgc-"
+	pgConfigMountPoint  = "/etc/ziro-config"
 )
 
 // PGCluster is one declared cluster.
@@ -116,6 +122,14 @@ type PGMember struct {
 	DropSlot string     `json:"drop_slot,omitempty"` // set when the member's replication slot was ordered dropped
 	Probe    PGProbe    `json:"probe"`
 	Cmd      *PGCommand `json:"cmd,omitempty"`
+	// Initialised: this member has been seen serving as a primary, so an empty data directory is a
+	// loss and not a new cluster (the role file tells the entry script).
+	Initialised bool `json:"initialised,omitempty"`
+	// UnreadySince is when the member started answering without following the primary (restarted
+	// whenever its WAL position moves); RebuiltAt is when the controller last rebuilt it.
+	UnreadySince time.Time `json:"unready_since,omitempty"`
+	UnreadyLSN   uint64    `json:"unready_lsn,omitempty"`
+	RebuiltAt    time.Time `json:"rebuilt_at,omitempty"`
 }
 
 // PGProbe is what the member's agent last read from Postgres.
@@ -127,7 +141,8 @@ type PGProbe struct {
 	LSN       uint64    `json:"lsn"`                 // WAL position: received or replayed on a replica, written on a primary
 	Timeline  int       `json:"timeline"`
 	LagMs     int64     `json:"lag_ms"`
-	Epoch     int64     `json:"epoch"` // the epoch of the role file the container has seen
+	Epoch     int64     `json:"epoch"`        // the epoch of the role file the container has seen
+	ReadOnly  bool      `json:"ro,omitempty"` // default_transaction_read_only is on
 }
 
 // PGCommand is an order for one member's agent, taken from a closed list (pg_agent.go).

@@ -40,3 +40,28 @@ func TestPGProbesAreSoftState(t *testing.T) {
 		t.Error("primary failure after a takeover isn't judged from the takeover")
 	}
 }
+
+// The unready timer follows the probes of a replica that is catching up; it must not make a Raft commit
+// every few seconds. A new leader starts it over (its probes are unknown, so no member is unready yet).
+func TestPGProgressTimerIsSoftState(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	st := &ClusterState{PG: map[string]*PGCluster{"db": {Groups: []PGGroup{{Name: "main", Members: []PGMember{
+		{ID: "m1", Node: "n1", Role: pgPrimary},
+		{ID: "m2", Node: "n2", Role: pgReplica},
+	}}}}}}
+	before := hardKey(st)
+	m := &st.PG["db"].Groups[0].Members[1]
+	m.UnreadySince, m.UnreadyLSN = now, 12345
+	if !bytes.Equal(before, hardKey(st)) {
+		t.Error("the progress timer would be committed on every probe")
+	}
+	m.RebuiltAt = now
+	if bytes.Equal(before, hardKey(st)) {
+		t.Error("a rebuild must be committed (it gates the next one)")
+	}
+	m.RebuiltAt = time.Time{}
+	m.Initialised = true
+	if bytes.Equal(before, hardKey(st)) {
+		t.Error("a member seen serving must be committed (its role file follows)")
+	}
+}

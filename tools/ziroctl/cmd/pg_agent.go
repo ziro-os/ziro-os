@@ -53,7 +53,8 @@ const pgProbeSQL = `select pg_is_in_recovery()::int,
        else ('x' || substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8))::bit(32)::int end,
   exists (select from pg_stat_wal_receiver where status = 'streaming')::int,
   case when pg_is_in_recovery() and pg_last_wal_receive_lsn() is distinct from pg_last_wal_replay_lsn()
-       then coalesce((extract(epoch from now() - pg_last_xact_replay_timestamp()) * 1000)::bigint, 0) else 0 end`
+       then coalesce((extract(epoch from now() - pg_last_xact_replay_timestamp()) * 1000)::bigint, 0) else 0 end,
+  (current_setting('default_transaction_read_only') = 'on')::int`
 
 // parseProbe reads the row pgProbeSQL returns.
 func parseProbe(out string) (PGReport, error) {
@@ -62,15 +63,18 @@ func parseProbe(out string) (PGReport, error) {
 		line = line[i+1:]
 	}
 	f := strings.Split(line, "|")
-	if len(f) != 5 {
+	if len(f) == 5 { // an older probe without the read-only column
+		f = append(f, "0")
+	}
+	if len(f) != 6 {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	tli, err1 := strconv.Atoi(f[2])
 	lag, err2 := strconv.ParseInt(f[4], 10, 64)
-	if _, err := parseLSN(f[1]); err != nil || err1 != nil || err2 != nil || (f[0] != "0" && f[0] != "1") {
+	if _, err := parseLSN(f[1]); err != nil || err1 != nil || err2 != nil || (f[0] != "0" && f[0] != "1") || (f[5] != "0" && f[5] != "1") {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
-	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag}, nil
+	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag, ReadOnly: f[5] == "1"}, nil
 }
 
 // pgProbe asks one member how it is.

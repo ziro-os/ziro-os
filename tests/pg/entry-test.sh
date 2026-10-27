@@ -192,4 +192,17 @@ grep -q "this member is the primary: ignored" "$work/m2/log" || fail "the refusa
 has_row m2 three || fail "the primary lost its data"
 ok "the rebuild marker on a primary is ignored and its data stays"
 
+# 7. a member that already served a database comes back with an empty data directory: it must not
+# create a new empty database (that would silently replace the lost one); it stays down so the
+# controller fails over to a replica
+member m3
+printf 'role=primary\nepoch=2\ninitialised=1\n' >"$work/m3/cfg/role"
+start m3 $ip2 primary
+rc=0
+wait "$(cat "$work/m3/pid")" || rc=$?
+[ "$rc" -ne 0 ] || fail "a member that had served a database initialised a new one"
+[ ! -e "$work/m3/data/pgdata/PG_VERSION" ] || fail "an empty database was created"
+grep -q "refusing to create a new one" "$work/m3/log" || fail "the refusal was not logged"
+ok "an empty data directory on a member that served before is refused, not re-initialised"
+
 echo "pass: $pass checks against PostgreSQL $major"

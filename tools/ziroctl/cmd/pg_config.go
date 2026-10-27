@@ -124,7 +124,11 @@ func pgRoleFile(m *PGMember, g *PGGroup) string {
 	if m.Role == pgPrimary || m.Role == pgPromoting {
 		role = pgPrimary
 	}
-	return fmt.Sprintf("role=%s\nepoch=%d\n", role, g.Epoch)
+	s := fmt.Sprintf("role=%s\nepoch=%d\n", role, g.Epoch)
+	if m.Initialised {
+		s += "initialised=1\n"
+	}
+	return s
 }
 
 // pgMemberApp is the cluster app that runs one member.

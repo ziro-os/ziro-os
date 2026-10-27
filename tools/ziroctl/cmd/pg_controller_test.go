@@ -110,7 +110,7 @@ func (w *pgWorld) step(d time.Duration) {
 						for _, o := range w.pg {
 							primaryUp = primaryUp || o.up && o.primary
 						}
-						reports = append(reports, PGReport{App: app, OK: true, Recovery: !s.primary, LSN: formatLSN(s.lsn), Timeline: s.tli,
+						reports = append(reports, PGReport{App: app, OK: true, Recovery: !s.primary, LSN: formatLSN(s.lsn), Timeline: s.tli, ReadOnly: s.readonly,
 							Streaming: !s.primary && primaryUp && !w.stalled[app]})
 					}
 				}
@@ -311,7 +311,7 @@ func TestPGMembersAreRenderedAsPinnedApps(t *testing.T) {
 		t.Fatalf("revision moved from %d to %d without a change", before, after)
 	}
 	// The role file follows the role without touching the spec.
-	if got := pgDynamic(w.st, w.app("main", "m1")); got["role"] != "role=primary\nepoch=0\n" {
+	if got := pgDynamic(w.st, w.app("main", "m1")); got["role"] != "role=primary\nepoch=0\ninitialised=1\n" {
 		t.Fatalf("primary role file: %q", got)
 	}
 	if got := pgDynamic(w.st, w.app("main", "m2")); got["role"] != "role=replica\nepoch=0\n" {

@@ -29,11 +29,13 @@ as_pg() { gosu postgres "$@"; }
 
 role=replica
 epoch=0
+initialised=0
 if [ -r "$CFG/role" ]; then
 	while IFS='=' read -r key value; do
 		case "$key" in
 		role) role=$value ;;
 		epoch) epoch=$value ;;
+		initialised) initialised=$value ;;
 		esac
 	done <"$CFG/role"
 fi
@@ -136,6 +138,12 @@ fi
 
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
 	if [ "${ZIRO_PG_INIT:-replica}" = primary ] && [ "$role" = primary ]; then
+		if [ "$initialised" = 1 ]; then
+			# This member served a database before: an empty data directory is a loss, and a new empty
+			# database here would silently replace it. Stay down so the controller fails over to a replica.
+			log "the data directory is empty but this member already served a database: refusing to create a new one"
+			exit 1
+		fi
 		init_primary
 	else
 		basebackup "${ZIRO_PG_FROM:-$rw_host}"
