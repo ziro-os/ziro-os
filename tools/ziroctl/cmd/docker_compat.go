@@ -215,11 +215,15 @@ var composeValueFlags = map[string]bool{"-f": true, "--file": true, "-p": true, 
 
 // translateDocker rewrites a docker command line for nerdctl and returns notes for the user. Only
 // flags nerdctl rejects are touched: "network create --attachable" (every nerdctl network is
-// attachable), "compose pull --ignore-buildable" and "compose up --wait/--wait-timeout".
+// attachable), "compose pull --ignore-buildable", "compose up --wait/--wait-timeout" and "--rm" of a
+// detached "run" (nerdctl refuses -d with --rm; Coolify's helper container uses both).
 //
 // Known limitation: nerdctl compose has no --wait, so `up --wait` returns once the containers are
 // started and does not wait for health checks; poll `docker ps` or the service's own check when
 // that matters.
+//
+// Known limitation: without --rm a detached container that exits stays until it is removed; tools that
+// start one this way (Coolify) remove it themselves with `docker rm -f`.
 func translateDocker(args []string) (out, notes []string) {
 	switch {
 	case len(args) >= 2 && args[0] == "network" && args[1] == "create":
@@ -230,6 +234,8 @@ func translateDocker(args []string) (out, notes []string) {
 			}
 		}
 		return out, nil
+	case args[0] == "run" || (len(args) >= 2 && args[0] == "container" && args[1] == "run"):
+		return translateRun(args)
 	case args[0] == "compose":
 		i := 1
 		for i < len(args) && strings.HasPrefix(args[i], "-") {
@@ -262,6 +268,50 @@ func translateDocker(args []string) (out, notes []string) {
 		return out, notes
 	}
 	return args, nil
+}
+
+// runValueFlags are the `docker run` flags that take a separate value, to find where the image starts.
+var runValueFlags = map[string]bool{"--name": true, "--network": true, "--net": true, "-v": true, "--volume": true, "-e": true, "--env": true,
+	"--env-file": true, "-p": true, "--publish": true, "-l": true, "--label": true, "-w": true, "--workdir": true, "-u": true, "--user": true,
+	"--entrypoint": true, "--restart": true, "--add-host": true, "--platform": true, "-h": true, "--hostname": true, "--ip": true,
+	"-m": true, "--memory": true, "--cpus": true, "--cap-add": true, "--cap-drop": true, "--security-opt": true, "--mount": true,
+	"--dns": true, "--log-driver": true, "--pull": true, "--health-cmd": true, "--health-interval": true, "--network-alias": true,
+	"--tmpfs": true, "--device": true, "--pid": true, "--shm-size": true, "--stop-signal": true, "--stop-timeout": true}
+
+// translateRun drops --rm from a detached run. Only the flags before the image are looked at, so a
+// "--rm" that belongs to the container's own command is kept.
+func translateRun(args []string) (out, notes []string) {
+	start := 1
+	if args[0] == "container" {
+		start = 2
+	}
+	end, detached, rm := len(args), false, -1
+	for i := start; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			end = i
+		case !strings.HasPrefix(a, "-"):
+			end = i // the image
+		case a == "--detach" || a == "--detach=true" || (len(a) > 1 && a[1] != '-' && strings.Trim(a[1:], "dit") == "" && strings.Contains(a, "d")):
+			detached = true
+			continue
+		case a == "--rm" || a == "--rm=true":
+			rm = i
+			continue
+		case runValueFlags[a]:
+			i++
+			continue
+		default:
+			continue
+		}
+		break
+	}
+	if !detached || rm < 0 || rm >= end {
+		return args, nil
+	}
+	out = append(append(out, args[:rm]...), args[rm+1:]...)
+	return out, []string{"--rm is not supported by nerdctl together with -d: the container is not removed when it exits"}
 }
 
 // dockerCompat answers the commands the docker wrapper hands over: `version [--format F]`,
