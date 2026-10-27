@@ -11,6 +11,7 @@ usage: tests/qemu/pg-cluster.py [--arch x86_64|arm64] [--flavor alpine|custom] [
 """
 import argparse
 import importlib.util
+import json
 import os
 import platform
 import re
@@ -23,6 +24,23 @@ _spec.loader.exec_module(bs)
 
 LINK = f"230.0.{os.getpid() % 200}.1:{47000 + os.getpid() % 1000}"
 NODES = 4  # three members and one spare for the replica added later
+
+
+def members(out):
+    """The members of `ziroctl pg status --json` output (the console may add noise around it)."""
+    try:
+        doc = json.loads(out[out.index("{"):out.rindex("}") + 1])
+        return [m for g in doc["groups"] for m in g["members"]]
+    except (ValueError, KeyError):
+        return []
+
+
+def healthy(out, replicas):
+    """One ready primary and at least `replicas` ready, joined replicas."""
+    ms = members(out)
+    prim = [m for m in ms if m["role"] == "primary" and m["state"] == "ready"]
+    reps = [m for m in ms if m["role"] == "replica" and m["state"] == "ready" and m.get("joined")]
+    return len(prim) == 1 and len(reps) >= replicas
 
 
 def vm(args, idx):
@@ -75,8 +93,8 @@ def main():
 
         rc, out = m.run("ziroctl pg create t --replicas 2 --memory 1Gi", timeout=60)
         check("pg create", rc == 0, out)
-        ok, out = bs.retry(m, "ziroctl pg status t", lambda rc, o: o.count("primary") >= 1 and o.count("replica") >= 2 and "streaming" in o, 600, every=10)
-        check("a primary and two streaming replicas", ok, out)
+        ok, out = bs.retry(m, "ziroctl pg status t --json", lambda rc, o: healthy(o, 2), 600, every=10)
+        check("a primary and two ready, joined replicas", ok, out)
 
         # Clients reach the primary through a gateway TCP route on the master (host network).
         rc, out = m.run("ziroctl pg expose t --port 5432", timeout=60)
@@ -88,12 +106,22 @@ def main():
         ok, out = bs.retry(m, psql("select count(*) from t"), lambda rc, o: o.strip().endswith("1000"), 60)
         check("reads the rows back", ok, out)
 
+        # A failover is for a primary that is gone: while it answers the command points at switchover.
+        rc, out = m.run("ziroctl pg failover t 2>&1", timeout=60)
+        check("pg failover is refused while the primary answers", rc != 0 and "switchover" in out, out)
+        rc, out = m.run("ziroctl pg reinit t m1 2>&1", timeout=60)
+        check("pg reinit is refused for a primary", rc != 0 and "only a replica" in out, out)
+
         rc, out = m.run("ziroctl pg status t --json", timeout=30)
-        node = re.search(r'"role": "primary"[^}]*"node": "([^"]+)"', out)
-        primary_vm = next((v for i, v in enumerate(vms[1:], 2) if node and v.run("hostname")[1].strip() == node.group(1)), None)
+        primary = next((x for x in members(out) if x["role"] == "primary"), None)
+        node = primary["node"] if primary else None
+        primary_vm = next((v for i, v in enumerate(vms[1:], 2) if node and v.run("hostname")[1].strip() == node), None)
         if primary_vm is not None:
             primary_vm.run("poweroff -f", timeout=5)
-            ok, out = bs.retry(m, "ziroctl pg status t", lambda rc, o: "promoting" not in o and o.count("primary") == 1 and node.group(1) not in o.split("primary")[0], 300, every=10)
+            def moved(rc, o):
+                prim = [x for x in members(o) if x["role"] == "primary"]
+                return len(prim) == 1 and prim[0]["node"] != node and prim[0]["state"] == "ready"
+            ok, out = bs.retry(m, "ziroctl pg status t --json", moved, 300, every=10)
             check("failover moves the primary to another node", ok, out)
             ok, out = bs.retry(m, psql("select count(*) from t"), lambda rc, o: o.strip().endswith("1000"), 120)
             check("every committed row survived the failover", ok, out)
@@ -104,8 +132,18 @@ def main():
 
         rc, out = m.run("ziroctl pg add-replica t", timeout=60)
         check("add-replica while the cluster serves writes", rc == 0, out)
-        ok, out = bs.retry(m, "ziroctl pg status t", lambda rc, o: o.count("replica") >= 2 and "streaming" in o, 600, every=10)
+        ok, out = bs.retry(m, "ziroctl pg status t --json", lambda rc, o: healthy(o, 2), 600, every=10)
         check("the new replica catches up", ok, out)
+
+        # Rebuild a replica from the primary; the rows must still be there and the member must be ready again.
+        rc, out = m.run("ziroctl pg status t --json", timeout=30)
+        victim = next((x["id"] for x in members(out) if x["role"] == "replica" and x["state"] == "ready"), None)
+        rc, out = m.run(f"ziroctl pg reinit t {victim} 2>&1", timeout=60)
+        check("pg reinit rebuilds a replica", victim is not None and rc == 0, out)
+        ok, out = bs.retry(m, "ziroctl pg status t --json", lambda rc, o: healthy(o, 2), 600, every=10)
+        check("the rebuilt replica is ready and joined again", ok, out)
+        ok, out = bs.retry(m, psql("select count(*) from t"), lambda rc, o: o.strip().endswith("1001"), 120)
+        check("no row lost by the rebuild", ok, out)
 
         rc, out = m.run("ziroctl pg switchover t", timeout=120)
         check("planned switchover", rc == 0, out)

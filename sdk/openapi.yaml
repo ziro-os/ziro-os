@@ -466,10 +466,10 @@ paths:
     post:
       x-ziro-role: operator
       tags: [pg]
-      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), add-shard, pause or resume. Credentials are never served over the API'
+      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit ({"member": "m3"}), add-shard, pause or resume. Credentials are never served over the API'
       parameters:
         - $ref: "#/components/parameters/Name"
-        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, add-shard, pause, resume] } }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, failover, reinit, add-shard, pause, resume] } }
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }

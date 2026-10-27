@@ -254,12 +254,163 @@ func pgRequestSwitchover(st *ClusterState, name, groupName, to string, now time.
 	return pgStartSwitchover(c, g, to, now)
 }
 
+// pgGroupFor finds a group by name (the entry group when empty).
+func pgGroupFor(c *PGCluster, groupName string) (*PGGroup, error) {
+	if groupName == "" {
+		groupName = c.entryGroup()
+	}
+	g := c.group(groupName)
+	if g == nil {
+		return nil, errNotFound(fmt.Sprintf("group %q not found", groupName))
+	}
+	return g, nil
+}
+
+// pgRequestFailover is `pg failover`: promote a replica now because the primary is gone. It is refused
+// while the primary answers (use a switchover); unless unsafe it keeps the checks of an automatic
+// failover (enough replicas reachable, a replica not too far behind) and only skips the grace period
+// and the partition brake. unsafe promotes any replica that answers and accepts losing writes.
+func pgRequestFailover(st *ClusterState, name, groupName, to string, unsafe bool, now time.Time) error {
+	c, err := pgCluster(st, name)
+	if err != nil {
+		return err
+	}
+	g, err := pgGroupFor(c, groupName)
+	if err != nil {
+		return err
+	}
+	switch p := g.primary(); {
+	case c.Paused:
+		return fmt.Errorf("the controller of %s is paused: `ziroctl pg resume %s` first", name, name)
+	case g.Switch != nil || g.promoting() != nil:
+		return fmt.Errorf("group %s is already changing primary", g.Name)
+	case g.Force != nil:
+		return fmt.Errorf("a failover of group %s is already requested", g.Name)
+	case p != nil && p.fresh(now):
+		return fmt.Errorf("the primary %s of group %s is answering: use `ziroctl pg switchover %s` for a planned change", p.ID, g.Name, name)
+	}
+	if to != "" {
+		if t := g.member(to); t == nil || t.Role != pgReplica || t.Draining {
+			return fmt.Errorf("%s is not a replica of group %s", to, g.Name)
+		}
+	}
+	g.Force = &PGForce{To: to, Unsafe: unsafe, At: now}
+	if unsafe {
+		g.alert(now, "high", "operator requested a forced failover: acknowledged writes may be lost")
+	} else {
+		g.note(now, "operator requested a failover")
+	}
+	return nil
+}
+
+// pgRequestReinit is `pg reinit`: a replica discards its data directory and takes a new base backup from
+// the primary. The agent refuses a member that is not in recovery, so a primary is never wiped.
+func pgRequestReinit(st *ClusterState, name, groupName, member string, now time.Time) error {
+	c, err := pgCluster(st, name)
+	if err != nil {
+		return err
+	}
+	g, err := pgGroupFor(c, groupName)
+	if err != nil {
+		return err
+	}
+	m := g.member(member)
+	p := g.primary()
+	switch {
+	case m == nil:
+		return errNotFound(fmt.Sprintf("member %q not found in group %s", member, g.Name))
+	case c.Paused:
+		return fmt.Errorf("the controller of %s is paused: `ziroctl pg resume %s` first", name, name)
+	case m.Role != pgReplica:
+		return fmt.Errorf("only a replica can be rebuilt: %s is %s", m.ID, m.Role)
+	case m.Draining:
+		return fmt.Errorf("%s is being removed", m.ID)
+	case g.Switch != nil || g.promoting() != nil || g.Force != nil:
+		return fmt.Errorf("group %s is changing primary", g.Name)
+	case m.Cmd != nil:
+		return fmt.Errorf("%s has an order in progress (%s)", m.ID, m.Cmd.Op)
+	case p == nil || !p.fresh(now):
+		return fmt.Errorf("group %s has no answering primary to copy from", g.Name)
+	case !m.fresh(now):
+		return fmt.Errorf("%s is not answering: reinit needs its container running", m.ID)
+	}
+	m.issue(opReinit, "", g.Epoch, now)
+	g.note(now, "operator requested a rebuild of %s", m.ID)
+	return nil
+}
+
+// pgGroupReasons says, in words, why a group is not simply healthy: the same predicates the controller
+// acts on, so `pg status` explains a stall instead of leaving the operator to read the code.
+func pgGroupReasons(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) []string {
+	var r []string
+	if c.Paused {
+		r = append(r, fmt.Sprintf("the controller is paused: it changes no roles (ziroctl pg resume %s)", c.Name))
+	}
+	if sw := g.Switch; sw != nil {
+		r = append(r, fmt.Sprintf("switchover to %s in progress (%s)", sw.To, sw.Step))
+	}
+	if f := g.Force; f != nil {
+		r = append(r, fmt.Sprintf("an operator failover is waiting for a replica that can be promoted (%s left)", (2*time.Minute-now.Sub(f.At)).Round(time.Second)))
+	}
+	if m := g.promoting(); m != nil {
+		r = append(r, fmt.Sprintf("promoting %s since %s", m.ID, now.Sub(g.Notes["promoting"]).Round(time.Second)))
+	}
+	p := g.primary()
+	switch {
+	case p == nil:
+		r = append(r, "the group has no primary")
+	case pgPrimaryFailed(p, now):
+		r = append(r, fmt.Sprintf("primary %s has not answered for %s", p.ID, now.Sub(p.Probe.At).Round(time.Second)))
+	case !p.fresh(now) && p.Probe.At.IsZero():
+		r = append(r, fmt.Sprintf("primary %s has not reported yet", p.ID))
+	}
+	if (p == nil || pgPrimaryFailed(p, now)) && g.promoting() == nil && g.Switch == nil {
+		if partitioned(st, now) {
+			r = append(r, "too many nodes are unreachable to tell a failure from a partition, so the controller does not fail over")
+		}
+		best, reachable, total := pgCandidate(g, now)
+		switch {
+		case best == nil:
+			r = append(r, fmt.Sprintf("no joined replica answers, so nothing can be promoted (ziroctl pg failover %s --force promotes any replica that answers)", c.Name))
+		default:
+			if why := pgPromotionBlock(c, g, best, reachable, total); why != "" {
+				r = append(r, why+fmt.Sprintf(" (ziroctl pg failover %s --force accepts the loss)", c.Name))
+			}
+		}
+	}
+	for i := range g.Members {
+		m := &g.Members[i]
+		if m.Cmd != nil {
+			switch {
+			case m.Cmd.Done && !m.Cmd.OK:
+				r = append(r, fmt.Sprintf("%s: %s failed: %s", m.ID, m.Cmd.Op, m.Cmd.Msg))
+			case !m.Cmd.Done && now.Sub(m.Cmd.At) > 30*time.Second:
+				r = append(r, fmt.Sprintf("%s: %s has not completed after %s", m.ID, m.Cmd.Op, now.Sub(m.Cmd.At).Round(time.Second)))
+			}
+		}
+		if m.Role == pgReplica && !m.Draining && !m.ready(now) {
+			switch {
+			case !m.fresh(now) && m.Probe.At.IsZero():
+				r = append(r, fmt.Sprintf("%s has not reported yet", m.ID))
+			case !m.fresh(now):
+				r = append(r, fmt.Sprintf("%s is not answering", m.ID))
+			case !m.Probe.Streaming:
+				r = append(r, fmt.Sprintf("%s is not streaming from the primary (ziroctl pg reinit %s %s rebuilds it)", m.ID, c.Name, m.ID))
+			case m.Probe.LagMs > pgReadyLagMillis:
+				r = append(r, fmt.Sprintf("%s is catching up (%dms behind)", m.ID, m.Probe.LagMs))
+			}
+		}
+	}
+	return r
+}
+
 // pgView is one cluster for `pg status` and the API.
 type pgView struct {
 	Name      string        `json:"name"`
 	Version   string        `json:"version"`
 	Sync      string        `json:"sync"`
 	Replicas  int           `json:"replicas"`
+	Paused    bool          `json:"paused,omitempty"`
 	Database  string        `json:"database"`
 	User      string        `json:"user"`
 	Sharded   bool          `json:"sharded"`
@@ -278,6 +429,7 @@ type pgGroupView struct {
 	Sync    string         `json:"sync,omitempty"`
 	Primary string         `json:"primary,omitempty"`
 	Members []pgMemberView `json:"members"`
+	Reasons []string       `json:"reasons,omitempty"` // why the group is not healthy, if it is not
 	Events  []string       `json:"events,omitempty"`
 }
 
@@ -289,17 +441,18 @@ type pgMemberView struct {
 	LSN      string `json:"lsn,omitempty"`
 	Timeline int    `json:"timeline,omitempty"`
 	LagMs    int64  `json:"lag_ms,omitempty"`
+	Joined   bool   `json:"joined,omitempty"` // counts toward the synchronous standbys and is a promotion candidate
 }
 
 func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
-	v := pgView{Name: c.Name, Version: c.Version, Sync: c.Sync, Replicas: c.Replicas, Database: c.Database, User: c.User,
+	v := pgView{Name: c.Name, Version: c.Version, Sync: c.Sync, Replicas: c.Replicas, Paused: c.Paused, Database: c.Database, User: c.User,
 		Sharded:   c.Citus != "",
 		Endpoints: pgEndpointsV{RW: c.Name + "-rw." + meshDomain + ":" + pgPort, RO: c.Name + "-ro." + meshDomain + ":" + pgPort}}
 	for gi := range c.Groups {
 		g := &c.Groups[gi]
 		gv := pgGroupView{Name: g.Name, Epoch: g.Epoch, Sync: g.Sync}
 		for _, m := range g.Members {
-			mv := pgMemberView{ID: m.ID, Node: m.Node, Role: m.Role, Timeline: m.Probe.Timeline, LagMs: m.Probe.LagMs}
+			mv := pgMemberView{ID: m.ID, Node: m.Node, Role: m.Role, Timeline: m.Probe.Timeline, LagMs: m.Probe.LagMs, Joined: m.Joined}
 			if m.Probe.OK {
 				mv.LSN = formatLSN(m.Probe.LSN)
 			}
@@ -323,6 +476,7 @@ func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
 			}
 			gv.Members = append(gv.Members, mv)
 		}
+		gv.Reasons = pgGroupReasons(st, c, g, now)
 		for _, e := range g.Events {
 			gv.Events = append(gv.Events, e.At.UTC().Format("15:04:05")+" "+e.Msg)
 		}

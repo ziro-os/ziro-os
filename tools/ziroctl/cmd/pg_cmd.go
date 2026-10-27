@@ -27,7 +27,7 @@ var pgFlags struct {
 	memory                                                             string
 	cpus                                                               float64
 	allowFrom, allow                                                   []string
-	colocate, purge, ro                                                bool
+	colocate, purge, ro, force                                         bool
 }
 
 // pgEdit runs one change of the Postgres state on the master.
@@ -125,6 +125,9 @@ var pgStatusCmd = &cobra.Command{
 		v := pgViewOf(st, c, time.Now())
 		return printResult(v, func() {
 			fmt.Printf("%s: PostgreSQL %s, sync %s\n  writes: %s\n  reads:  %s\n", v.Name, v.Version, v.Sync, v.Endpoints.RW, v.Endpoints.RO)
+			if v.Paused {
+				fmt.Printf("  ! the controller is PAUSED: it changes no roles (ziroctl pg resume %s)\n", v.Name)
+			}
 			for _, g := range v.Groups {
 				fmt.Printf("\ngroup %s (epoch %d", g.Name, g.Epoch)
 				if g.Sync != "" {
@@ -138,6 +141,9 @@ var pgStatusCmd = &cobra.Command{
 						lag = fmt.Sprintf("%dms", m.LagMs)
 					}
 					fmt.Printf("  %-5s %-14s %-9s %-12s %-12s %s\n", m.ID, m.Node, m.Role, m.State, m.LSN, lag)
+				}
+				for _, r := range g.Reasons {
+					fmt.Printf("  ! %s\n", r)
 				}
 				for _, e := range g.Events {
 					fmt.Printf("  · %s\n", e)
@@ -247,6 +253,46 @@ everything, promotes it and turns the old primary into a replica. Writes pause f
 			return err
 		}
 		fmt.Printf("✓ switchover started. Watch: ziroctl pg status %s\n", args[0])
+		return nil
+	},
+}
+
+var pgFailoverCmd = &cobra.Command{
+	Use:   "failover <name>",
+	Short: "Promote a replica now because the primary is gone",
+	Long: `For a primary that is down. The controller does this by itself after 30 seconds; this does it at once, and is the
+way out when it refuses. It keeps the automatic checks (enough replicas answering, a replica not too far behind)
+unless --force is given: --force promotes any replica that answers and accepts that writes the primary
+acknowledged but the replica never received are lost. It is refused while the primary answers (use switchover).`,
+	Example: "  ziroctl pg failover shop\n  ziroctl pg failover shop --to m2 --force",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := pgEdit("pg failover", args[0], func(st *ClusterState, now time.Time) error {
+			return pgRequestFailover(st, args[0], pgFlags.group, pgFlags.to, pgFlags.force, now)
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("✓ failover requested. Watch: ziroctl pg status %s\n", args[0])
+		return nil
+	},
+}
+
+var pgReinitCmd = &cobra.Command{
+	Use:   "reinit <name> <member>",
+	Short: "Rebuild a replica from the primary",
+	Long: `Discards a replica's data directory and takes a new base backup from the primary, for a replica that cannot
+catch up (a lost replication slot, a diverged timeline). The primary is never touched: the order is refused for a
+member that is not a replica and fails before changing anything on one that is not in recovery. The controller
+also rebuilds a replica that stays unready by itself.`,
+	Example: "  ziroctl pg reinit shop m3",
+	Args:    cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := pgEdit("pg reinit", args[0]+"/"+args[1], func(st *ClusterState, now time.Time) error {
+			return pgRequestReinit(st, args[0], pgFlags.group, args[1], now)
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("✓ %s is being rebuilt from the primary. Watch: ziroctl pg status %s\n", args[1], args[0])
 		return nil
 	},
 }
@@ -377,19 +423,21 @@ func init() {
 	f.StringVar(&pgFlags.citus, "citus-image", "", "Citus member image, digest-pinned (needed with --shards)")
 	f.BoolVar(&pgFlags.colocate, "colocate", false, "Allow members of a group to share a node (development only)")
 	pgScaleCmd.Flags().IntVar(&pgFlags.replicas, "replicas", 0, "Replicas per group")
-	for _, c := range []*cobra.Command{pgAddReplicaCmd, pgRmReplicaCmd, pgSwitchoverCmd} {
+	for _, c := range []*cobra.Command{pgAddReplicaCmd, pgRmReplicaCmd, pgSwitchoverCmd, pgFailoverCmd, pgReinitCmd} {
 		c.Flags().StringVar(&pgFlags.group, "group", "", "Group (default: the only one, or the Citus coordinator)")
 	}
 	pgAddReplicaCmd.Flags().StringVar(&pgFlags.node, "node", "", "Node for the new replica (default: the least loaded without a member)")
 	pgAddReplicaCmd.Flags().StringVar(&pgFlags.from, "from", "", "Member to copy from (default: the primary)")
 	pgSwitchoverCmd.Flags().StringVar(&pgFlags.to, "to", "", "Replica to promote (default: the one furthest ahead)")
+	pgFailoverCmd.Flags().StringVar(&pgFlags.to, "to", "", "Replica to promote (default: the one furthest ahead)")
+	pgFailoverCmd.Flags().BoolVar(&pgFlags.force, "force", false, "Promote any replica that answers, even if acknowledged writes may be lost")
 	pgExposeCmd.Flags().IntVar(&pgFlags.port, "port", 0, "TCP port on the gateway")
 	pgExposeCmd.Flags().StringSliceVar(&pgFlags.allow, "allow", nil, "CIDRs allowed to connect")
 	pgExposeCmd.Flags().BoolVar(&pgFlags.ro, "ro", false, "Route to the read-only name")
 	pgCredentialsCmd.Flags().BoolVar(&pgFlags.ro, "ro", false, "Print only the read-only connection string")
 	pgRmCmd.Flags().BoolVar(&pgFlags.purge, "purge", false, "Also delete the data on every node and the credentials")
 	pgCmd.AddCommand(pgCreateCmd, pgLsCmd, pgStatusCmd, pgCredentialsCmd, pgScaleCmd, pgAddReplicaCmd, pgRmReplicaCmd,
-		pgSwitchoverCmd, pgAddShardCmd, pgExposeCmd, pgPauseCmd, pgResumeCmd, pgRmCmd)
+		pgSwitchoverCmd, pgFailoverCmd, pgReinitCmd, pgAddShardCmd, pgExposeCmd, pgPauseCmd, pgResumeCmd, pgRmCmd)
 	rootCmd.AddCommand(pgCmd)
 }
 
@@ -464,6 +512,7 @@ func registerPGRoutes(a *apiRouter) {
 			From     string `json:"from"`
 			Member   string `json:"member"`
 			To       string `json:"to"`
+			Force    bool   `json:"force"`
 		}
 		if r.ContentLength != 0 && !decodeBody(w, r, &req) {
 			return
@@ -485,6 +534,10 @@ func registerPGRoutes(a *apiRouter) {
 				return pgRemoveReplica(st, name, req.Group, req.Member)
 			case "switchover":
 				return pgRequestSwitchover(st, name, req.Group, req.To, now)
+			case "failover":
+				return pgRequestFailover(st, name, req.Group, req.To, req.Force, now)
+			case "reinit":
+				return pgRequestReinit(st, name, req.Group, req.Member, now)
 			case "add-shard":
 				g, err := pgAddShard(st, name, now)
 				out = map[string]string{"group": g}

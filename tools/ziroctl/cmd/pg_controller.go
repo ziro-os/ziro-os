@@ -48,6 +48,7 @@ const (
 	opSetSync  = "setsync"  // synchronous_standby_names; argument is the value ("" = asynchronous)
 	opSlots    = "slots"    // create the named physical replication slots if missing
 	opDropSlot = "dropslot" // drop one replication slot
+	opReinit   = "reinit"   // a replica discards its data directory and takes a new base backup (pg reinit)
 )
 
 var pgSyncValueRe = regexp.MustCompile(`^(ANY [12] \(m[0-9]{1,3}(, m[0-9]{1,3})*\))?$`)
@@ -55,7 +56,7 @@ var pgSyncValueRe = regexp.MustCompile(`^(ANY [12] \(m[0-9]{1,3}(, m[0-9]{1,3})*
 // validPGCommand checks an order and its argument.
 func validPGCommand(op, arg string) error {
 	switch op {
-	case opPromote, opDemote, opReadonly, opWritable:
+	case opPromote, opDemote, opReadonly, opWritable, opReinit:
 		if arg != "" {
 			return fmt.Errorf("%s takes no argument", op)
 		}
@@ -299,6 +300,8 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 		pgFinishPromotion(c, g, now)
 	case g.Switch != nil:
 		pgSwitchover(c, g, now)
+	case g.Force != nil:
+		pgForcedFailover(c, g, now)
 	default:
 		if p := g.primary(); p == nil || pgPrimaryFailed(p, now) {
 			if !braked {
@@ -394,6 +397,13 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 		if m.Role == pgPromoting {
 			return // pgFinishPromotion reads the result
 		}
+	case opReinit:
+		if cmd.OK {
+			// It restarts with an empty data directory and rebuilds from the primary: not a standby
+			// (nor a promotion candidate) until it has caught up again.
+			m.Joined = false
+			g.note(now, "%s is rebuilding from the primary", m.ID)
+		}
 	case opDemote, opReadonly, opWritable, opDropSlot:
 		if g.Switch != nil && cmd.Op == opReadonly {
 			return // pgSwitchover reads the result
@@ -455,17 +465,89 @@ func pgFailover(c *PGCluster, g *PGGroup, now time.Time) {
 		return
 	}
 	delete(g.Notes, "nocandidate-since")
+	if why := pgPromotionBlock(c, g, best, reachable, total); why != "" {
+		if g.last(now, 60*time.Second, "waiting") {
+			g.alert(now, "high", "primary is down, but %s; `ziroctl pg failover %s --force` promotes anyway and accepts the loss", why, c.Name)
+		}
+		return
+	}
+	pgPromote(c, g, best, now, "primary is down")
+}
+
+// pgPromotionBlock says why promoting best could lose acknowledged writes ("" = it cannot). With
+// synchronous replication a commit is on k replicas, so enough reachable ones make it safe; without it
+// the writes the replica has not received are lost, so a replica further behind the primary's last
+// known position than pgMaxLagBytes is not promoted automatically.
+func pgPromotionBlock(c *PGCluster, g *PGGroup, best *PGMember, reachable, total int) string {
 	k := 0
 	if c.Sync == pgSyncQuorum {
 		k = pgQuorum(total)
 	}
 	if !pgSafeToPromote(reachable, total, k) {
-		if g.last(now, 60*time.Second, "waiting") {
-			g.alert(now, "high", "primary is down, but only %d of %d replicas answer; promoting could lose acknowledged writes", reachable, total)
+		return fmt.Sprintf("only %d of %d replicas answer; promoting could lose acknowledged writes", reachable, total)
+	}
+	if k == 0 {
+		if p := g.primary(); p != nil && p.Probe.LSN > best.Probe.LSN && p.Probe.LSN-best.Probe.LSN > pgMaxLagBytes {
+			return fmt.Sprintf("%s is %d MiB behind the primary's last known position; promoting it would lose those writes",
+				best.ID, (p.Probe.LSN-best.Probe.LSN)>>20)
 		}
+	}
+	return ""
+}
+
+// pgForcedFailover carries out an operator's failover request: promote the named replica (or the one
+// furthest ahead) now, without the grace period or the partition brake. Unless the request is forced it
+// keeps the safety checks of an automatic failover. It waits for a replica that can be promoted, up to
+// two minutes.
+func pgForcedFailover(c *PGCluster, g *PGGroup, now time.Time) {
+	f := g.Force
+	if now.Sub(f.At) > 2*time.Minute {
+		g.Force = nil
+		g.alert(now, "medium", "the failover request expired: no replica could be promoted")
 		return
 	}
-	pgPromote(c, g, best, now, "primary is down")
+	var target *PGMember
+	switch {
+	case f.To != "":
+		t := g.member(f.To)
+		if t != nil && t.Role == pgReplica && !t.Draining && t.fresh(now) && t.Probe.Recovery {
+			target = t
+		}
+		if target != nil && !f.Unsafe {
+			_, reachable, total := pgCandidate(g, now)
+			if why := pgPromotionBlock(c, g, target, reachable, total); why != "" {
+				g.Force = nil
+				g.alert(now, "high", "failover to %s refused: %s; add --force to accept the loss", target.ID, why)
+				return
+			}
+		}
+	case f.Unsafe:
+		for i := range g.Members {
+			m := &g.Members[i]
+			if m.Role == pgReplica && !m.Draining && m.fresh(now) && m.Probe.Recovery && (target == nil || m.Probe.LSN > target.Probe.LSN) {
+				target = m
+			}
+		}
+	default:
+		best, reachable, total := pgCandidate(g, now)
+		if best != nil {
+			if why := pgPromotionBlock(c, g, best, reachable, total); why != "" {
+				g.Force = nil
+				g.alert(now, "high", "failover refused: %s; add --force to accept the loss", why)
+				return
+			}
+			target = best
+		}
+	}
+	if target == nil {
+		return // wait for a replica to answer
+	}
+	g.Force = nil
+	why := "operator failover"
+	if f.Unsafe {
+		why += ", forced: acknowledged writes may be lost"
+	}
+	pgPromote(c, g, target, now, why)
 }
 
 // last rate-limits a repeated event: it reports whether msg-kind key has not been recorded in d.

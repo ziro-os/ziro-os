@@ -105,13 +105,15 @@ ziroctl pg add-replica db [--node N] [--from member]
 ziroctl pg scale db --replicas 4
 ziroctl pg rm-replica db <member>
 ziroctl pg switchover db [--to member]
+ziroctl pg failover db [--to member] [--force]
+ziroctl pg reinit db <member>
 ziroctl pg expose db --port 5432 [--allow CIDR]
 ziroctl pg add-shard db
 ziroctl pg rm db [--purge]
 ```
 
 API: `GET /api/v1/pg`, `GET|DELETE /api/v1/pg/{name}`, `POST /api/v1/pg` (admin), `POST
-/api/v1/pg/{name}/{action}` for `scale`, `add-replica`, `rm-replica`, `switchover`, `add-shard` (operator).
+/api/v1/pg/{name}/{action}` for `scale`, `add-replica`, `rm-replica`, `switchover`, `failover`, `reinit`, `add-shard` (operator).
 Credentials are never served over the API.
 
 ## Security

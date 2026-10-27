@@ -91,8 +91,17 @@ type PGGroup struct {
 	Slots      int64                `json:"slots,omitempty"` // the epoch for which the primary's replication slots were created
 	Notes      map[string]time.Time `json:"notes,omitempty"` // when a repeated event was last recorded
 	Switch     *PGSwitch            `json:"switch,omitempty"`
+	Force      *PGForce             `json:"force,omitempty"`      // an operator's request to promote now (pg failover)
 	Registered bool                 `json:"registered,omitempty"` // Citus: the coordinator knows this worker group
 	Events     []PGEvent            `json:"events,omitempty"`     // the last few role changes, newest last
+}
+
+// PGForce is an operator's request to promote now. It is read once by the controller and expires if
+// no replica can be promoted in time.
+type PGForce struct {
+	To     string    `json:"to,omitempty"`     // the replica to promote ("" = the one furthest ahead)
+	Unsafe bool      `json:"unsafe,omitempty"` // --force: skip the Joined, quorum and lag checks, accepting that acknowledged writes may be lost
+	At     time.Time `json:"at"`
 }
 
 // PGMember is one Postgres container.

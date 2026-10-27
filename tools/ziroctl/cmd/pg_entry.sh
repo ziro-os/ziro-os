@@ -122,6 +122,18 @@ rejoin() {
 	fi
 }
 
+# A rebuild was requested (ziroctl pg reinit): throw this data directory away and take a new base
+# backup. Only a replica does; a member that is the primary now ignores the request.
+if [ -f "$PGDATA/ziro-reinit" ]; then
+	rm -f "$PGDATA/ziro-reinit"
+	if [ "$role" = replica ]; then
+		log "rebuild requested: discarding this data directory"
+		rm -f "$PGDATA/PG_VERSION"
+	else
+		log "rebuild requested, but this member is the primary: ignored"
+	fi
+fi
+
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
 	if [ "${ZIRO_PG_INIT:-replica}" = primary ] && [ "$role" = primary ]; then
 		init_primary

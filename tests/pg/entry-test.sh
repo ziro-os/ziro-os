@@ -31,8 +31,16 @@ export PATH="$work/bin:$bindir:$PATH"
 
 ip1=127.0.0.11 ip2=127.0.0.12
 hosts_mark="# ziro-pg-test $$"
+# Rewrites /etc/hosts in place (a bind mount in a container cannot be replaced by a rename, as sed -i does).
+hosts_del() { # hosts_del PATTERN: drop the matching lines
+	local tmp
+	tmp=$(mktemp)
+	grep -v -- "$1" /etc/hosts >"$tmp" || true
+	cat "$tmp" >/etc/hosts
+	rm -f "$tmp"
+}
 set_rw() { # set_rw IP: point the read-write name at a member
-	sed -i "/ziro-pg-test-rw/d" /etc/hosts
+	hosts_del "ziro-pg-test-rw"
 	echo "$1 rw.pgtest # ziro-pg-test-rw $hosts_mark" >>/etc/hosts
 }
 {
@@ -46,7 +54,7 @@ cleanup() {
 		[ -f "$f" ] && kill -9 "$(cat "$f")" 2>/dev/null || true
 	done
 	pkill -9 -u postgres -f "$work" 2>/dev/null || true
-	sed -i "/$hosts_mark/d" /etc/hosts
+	hosts_del "$hosts_mark"
 	[ -n "${KEEP:-}" ] || rm -rf "$work"
 }
 trap cleanup EXIT
@@ -153,5 +161,35 @@ wait_for "m1 to follow m2" streaming m1
 is_replica m1 || fail "m1 started as a primary while m2 was serving"
 grep -q "not starting as primary" "$work/m1/log" || fail "the refusal was not logged"
 ok "a former primary refuses to serve while the read-write name has another primary"
+
+# 5. a rebuild was requested (ziroctl pg reinit): the replica discards its data and copies the primary
+stop_clean m1
+echo local-only >"$work/m1/data/pgdata/SENTINEL"
+touch "$work/m1/data/pgdata/ziro-reinit"
+role m1 replica 1
+start m1 $ip1 replica
+wait_for "m1 to be rebuilt and accept connections" ready m1
+wait_for "m1 to stream again" streaming m1
+is_replica m1 || fail "m1 should be a replica"
+[ ! -e "$work/m1/data/pgdata/SENTINEL" ] || fail "the old data directory was kept"
+[ ! -e "$work/m1/data/pgdata/ziro-reinit" ] || fail "the marker was left behind"
+grep -q "rebuild requested: discarding this data directory" "$work/m1/log" || fail "the rebuild was not logged"
+grep -q "taking a base backup" "$work/m1/log" || fail "no new base backup was taken"
+wait_for "m1 to have the data again" has_row m1 three
+ok "a replica with the rebuild marker discards its data and takes a new base backup"
+
+# 6. the same marker on the primary is ignored: nothing is wiped
+stop_clean m2
+echo keep-me >"$work/m2/data/pgdata/SENTINEL"
+touch "$work/m2/data/pgdata/ziro-reinit"
+role m2 primary 1
+start m2 $ip2 replica
+wait_for "m2 to accept connections" ready m2
+is_primary m2 || fail "m2 should still be the primary"
+[ -e "$work/m2/data/pgdata/SENTINEL" ] || fail "the primary's data directory was wiped"
+[ ! -e "$work/m2/data/pgdata/ziro-reinit" ] || fail "the marker was left behind on the primary"
+grep -q "this member is the primary: ignored" "$work/m2/log" || fail "the refusal was not logged"
+has_row m2 three || fail "the primary lost its data"
+ok "the rebuild marker on a primary is ignored and its data stays"
 
 echo "pass: $pass checks against PostgreSQL $major"

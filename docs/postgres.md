@@ -59,8 +59,9 @@ Data checksums and `scram-sha-256` are on.
 The agent on each node checks every member every 5 seconds. The controller on the cluster leader declares the
 primary failed when its node is down or it has not answered for 30 seconds, and then:
 
-1. picks the replica that has replayed the most WAL, within 16 MiB of the failed primary's last known position (a
-   further-behind replica is promoted only by an operator, since that can lose writes);
+1. picks the replica that has replayed the most WAL. With asynchronous replication it must be within 16 MiB of the
+   failed primary's last known position: a further-behind replica is promoted only by an operator with
+   `ziroctl pg failover --force`, since that loses writes;
 2. refuses to promote unless the replicas it can reach could have received every synchronous commit, so a minority
    cannot promote itself next to a live primary (with `--sync quorum`);
 3. raises the cluster epoch, orders the promotion, and moves `-rw` to the new primary when it confirms;
@@ -70,6 +71,33 @@ primary failed when its node is down or it has not answered for 30 seconds, and 
 The controller does nothing while the cluster is partitioned or when probe data is stale. `ziroctl pg pause shop`
 stops it from changing roles at all (for maintenance) and `ziroctl pg resume shop` brings it back. Every promotion
 is an alert in the category `database` and is listed in `ziroctl pg status`.
+
+### When the controller does not fail over
+
+`ziroctl pg status shop` ends each group with lines starting `!` that say why it is not healthy: a paused
+controller, a primary that stopped answering, no replica that can be promoted, too few replicas reachable for a safe
+promotion, a replica far behind, a partition, a command that failed or has not completed, a replica that is not
+streaming. When the reason is one of the safety refusals, an operator can decide:
+
+```sh
+ziroctl pg failover shop                # now, with the automatic safety checks (skips the 30 s wait and the partition brake)
+ziroctl pg failover shop --to m3 --force  # promote m3 even if acknowledged writes may be lost
+```
+
+`failover` is for a primary that is down and is refused while it answers (use a switchover). Without `--force` it
+keeps the checks of an automatic failover; with `--force` it promotes any replica that answers and the alert says
+that writes may be lost. A request that finds no replica to promote expires after two minutes.
+
+### Rebuild a replica
+
+```sh
+ziroctl pg reinit shop m3
+```
+
+Discards the replica's data directory and takes a new base backup from the primary, for a replica that cannot catch
+up (a replication slot lost to WAL growth, a diverged timeline). The primary is never touched: the command is
+refused for any member that is not a replica, and the agent checks that the member is in recovery before it changes
+anything.
 
 ### Planned switchover
 
@@ -125,7 +153,8 @@ distinct values and appears in most queries (tenant, user or device id).
 
 ## Monitoring
 
-`ziroctl pg status shop` lists the members with role, node, state, timeline, lag and recent events. The master's
+`ziroctl pg status shop` lists the members with role, node, state, timeline, lag and recent events, and the reasons
+a group is not healthy. The master's
 `/metrics` has `ziro_pg_members`, `ziro_pg_primary`, `ziro_pg_epoch` and `ziro_pg_replication_lag_milliseconds` per
 cluster, group and member. Alerts of category `database` fire on a promotion, when no safe promotion exists, when
 a command to a member fails, when a switchover is aborted and when no node is free for another replica.
