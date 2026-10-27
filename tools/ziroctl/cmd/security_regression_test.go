@@ -318,9 +318,11 @@ func TestIptablesRebuildFailsClosed(t *testing.T) {
 
 func TestBackupPrivateDuringWriteAndFailureCleanup(t *testing.T) {
 	dir := t.TempDir()
-	old := backupPaths
+	old, oldKey, oldNo := backupPaths, backupKeyPath, backupNoSecrets
 	backupPaths = []string{dir}
-	t.Cleanup(func() { backupPaths = old })
+	backupKeyPath = filepath.Join(dir, "backup.key")
+	backupNoSecrets = true // plain archive: this test is about permissions and publication, not encryption
+	t.Cleanup(func() { backupPaths, backupKeyPath, backupNoSecrets = old, oldKey, oldNo })
 	started, proceed := filepath.Join(dir, "started"), filepath.Join(dir, "proceed")
 	binDir := filepath.Join(dir, "bin")
 	os.Mkdir(binDir, 0755)
@@ -395,20 +397,32 @@ func TestBackupChecksumAndRestoreValidation(t *testing.T) {
 	source := filepath.Join(dir, "config")
 	os.Mkdir(source, 0700)
 	os.WriteFile(filepath.Join(source, "key"), []byte("private key"), 0600)
-	old := backupPaths
+	old, oldKey, oldNo := backupPaths, backupKeyPath, backupNoSecrets
 	backupPaths = []string{source}
-	t.Cleanup(func() { backupPaths = old })
-	out := filepath.Join(dir, "backup.tar.gz")
-	if _, err := createBackup(out); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateBackupArchive(out); err != nil {
-		t.Fatal(err)
-	}
-	hash, _ := computeFileSHA256(out)
-	manifest, _ := os.ReadFile(out + ".sha256")
-	if string(manifest) != hash+"  backup.tar.gz\n" {
-		t.Fatal("checksum format changed")
+	backupKeyPath = filepath.Join(dir, "backup.key")
+	t.Cleanup(func() { backupPaths, backupKeyPath, backupNoSecrets = old, oldKey, oldNo })
+	for _, c := range []struct {
+		noSecrets bool
+		name      string
+	}{{false, "backup.tar.gz.enc"}, {true, "backup.tar.gz"}} {
+		backupNoSecrets = c.noSecrets
+		out, err := createBackup(filepath.Join(dir, "backup.tar.gz"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Base(out) != c.name {
+			t.Fatalf("archive named %s, want %s", filepath.Base(out), c.name)
+		}
+		if err := validateBackupArchive(out); err != nil {
+			t.Fatal(err)
+		}
+		hash, _ := computeFileSHA256(out)
+		manifest, _ := os.ReadFile(out + ".sha256")
+		if string(manifest) != hash+"  "+c.name+"\n" {
+			t.Fatal("checksum format changed")
+		}
+		os.Remove(out)
+		os.Remove(out + ".sha256")
 	}
 }
 

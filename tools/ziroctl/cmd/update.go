@@ -476,6 +476,13 @@ func runToolsUpdate(tag string, allowDowngrade bool) (string, error) {
 	if err := os.MkdirAll("/var/lib/ziro", 0o755); err != nil {
 		return "", err
 	}
+	// The way back from a bad tools release. Only the tools are replaced, so a failed snapshot is
+	// reported but does not stop the update (ziroctl upgrade, which swaps the whole OS, is strict).
+	if snap, err := snapshotBeforeChange("preupdate"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: no snapshot before the update: %v\n", err)
+	} else {
+		fmt.Printf("✓ Snapshot saved to %s\n", snap)
+	}
 	dir, err := os.MkdirTemp("/var/lib/ziro", ".update-")
 	if err != nil {
 		return "", err

@@ -142,7 +142,8 @@ Both services use `restart=always`: ziro-init restarts them with a crash-loop ba
   - They are sent only over the pinned TLS channel to the nodes that run the app, and written to `0600` env
     files on tmpfs (`/run/ziro/cluster/secrets`).
   - They never appear in argv or `ps`.
-  - Backups contain only the sealed form; the data key is left out unless you pass `--include-secrets`.
+  - Backups carry the sealed form and the data key, and are encrypted with the host's backup key (see
+    [backup](backup.md)); `--no-secrets` leaves the data key out.
 - **Exposure:**
   - `cluster init`/`join` opens tcp/7443 and udp/51821 and trusts `ziro0`, whose peers are authenticated by their
     WireGuard keys. The network policy then narrows that trust. A firewall the admin disabled stays disabled.
@@ -223,7 +224,7 @@ own copy of that key, wrapped by a **key provider** it chooses:
 
 | Provider | Protects against | Setup |
 |---|---|---|
-| `file` (default) | copied Raft data, backups | none: the key is a 0600 file, excluded from backups |
+| `file` (default) | copied Raft data, backups | none: the key is a 0600 file, in the encrypted backup |
 | `tpm` | the disk or its image leaving the machine | TPM 2.0 (bare metal, cloud vTPM) and the `custom` kernel flavor (the `alpine` kernel has no TPM drivers) |
 | `command` | anything short of KMS or HSM compromise | two executables that call your KMS, Vault or HSM |
 
@@ -252,7 +253,7 @@ ziroctl cluster keys provider command --wrap /usr/local/bin/kms-wrap --unwrap /u
   with it, so no master is ever left unable to open them. Each master then drops the old key and compacts its
   Raft log, so nothing sealed with the old key remains. `cluster keys status` shows which masters it is waiting
   for. Remove dead masters first (`cluster member rm`), because the rotation waits for every master.
-- **Keep one master's key recoverable:** a KMS key, a working TPM, or a backup made with `--include-secrets`.
+- **Keep one master's key recoverable:** a KMS key, a working TPM, or a backup (encrypted; keep its key apart).
   Without the data key, sealed secrets cannot be recovered. Downgrading a master below this version after
   sealing is not supported.
 

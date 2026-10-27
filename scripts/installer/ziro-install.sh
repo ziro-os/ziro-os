@@ -802,7 +802,7 @@ perform_upgrade() {
 
     printf "${BOLD}[2/4] Snapshotting configuration and state before upgrade...${RESET}\n"
     snapshot_ok=0
-    if [ -x "$TARGET_MNT/usr/bin/ziroctl" ] && chroot "$TARGET_MNT" /usr/bin/ziroctl backup create 2>/dev/null; then
+    if [ -x "$TARGET_MNT/usr/bin/ziroctl" ] && chroot "$TARGET_MNT" /usr/bin/ziroctl backup create; then
         snapshot_ok=1
         echo "✓ Configuration snapshot created via ziroctl backup"
     fi
