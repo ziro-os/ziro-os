@@ -963,6 +963,14 @@ paths:
       summary: 'Server-sent events: every audited change as it happens (text/event-stream)'
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/firewall/flowtable:
+    put:
+      x-ziro-role: admin
+      tags: [security]
+      summary: 'Interfaces whose forwarded flows take the flow offload fast path, {"interfaces": ["eth0", "nerdctl0"]}; empty turns it off'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
   /api/v1/firewall/allow:
     post:
       x-ziro-role: admin
