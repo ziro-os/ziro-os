@@ -125,5 +125,7 @@ Docker host trip over:
   `docker compose pull --ignore-buildable` and `docker compose up --wait` drop the flag nerdctl does not know.
   nerdctl compose has no `--wait`, so `up --wait` returns once the containers are started and does not wait for
   health checks; it prints a note saying so.
+- `docker run -d --rm` drops `--rm` (nerdctl refuses the two together) and prints a note: the container is not
+  removed when it exits, so remove it with `docker rm -f`, as Coolify does for its helper container.
 - Everything else goes to nerdctl untouched. `docker build` and `docker compose build` need BuildKit, which Ziro OS
   does not ship.

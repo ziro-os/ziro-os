@@ -193,7 +193,7 @@ func TestDockerWrapperRouting(t *testing.T) {
 		{[]string{"-v"}, "ZIROCTL: [docker-compat] [-v]"},
 		{[]string{"compose", "-f", "a.yml", "up", "-d"}, "ZIROCTL: [docker-compat] [compose] [-f] [a.yml] [up] [-d]"},
 		{[]string{"network", "create", "x", "--attachable"}, "ZIROCTL: [docker-compat] [network] [create] [x] [--attachable]"},
-		{[]string{"run", "--rm", "-v", "/a:/b", "alpine", "sh", "-c", "echo hi"}, "NERDCTL: [run] [--rm] [-v] [/a:/b] [alpine] [sh] [-c] [echo hi]"},
+		{[]string{"run", "--rm", "-v", "/a:/b", "alpine", "sh", "-c", "echo hi"}, "ZIROCTL: [docker-compat] [run] [--rm] [-v] [/a:/b] [alpine] [sh] [-c] [echo hi]"},
 		{[]string{"ps", "-a", "--format", "{{json .}}"}, "NERDCTL: [ps] [-a] [--format] [{{json .}}]"},
 		{[]string{"container", "inspect", "--format", "{{json .}}", "abc"}, "NERDCTL: [container] [inspect] [--format] [{{json .}}] [abc]"},
 	} {
@@ -217,6 +217,15 @@ func TestTranslateDockerDropsOnlyWhatNerdctlRejects(t *testing.T) {
 		{"network create not--attachable", "network create not--attachable", 0},
 		{"network ls", "network ls", 0},
 		{"network connect coolify web", "network connect coolify web", 0},
+		// run: --rm is dropped from a detached run only, and only before the image
+		{"run -d --network coolify --name x --rm -v /a:/b img", "run -d --network coolify --name x -v /a:/b img", 1},
+		{"run --rm -d img", "run -d img", 1},
+		{"run -dit --rm img sh", "run -dit img sh", 1},
+		{"container run --detach --rm img", "container run --detach img", 1},
+		{"run --rm img", "run --rm img", 0},
+		{"run -d img tool --rm", "run -d img tool --rm", 0},
+		{"run -d -e A=--rm img", "run -d -e A=--rm img", 0},
+		{"run -d img", "run -d img", 0},
 		// compose: the subcommand is found behind the global flags and their values
 		{"compose -f a.yml pull --ignore-buildable", "compose -f a.yml pull", 0},
 		{"compose --env-file e -f a.yml --project-name p pull --ignore-buildable web", "compose --env-file e -f a.yml --project-name p pull web", 0},
