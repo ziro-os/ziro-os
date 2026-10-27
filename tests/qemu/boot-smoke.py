@@ -298,6 +298,46 @@ def docker_api_checks(con, check):
                       "nerdctl network ls | grep -c dk-net", timeout=120)
     check("docker-api network create and remove", out.split() == ["201", "1", "204", "0"], out)
     con.run("nerdctl rm -f dk-api >/dev/null 2>&1", timeout=60)
+    # Coolify's Validate Server: Server.Version (>= 24) from `docker version --format json`, over a plain sh like SSH gives it.
+    guest = r"""sh -c "docker version --format json" 2>/tmp/ver.err | jq -M -r '.Server.Version, ((.Server.Version | split(".")[0] | tonumber) >= 24)'; wc -c < /tmp/ver.err"""
+    rc, out = con.run(guest, timeout=120)
+    check("coolify: docker version --format json has Server.Version >= 24, nothing on stderr", out.split() == ["24.0.0", "true", "0"], out)
+    rc, out = con.run("docker version --format '{{.Server.Version}}'; docker --version; docker compose version --short; docker compose version", timeout=120)
+    check("coolify: template form, --version and compose version (plain and --short)",
+          out.split("\n")[0] == "24.0.0" and "Docker version 24.0.0" in out and re.search(r"^\d+\.\d+", out.split("\n")[2]) is not None and "Docker Compose version v" in out, out)
+    rc, out = con.run("curl -s --unix-socket /var/run/docker.sock http://d/version | jq -r .Version; nerdctl --version | cut -c1-14", timeout=60)
+    check("the socket and the CLI report the same engine version", out.split()[0] == "24.0.0", out)
+    # A Coolify-style deployment: the coolify network, then compose pull / up --wait / ps / network inspect / down.
+    compose = (r"""mkdir -p /tmp/co; echo A=1 > /tmp/co/.env; cat > /tmp/co/c.yml <<'Y'
+services:
+  web:
+    image: docker.io/library/alpine:latest
+    command: sleep 600
+    labels:
+      - traefik.enable=true
+    networks: [coolify]
+networks:
+  coolify:
+    external: true
+Y
+docker network create coolify --attachable >/dev/null 2>&1; echo NET=$?
+docker compose --env-file /tmp/co/.env -f /tmp/co/c.yml pull --ignore-buildable >/dev/null 2>&1; echo PULL=$?
+docker compose --env-file /tmp/co/.env -f /tmp/co/c.yml up -d --wait --remove-orphans >/dev/null 2>&1; echo UP=$?
+docker compose --env-file /tmp/co/.env -f /tmp/co/c.yml ps >/dev/null 2>&1; echo PS=$?
+docker network inspect coolify -f '{{json .Containers}}' >/dev/null 2>&1; echo INSPECT=$?
+docker compose --env-file /tmp/co/.env -f /tmp/co/c.yml down >/dev/null 2>&1; echo DOWN=$?
+docker network rm coolify >/dev/null 2>&1; echo RM=$?""")
+    rc, out = con.run(compose, timeout=600)
+    found = [x.strip() for x in re.findall(r"^[A-Z]+=\d+\s*$", out, re.M)][-7:]  # the console also echoes what was typed
+    check("coolify deployment commands: network create --attachable, compose pull --ignore-buildable, up --wait, ps, network inspect, down",
+          found == ["NET=0", "PULL=0", "UP=0", "PS=0", "INSPECT=0", "DOWN=0", "RM=0"], " ".join(found) or out[-300:])
+    rc, out = con.run("nerdctl run -d --name dk-co alpine sleep 600 >/dev/null 2>&1; sleep 1; "
+                      "docker network create coolify --attachable >/dev/null 2>&1; echo NET=$?; docker network ls | grep -c coolify; "
+                      "docker ps -a --format '{{json .}}' | jq -r .Names | grep -c dk-co; "
+                      "docker container inspect $(docker container ls -aq) --format '{{json .}}' | jq -r .Name | grep -c dk-co; "
+                      "docker run --rm alpine echo via-nerdctl; docker network rm coolify >/dev/null 2>&1; nerdctl rm -f dk-co >/dev/null 2>&1", timeout=300)
+    check("coolify: network create --attachable, ps/inspect JSON lines, and other commands still reach nerdctl",
+          out.split() == ["NET=0", "1", "1", "1", "via-nerdctl"], out)
     # What Coolify's Validate Server runs over SSH (non-interactive: a plain sh with its default PATH).
     for cmd in ("docker --version", "docker version", "docker info --format '{{.ServerVersion}}'",
                 "docker network ls", "docker compose version", "command -v docker git jq bash curl"):

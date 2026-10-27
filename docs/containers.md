@@ -23,7 +23,8 @@ flowchart LR
 
 - **No Docker daemon.** `ziroctl container` drives containerd through `nerdctl`, or falls back to `ctr`. Each
   container is a runc process in its own cgroup. Nothing long-running is added beyond containerd. Tools that need
-  the Docker socket can use the opt-in [Docker API](#docker-api-socket).
+  the Docker socket can use the opt-in [Docker API](#docker-api-socket). The `docker` command is nerdctl with
+  [Docker-compatible version output](#the-docker-command).
 - **Short image names** resolve like Docker: `nginx` becomes `docker.io/library/nginx:latest`, and
   `redis/redis-stack` becomes `docker.io/redis/redis-stack:latest`.
 - **Networking:** containers join the CNI bridge by default (`--net` picks another). `-p host:container`
@@ -107,3 +108,19 @@ the registry auth header, answer `501` with the route in the message; pull priva
 host. Container create maps the common fields (image, command, entrypoint, environment, labels, ports, binds,
 networks and aliases, restart policy, memory, CPUs, capabilities, DNS, tmpfs, sysctls) and ignores the rest, such
 as health checks and devices. The design is RFC 0006 (`docs/design/rfcs`).
+
+## The docker command
+
+`docker` is a small wrapper around nerdctl, so Docker-style commands work. It changes only what tools that manage a
+Docker host trip over:
+
+- `docker version`, `docker --version` and `docker compose version` print Docker-shaped output, including
+  `--format json` and Go templates such as `--format '{{.Server.Version}}'`. The server reports Docker Engine
+  **24.0.0**: that is the API compatibility level of the [Docker API socket](#docker-api-socket) (API 1.43), not an
+  installed Docker Engine. The real runtime (nerdctl, containerd, runc) is listed under `Components`.
+- `docker network create --attachable` ignores the flag (every nerdctl network is attachable), and
+  `docker compose pull --ignore-buildable` and `docker compose up --wait` drop the flag nerdctl does not know.
+  nerdctl compose has no `--wait`, so `up --wait` returns once the containers are started and does not wait for
+  health checks; it prints a note saying so.
+- Everything else goes to nerdctl untouched. `docker build` and `docker compose build` need BuildKit, which Ziro OS
+  does not ship.
