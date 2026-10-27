@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -35,6 +36,7 @@ import (
 
 const (
 	dockerSock       = "/run/docker.sock"
+	dockerSockLink   = "/var/run/docker.sock" // where tools look; /var/run is not always a link to /run
 	dockerAPIVersion = "1.43"
 	dockerMinVersion = "1.24"
 	dockerService    = "dockerd"
@@ -527,6 +529,7 @@ func (d *dockerAPI) events(w http.ResponseWriter, r *http.Request) {
 		fl.Flush()
 	}
 	enc := json.NewEncoder(w)
+	lastErr := ""
 	t := time.NewTicker(dockerEventPoll)
 	defer t.Stop()
 	for {
@@ -536,8 +539,13 @@ func (d *dockerAPI) events(w http.ResponseWriter, r *http.Request) {
 		case now := <-t.C:
 			cur, err := d.snapshot(r.Context())
 			if err != nil {
-				continue // a failed look is retried at the next tick
+				if err.Error() != lastErr { // a failed look is retried at the next tick; say why once
+					fmt.Fprintf(os.Stderr, "docker-api: events: %v\n", err)
+					lastErr = err.Error()
+				}
+				continue
 			}
+			lastErr = ""
 			for _, e := range diffContainers(prev, cur, now) {
 				if enc.Encode(e) != nil {
 					return
@@ -574,10 +582,37 @@ func listenDockerSock(path string) (net.Listener, error) {
 	return ln, nil
 }
 
+// linkDockerSock makes link (the path tools expect) lead to sock, unless both already name the same
+// directory. Only an existing symlink is replaced.
+func linkDockerSock(sock, link string) error {
+	a, errA := os.Stat(filepath.Dir(sock))
+	b, errB := os.Stat(filepath.Dir(link))
+	if errA == nil && errB == nil && os.SameFile(a, b) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(link); err == nil {
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("%s exists and is not a symlink", link)
+		}
+		_ = os.Remove(link)
+	}
+	return os.Symlink(sock, link)
+}
+
 func serveDockerAPI(ctx context.Context, path string, d *dockerAPI) error {
 	ln, err := listenDockerSock(path)
 	if err != nil {
 		return err
+	}
+	if path == dockerSock {
+		if err := linkDockerSock(path, dockerSockLink); err != nil {
+			ln.Close()
+			return err
+		}
+		defer os.Remove(dockerSockLink)
 	}
 	srv := &http.Server{Handler: d.handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -652,6 +687,7 @@ var dockerAPIDisableCmd = &cobra.Command{
 		_ = stopService(dockerService)
 		err := disableService(dockerService)
 		_ = os.Remove(dockerSock)
+		_ = os.Remove(dockerSockLink)
 		_ = auditLog("root", "cli", "docker-api disable", dockerSock, err)
 		if err != nil {
 			return err

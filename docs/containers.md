@@ -87,7 +87,7 @@ ziroctl cron remove 3
 
 Some tools that manage a Docker host (Coolify's proxy, Traefik's Docker provider) talk to `/var/run/docker.sock`.
 Ziro OS has no Docker daemon, so the socket is off. An administrator can turn on a small translation layer that
-serves part of the Docker Engine API on `/run/docker.sock` and runs the matching `nerdctl` commands:
+serves part of the Docker Engine API on `/run/docker.sock` (linked at `/var/run/docker.sock`) and runs the matching `nerdctl` commands:
 
 ```bash
 ziroctl docker-api enable

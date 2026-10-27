@@ -212,10 +212,13 @@ func TestDockerAPIEventsStream(t *testing.T) {
 	dockerEventPoll = 10 * time.Millisecond
 	t.Cleanup(func() { dockerEventPoll = old })
 	var mu sync.Mutex
-	running := false
+	running, gone := false, false
 	d := &dockerAPI{audit: func(string, string, error) {}, run: func(_ context.Context, args ...string) ([]byte, error) {
 		mu.Lock()
 		defer mu.Unlock()
+		if gone {
+			return nil, nil // no containers
+		}
 		if args[0] == "ps" {
 			return []byte("aaa111\n"), nil
 		}
@@ -239,6 +242,20 @@ func TestDockerAPIEventsStream(t *testing.T) {
 	var e dockerEvent
 	if json.Unmarshal([]byte(line), &e) != nil || e.Action != "start" || e.Actor.Attributes["name"] != "web" || e.Actor.Attributes["image"] != "nginx" {
 		t.Fatalf("event: %s", line)
+	}
+	// The container is removed while the stream is open: die, then destroy.
+	mu.Lock()
+	gone = true
+	mu.Unlock()
+	rd := bufio.NewReader(resp.Body)
+	for _, want := range []string{"die", "destroy"} {
+		line, err := rd.ReadString('\n')
+		if err != nil {
+			t.Fatalf("waiting for %s: %v", want, err)
+		}
+		if json.Unmarshal([]byte(line), &e) != nil || e.Action != want {
+			t.Fatalf("want %s, got %s", want, line)
+		}
 	}
 }
 
@@ -271,4 +288,40 @@ func TestListenDockerSock(t *testing.T) {
 		t.Fatalf("a stale socket must be replaced: %v", err)
 	}
 	ln.Close()
+}
+
+func TestLinkDockerSock(t *testing.T) {
+	root, err := os.MkdirTemp("", "dl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	run, varRun := filepath.Join(root, "run"), filepath.Join(root, "var", "run")
+	os.MkdirAll(run, 0o755)
+	os.MkdirAll(varRun, 0o755)
+	sock, link := filepath.Join(run, "docker.sock"), filepath.Join(varRun, "docker.sock")
+	if err := linkDockerSock(sock, link); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.Readlink(link); got != sock {
+		t.Fatalf("link -> %q", got)
+	}
+	if err := linkDockerSock(sock, link); err != nil { // a second start replaces its own link
+		t.Fatal(err)
+	}
+	os.Remove(link)
+	os.WriteFile(link, nil, 0o600)
+	if err := linkDockerSock(sock, link); err == nil {
+		t.Fatal("replaced a regular file")
+	}
+	// /var/run -> /run: nothing to do, and no link to itself
+	os.Remove(link)
+	os.RemoveAll(varRun)
+	os.Symlink(run, varRun)
+	if err := linkDockerSock(sock, filepath.Join(varRun, "docker.sock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(sock); err == nil {
+		t.Fatal("created a socket path")
+	}
 }
