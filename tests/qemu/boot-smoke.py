@@ -421,7 +421,7 @@ def main():
 
     def check(name, passed, detail="", limit=200):
         results.append(passed)
-        print(f"  [{'PASS' if passed else 'FAIL'}] {name}" + (f": {detail.strip()[-limit:] if limit < 0 else detail.strip()[:limit]}" if detail and not passed else ""))
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}" + (f": {detail.strip()[limit:] if limit < 0 else detail.strip()[:limit]}" if detail and not passed else ""))
 
     try:
         t0 = time.time()
@@ -639,6 +639,18 @@ def main():
         con.run("ziroctl security bans unban 10.99.0.2; kill $(cat /tmp/atk.pid); /sbin/ip link del atk0; ziroctl security alerting remove local")
         ok, out = retry(con, "nft list table inet ziro", lambda rc, o: rc == 0 and "policy drop" in o, 60)
         check("firewall table 'inet ziro' applied at boot", ok, out)
+        # Blocked sources become interval sets and unscoped ports one set rule: the kernel must accept them.
+        rc, out = con.run("ziroctl firewall block-ip 203.0.113.0/24 >/dev/null 2>&1; ziroctl firewall block-ip 203.0.113.7 >/dev/null 2>&1; "
+                          "ziroctl firewall block-ip 2001:db8::/32 >/dev/null 2>&1; "
+                          "ziroctl firewall allow 18081/tcp >/dev/null 2>&1; ziroctl firewall allow 18082/tcp >/dev/null 2>&1; "
+                          "nft list set inet ziro blocked4; nft list set inet ziro blocked6; nft list chain inet ziro input", timeout=120)
+        check("firewall sets load in nftables (blocked4/blocked6 intervals, merged), ports grouped",
+              "203.0.113.0/24" in out and "2001:db8::/32" in out and "ip saddr @blocked4 drop" in out and "ip6 saddr @blocked6 drop" in out
+              and "18081, 18082 } accept" in out and "203.0.113.7" not in out, out, limit=-700)
+        rc, out = con.run("ziroctl firewall unblock-ip 203.0.113.0/24 >/dev/null 2>&1; ziroctl firewall unblock-ip 203.0.113.7 >/dev/null 2>&1; "
+                          "ziroctl firewall unblock-ip 2001:db8::/32 >/dev/null 2>&1; ziroctl firewall deny 18081/tcp >/dev/null 2>&1; "
+                          "ziroctl firewall deny 18082/tcp >/dev/null 2>&1; nft list table inet ziro | grep -c 'blocked\\|1808[12]'", timeout=120)
+        check("firewall sets removed again when the blocks are lifted", out.split()[-1] == "0", out)
 
         # Declarative provisioning: a YAML host file with a stack (local app) is applied, a second
         # run plans no change, and the stack comes down cleanly.
