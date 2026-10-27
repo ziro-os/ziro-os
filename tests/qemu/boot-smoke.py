@@ -244,6 +244,45 @@ def apps_checks(con, check):
     check("mysql-cluster: 3 members ONLINE (group replication over pod DNS)", ok, out)
 
 
+def docker_api_checks(con, check):
+    """The opt-in Docker Engine API socket (RFC 0006), and the docker commands Coolify's validation runs."""
+    sock = "curl -s --unix-socket /var/run/docker.sock"
+    rc, out = con.run("ziroctl docker-api enable 2>&1 | tail -1; sleep 2; ziroctl docker-api status; ls -lL /var/run/docker.sock", timeout=120)
+    check("docker-api enable: the socket answers, root-only", "running on" in out and "srw-rw----" in out, out)
+    rc, out = con.run(f"{sock} -i http://d/_ping", timeout=30)
+    check("docker-api _ping: OK with Api-Version", "OK" in out and "Api-Version" in out, out)
+    rc, out = con.run(f"{sock} http://d/v1.43/version; echo; {sock} http://d/info", timeout=60)
+    check("docker-api version and info", '"ApiVersion"' in out and '"OSType":"linux"' in out, out)
+    rc, out = con.run("nerdctl run -d --name dk-web -l traefik.enable=true -p 8099:80 alpine sleep 3600 2>&1 | tail -1", timeout=300)
+    check("container for the docker-api checks", rc == 0, out)
+    rc, out = con.run(f"{sock} 'http://d/containers/json'", timeout=60)
+    check("docker-api containers/json lists the running container with labels and ports",
+          '"/dk-web"' in out and '"Status":"Up"' in out and "traefik.enable" in out and "PublicPort" in out, out, limit=-600)
+    rc, out = con.run(f"{sock} http://d/containers/dk-web/json | head -c 300", timeout=60)
+    check("docker-api containers/{name}/json is the runtime's inspect document", '"Id"' in out, out)
+    rc, out = con.run(f"{sock} http://d/networks | head -c 300", timeout=60)
+    check("docker-api networks", out.lstrip().startswith("[") and '"Name"' in out, out)
+    # curl -N: without it curl buffers a file's output until it exits and the stream looks empty.
+    rc, out = con.run(f"({sock} -N --max-time 25 http://d/events > /tmp/ev.json &); sleep 3; "
+                      "nerdctl run -d --name dk-ev alpine sleep 60 >/dev/null 2>&1; sleep 8; "
+                      "nerdctl rm -f dk-ev 2>&1 | tail -1; sleep 8; cat /tmp/ev.json; echo ---; nerdctl ps -a --format '{{.Names}} {{.Status}}'; "
+                      "tail -5 /var/log/dockerd.log", timeout=120)
+    check("docker-api events: start and die/destroy of a container", '"Action":"start"' in out and '"Action":"destroy"' in out, out, limit=-900)
+    rc, out = con.run(f"{sock} -o /dev/null -w '%{{http_code}}' -X POST http://d/containers/dk-web/stop?t=1; echo; "
+                      "nerdctl ps -q | wc -l", timeout=60)
+    check("docker-api stop: 204 and the container is stopped", out.split()[0] == "204" and out.split()[-1] == "0", out)
+    rc, out = con.run(f"{sock} -o /dev/null -w '%{{http_code}}' -X DELETE http://d/containers/dk-web; echo; "
+                      f"{sock} -o /dev/null -w '%{{http_code}}' -X POST http://d/containers/create; echo; "
+                      "grep -c 'POST /containers/dk-web/stop' /var/log/ziro/audit.log", timeout=60)
+    check("docker-api remove 204, create 501, mutations audited", out.split() == ["204", "501", "1"], out)
+    # What Coolify's Validate Server runs over SSH (non-interactive: a plain sh with its default PATH).
+    for cmd in ("docker --version", "docker version", "docker info --format '{{.ServerVersion}}'",
+                "docker network ls", "docker compose version", "command -v docker git jq bash curl"):
+        rc, out = con.run(f"sh -c \"{cmd}\" 2>/dev/null | head -5", timeout=120)  # stdout: nerdctl warns about buildctl on stderr
+        check(f"coolify validation: {cmd}", rc == 0 and out.strip() != "", out)
+    con.run("ziroctl docker-api disable >/dev/null 2>&1; nerdctl rm -f dk-web dk-ev >/dev/null 2>&1", timeout=60)
+
+
 def sandbox_checks(con, check):
     rc, out = con.run("ziroctl module enable sandbox 2>&1 | tail -2", timeout=900)
     check("module enable sandbox: gVisor runsc + ziro-sandboxd", "Module sandbox enabled" in out, out)
@@ -360,6 +399,7 @@ def main():
     ap.add_argument("--installed", action="store_true", help="also install to a disk and boot it (tiny initramfs)")
     ap.add_argument("--modules", action="store_true", help="also test the clamav module (downloads ~250 MB of signatures)")
     ap.add_argument("--sandbox", action="store_true", help="also test the sandbox module (gVisor, downloads ~170 MB)")
+    ap.add_argument("--docker-api", action="store_true", help="also test the Docker API socket and Coolify's docker commands")
     ap.add_argument("--apps", action="store_true",
                     help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
     args = ap.parse_args()
@@ -800,6 +840,8 @@ def main():
             check("module disable clamav", "Module clamav disabled" in out, out)
         if args.sandbox and not args.no_pull:
             sandbox_checks(con, check)
+        if args.docker_api and not args.no_pull:
+            docker_api_checks(con, check)
         if args.apps:
             apps_checks(con, check)
         # Logging out of a console clears it (screen + scrollback) before the next login prompt.
