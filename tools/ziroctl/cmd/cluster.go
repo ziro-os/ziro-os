@@ -236,6 +236,7 @@ type ClusterState struct {
 	// PurgeData: apps whose node-local data every node deletes (app -> when requested). Entries
 	// expire after purgeDataTTL; deploying an app of that name again cancels its entry.
 	PurgeData       map[string]string     `json:"purge_data,omitempty"`
+	PGHold          time.Time             `json:"pg_hold,omitempty"`   // Postgres failover waits until this (a new leader's probes are unknown)
 	DNSCloud        DNSCloud              `json:"dns_cloud,omitempty"` // public DNS provider: records for the gateway's names (dnsprovider.go)
 	Heal            HealConfig            `json:"heal,omitempty"`      // auto-healing settings and recent actions (see cluster_heal.go)
 	GatewayACME     GatewayACME           `json:"gateway_acme,omitempty"`

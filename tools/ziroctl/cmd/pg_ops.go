@@ -355,6 +355,9 @@ func pgGroupReasons(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) [
 	if m := g.promoting(); m != nil {
 		r = append(r, fmt.Sprintf("promoting %s since %s", m.ID, now.Sub(g.Notes["promoting"]).Round(time.Second)))
 	}
+	if hold := st.PGHold; now.Before(hold) {
+		r = append(r, fmt.Sprintf("the cluster leader changed recently: the controller waits %s for the members to report before it fails anything over", hold.Sub(now).Round(time.Second)))
+	}
 	p := g.primary()
 	switch {
 	case p == nil:
@@ -386,6 +389,11 @@ func pgGroupReasons(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) [
 				r = append(r, fmt.Sprintf("%s: %s failed: %s", m.ID, m.Cmd.Op, m.Cmd.Msg))
 			case !m.Cmd.Done && now.Sub(m.Cmd.At) > 30*time.Second:
 				r = append(r, fmt.Sprintf("%s: %s has not completed after %s", m.ID, m.Cmd.Op, now.Sub(m.Cmd.At).Round(time.Second)))
+			}
+		}
+		if !m.UnreadySince.IsZero() {
+			if left := pgRebuildAfter - now.Sub(m.UnreadySince); left > 0 {
+				r = append(r, fmt.Sprintf("%s makes no progress; the controller rebuilds it from the primary in %s", m.ID, left.Round(time.Second)))
 			}
 		}
 		if m.Role == pgReplica && !m.Draining && !m.ready(now) {
@@ -451,6 +459,9 @@ func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
 	for gi := range c.Groups {
 		g := &c.Groups[gi]
 		gv := pgGroupView{Name: g.Name, Epoch: g.Epoch, Sync: g.Sync}
+		if g.Sync == pgSyncUnknown {
+			gv.Sync = ""
+		}
 		for _, m := range g.Members {
 			mv := pgMemberView{ID: m.ID, Node: m.Node, Role: m.Role, Timeline: m.Probe.Timeline, LagMs: m.Probe.LagMs, Joined: m.Joined}
 			if m.Probe.OK {

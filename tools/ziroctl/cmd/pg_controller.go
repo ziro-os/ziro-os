@@ -154,6 +154,8 @@ type PGReport struct {
 	// AgeMs is how long ago the agent took the probe: an agent that is alive but whose probes hang
 	// must not look healthy.
 	AgeMs int64 `json:"age_ms,omitempty"`
+	// ReadOnly: default_transaction_read_only is on (a primary left read-only by an aborted switchover).
+	ReadOnly bool `json:"ro,omitempty"`
 }
 
 // PGResult is the outcome of an order.
@@ -211,7 +213,7 @@ func pgIngest(st *ClusterState, nodeID string, reports []PGReport, results []PGR
 		if at.Before(m.Probe.At) {
 			continue // an older report than the one we have
 		}
-		m.Probe = PGProbe{At: at, OK: true, Recovery: r.Recovery, Streaming: r.Streaming, LSN: lsn, Timeline: r.Timeline, LagMs: r.LagMs, Epoch: r.Epoch}
+		m.Probe = PGProbe{At: at, OK: true, Recovery: r.Recovery, Streaming: r.Streaming, LSN: lsn, Timeline: r.Timeline, LagMs: r.LagMs, Epoch: r.Epoch, ReadOnly: r.ReadOnly}
 	}
 	if len(results) == 0 {
 		return
@@ -269,11 +271,12 @@ func pgPass(st *ClusterState, now time.Time) {
 	}
 	sort.Strings(names)
 	braked := partitioned(st, now)
+	held := now.Before(st.PGHold)
 	for _, n := range names {
 		c := st.PG[n]
 		if !c.Paused {
 			for gi := range c.Groups {
-				pgGroupPass(st, c, &c.Groups[gi], now, braked)
+				pgGroupPass(st, c, &c.Groups[gi], now, braked, held)
 			}
 			pgCitusPass(st, c, now)
 		}
@@ -283,7 +286,7 @@ func pgPass(st *ClusterState, now time.Time) {
 }
 
 // pgGroupPass settles commands, then lets the group's state machine take one step.
-func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, braked bool) {
+func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, braked, held bool) {
 	for i := range g.Members {
 		pgSettle(c, g, &g.Members[i], now)
 	}
@@ -304,18 +307,111 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 		pgForcedFailover(c, g, now)
 	default:
 		if p := g.primary(); p == nil || pgPrimaryFailed(p, now) {
-			if !braked {
+			switch {
+			case held:
+				// A new cluster leader has not heard from the members yet: a primary that is merely
+				// slow to report (a reboot, a long crash recovery) must not lose its place to a replica.
+			case !braked:
 				pgFailover(c, g, now)
-			} else if g.last(now, 60*time.Second, "braked") {
+			case g.last(now, 60*time.Second, "braked"):
 				g.alert(now, "high", "primary is down, but too many nodes are unreachable to tell a failure from a partition; not promoting")
 			}
 		}
 	}
 	pgFence(c, g, now)
+	pgSelfHeal(c, g, now)
 	if g.primary() != nil && g.promoting() == nil && g.Switch == nil {
 		pgAdjustMembers(st, c, g, now)
 		pgSyncAndSlots(c, g, now)
 	}
+}
+
+// pgSelfHeal is the controller acting on its own for what would otherwise wait for an operator: it
+// remembers a member that has held a database, makes a primary left read-only writable again, rebuilds
+// a replica that answers but cannot follow, and says so when a primary never reports.
+func pgSelfHeal(c *PGCluster, g *PGGroup, now time.Time) {
+	p := g.primary()
+	if p != nil && p.fresh(now) && !p.Probe.Recovery && p.Probe.Timeline > 0 && !p.Initialised {
+		// From now on an empty data directory on this member is a loss, not a new cluster: the entry
+		// script refuses to initialise one and the controller fails over instead.
+		p.Initialised = true
+	}
+	if p != nil && p.Probe.At.IsZero() {
+		key := "noprobe-" + p.ID
+		if g.Notes == nil {
+			g.Notes = map[string]time.Time{}
+		}
+		if _, ok := g.Notes[key]; !ok {
+			g.Notes[key] = now
+		} else if now.Sub(g.Notes[key]) > 5*time.Minute && g.last(now, 30*time.Minute, key) {
+			g.alert(now, "medium", "primary %s has not reported since the controller started watching it: check its node and container", p.ID)
+		}
+	} else if p != nil {
+		delete(g.Notes, "noprobe-"+p.ID)
+	}
+	if g.Switch != nil || g.promoting() != nil || g.Force != nil {
+		return
+	}
+	// A primary left read-only (an aborted switchover, a failed writable order) refuses every write
+	// and nothing else would ever change it back.
+	if p != nil && p.fresh(now) && !p.Probe.Recovery && p.Probe.ReadOnly && p.Cmd == nil {
+		p.issue(opWritable, "", g.Epoch, now)
+		if g.last(now, 10*time.Minute, "readonly") {
+			g.alert(now, "medium", "primary %s is read-only and no switchover is running: making it writable", p.ID)
+		}
+	}
+	pgTrackProgress(g, now)
+	pgAutoRebuild(c, g, now)
+}
+
+// pgTrackProgress keeps UnreadySince honest: it runs while a replica answers but does not follow the
+// primary, and starts over whenever its WAL position moves (a long catch-up is progress). A silent
+// replica is a different problem (its node or container is down) and is not counted.
+func pgTrackProgress(g *PGGroup, now time.Time) {
+	for i := range g.Members {
+		m := &g.Members[i]
+		switch {
+		case m.Role != pgReplica || m.Draining || m.ready(now) || !m.fresh(now):
+			m.UnreadySince = time.Time{}
+		case m.UnreadySince.IsZero() || m.Probe.LSN > m.UnreadyLSN:
+			m.UnreadySince, m.UnreadyLSN = now, m.Probe.LSN
+		}
+	}
+}
+
+// pgAutoRebuild rebuilds a replica that has made no progress for pgRebuildAfter, one at a time and only
+// while the primary answers (it is the copy source). A second rebuild within pgRebuildCooldown is left
+// to an operator: the cause is then not the data.
+func pgAutoRebuild(c *PGCluster, g *PGGroup, now time.Time) {
+	p := g.primary()
+	if p == nil || !p.fresh(now) {
+		return
+	}
+	for i := range g.Members {
+		if m := &g.Members[i]; m.Cmd != nil && m.Cmd.Op == opReinit {
+			return // one at a time
+		}
+	}
+	var worst *PGMember
+	for i := range g.Members {
+		m := &g.Members[i]
+		if m.Role == pgReplica && !m.Draining && m.Cmd == nil && !m.UnreadySince.IsZero() && now.Sub(m.UnreadySince) >= pgRebuildAfter &&
+			(worst == nil || m.UnreadySince.Before(worst.UnreadySince)) {
+			worst = m
+		}
+	}
+	if worst == nil {
+		return
+	}
+	if !worst.RebuiltAt.IsZero() && now.Sub(worst.RebuiltAt) < pgRebuildCooldown {
+		if g.last(now, 30*time.Minute, "rebuilt-"+worst.ID) {
+			g.alert(now, "high", "%s was rebuilt less than an hour ago and still does not follow the primary: leaving it to an operator (ziroctl pg status %s)", worst.ID, c.Name)
+		}
+		return
+	}
+	worst.issue(opReinit, "", g.Epoch, now)
+	worst.RebuiltAt, worst.UnreadySince = now, time.Time{}
+	g.alert(now, "medium", "%s has not followed the primary for %s: rebuilding it from the primary", worst.ID, pgRebuildAfter)
 }
 
 func (g *PGGroup) promoting() *PGMember {
@@ -343,6 +439,8 @@ func pgWithoutProbes(pg map[string]*PGCluster) map[string]*PGCluster {
 			g.Members = append([]PGMember(nil), g.Members...)
 			for j := range g.Members {
 				g.Members[j].Probe = PGProbe{}
+				// The progress timer moves with every probe of a replica that is catching up: soft too.
+				g.Members[j].UnreadySince, g.Members[j].UnreadyLSN = time.Time{}, 0
 			}
 			cc.Groups[i] = g
 		}
@@ -355,6 +453,9 @@ func pgWithoutProbes(pg map[string]*PGCluster) map[string]*PGCluster {
 // ready or a promotion candidate until its agent reports), last heard now (a primary that never
 // reports is failed over one grace period from now), and older reports are ignored by pgIngest.
 func pgProbesUnknown(st *ClusterState, now time.Time) {
+	if len(st.PG) > 0 {
+		st.PGHold = now.Add(pgHoldAfterElection) // and nothing is failed over until the members have had time to report
+	}
 	for _, c := range st.PG {
 		for gi := range c.Groups {
 			for mi := range c.Groups[gi].Members {
@@ -412,7 +513,12 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 		pgCitusSettle(c, g, m, cmd, now)
 	}
 	if !cmd.OK {
-		g.alert(now, "medium", "%s on %s failed: %s", cmd.Op, m.ID, cmd.Msg)
+		// A command that keeps failing is re-issued every pass: one alert per quarter hour, not one per try.
+		if g.last(now, 15*time.Minute, "cmdfail-"+cmd.Op+"-"+m.ID) {
+			g.alert(now, "medium", "%s on %s failed: %s", cmd.Op, m.ID, cmd.Msg)
+		} else {
+			g.note(now, "%s on %s failed again: %s", cmd.Op, m.ID, cmd.Msg)
+		}
 	}
 	m.Cmd = nil
 }
@@ -422,6 +528,10 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 // pgCandidate picks the replica to promote: reachable, in recovery, joined, the furthest ahead.
 // reachable and total count the replicas that could hold acknowledged commits.
 func pgCandidate(g *PGGroup, now time.Time) (best *PGMember, reachable, total int) {
+	tl := 0 // the timeline the group was last known to be on: a replica behind it never followed
+	if p := g.primary(); p != nil {
+		tl = p.Probe.Timeline
+	}
 	for i := range g.Members {
 		m := &g.Members[i]
 		if m.Role != pgReplica || !m.Joined || m.Draining {
@@ -430,6 +540,9 @@ func pgCandidate(g *PGGroup, now time.Time) (best *PGMember, reachable, total in
 		total++
 		if !m.fresh(now) || !m.Probe.Recovery {
 			continue
+		}
+		if tl > 0 && m.Probe.Timeline > 0 && m.Probe.Timeline < tl {
+			continue // its WAL position is on an older timeline: not comparable, and it lacks the newer writes
 		}
 		reachable++
 		if best == nil || m.Probe.LSN > best.Probe.LSN ||
@@ -575,7 +688,9 @@ func pgPromote(c *PGCluster, g *PGGroup, target *PGMember, now time.Time, why st
 	g.Notes["promoting"] = now
 	target.Role = pgPromoting
 	target.Cmd = newPGCommand(opPromote, "", g.Epoch, now)
-	g.Sync = "" // the new primary starts without synchronous standbys; pgSyncAndSlots sets them
+	// The new primary may carry the synchronous list of the one before it (it was a primary once, or was
+	// copied from one), so the list is unknown, not empty: pgSyncAndSlots always sends it, even as "".
+	g.Sync = pgSyncUnknown
 	g.alert(now, "high", "promoting %s (%s), epoch %d", target.ID, why, g.Epoch)
 }
 
@@ -747,7 +862,13 @@ func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) 
 	// makes room for a new replica on a live node. Only when there is such a node, and one at a time.
 	for i := range g.Members {
 		m := &g.Members[i]
-		if m.Role != pgPrimary && !m.Draining && pgNodeGone(st, m.Node, now) && pgPickNode(st, c, g) != "" {
+		if m.Role != pgPrimary && !m.Draining && pgNodeGone(st, m.Node, now) {
+			if pgPickNode(st, c, g) == "" {
+				if g.last(now, 30*time.Minute, "nonode-replace") {
+					g.alert(now, "medium", "node %s of %s is gone and no other node is free to rebuild it on (the members of a group are spread over nodes): add a node", m.Node, m.ID)
+				}
+				continue
+			}
 			m.Draining = true
 			g.note(now, "replacing %s: node %s is gone", m.ID, m.Node)
 			return
@@ -786,7 +907,19 @@ func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) 
 			continue
 		}
 		if g.Sync != pgSyncSpec(c, g) {
-			continue // the synchronous list still names it
+			// The synchronous list still names it: wait for the primary to drop it, but not forever (a
+			// setsync that keeps failing must not keep a removed member in the group).
+			key := "drain-" + m.ID
+			if g.Notes == nil {
+				g.Notes = map[string]time.Time{}
+			}
+			if _, ok := g.Notes[key]; !ok {
+				g.Notes[key] = now
+			}
+			if now.Sub(g.Notes[key]) < pgRebuildAfter {
+				continue
+			}
+			g.alert(now, "medium", "removing %s although the synchronous standby list could not be updated for %s", m.ID, pgRebuildAfter)
 		}
 		if m.DropSlot == "" {
 			if p != nil && p.fresh(now) {
@@ -799,6 +932,7 @@ func pgAdjustMembers(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) 
 		} else if p != nil && p.Cmd != nil {
 			continue
 		}
+		delete(g.Notes, "drain-"+m.ID)
 		g.note(now, "replica %s removed", m.ID)
 		markPurge(st, c.memberApp(g.Name, m.ID))
 		g.Members = slices.Delete(g.Members, i, i+1)

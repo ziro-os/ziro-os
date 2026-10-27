@@ -72,6 +72,26 @@ The controller does nothing while the cluster is partitioned or when probe data 
 stops it from changing roles at all (for maintenance) and `ziroctl pg resume shop` brings it back. Every promotion
 is an alert in the category `database` and is listed in `ziroctl pg status`.
 
+### What the controller repairs by itself
+
+- **A replica that cannot follow.** A replica that answers but has not made progress for 10 minutes (it is not
+  streaming, or its WAL position does not move) is rebuilt from the primary, as `ziroctl pg reinit` does. A long
+  catch-up that is still gaining is progress and is left alone. A replica that was rebuilt less than an hour ago and
+  is still stuck is left to an operator, with an alert: the cause is then not its data. A silent replica (node or
+  container down) is not rebuilt; one on a node that has been gone for 10 minutes is replaced on another node.
+- **A primary left read-only** by an aborted switchover is made writable again.
+- **The synchronous standby list** is sent to every new primary after a promotion, even when it is empty, so commits
+  never wait for replicas that are not there.
+- **A replica on an older timeline** than the primary it would replace is not a promotion candidate.
+- **A member that served a database and comes back with an empty data directory** (a replaced disk) is not
+  initialised again as a new empty database: it stays down, and the controller fails over to a replica.
+- **A new cluster leader** waits 60 seconds for the members to report before it fails anything over, so a primary
+  that is only slow to report after a reboot does not lose its place.
+- **A replica being removed** leaves after 10 minutes even if the synchronous list could not be updated.
+
+Repeated failures of the same command raise one alert per quarter hour, not one per attempt, and `ziroctl pg status`
+shows what each group is waiting for.
+
 ### When the controller does not fail over
 
 `ziroctl pg status shop` ends each group with lines starting `!` that say why it is not healthy: a paused
