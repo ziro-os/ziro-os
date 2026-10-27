@@ -99,7 +99,10 @@ ziroctl docker-api disable
 
 Anyone who can use this socket is root on the host, so it is off by default, readable by root only, and never
 mounted into apps, stacks, sandboxes or cluster replicas. Every call that changes something is written to the audit
-log (`ziroctl audit`).
+log (`ziroctl audit`) with the user and process id the kernel recorded for the connection (`uid:0 pid:1234`).
+
+The same switch is in the API: `GET /api/v1/docker-api` (any token) says whether the socket is enabled and answering,
+and `POST /api/v1/docker-api/enable` and `/disable` (admin) turn it on and off.
 
 Supported calls: `_ping`, `version`, `info` and `events`; containers (list, inspect, create, start, stop, restart,
 kill, remove and logs); images (list, inspect and pull); volumes (list, inspect, create and remove, local driver);
