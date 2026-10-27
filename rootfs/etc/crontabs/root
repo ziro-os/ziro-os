@@ -6,3 +6,5 @@
 17 4 * * * /usr/bin/ziroctl dns blocklist update >/dev/null 2>&1
 # Check for a newer ziroctl/ziropkg (shown at login); installs only with {"auto": true} in /etc/ziro/update.json
 43 3 * * * /usr/bin/ziroctl update --cron >/dev/null 2>&1
+# Back up the host state every night (encrypted with /etc/ziro/backup.key); keep the newest 7. Failures are in the audit log.
+27 2 * * * /usr/bin/ziroctl backup create --auto --keep 7 >/dev/null 2>&1

@@ -306,6 +306,49 @@ def docker_api_checks(con, check):
     con.run("ziroctl docker-api disable >/dev/null 2>&1; nerdctl rm -f dk-web dk-ev >/dev/null 2>&1", timeout=60)
 
 
+def backup_checks(con, check):
+    """Backup and restore end to end, starting from a host that has no /var/backups/ziro (a fresh install)."""
+    rc, out = con.run("rm -rf /var/backups/ziro /etc/ziro/backup.key; "
+                      "ziroctl backup create --output /var/backups/ziro/ziro-backup-preupgrade-1.0.0-smoke.tar.gz 2>&1 | tail -4; "
+                      "ls /var/backups/ziro; ls -l /etc/ziro/backup.key | cut -c1-10", timeout=300)
+    check("backup into a missing /var/backups/ziro (the fresh-install upgrade path), key made 0600",
+          "preupgrade-1.0.0-smoke.tar.gz.enc" in out and ".sha256" in out and "-rw-------" in out, out)
+    con.run("mkdir -p /var/lib/ziro/gateway/certs /var/lib/ziro/volumes /var/lib/ziro/upgrade /var/lib/ziro/apps/db/0 /var/lib/ziro/sandbox/s1 /var/lib/ziro/tailscale; "
+            "echo APP > /var/lib/ziro/apps/db/0/data; echo SBX > /var/lib/ziro/sandbox/s1/f; echo TSKEY > /var/lib/ziro/tailscale/node.key; echo CERT-A > /var/lib/ziro/gateway/certs/t.pem; "
+            "echo VOL > /var/lib/ziro/volumes/v; echo IMG > /var/lib/ziro/upgrade/i; echo '{\"k\":1}' > /etc/ziro/zz-backup-test.json", timeout=60)
+    rc, out = con.run("ziroctl backup create 2>&1 | tail -3; ziroctl backup list", timeout=300)
+    name = re.search(r"(ziro-backup-\d{8}-\d{6}\.tar\.gz\.enc)", out)
+    check("backup create: encrypted archive with checksum, listed", name is not None and "true" in out, out)
+    if not name:
+        return
+    arc = name.group(1)
+    rc, out = con.run(f"ziroctl backup verify {arc} 2>&1 | tail -2", timeout=300)
+    check("backup verify: checksum, allowlist and every tag", "every checksum and tag verified" in out, out)
+    con.run("head -c32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > /tmp/wrong.key; echo >> /tmp/wrong.key", timeout=30)
+    rc, out = con.run(f"grep -c CERT-A /var/backups/ziro/{arc}; ziroctl backup verify {arc} --key-file /tmp/wrong.key 2>&1 | tail -1", timeout=120)
+    check("an encrypted archive shows no contents, and a wrong key is refused", out.split()[0] == "0" and "key is wrong" in out, out)
+    con.run("echo CERT-B > /var/lib/ziro/gateway/certs/t.pem; rm -f /etc/ziro/zz-backup-test.json; echo NEW > /etc/ziro/zz-new.json", timeout=60)
+    rc, out = con.run(f"ziroctl backup restore {arc} --dry-run > /tmp/dry.txt 2>&1; grep -c 'gateway/certs/t.pem' /tmp/dry.txt; "
+                      "grep -c 'zz-backup-test.json' /tmp/dry.txt; grep -cE 'lib/ziro/(volumes|apps|sandbox|upgrade|tailscale)|backup.key' /tmp/dry.txt; "
+                      "cat /var/lib/ziro/gateway/certs/t.pem", timeout=300)
+    check("restore --dry-run lists state, lists none of volumes, app data, sandboxes, upgrade staging, node or backup keys; changes nothing",
+          out.split()[:3] == ["1", "1", "0"] and "CERT-B" in out, out)
+    rc, out = con.run(f"cp /var/backups/ziro/{arc}.sha256 /tmp/sum.bak; echo 0000 > /var/backups/ziro/{arc}.sha256; "
+                      f"ziroctl backup restore {arc} >/dev/null 2>&1; echo RC=$?; cp /tmp/sum.bak /var/backups/ziro/{arc}.sha256; "
+                      "cat /var/lib/ziro/gateway/certs/t.pem", timeout=300)
+    check("a checksum mismatch makes restore fail (exit 1) and change nothing", "RC=1" in out and "CERT-B" in out, out)
+    rc, out = con.run(f"ziroctl backup restore {arc} 2>&1 | tail -4; echo RC=$?; cat /var/lib/ziro/gateway/certs/t.pem; cat /etc/ziro/zz-backup-test.json; "
+                      "ls /etc/ziro/zz-new.json 2>&1 | tail -1; ls /var/backups/ziro | grep -c prerestore; ls /var/lib/ziro/volumes /var/lib/ziro/upgrade", timeout=600)
+    check("restore: files back as saved, snapshot of the state before it, bulk dirs untouched",
+          "RC=0" in out and "CERT-A" in out and '"k":1' in out and "zz-new.json" in out and re.search(r"^[1-9]\s*$", out, re.M) is not None, out)
+    rc, out = con.run("ls /var/log/ziro/audit.log >/dev/null && ziroctl audit verify 2>&1 | tail -1", timeout=60)
+    check("the audit log survives a restore and still verifies", rc == 0, out)
+    rc, out = con.run("for i in 1 2 3; do ziroctl backup create --auto --no-secrets >/dev/null 2>&1; sleep 1; done; "
+                      "ziroctl backup prune --keep 1 --keep-safety 1 | tail -1; ls /var/backups/ziro | grep -v sha256 | wc -l", timeout=300)
+    check("backup prune --keep 1 --keep-safety 1 leaves one regular and one safety archive per kind", out.split()[-1].isdigit() and int(out.split()[-1]) <= 3, out)
+    con.run("rm -f /etc/ziro/zz-backup-test.json /etc/ziro/zz-new.json; rm -rf /var/lib/ziro/gateway/certs/t.pem /var/lib/ziro/volumes /var/lib/ziro/upgrade /var/lib/ziro/apps/db /var/lib/ziro/sandbox/s1 /var/lib/ziro/tailscale", timeout=60)
+
+
 def sandbox_checks(con, check):
     rc, out = con.run("ziroctl module enable sandbox 2>&1 | tail -2", timeout=900)
     check("module enable sandbox: gVisor runsc + ziro-sandboxd", "Module sandbox enabled" in out, out)
@@ -422,6 +465,7 @@ def main():
     ap.add_argument("--installed", action="store_true", help="also install to a disk and boot it (tiny initramfs)")
     ap.add_argument("--modules", action="store_true", help="also test the clamav module (downloads ~250 MB of signatures)")
     ap.add_argument("--sandbox", action="store_true", help="also test the sandbox module (gVisor, downloads ~170 MB)")
+    ap.add_argument("--backup", action="store_true", help="also test backup, verify, restore and retention from a host without /var/backups/ziro")
     ap.add_argument("--docker-api", action="store_true", help="also test the Docker API socket and Coolify's docker commands")
     ap.add_argument("--apps", action="store_true",
                     help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
@@ -875,6 +919,8 @@ def main():
             check("module disable clamav", "Module clamav disabled" in out, out)
         if args.sandbox and not args.no_pull:
             sandbox_checks(con, check)
+        if args.backup:
+            backup_checks(con, check)
         if args.docker_api and not args.no_pull:
             docker_api_checks(con, check)
         if args.apps:

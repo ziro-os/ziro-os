@@ -133,7 +133,7 @@ func TestValidateBackupArchive(t *testing.T) {
 	}
 
 	bad := map[string][]*tar.Header{
-		"outside allowlist": {{Name: "etc/shadow", Typeflag: tar.TypeReg}},
+		"outside allowlist": {{Name: "root/.ssh/authorized_keys", Typeflag: tar.TypeReg}},
 		"traversal":         {{Name: "etc/ziro/../../root/.ssh/authorized_keys", Typeflag: tar.TypeReg}},
 		"through symlink": {
 			{Name: "etc/ziro/l", Typeflag: tar.TypeSymlink, Linkname: "/root/.ssh"},

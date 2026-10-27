@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -359,10 +360,15 @@ func TestTailscaleAllowSpec(t *testing.T) {
 }
 
 func TestTailscaleStateIsNeverBackedUp(t *testing.T) {
+	// /var/lib/ziro is backed up as a whole, so the node key directory inside it must be excluded.
 	for _, p := range backupPaths {
-		if strings.HasPrefix(tsStateDir, p) {
-			t.Errorf("backup path %s includes the node key directory %s", p, tsStateDir)
+		if strings.HasPrefix(tsStateDir, p) && !slices.Contains(backupAlwaysExcludes(), strings.TrimPrefix(tsStateDir, "/")) {
+			t.Errorf("backup path %s includes the node key directory %s and it is not excluded", p, tsStateDir)
 		}
+	}
+	// and no flag brings it back: the always-excludes apply with --include-volumes too
+	if !slices.Contains(backupAlwaysExcludes(), "var/lib/ziro/tailscale") {
+		t.Error("tailscale state is not in the always-excluded set")
 	}
 }
 
