@@ -1,0 +1,11 @@
+#!/bin/sh
+# docker is nerdctl. Version output, "network" and "compose" go through ziroctl, which prints the
+# Docker-shaped version output tools such as Coolify parse and drops the Docker-only flags nerdctl
+# rejects (--attachable, compose up --wait, compose pull --ignore-buildable) before running nerdctl.
+# Everything else goes to nerdctl untouched.
+case "$1" in
+version | --version | -v | compose | network)
+    exec /usr/bin/ziroctl docker-compat "$@"
+    ;;
+esac
+exec /usr/bin/nerdctl "$@"

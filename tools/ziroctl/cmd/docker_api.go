@@ -175,8 +175,8 @@ func dockerArch() string {
 func (d *dockerAPI) version(w http.ResponseWriter, r *http.Request) {
 	dockerJSON(w, map[string]any{
 		"Platform":      map[string]string{"Name": "Ziro OS"},
-		"Components":    []map[string]any{{"Name": "Engine", "Version": Version, "Details": map[string]string{"ApiVersion": dockerAPIVersion, "MinAPIVersion": dockerMinVersion, "Os": "linux", "Arch": runtime.GOARCH}}},
-		"Version":       Version,
+		"Components":    []map[string]any{{"Name": "Engine", "Version": dockerCompatVersion, "Details": map[string]string{"ApiVersion": dockerAPIVersion, "MinAPIVersion": dockerMinVersion, "Os": "linux", "Arch": runtime.GOARCH}}},
+		"Version":       dockerCompatVersion,
 		"ApiVersion":    dockerAPIVersion,
 		"MinAPIVersion": dockerMinVersion,
 		"GoVersion":     runtime.Version(),
@@ -325,7 +325,7 @@ func (d *dockerAPI) info(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
 	dockerJSON(w, map[string]any{
 		"ID": host, "Containers": len(list), "ContainersRunning": running, "ContainersPaused": 0,
-		"ContainersStopped": len(list) - running, "Driver": "overlayfs", "Name": host, "ServerVersion": Version,
+		"ContainersStopped": len(list) - running, "Driver": "overlayfs", "Name": host, "ServerVersion": dockerCompatVersion,
 		"OperatingSystem": "Ziro OS", "OSType": "linux", "Architecture": dockerArch(), "NCPU": runtime.NumCPU(),
 		"MemTotal": int64(inspectSystem().TotalMemMB) << 20, "DockerRootDir": "/var/lib/containerd",
 	})

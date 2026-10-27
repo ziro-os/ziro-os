@@ -429,8 +429,9 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         cp -r /rootfs/usr/libexec/cni/* /rootfs/opt/cni/bin/ 2>/dev/null || true
     fi
 
-    # Docker & Podman CLI compatibility symlinks
-    ln -sf nerdctl /rootfs/usr/bin/docker
+    # Docker & Podman CLI compatibility. docker is a wrapper from rootfs/usr/bin (nerdctl, plus the
+    # version output Docker tools parse); only a build without it falls back to a plain link.
+    [ -e /rootfs/usr/bin/docker ] || ln -sf nerdctl /rootfs/usr/bin/docker
     ln -sf nerdctl /rootfs/usr/bin/podman
     if [ -f /rootfs/usr/bin/runc ]; then
         ln -sf /usr/bin/runc /rootfs/bin/runc
