@@ -17,11 +17,12 @@ import (
 )
 
 type fakeDocker struct {
-	mu    sync.Mutex
-	out   map[string]string // joined args -> stdout
-	err   map[string]error
-	calls []string
-	logs  []string // audit entries "action|target|ok"
+	mu     sync.Mutex
+	out    map[string]string // joined args -> stdout
+	err    map[string]error
+	calls  []string
+	logs   []string // audit entries "action|target|ok"
+	actors []string // who each audit entry names
 }
 
 func (f *fakeDocker) api() *dockerAPI {
@@ -36,9 +37,10 @@ func (f *fakeDocker) api() *dockerAPI {
 			}
 			return []byte(f.out[k]), nil
 		},
-		audit: func(action, target string, err error) {
+		audit: func(actor, action, target string, err error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
+			f.actors = append(f.actors, actor)
 			f.logs = append(f.logs, action+"|"+target+"|"+map[bool]string{true: "ok", false: "err"}[err == nil])
 		},
 	}
@@ -213,7 +215,7 @@ func TestDockerAPIEventsStream(t *testing.T) {
 	t.Cleanup(func() { dockerEventPoll = old })
 	var mu sync.Mutex
 	running, gone := false, false
-	d := &dockerAPI{audit: func(string, string, error) {}, run: func(_ context.Context, args ...string) ([]byte, error) {
+	d := &dockerAPI{audit: func(string, string, string, error) {}, run: func(_ context.Context, args ...string) ([]byte, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if gone {

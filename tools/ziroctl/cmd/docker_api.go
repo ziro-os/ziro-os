@@ -68,12 +68,15 @@ func dockerNerdctl(ctx context.Context, args ...string) ([]byte, error) {
 type dockerAPI struct {
 	run    nerdctlFunc
 	stream streamFunc
-	audit  func(action, target string, err error)
+	audit  func(actor, action, target string, err error)
 }
 
+// dockerPeerKey carries the peer of a connection (its uid and pid) from the listener to the audit entry.
+type dockerPeerKey struct{}
+
 func newDockerAPI() *dockerAPI {
-	return &dockerAPI{run: dockerNerdctl, stream: streamNerdctl, audit: func(action, target string, err error) {
-		_ = auditLog("root", "docker-api", action, target, err)
+	return &dockerAPI{run: dockerNerdctl, stream: streamNerdctl, audit: func(actor, action, target string, err error) {
+		_ = auditLog(actor, "docker-api", action, target, err)
 	}}
 }
 
@@ -145,7 +148,11 @@ func (d *dockerAPI) handler() http.Handler {
 			if sw.code >= 400 {
 				err = fmt.Errorf("status %d", sw.code)
 			}
-			d.audit(r.Method+" "+r.URL.Path, sanitizeLabel(r.URL.RawQuery, 200), err)
+			actor := "docker-socket"
+			if peer, ok := r.Context().Value(dockerPeerKey{}).(string); ok {
+				actor = peer // the user and process that opened the connection (SO_PEERCRED)
+			}
+			d.audit(actor, r.Method+" "+r.URL.Path, sanitizeLabel(r.URL.RawQuery, 200), err)
 		}
 	})
 }
@@ -622,7 +629,13 @@ func serveDockerAPI(ctx context.Context, path string, d *dockerAPI) error {
 		}
 		defer os.Remove(dockerSockLink)
 	}
-	srv := &http.Server{Handler: d.handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: d.handler(), ReadHeaderTimeout: 10 * time.Second,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if uid, pid, ok := peerCred(c); ok {
+				return context.WithValue(ctx, dockerPeerKey{}, fmt.Sprintf("uid:%d pid:%d", uid, pid))
+			}
+			return ctx
+		}}
 	go func() {
 		<-ctx.Done()
 		sh, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -660,6 +673,43 @@ var dockerAPIServeCmd = &cobra.Command{
 	},
 }
 
+// dockerAPIEnable turns the socket service on and starts it; dockerAPIDisable undoes it. The CLI and the
+// REST route share them; each audits in its own way.
+func dockerAPIEnable() error {
+	if err := enableService(dockerService); err != nil {
+		return err
+	}
+	return startService(dockerService)
+}
+
+func dockerAPIDisable() error {
+	_ = stopService(dockerService)
+	err := disableService(dockerService)
+	_ = os.Remove(dockerSock)
+	_ = os.Remove(dockerSockLink)
+	return err
+}
+
+// dockerAPIEnabled reads the service's on/off switch in dir (enabledDir on a host).
+func dockerAPIEnabled(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, dockerService))
+	return err == nil && strings.TrimSpace(string(b)) == "enabled"
+}
+
+// dockerAPIState is whether the service is enabled and whether the socket answers.
+func dockerAPIState() (enabled, running bool) {
+	enabled = dockerAPIEnabled(enabledDir)
+	c := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", dockerSock)
+		}}}
+	if resp, err := c.Get("http://docker/_ping"); err == nil {
+		resp.Body.Close()
+		running = resp.StatusCode == http.StatusOK
+	}
+	return enabled, running
+}
+
 var dockerAPIEnableCmd = &cobra.Command{
 	Use:     "enable",
 	Short:   "Turn the Docker API socket on",
@@ -669,10 +719,7 @@ var dockerAPIEnableCmd = &cobra.Command{
 		if os.Geteuid() != 0 {
 			return errors.New("docker-api enable must run as root")
 		}
-		err := enableService(dockerService)
-		if err == nil {
-			err = startService(dockerService)
-		}
+		err := dockerAPIEnable()
 		_ = auditLog("root", "cli", "docker-api enable", dockerSock, err)
 		if err != nil {
 			return err
@@ -692,10 +739,7 @@ var dockerAPIDisableCmd = &cobra.Command{
 		if os.Geteuid() != 0 {
 			return errors.New("docker-api disable must run as root")
 		}
-		_ = stopService(dockerService)
-		err := disableService(dockerService)
-		_ = os.Remove(dockerSock)
-		_ = os.Remove(dockerSockLink)
+		err := dockerAPIDisable()
 		_ = auditLog("root", "cli", "docker-api disable", dockerSock, err)
 		if err != nil {
 			return err
@@ -710,16 +754,8 @@ var dockerAPIStatusCmd = &cobra.Command{
 	Example: `  ziroctl docker-api status`,
 	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", dockerSock)
-			}}}
-		up := false
-		if resp, err := c.Get("http://docker/_ping"); err == nil {
-			resp.Body.Close()
-			up = resp.StatusCode == http.StatusOK
-		}
-		return printResult(map[string]any{"socket": dockerSock, "running": up}, func() {
+		enabled, up := dockerAPIState()
+		return printResult(map[string]any{"socket": dockerSock, "enabled": enabled, "running": up}, func() {
 			if up {
 				fmt.Printf("running on %s\n", dockerSock)
 			} else {

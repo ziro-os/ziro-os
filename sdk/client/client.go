@@ -369,6 +369,23 @@ func (c *Client) PGAction(ctx context.Context, name, action string, body map[str
 	return out, c.Do(ctx, http.MethodPost, "/api/v1/pg/"+esc(name)+"/"+esc(action), body, &out)
 }
 
+// DockerAPIStatus reports whether the opt-in Docker Engine API socket is enabled and answering.
+func (c *Client) DockerAPIStatus(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.Get(ctx, "/api/v1/docker-api", &out)
+}
+
+// SetDockerAPI enables or disables the Docker Engine API socket (admin). Anyone who can use the socket
+// is root on the host.
+func (c *Client) SetDockerAPI(ctx context.Context, enable bool) (map[string]any, error) {
+	action := "disable"
+	if enable {
+		action = "enable"
+	}
+	var out map[string]any
+	return out, c.Do(ctx, http.MethodPost, "/api/v1/docker-api/"+action, nil, &out)
+}
+
 // RemovePGCluster removes a cluster; purge also deletes its data on every node and its credentials.
 func (c *Client) RemovePGCluster(ctx context.Context, name string, purge bool) (api.Message, error) {
 	var m api.Message

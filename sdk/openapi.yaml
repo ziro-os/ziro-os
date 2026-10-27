@@ -473,6 +473,22 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /api/v1/docker-api:
+    get:
+      x-ziro-role: viewer
+      tags: [host]
+      summary: Whether the opt-in Docker Engine API socket is enabled and answering
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/docker-api/{action}:
+    post:
+      x-ziro-role: admin
+      tags: [host]
+      summary: Enable or disable the Docker Engine API socket. Anyone who can use the socket is root on the host
+      parameters:
+        - { name: action, in: path, required: true, schema: { type: string, enum: [enable, disable] } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/nfs:
     get:
       x-ziro-role: viewer

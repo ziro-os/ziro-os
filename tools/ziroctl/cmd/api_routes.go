@@ -80,6 +80,7 @@ func apiRoutes() *apiRouter {
 	registerStackRoutes(a)
 	registerDeployRoutes(a)
 	registerSandboxRoutes(a)
+	registerDockerAPIRoutes(a)
 	return a
 }
 
