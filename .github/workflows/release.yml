@@ -127,12 +127,13 @@ jobs:
       - name: Build Multi-Architecture Rootfs & Initramfs
         run: make rootfs-all
 
-      - name: Build Bootable Hybrid ISO
-        run: ./images/iso/build-iso.sh x86_64
+      - name: Build Bootable Hybrid ISOs
+        run: |
+          for a in x86_64 arm64; do ./images/iso/build-iso.sh "$a"; done
 
       - name: Enforce image size goal (< 300 MB)
         run: |
-          for f in build/ziro-os-x86_64.iso build/ziro-initramfs-x86_64.cpio.gz build/ziro-initramfs-arm64.cpio.gz; do
+          for f in build/ziro-os-x86_64.iso build/ziro-os-arm64.iso build/ziro-initramfs-x86_64.cpio.gz build/ziro-initramfs-arm64.cpio.gz; do
             size=$(stat -c %s "$f")
             echo "$f: $((size / 1000000)) MB"
             [ "$size" -lt 300000000 ] || { echo "::error::$f exceeds the 300 MB image goal"; exit 1; }

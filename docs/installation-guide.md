@@ -6,7 +6,7 @@ To build the ISO yourself, see [building](building.md).
 
 ## 1. Get the ISO
 
-Download `ziro-os-x86_64.iso` (or `-custom.iso`, with the hardened kernel) and `SHA256SUMS` from the
+Download `ziro-os-x86_64.iso` or `ziro-os-arm64.iso` (arm64 boots by UEFI only), or the `-custom.iso` variant with the hardened kernel, and `SHA256SUMS` from the
 [latest release](https://github.com/ziro-os/ziro-os/releases/latest), then check it:
 
 ```sh
@@ -96,6 +96,6 @@ Next: run something ([containers](containers.md), [apps](apps.md), [deploy](depl
 
 | | Minimum | Recommended |
 |---|---|---|
-| CPU | 1 × x86_64 (the ISO); arm64 runs from the [images](cloud.md) | 2+ cores |
+| CPU | 1 × x86_64 or arm64 (see also the [cloud images](cloud.md)) | 2+ cores |
 | Memory | 512 MB | 2 GB+; some modules need more, e.g. ClamAV 2 GB |
 | Disk | 2 GB | 8 GB+ SSD |
