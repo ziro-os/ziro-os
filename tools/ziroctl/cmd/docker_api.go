@@ -66,9 +66,10 @@ func dockerNerdctl(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 type dockerAPI struct {
-	run    nerdctlFunc
-	stream streamFunc
-	audit  func(actor, action, target string, err error)
+	run     nerdctlFunc
+	stream  streamFunc
+	runProc dockerProc // nil: nerdctl; tests replace it (docker_api_build.go)
+	audit   func(actor, action, target string, err error)
 }
 
 // dockerPeerKey carries the peer of a connection (its uid and pid) from the listener to the audit entry.
@@ -113,7 +114,8 @@ type dockerStatusWriter struct {
 	code int
 }
 
-func (s *dockerStatusWriter) WriteHeader(c int) { s.code = c; s.ResponseWriter.WriteHeader(c) }
+func (s *dockerStatusWriter) WriteHeader(c int)           { s.code = c; s.ResponseWriter.WriteHeader(c) }
+func (s *dockerStatusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter } // for http.NewResponseController
 func (s *dockerStatusWriter) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -135,12 +137,20 @@ func (d *dockerAPI) handler() http.Handler {
 	mux.HandleFunc("GET /networks/{id}", d.networkInspect)
 	mux.HandleFunc("GET /events", d.events)
 	d.registerWrite(mux)
+	d.registerBuild(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		dockerError(w, http.StatusNotImplemented, fmt.Sprintf("ziro-dockerd: %s %s is not supported", r.Method, r.URL.Path))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = dockerVerRe.ReplaceAllString(r.URL.Path, "/") // clients prefix /v1.43
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		limit := int64(1 << 20)
+		switch {
+		case r.URL.Path == "/images/load":
+			limit = dockerLoadMax
+		case strings.HasSuffix(r.URL.Path, "/archive"):
+			limit = dockerArchiveMax
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		sw := &dockerStatusWriter{ResponseWriter: w, code: http.StatusOK}
 		mux.ServeHTTP(sw, r)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
