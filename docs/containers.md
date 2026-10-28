@@ -127,5 +127,6 @@ Docker host trip over:
   health checks; it prints a note saying so.
 - `docker run -d --rm` drops `--rm` (nerdctl refuses the two together) and prints a note: the container is not
   removed when it exits, so remove it with `docker rm -f`, as Coolify does for its helper container.
+- `docker run --init` and `init: true` in a compose file work: the image carries `tini`.
 - Everything else goes to nerdctl untouched. `docker build` and `docker compose build` need BuildKit, which Ziro OS
   does not ship.

@@ -398,7 +398,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
             --keys-dir /etc/apk/keys \
             --repositories-file /etc/apk/repositories \
             add --cache-dir "/out/apk-cache/$TARGET_ARCH" \
-            ca-certificates containerd containerd-ctr nerdctl runc cni-plugins \
+            ca-certificates containerd containerd-ctr nerdctl runc tini-static cni-plugins \
             iptables openssh-server openssh-client linux-pam \
             e2fsprogs e2fsprogs-extra dosfstools util-linux sfdisk parted curl git jq bash kmod wireguard-tools nftables $GRUB_PKGS; then
             ok=1
@@ -411,7 +411,7 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
         echo "FATAL: host packages failed to install" >&2
         exit 1
     fi
-    for bin in usr/bin/containerd usr/bin/nerdctl usr/bin/runc usr/sbin/nft usr/sbin/sshd usr/bin/wg usr/sbin/iptables \
+    for bin in usr/bin/containerd usr/bin/nerdctl usr/bin/runc sbin/tini-static usr/sbin/nft usr/sbin/sshd usr/bin/wg usr/sbin/iptables \
         usr/sbin/resize2fs; do
         if [ ! -x "/rootfs/$bin" ]; then
             echo "FATAL: /$bin missing from host rootfs" >&2
@@ -428,6 +428,10 @@ docker run --rm --platform "$DOCKER_PLATFORM" \
     if [ -d /rootfs/usr/libexec/cni ]; then
         cp -r /rootfs/usr/libexec/cni/* /rootfs/opt/cni/bin/ 2>/dev/null || true
     fi
+
+    # docker run --init (and init: true in a compose file) makes nerdctl look for an init binary named
+    # tini; without it the container does not start.
+    ln -sf /sbin/tini-static /rootfs/usr/bin/tini
 
     # Docker & Podman CLI compatibility. docker is a wrapper from rootfs/usr/bin (nerdctl, plus the
     # version output Docker tools parse); only a build without it falls back to a plain link.

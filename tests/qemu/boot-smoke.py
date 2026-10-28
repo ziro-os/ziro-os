@@ -297,6 +297,13 @@ def docker_api_checks(con, check):
                       f"nerdctl network ls | grep -c dk-net; {sock} -o /dev/null -w '%{{http_code}}' -X DELETE http://d/networks/dk-net; echo; "
                       "nerdctl network ls | grep -c dk-net", timeout=120)
     check("docker-api network create and remove", out.split() == ["201", "1", "204", "0"], out)
+    # HostConfig.Init (compose "init: true") needs the tini binary on the host.
+    ibody = '{"Image":"docker.io/library/busybox:1.36","Cmd":["sleep","3600"],"HostConfig":{"Init":true}}'
+    rc, out = con.run(f"{sock} -X POST {js} -d '{ibody}' 'http://d/containers/create?name=dk-init'; echo; "
+                      f"{sock} -w '%{{http_code}}' -X POST http://d/containers/dk-init/start; echo; sleep 3; "
+                      "nerdctl ps --format '{{.Names}} {{.Status}}' | grep dk-init", timeout=120)
+    check("docker-api container with Init:true starts (tini present)", "tini" not in out and "dk-init Up" in out, out)
+    con.run("nerdctl rm -f dk-init >/dev/null 2>&1", timeout=60)
     con.run("nerdctl rm -f dk-api >/dev/null 2>&1", timeout=60)
     # Coolify's Validate Server: Server.Version (>= 24) from `docker version --format json`, over a plain sh like SSH gives it.
     guest = r"""sh -c "docker version --format json" 2>/tmp/ver.err | jq -M -r '.Server.Version, ((.Server.Version | split(".")[0] | tonumber) >= 24)'; wc -c < /tmp/ver.err"""
