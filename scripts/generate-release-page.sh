@@ -52,7 +52,7 @@ asset_bytes() { printf '%s\n' "$ASSET_SIZES" | awk -v n="$1" '$1 == n { print $2
 fmt_mb() { awk -v b="$1" 'BEGIN { if (b < 1000000) printf "%.1f KB", b / 1000; else printf "%.1f MB", b / 1000000 }'; }
 
 # dl <asset>: download link with the real size, or a dash when the release does not
-# ship that file. "-" marks a combination that is never built (e.g. an arm64 ISO).
+# ship that file. "-" marks a combination that is never built.
 dl() {
     local name="$1" bytes label="Download"
     if [ "$name" = "-" ]; then printf '<span class="na" title="Not built">&mdash;</span>'; return 0; fi
@@ -86,9 +86,9 @@ sums_row() {
 }
 
 ARTIFACTS="$(group "Host OS &middot; Alpine kernel" "Default. linux-virt LTS, tuned for virtual machines." \
-    "$(row "ISO" "Live system and disk installer, UEFI and BIOS" ziro-os-x86_64.iso -)$(row "Host image" "initramfs for direct boot and <code>ziroctl upgrade</code>" ziro-initramfs-x86_64.cpio.gz ziro-initramfs-arm64.cpio.gz)$(row "Kernel" "vmlinuz for QEMU, Firecracker and Cloud Hypervisor" vmlinuz-x86_64 vmlinuz-arm64)")
+    "$(row "ISO" "Live system and disk installer, UEFI and BIOS" ziro-os-x86_64.iso ziro-os-arm64.iso)$(row "Host image" "initramfs for direct boot and <code>ziroctl upgrade</code>" ziro-initramfs-x86_64.cpio.gz ziro-initramfs-arm64.cpio.gz)$(row "Kernel" "vmlinuz for QEMU, Firecracker and Cloud Hypervisor" vmlinuz-x86_64 vmlinuz-arm64)")
 $(group "Host OS &middot; Ziro kernel" "kernel.org LTS with drivers for bare metal, KVM, Xen, Hyper-V, VMware, AWS Nitro and GCP." \
-    "$(row "ISO" "Live system and disk installer, UEFI and BIOS" ziro-os-x86_64-custom.iso -)$(row "Host image" "initramfs for direct boot and <code>ziroctl upgrade</code>" ziro-initramfs-x86_64-custom.cpio.gz ziro-initramfs-arm64-custom.cpio.gz)$(row "Kernel" "vmlinuz for QEMU, Firecracker and Cloud Hypervisor" vmlinuz-x86_64-custom vmlinuz-arm64-custom)$(row "Kernel config" "The .config this kernel was built from" kernel-config-x86_64-custom kernel-config-arm64-custom)")
+    "$(row "ISO" "Live system and disk installer, UEFI and BIOS" ziro-os-x86_64-custom.iso ziro-os-arm64-custom.iso)$(row "Host image" "initramfs for direct boot and <code>ziroctl upgrade</code>" ziro-initramfs-x86_64-custom.cpio.gz ziro-initramfs-arm64-custom.cpio.gz)$(row "Kernel" "vmlinuz for QEMU, Firecracker and Cloud Hypervisor" vmlinuz-x86_64-custom vmlinuz-arm64-custom)$(row "Kernel config" "The .config this kernel was built from" kernel-config-x86_64-custom kernel-config-arm64-custom)")
 $(group "Container base" "" \
     "$(row "Rootfs" "Minimal root filesystem for container images and microVMs" ziro-rootfs-x86_64.tar.gz ziro-rootfs-arm64.tar.gz)")
 $(group "Tools" "Static binaries, no dependencies." \
