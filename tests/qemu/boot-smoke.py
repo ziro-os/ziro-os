@@ -251,8 +251,16 @@ def coolify_build_checks(con, check):
     rc, out = con.run("rm -rf /var/run/docker.sock; ziroctl docker-api enable 2>&1 | tail -1; sleep 2; "
                       "nerdctl pull docker.io/coollabsio/coolify-helper:1.0.18 2>&1 | tail -1", timeout=900)
     check("coolify helper image pulled", "Docker API enabled" in out, out)
-    rc, out = con.run("mkdir -p /root/.docker/buildx /w && printf 'FROM busybox:1.36\\nRUN echo built-ok > /x\\n' > /w/Dockerfile && "
-                      "printf 'services:\\n  app:\\n    build: .\\n    init: true\\n' > /w/docker-compose.yml; "
+    compose = ("services:\n  app:\n    build: .\n    init: true\n    restart: unless-stopped\n    environment:\n      - A=b\n"
+               "    labels:\n      - coolify.managed=true\n    volumes:\n      - data:/data\n    networks:\n      - coolify\n"
+               "    healthcheck:\n      test: exit 0\n      interval: 5s\n"
+               "volumes:\n  data: {}\nnetworks:\n  coolify:\n    name: coolify\n    external: true\n")
+    dockerfile = "FROM busybox:1.36\nRUN echo built-ok > /x\nCMD sleep 3600\n"
+    # Both files travel as base64: no quoting to get wrong between Python, the console and the shell.
+    b64 = lambda t: base64.b64encode(t.encode()).decode()
+    rc, out = con.run("mkdir -p /root/.docker/buildx /w && "
+                      f"echo {b64(dockerfile)} | base64 -d > /w/Dockerfile && echo {b64(compose)} | base64 -d > /w/docker-compose.yml; "
+                      "nerdctl network create coolify >/dev/null 2>&1; "
                       "docker run -d --network host --name hlp -v /root/.docker/buildx:/root/.docker/buildx "
                       "-v /var/run/docker.sock:/var/run/docker.sock -v /w:/w docker.io/coollabsio/coolify-helper:1.0.18 sleep 3000 2>&1 | tail -1", timeout=120)
     check("coolify helper container started (docker run -d --rm style flags accepted)", len(out.strip()) >= 12, out)
@@ -260,6 +268,19 @@ def coolify_build_checks(con, check):
     check("docker compose build through the socket builds the image", "Image w-app Built" in out, out, limit=-900)
     rc, out = con.run("nerdctl run --rm w-app cat /x 2>&1 | tail -1", timeout=120)
     check("the built image is in the host's image store and runs", "built-ok" in out, out)
+    # What Coolify does next: start the application, look at it, and stop it again.
+    rc, out = con.run("timeout 300 docker exec hlp bash -c 'cd /w && docker compose -p wp up -d 2>&1 | tail -12'; echo RC=$?; "
+                      "nerdctl ps --format '{{.Names}} {{.Status}}' | grep wp-app", timeout=400)
+    check("docker compose up -d through the socket starts the application", "wp-app" in out and " Up" in out, out, limit=-1500)
+    rc, out = con.run("timeout 120 docker exec hlp bash -c 'cd /w && docker compose -p wp ps --format json 2>&1 | head -c 600; echo; "
+                      "docker ps --filter label=com.docker.compose.project=wp --format {{.Names}} 2>&1'", timeout=200)
+    check("compose ps and a label filter find the application, and only it", "wp-app" in out and "hlp" not in out.split("}")[-1], out, limit=-900)
+    rc, out = con.run("nerdctl exec wp-app-1 hostname; nerdctl exec hlp getent hosts app 2>&1 | head -1; "
+                      "nerdctl exec wp-app-1 cat /etc/hosts | grep -c ' app '", timeout=120)
+    check("the compose service name is the container's hostname, resolvable on its network", out.split()[0] == "app", out)
+    rc, out = con.run("timeout 300 docker exec hlp bash -c 'cd /w && docker compose -p wp down 2>&1 | tail -6'; echo RC=$?; "
+                      "nerdctl ps -a --format '{{.Names}}' | grep -c wp-app", timeout=400)
+    check("docker compose down removes it", out.split()[-1] == "0", out, limit=-900)
     con.run("nerdctl rm -f hlp buildx_buildkit_default >/dev/null 2>&1", timeout=120)
 
 

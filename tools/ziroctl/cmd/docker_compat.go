@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"text/template"
@@ -234,7 +235,7 @@ func translateDocker(args []string) (out, notes []string) {
 			}
 		}
 		return out, nil
-	case args[0] == "run" || (len(args) >= 2 && args[0] == "container" && args[1] == "run"):
+	case args[0] == "run" || args[0] == "create" || (len(args) >= 2 && args[0] == "container" && (args[1] == "run" || args[1] == "create")):
 		return translateRun(args)
 	case args[0] == "compose":
 		i := 1
@@ -278,14 +279,19 @@ var runValueFlags = map[string]bool{"--name": true, "--network": true, "--net": 
 	"--dns": true, "--log-driver": true, "--pull": true, "--health-cmd": true, "--health-interval": true, "--network-alias": true,
 	"--tmpfs": true, "--device": true, "--pid": true, "--shm-size": true, "--stop-signal": true, "--stop-timeout": true}
 
-// translateRun drops --rm from a detached run. Only the flags before the image are looked at, so a
-// "--rm" that belongs to the container's own command is kept.
+// translateRun adapts the flags of docker run and docker create that nerdctl lacks: --rm of a
+// detached run is dropped, and the first --network-alias becomes --hostname (nerdctl makes a hostname
+// resolvable on the container's network; see buildCreateArgs), the others are dropped. Only the flags
+// before the image are looked at, so the same text in the container's own command is kept.
 func translateRun(args []string) (out, notes []string) {
 	start := 1
 	if args[0] == "container" {
 		start = 2
 	}
+	run := args[start-1] == "run"
 	end, detached, rm := len(args), false, -1
+	var alias []int
+	hostname := false
 	for i := start; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -299,6 +305,18 @@ func translateRun(args []string) (out, notes []string) {
 		case a == "--rm" || a == "--rm=true":
 			rm = i
 			continue
+		case a == "--hostname" || a == "-h" || strings.HasPrefix(a, "--hostname="):
+			hostname = true
+			if !strings.Contains(a, "=") {
+				i++
+			}
+			continue
+		case a == "--network-alias" || strings.HasPrefix(a, "--network-alias="):
+			alias = append(alias, i)
+			if a == "--network-alias" {
+				i++
+			}
+			continue
 		case runValueFlags[a]:
 			i++
 			continue
@@ -307,11 +325,36 @@ func translateRun(args []string) (out, notes []string) {
 		}
 		break
 	}
-	if !detached || rm < 0 || rm >= end {
-		return args, nil
+	out = append([]string(nil), args...)
+	var drop []int
+	for n, i := range alias {
+		if i >= end {
+			continue
+		}
+		val := strings.TrimPrefix(out[i], "--network-alias=")
+		if out[i] == "--network-alias" {
+			val = out[i+1]
+			drop = append(drop, i+1)
+		}
+		if n == 0 && !hostname {
+			out[i] = "--hostname=" + val // a separate value token, if any, is already in drop
+		} else {
+			drop = append(drop, i)
+		}
 	}
-	out = append(append(out, args[:rm]...), args[rm+1:]...)
-	return out, []string{"--rm is not supported by nerdctl together with -d: the container is not removed when it exits"}
+	slices.SortFunc(drop, func(a, b int) int { return b - a })
+	for _, i := range drop {
+		out = slices.Delete(out, i, i+1)
+		if rm > i {
+			rm--
+		}
+		end--
+	}
+	if run && detached && rm >= 0 && rm < end {
+		out = append(out[:rm], out[rm+1:]...)
+		notes = append(notes, "--rm is not supported by nerdctl together with -d: the container is not removed when it exits")
+	}
+	return out, notes
 }
 
 // dockerCompat answers the commands the docker wrapper hands over: `version [--format F]`,

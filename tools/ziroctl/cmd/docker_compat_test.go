@@ -194,6 +194,7 @@ func TestDockerWrapperRouting(t *testing.T) {
 		{[]string{"compose", "-f", "a.yml", "up", "-d"}, "ZIROCTL: [docker-compat] [compose] [-f] [a.yml] [up] [-d]"},
 		{[]string{"network", "create", "x", "--attachable"}, "ZIROCTL: [docker-compat] [network] [create] [x] [--attachable]"},
 		{[]string{"run", "--rm", "-v", "/a:/b", "alpine", "sh", "-c", "echo hi"}, "ZIROCTL: [docker-compat] [run] [--rm] [-v] [/a:/b] [alpine] [sh] [-c] [echo hi]"},
+		{[]string{"create", "--name", "x", "alpine"}, "ZIROCTL: [docker-compat] [create] [--name] [x] [alpine]"},
 		{[]string{"ps", "-a", "--format", "{{json .}}"}, "NERDCTL: [ps] [-a] [--format] [{{json .}}]"},
 		{[]string{"container", "inspect", "--format", "{{json .}}", "abc"}, "NERDCTL: [container] [inspect] [--format] [{{json .}}] [abc]"},
 	} {
@@ -226,6 +227,14 @@ func TestTranslateDockerDropsOnlyWhatNerdctlRejects(t *testing.T) {
 		{"run -d img tool --rm", "run -d img tool --rm", 0},
 		{"run -d -e A=--rm img", "run -d -e A=--rm img", 0},
 		{"run -d img", "run -d img", 0},
+		// --network-alias: the first becomes the hostname (nerdctl has no alias), before the image only
+		{"run -d --network-alias web --network n img", "run -d --hostname=web --network n img", 0},
+		{"create --network-alias=web img", "create --hostname=web img", 0},
+		{"create --network-alias a --network-alias b img", "create --hostname=a img", 0},
+		{"create --hostname h --network-alias a img", "create --hostname h img", 0},
+		{"run -d --rm --network-alias a --network-alias b img", "run -d --hostname=a img", 1},
+		{"run img tool --network-alias x", "run img tool --network-alias x", 0},
+		{"create --rm img", "create --rm img", 0},
 		// compose: the subcommand is found behind the global flags and their values
 		{"compose -f a.yml pull --ignore-buildable", "compose -f a.yml pull", 0},
 		{"compose --env-file e -f a.yml --project-name p pull --ignore-buildable web", "compose --env-file e -f a.yml --project-name p pull web", 0},
