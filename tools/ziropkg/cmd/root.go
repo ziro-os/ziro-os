@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	Version = "1.0.33"
+	Version = "1.0.34"
 	verbose bool
 )
 
