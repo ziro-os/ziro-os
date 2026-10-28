@@ -598,7 +598,8 @@ func listenDockerSock(path string) (net.Listener, error) {
 }
 
 // linkDockerSock makes link (the path tools expect) lead to sock, unless both already name the same
-// directory. Only an existing symlink is replaced.
+// directory. An existing symlink is replaced, and so is a socket nobody listens on (what a daemon that
+// ran when /var/run was not /run, or that crashed, leaves behind); a live socket or any other file is not.
 func linkDockerSock(sock, link string) error {
 	a, errA := os.Stat(filepath.Dir(sock))
 	b, errB := os.Stat(filepath.Dir(link))
@@ -610,7 +611,13 @@ func linkDockerSock(sock, link string) error {
 	}
 	if fi, err := os.Lstat(link); err == nil {
 		if fi.Mode()&os.ModeSymlink == 0 {
-			return fmt.Errorf("%s exists and is not a symlink", link)
+			if fi.Mode()&os.ModeSocket == 0 {
+				return fmt.Errorf("%s exists and is not a symlink or a socket", link)
+			}
+			if c, err := net.DialTimeout("unix", link, time.Second); err == nil {
+				c.Close()
+				return fmt.Errorf("%s is a socket another process listens on", link)
+			}
 		}
 		_ = os.Remove(link)
 	}
