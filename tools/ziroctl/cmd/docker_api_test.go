@@ -328,10 +328,21 @@ func TestLinkDockerSock(t *testing.T) {
 	if got, _ := os.Readlink(link); got != sock {
 		t.Fatalf("link -> %q", got)
 	}
+	// An empty directory (a bind mount of the missing path) goes; one with content stays.
 	os.Remove(link)
-	os.WriteFile(link, nil, 0o600)
+	os.Mkdir(link, 0o755)
+	if err := linkDockerSock(sock, link); err != nil {
+		t.Fatalf("an empty directory was not replaced: %v", err)
+	}
+	os.Remove(link)
+	os.MkdirAll(filepath.Join(link, "x"), 0o755)
 	if err := linkDockerSock(sock, link); err == nil {
-		t.Fatal("replaced a regular file")
+		t.Fatal("removed a directory with content")
+	}
+	os.RemoveAll(link)
+	os.WriteFile(link, []byte("data"), 0o600)
+	if err := linkDockerSock(sock, link); err == nil {
+		t.Fatal("replaced a regular file with content")
 	}
 	// /var/run -> /run: nothing to do, and no link to itself
 	os.Remove(link)
