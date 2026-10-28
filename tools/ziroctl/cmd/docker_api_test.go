@@ -311,6 +311,23 @@ func TestLinkDockerSock(t *testing.T) {
 	if err := linkDockerSock(sock, link); err != nil { // a second start replaces its own link
 		t.Fatal(err)
 	}
+	// A socket nobody listens on (left by a crashed daemon) is replaced; a live one is not.
+	os.Remove(link)
+	ln, err := net.Listen("unix", link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := linkDockerSock(sock, link); err == nil {
+		t.Fatal("replaced a socket that is in use")
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if err := linkDockerSock(sock, link); err != nil {
+		t.Fatalf("a stale socket was not replaced: %v", err)
+	}
+	if got, _ := os.Readlink(link); got != sock {
+		t.Fatalf("link -> %q", got)
+	}
 	os.Remove(link)
 	os.WriteFile(link, nil, 0o600)
 	if err := linkDockerSock(sock, link); err == nil {
