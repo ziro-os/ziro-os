@@ -580,9 +580,13 @@ func (d *dockerAPI) events(w http.ResponseWriter, r *http.Request) {
 func listenDockerSock(path string) (net.Listener, error) {
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&os.ModeSocket == 0 {
-			return nil, fmt.Errorf("%s exists and is not a socket", path)
+			// An empty directory is what a container's bind mount leaves where no socket existed.
+			if !fi.IsDir() || os.Remove(path) != nil {
+				return nil, fmt.Errorf("%s exists and is not a socket", path)
+			}
+		} else {
+			_ = os.Remove(path)
 		}
-		_ = os.Remove(path)
 	}
 	old := syscall.Umask(0o177) // created 0600: no other user can connect before the chmod
 	ln, err := net.Listen("unix", path)
@@ -599,7 +603,8 @@ func listenDockerSock(path string) (net.Listener, error) {
 
 // linkDockerSock makes link (the path tools expect) lead to sock, unless both already name the same
 // directory. An existing symlink is replaced, and so is a socket nobody listens on (what a daemon that
-// ran when /var/run was not /run, or that crashed, leaves behind); a live socket or any other file is not.
+// ran when /var/run was not /run, or that crashed, leaves behind); an empty directory or file (a container's bind mount of the missing path makes one) is removed;
+// a live socket or anything else is not.
 func linkDockerSock(sock, link string) error {
 	a, errA := os.Stat(filepath.Dir(sock))
 	b, errB := os.Stat(filepath.Dir(link))
@@ -611,12 +616,25 @@ func linkDockerSock(sock, link string) error {
 	}
 	if fi, err := os.Lstat(link); err == nil {
 		if fi.Mode()&os.ModeSymlink == 0 {
-			if fi.Mode()&os.ModeSocket == 0 {
-				return fmt.Errorf("%s exists and is not a symlink or a socket", link)
+			switch {
+			case fi.IsDir() || fi.Mode().IsRegular():
+				// A container started with -v /var/run/docker.sock:... while no socket existed makes the
+				// runtime create a directory there. Only an empty one (or an empty file) is such debris;
+				// os.Remove refuses a directory that holds anything.
+				if fi.Mode().IsRegular() && fi.Size() > 0 {
+					return fmt.Errorf("%s is a file with content: move it away and retry", link)
+				}
+				if err := os.Remove(link); err != nil {
+					return fmt.Errorf("%s is a directory that is not empty: move it away and retry", link)
+				}
+			case fi.Mode()&os.ModeSocket == 0:
+				return fmt.Errorf("%s exists and is not a symlink, a socket or an empty directory", link)
 			}
-			if c, err := net.DialTimeout("unix", link, time.Second); err == nil {
-				c.Close()
-				return fmt.Errorf("%s is a socket another process listens on", link)
+			if fi.Mode()&os.ModeSocket != 0 {
+				if c, err := net.DialTimeout("unix", link, time.Second); err == nil {
+					c.Close()
+					return fmt.Errorf("%s is a socket another process listens on", link)
+				}
 			}
 		}
 		_ = os.Remove(link)
