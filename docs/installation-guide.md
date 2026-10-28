@@ -6,7 +6,8 @@ To build the ISO yourself, see [building](building.md).
 
 ## 1. Get the ISO
 
-Download `ziro-os-x86_64.iso` or `ziro-os-arm64.iso` (arm64 boots by UEFI only), or the `-custom.iso` variant with the hardened kernel, and `SHA256SUMS` from the
+Download `ziro-os-x86_64.iso` or `ziro-os-arm64.iso` (arm64 boots by UEFI only), or the `-custom.iso` variant with
+the hardened kernel, and `SHA256SUMS` from the
 [latest release](https://github.com/ziro-os/ziro-os/releases/latest), then check it:
 
 ```sh
