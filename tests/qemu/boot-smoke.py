@@ -244,6 +244,25 @@ def apps_checks(con, check):
     check("mysql-cluster: 3 members ONLINE (group replication over pod DNS)", ok, out)
 
 
+def coolify_build_checks(con, check):
+    """`docker compose build` as Coolify runs it: in its helper container, through the Docker socket.
+    buildx boots a moby/buildkit container with the docker-container driver (create, copy files in,
+    start, exec over a hijacked connection) and loads the finished image back."""
+    rc, out = con.run("rm -rf /var/run/docker.sock; ziroctl docker-api enable 2>&1 | tail -1; sleep 2; "
+                      "nerdctl pull docker.io/coollabsio/coolify-helper:1.0.18 2>&1 | tail -1", timeout=900)
+    check("coolify helper image pulled", "Docker API enabled" in out, out)
+    rc, out = con.run("mkdir -p /root/.docker/buildx /w && printf 'FROM busybox:1.36\\nRUN echo built-ok > /x\\n' > /w/Dockerfile && "
+                      "printf 'services:\\n  app:\\n    build: .\\n    init: true\\n' > /w/docker-compose.yml; "
+                      "docker run -d --network host --name hlp -v /root/.docker/buildx:/root/.docker/buildx "
+                      "-v /var/run/docker.sock:/var/run/docker.sock -v /w:/w docker.io/coollabsio/coolify-helper:1.0.18 sleep 3000 2>&1 | tail -1", timeout=120)
+    check("coolify helper container started (docker run -d --rm style flags accepted)", len(out.strip()) >= 12, out)
+    rc, out = con.run("timeout 600 docker exec hlp bash -c 'cd /w && DOCKER_BUILDKIT=1 docker compose build --pull 2>&1 | tail -6'; echo RC=$?", timeout=700)
+    check("docker compose build through the socket builds the image", "Image w-app Built" in out, out, limit=-900)
+    rc, out = con.run("nerdctl run --rm w-app cat /x 2>&1 | tail -1", timeout=120)
+    check("the built image is in the host's image store and runs", "built-ok" in out, out)
+    con.run("nerdctl rm -f hlp buildx_buildkit_default >/dev/null 2>&1", timeout=120)
+
+
 def docker_api_checks(con, check):
     """The opt-in Docker Engine API socket (RFC 0006), and the docker commands Coolify's validation runs."""
     sock = "curl -s --unix-socket /var/run/docker.sock"
@@ -272,9 +291,9 @@ def docker_api_checks(con, check):
                       "nerdctl ps -q | wc -l", timeout=60)
     check("docker-api stop: 204 and the container is stopped", out.split()[0] == "204" and out.split()[-1] == "0", out)
     rc, out = con.run(f"{sock} -o /dev/null -w '%{{http_code}}' -X DELETE http://d/containers/dk-web; echo; "
-                      f"{sock} -o /dev/null -w '%{{http_code}}' -X POST http://d/containers/dk-web/exec; echo; "
+                      f"{sock} -o /dev/null -w '%{{http_code}}' -X POST http://d/containers/dk-web/attach; echo; "
                       "grep -c 'POST /containers/dk-web/stop' /var/log/ziro/audit.log", timeout=60)
-    check("docker-api remove 204, exec 501, mutations audited", out.split() == ["204", "501", "1"], out)
+    check("docker-api remove 204, attach 501, mutations audited", out.split() == ["204", "501", "1"], out)
     # Phase 2: what a deploy tool does through the API: pull, create, start, read logs and inspect, volumes, networks.
     js = "-H 'Content-Type: application/json'"
     rc, out = con.run(f"{sock} -X POST 'http://d/images/create?fromImage=docker.io/library/busybox&tag=1.36' | tail -2", timeout=600)
@@ -573,6 +592,7 @@ def main():
     ap.add_argument("--nft-accel", action="store_true", help="also test the SYN proxy and the flow offload table against the kernel")
     ap.add_argument("--backup", action="store_true", help="also test backup, verify, restore and retention from a host without /var/backups/ziro")
     ap.add_argument("--docker-api", action="store_true", help="also test the Docker API socket and Coolify's docker commands")
+    ap.add_argument("--coolify-build", action="store_true", help="also run Coolify's helper image and build an image through docker compose build (downloads ~300 MB; the VM needs ZIRO_SMOKE_MEM=4096)")
     ap.add_argument("--apps", action="store_true",
                     help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
     args = ap.parse_args()
@@ -1031,6 +1051,8 @@ def main():
             backup_checks(con, check)
         if args.docker_api and not args.no_pull:
             docker_api_checks(con, check)
+        if args.coolify_build and not args.no_pull:
+            coolify_build_checks(con, check)
         if args.apps:
             apps_checks(con, check)
         # Logging out of a console clears it (screen + scrollback) before the next login prompt.

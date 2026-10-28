@@ -182,7 +182,11 @@ type dockerCreateBody struct {
 	OpenStdin    bool
 	ExposedPorts map[string]struct{}
 	HostConfig   struct {
-		Binds         []string
+		Binds  []string
+		Mounts []struct {
+			Type, Source, Target string
+			ReadOnly             bool
+		}
 		NetworkMode   string
 		PortBindings  map[string][]struct{ HostIp, HostPort string }
 		RestartPolicy struct {
@@ -334,7 +338,18 @@ func buildCreateArgs(name, platform string, b dockerCreateBody) ([]string, error
 	if hc.PublishAll {
 		args = append(args, "--publish-all")
 	}
-	for _, v := range hc.Binds {
+	binds := slices.Clone(hc.Binds)
+	for _, m := range hc.Mounts {
+		if (m.Type != "volume" && m.Type != "bind") || m.Source == "" || strings.Contains(m.Source+m.Target, ":") {
+			return nil, fmt.Errorf("unsupported mount")
+		}
+		v := m.Source + ":" + m.Target
+		if m.ReadOnly {
+			v += ":ro"
+		}
+		binds = append(binds, v)
+	}
+	for _, v := range binds {
 		parts := strings.Split(v, ":")
 		if len(parts) < 2 || len(parts) > 3 || !okText(v, 4096) || !strings.HasPrefix(parts[1], "/") ||
 			(!strings.HasPrefix(parts[0], "/") && !dockerIDRe.MatchString(parts[0])) {

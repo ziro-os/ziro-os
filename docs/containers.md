@@ -106,11 +106,14 @@ and `POST /api/v1/docker-api/enable` and `/disable` (admin) turn it on and off.
 
 Supported calls: `_ping`, `version`, `info` and `events`; containers (list, inspect, create, start, stop, restart,
 kill, remove and logs); images (list, inspect and pull); volumes (list, inspect, create and remove, local driver);
-networks (list, inspect, create and remove, bridge driver). Other calls, including exec, attach, build, stats and
-the registry auth header, answer `501` with the route in the message; pull private images with `docker login` on the
-host. Container create maps the common fields (image, command, entrypoint, environment, labels, ports, binds,
-networks and aliases, restart policy, memory, CPUs, capabilities, DNS, tmpfs, sysctls) and ignores the rest, such
-as health checks and devices. The design is RFC 0006 (`docs/design/rfcs`).
+networks (list, inspect, create and remove, bridge driver); and what `docker buildx` needs to build images: exec
+(create, start over a hijacked connection, inspect; no terminal), copying a tar into a container (`PUT
+/containers/{id}/archive`, regular files and directories only) and `POST /images/load`. Other calls, including
+attach, the classic `/build`, stats and the registry auth header, answer `501` with the route in the message; pull
+private images with `docker login` on the host. Container create maps the common fields (image, command,
+entrypoint, environment, labels, ports, binds and mounts, networks and aliases, restart policy, memory, CPUs,
+privileged, capabilities, DNS, tmpfs, sysctls) and ignores the rest, such as health checks and devices. The
+design is RFC 0006 (`docs/design/rfcs`).
 
 ## The docker command
 
@@ -128,5 +131,11 @@ Docker host trip over:
 - `docker run -d --rm` drops `--rm` (nerdctl refuses the two together) and prints a note: the container is not
   removed when it exits, so remove it with `docker rm -f`, as Coolify does for its helper container.
 - `docker run --init` and `init: true` in a compose file work: the image carries `tini`.
-- Everything else goes to nerdctl untouched. `docker build` and `docker compose build` need BuildKit, which Ziro OS
-  does not ship.
+- Everything else goes to nerdctl untouched. Ziro OS does not ship BuildKit, so `docker build` run on the host itself
+  does not work. A tool that talks to the [socket](#docker-api-socket), such as Coolify's helper container running
+  `docker compose build`, does: `docker buildx` starts its own `moby/buildkit` container (privileged, as in Docker),
+  builds in it and loads the image into the host's store. The first build pulls that image (about 100 MB).
+
+Because the socket gives exec and privileged containers, anyone who can use it is root on the host (it is root-only,
+off by default, and every call that changes something, including each exec and the command it runs, is in the audit
+log).

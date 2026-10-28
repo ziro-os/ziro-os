@@ -24,9 +24,9 @@ the host. Prerequisites that need no design (`git`, `jq`, `bash`, `ID_LIKE`) are
   `rootfs/etc/ziro/services/dockerd.conf` only when enabled. It listens on `/run/docker.sock`, mode 0660, owner
   `root:root`. `/var/run` must resolve to `/run` so the usual path works.
 - **Endpoints (v1).** `/_ping`, `/version`, `/info`, the containers family (list, inspect, create, start, stop,
-  restart, kill, remove, logs, exec create/start), networks (list, create, inspect, remove), volumes (list,
-  create, remove), images (list, pull, inspect) and `/events`. Anything else answers `501` with a message naming the
-  route, so a missing call is visible rather than silently wrong.
+  restart, kill, remove, logs, exec create/start/inspect, copy a tar in), networks (list, create, inspect, remove),
+  volumes (list, create, remove), images (list, pull, inspect, load) and `/events`. Anything else answers `501` with a
+  message naming the route, so a missing call is visible rather than silently wrong.
 - **Translation.** Each call runs the matching `nerdctl` command and maps its JSON to the Docker response shape.
   This is the smallest implementation and reuses CNI networking and containerd storage as they are. Speed is the
   cost: a call costs a process start. Move hot calls (list, inspect, events) to the containerd client once

@@ -227,12 +227,12 @@ func TestDockerAPIVolumesAndNetworks(t *testing.T) {
 	if r := do(h, "DELETE", "/networks/coolify"); r.Code != 204 || f.last() != "network rm coolify" {
 		t.Fatalf("network rm: %d %q", r.Code, f.last())
 	}
-	// every one of these is audited, and exec is still a clear 501
-	if r := post(h, "POST", "/containers/web/exec", `{}`); r.Code != 501 {
-		t.Fatalf("exec: %d", r.Code)
+	// every one of these is audited, and attach is still a clear 501
+	if r := post(h, "POST", "/containers/web/attach", `{}`); r.Code != 501 {
+		t.Fatalf("attach: %d", r.Code)
 	}
 	joined := strings.Join(f.logs, "\n")
-	for _, want := range []string{"DELETE /volumes/data|", "POST /networks/create|", "DELETE /networks/coolify|", "POST /containers/web/exec|"} {
+	for _, want := range []string{"DELETE /volumes/data|", "POST /networks/create|", "DELETE /networks/coolify|", "POST /containers/web/attach|"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("audit lacks %q:\n%s", want, joined)
 		}
