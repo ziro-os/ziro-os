@@ -104,6 +104,11 @@ log (`ziroctl audit`) with the user and process id the kernel recorded for the c
 The same switch is in the API: `GET /api/v1/docker-api` (any token) says whether the socket is enabled and answering,
 and `POST /api/v1/docker-api/enable` and `/disable` (admin) turn it on and off.
 
+The list calls (`containers/json`, `networks`, `volumes`) take the `filters` parameter in both JSON shapes Docker
+clients send: `status`, `label`, `name`, `id`, `ancestor` and `network` for containers, `name`, `id`, `label` and
+`driver` for networks, `name`, `label` and `driver` for volumes. A filter that is not listed answers `400` rather
+than being ignored, because answering with everything would make Compose treat unrelated containers as its own.
+
 Supported calls: `_ping`, `version`, `info` and `events`; containers (list, inspect, create, start, stop, restart,
 kill, remove and logs); images (list, inspect and pull); volumes (list, inspect, create and remove, local driver);
 networks (list, inspect, create and remove, bridge driver); and what `docker buildx` needs to build images: exec
@@ -130,6 +135,9 @@ Docker host trip over:
   health checks; it prints a note saying so.
 - `docker run -d --rm` drops `--rm` (nerdctl refuses the two together) and prints a note: the container is not
   removed when it exits, so remove it with `docker rm -f`, as Coolify does for its helper container.
+- `docker run --network-alias X` (and a Compose service name, which Docker clients send as an alias) sets the
+  container's hostname to `X` when none is given, because nerdctl has no network alias but makes a hostname
+  resolvable on the container's network. One alias per container works; further ones do not resolve.
 - `docker run --init` and `init: true` in a compose file work: the image carries `tini`.
 - Everything else goes to nerdctl untouched. Ziro OS does not ship BuildKit, so `docker build` run on the host itself
   does not work. A tool that talks to the [socket](#docker-api-socket), such as Coolify's helper container running

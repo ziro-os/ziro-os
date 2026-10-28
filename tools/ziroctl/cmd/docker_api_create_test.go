@@ -28,7 +28,7 @@ const createBody = `{"Image":"nginx:1","Cmd":["-g","daemon off;"],"Env":["A=1","
 
 func TestDockerAPIContainerCreate(t *testing.T) {
 	f := &fakeDocker{out: map[string]string{}}
-	want := "create --name=web --env=A=1 --env=B=two words --label=a=b --label=traefik.enable=true --network-alias=web --network=coolify " +
+	want := "create --name=web --env=A=1 --env=B=two words --label=a=b --label=traefik.enable=true --network=coolify " +
 		"--publish=0.0.0.0:8080:80/tcp --volume=data:/data --volume=/etc/x:/x:ro --restart=unless-stopped --memory=268435456 --cpus=0.500 " +
 		"--cap-add=NET_ADMIN -- nginx:1 -g daemon off;"
 	f.out[want] = "d0c0ffee\n"

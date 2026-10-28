@@ -299,32 +299,24 @@ func (d *dockerAPI) containers(w http.ResponseWriter, r *http.Request) {
 		d.fail(w, err)
 		return
 	}
-	var status []string
-	if f := q.Get("filters"); f != "" {
-		var m map[string][]string
-		if err := json.Unmarshal([]byte(f), &m); err != nil {
-			dockerError(w, http.StatusBadRequest, "invalid filters")
-			return
-		}
-		status = m["status"]
+	f, err := parseDockerFilters(q.Get("filters"), "status", "label", "name", "id", "ancestor", "network")
+	if err != nil {
+		dockerError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	out := []map[string]any{}
 	for _, c := range list {
-		if len(status) > 0 && !containsFold(status, c.State.Status) {
+		if !f.anyOf("status", func(v string) bool { return strings.EqualFold(v, c.State.Status) }) ||
+			!f.labels(c.Config.Labels) ||
+			!f.anyOf("name", nameMatch("/"+strings.TrimPrefix(c.Name, "/"))) ||
+			!f.anyOf("id", func(v string) bool { return strings.HasPrefix(c.ID, v) }) ||
+			!f.anyOf("ancestor", func(v string) bool { return v == c.Config.Image || v == c.Image || strings.HasPrefix(c.Image, v) }) ||
+			!f.anyOf("network", func(v string) bool { _, ok := c.NetworkSettings.Networks[v]; return ok }) {
 			continue
 		}
 		out = append(out, containerSummary(c))
 	}
 	dockerJSON(w, out)
-}
-
-func containsFold(list []string, s string) bool {
-	for _, x := range list {
-		if strings.EqualFold(x, s) {
-			return true
-		}
-	}
-	return false
 }
 
 func (d *dockerAPI) info(w http.ResponseWriter, r *http.Request) {
@@ -436,13 +428,38 @@ func (d *dockerAPI) networks(w http.ResponseWriter, r *http.Request) {
 		dockerJSON(w, []any{})
 		return
 	}
+	f, err := parseDockerFilters(r.URL.Query().Get("filters"), "name", "id", "label", "driver")
+	if err != nil {
+		dockerError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	raw, err := d.run(r.Context(), append([]string{"network", "inspect"}, names...)...)
 	if err != nil {
 		d.fail(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(raw)
+	var list []json.RawMessage
+	if err := json.Unmarshal(raw, &list); err != nil {
+		d.fail(w, fmt.Errorf("nerdctl network inspect: %v", err))
+		return
+	}
+	kept := []json.RawMessage{}
+	for _, item := range list {
+		var n struct {
+			Name, ID, Id, Driver string
+			Labels               map[string]string
+		}
+		_ = json.Unmarshal(item, &n)
+		id := n.Id
+		if id == "" {
+			id = n.ID
+		}
+		if f.anyOf("name", nameMatch(n.Name)) && f.anyOf("id", func(v string) bool { return strings.HasPrefix(id, v) }) &&
+			f.labels(n.Labels) && f.anyOf("driver", func(v string) bool { return v == n.Driver }) {
+			kept = append(kept, item)
+		}
+	}
+	dockerJSON(w, kept)
 }
 
 func (d *dockerAPI) networkInspect(w http.ResponseWriter, r *http.Request) {

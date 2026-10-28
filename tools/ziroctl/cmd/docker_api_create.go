@@ -282,6 +282,7 @@ func buildCreateArgs(name, platform string, b dockerCreateBody) ([]string, error
 		}
 		nets = append(nets, hc.NetworkMode)
 	}
+	var aliases []string
 	epNames := make([]string, 0, len(b.NetworkingConfig.EndpointsConfig))
 	for n := range b.NetworkingConfig.EndpointsConfig {
 		epNames = append(epNames, n)
@@ -298,10 +299,24 @@ func buildCreateArgs(name, platform string, b dockerCreateBody) ([]string, error
 			if !dockerHostRe.MatchString(a) {
 				return nil, fmt.Errorf("invalid network alias")
 			}
-			add("--network-alias", a)
+			aliases = append(aliases, a)
 		}
 	}
 	add("--network", nets...)
+	// nerdctl has no network alias. It does make a container's hostname resolvable by the others on its
+	// network, so the first alias that is not the container's own name becomes the hostname (Compose
+	// sends the service name as an alias, and other services reach it by that name).
+	//
+	// Known limitation: one alias per container; the others, and an alias when a hostname is set, are
+	// not reachable by name. Give the container a name that clients use, or set its hostname.
+	if b.Hostname == "" {
+		for _, a := range aliases {
+			if a != name && len(a) <= 63 && !strings.Contains(a, ".") {
+				args = append(args, "--hostname="+a)
+				break
+			}
+		}
+	}
 	// Ports.
 	pspecs := make([]string, 0, len(hc.PortBindings))
 	for p := range hc.PortBindings {
@@ -606,7 +621,26 @@ func (d *dockerAPI) volumes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	dockerJSON(w, map[string]any{"Volumes": list, "Warnings": []string{}})
+	f, err := parseDockerFilters(r.URL.Query().Get("filters"), "name", "label", "driver")
+	if err != nil {
+		dockerError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	kept := []json.RawMessage{}
+	for _, item := range list {
+		var v struct {
+			Name, Driver string
+			Labels       map[string]string
+		}
+		_ = json.Unmarshal(item, &v)
+		if v.Driver == "" {
+			v.Driver = "local"
+		}
+		if f.anyOf("name", nameMatch(v.Name)) && f.labels(v.Labels) && f.anyOf("driver", func(d string) bool { return d == v.Driver }) {
+			kept = append(kept, item)
+		}
+	}
+	dockerJSON(w, map[string]any{"Volumes": kept, "Warnings": []string{}})
 }
 
 func (d *dockerAPI) volumeInspect(w http.ResponseWriter, r *http.Request) {
