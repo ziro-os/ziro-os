@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -344,9 +343,15 @@ func (c *cancelOnErr) Write(p []byte) (int, error) {
 
 // ---- archive ----
 
-// extractDockerTar unpacks a tar stream into dir. Only regular files and directories are taken, and
-// every name must stay inside dir: the archive comes from a client of the socket.
+// extractDockerTar unpacks a tar stream into dir. Only regular files and directories are taken. The
+// archive comes from a client of the socket, so every name is cleaned and then resolved through an
+// os.Root on dir, which the kernel keeps inside it whatever the names or links say.
 func extractDockerTar(dir string, r io.Reader) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	tr := tar.NewReader(r)
 	var total int64
 	for {
@@ -357,24 +362,23 @@ func extractDockerTar(dir string, r io.Reader) error {
 		if err != nil {
 			return fmt.Errorf("invalid tar: %v", err)
 		}
-		name := path.Clean("/" + h.Name)
-		if name == "/" {
+		name := strings.TrimPrefix(path.Clean("/"+h.Name), "/")
+		if name == "" {
 			continue
 		}
-		dst := filepath.Join(dir, filepath.FromSlash(name))
 		switch h.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(dst, 0o755); err != nil {
+			if err := root.MkdirAll(name, 0o755); err != nil {
 				return err
 			}
 		case tar.TypeReg:
 			if total += h.Size; total > dockerArchiveMax {
 				return errors.New("archive too large")
 			}
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			if err := root.MkdirAll(path.Dir(name), 0o755); err != nil {
 				return err
 			}
-			f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(h.Mode&0o777))
+			f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(h.Mode&0o777))
 			if err != nil {
 				return err
 			}
