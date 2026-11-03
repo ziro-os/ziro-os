@@ -1,6 +1,6 @@
 module github.com/ziro-os/zirocd
 
-go 1.27.1
+go 1.27.3
 
 replace github.com/ziro-os/ziro-os/sdk => ../../sdk
 

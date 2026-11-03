@@ -3,7 +3,7 @@
 The build runs in Docker containers with pinned base images and produces `x86_64` (Intel/AMD) and `arm64` (Apple
 Silicon, ARM servers) artifacts.
 
-**You need:** Docker (Docker Desktop, Colima or OrbStack, with Buildx for multi-architecture images), Go 1.27.1 or
+**You need:** Docker (Docker Desktop, Colima or OrbStack, with Buildx for multi-architecture images), Go 1.27.3 or
 later, `make`, and
 QEMU for the boot tests. Everything else (Alpine packages, the kernel toolchain) runs inside containers.
 

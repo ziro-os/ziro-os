@@ -15,3 +15,35 @@ ignore:
           Registries are chosen by users, so destination CIDRs cannot be enumerated.
         expires: 2027-03-31T00:00:00.000Z
         created: 2026-09-30T00:00:00.000Z
+  'snyk:lic:golang:github.com:hashicorp:raft:MPL-2.0':
+    - '*':
+        reason: >-
+          MPL-2.0 is a file-level copyleft that is compatible with the project's MIT license: ziroctl
+          uses HashiCorp's Raft libraries unmodified, and their source stays available upstream. A change
+          to one of these files must be published under MPL-2.0 (community/CONTRIBUTING.md, Dependencies).
+        expires: 2027-11-03T00:00:00.000Z
+        created: 2026-11-03T00:00:00.000Z
+  'snyk:lic:golang:github.com:hashicorp:raft-boltdb:v2:MPL-2.0':
+    - '*':
+        reason: >-
+          MPL-2.0 is a file-level copyleft that is compatible with the project's MIT license: ziroctl
+          uses HashiCorp's Raft libraries unmodified, and their source stays available upstream. A change
+          to one of these files must be published under MPL-2.0 (community/CONTRIBUTING.md, Dependencies).
+        expires: 2027-11-03T00:00:00.000Z
+        created: 2026-11-03T00:00:00.000Z
+  'snyk:lic:golang:github.com:hashicorp:golang-lru:MPL-2.0':
+    - '*':
+        reason: >-
+          MPL-2.0 is a file-level copyleft that is compatible with the project's MIT license: ziroctl
+          uses HashiCorp's Raft libraries unmodified, and their source stays available upstream. A change
+          to one of these files must be published under MPL-2.0 (community/CONTRIBUTING.md, Dependencies).
+        expires: 2027-11-03T00:00:00.000Z
+        created: 2026-11-03T00:00:00.000Z
+  'snyk:lic:golang:github.com:hashicorp:go-immutable-radix:MPL-2.0':
+    - '*':
+        reason: >-
+          MPL-2.0 is a file-level copyleft that is compatible with the project's MIT license: ziroctl
+          uses HashiCorp's Raft libraries unmodified, and their source stays available upstream. A change
+          to one of these files must be published under MPL-2.0 (community/CONTRIBUTING.md, Dependencies).
+        expires: 2027-11-03T00:00:00.000Z
+        created: 2026-11-03T00:00:00.000Z

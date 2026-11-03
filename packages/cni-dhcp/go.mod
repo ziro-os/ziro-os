@@ -1,6 +1,6 @@
 module github.com/ziro-os/cni-dhcp-build
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/containernetworking/plugins v1.9.1

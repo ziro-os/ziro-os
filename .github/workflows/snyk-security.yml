@@ -99,16 +99,20 @@ jobs:
           IMAGE_TAG: ziro-os:${{ github.sha }}
         run: ./images/docker/build-docker.sh x86_64
 
+      # The image's Go binaries are tested against the same policy as the source (.snyk: accepted
+      # licenses, ignores with reasons); the container test reads it only when given.
       - name: Snyk Container test
         continue-on-error: true
         run: |
           snyk container test \
             ziro-os:${{ github.sha }} \
-            --file=images/docker/Dockerfile
+            --file=images/docker/Dockerfile \
+            --policy-path=.snyk
 
       - name: Snyk Container monitor
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           snyk container monitor \
             ziro-os:${{ github.sha }} \
-            --file=images/docker/Dockerfile
+            --file=images/docker/Dockerfile \
+            --policy-path=.snyk
