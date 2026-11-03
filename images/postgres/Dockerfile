@@ -9,7 +9,7 @@
 # binary is built with an old Go release that scanners flag for standard library CVEs. The binary is
 # deleted (a scanner still reports a file that a later layer only overwrites) and the script goes to
 # /usr/local/sbin, which comes first on PATH, so `gosu` finds it.
-ARG BASE=postgres
+ARG BASE=postgres:18.4-alpine3.22
 FROM ${BASE}
 COPY --chmod=0755 gosu.sh /usr/local/sbin/gosu
 RUN set -eux; \
