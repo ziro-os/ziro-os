@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -193,16 +194,80 @@ var dockerCompatCmd = &cobra.Command{
 			fmt.Print(out)
 			return nil
 		}
-		nargs, notes := translateDocker(args)
-		for _, n := range notes {
-			fmt.Fprintln(os.Stderr, "docker: note: "+n)
-		}
-		bin, err := exec.LookPath("nerdctl")
-		if err != nil {
-			return err
-		}
-		return syscall.Exec(bin, append([]string{"nerdctl"}, nargs...), os.Environ())
+		os.Exit(runDockerPlan(planDocker(args, time.Now)))
+		return nil
 	},
+}
+
+// runNerdctlOut runs nerdctl and returns its stdout; its stderr goes to ours.
+func runNerdctlOut(args ...string) ([]byte, error) {
+	c := exec.Command("nerdctl", args...)
+	c.Stderr = os.Stderr
+	return c.Output()
+}
+
+// runDockerPlan carries out a plan and returns the exit code. A plain rewrite replaces this process
+// with nerdctl, so signals, the terminal and the exit code are nerdctl's own.
+func runDockerPlan(p dockerPlan) int {
+	for _, n := range p.notes {
+		fmt.Fprintln(os.Stderr, "docker: note: "+n)
+	}
+	if p.native != nil {
+		if err := p.native(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error response from daemon: "+err.Error())
+			return 1
+		}
+		return 0
+	}
+	if p.before != nil {
+		if err := p.before(runNerdctlOut); err != nil {
+			fmt.Fprintln(os.Stderr, "docker: warning: "+err.Error())
+		}
+	}
+	bin, err := exec.LookPath("nerdctl")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "docker: "+err.Error())
+		return 127
+	}
+	if p.output == nil && !p.ignoreFailure && p.after == nil {
+		err := syscall.Exec(bin, append([]string{"nerdctl"}, p.args...), os.Environ())
+		fmt.Fprintln(os.Stderr, "docker: "+err.Error())
+		return 126
+	}
+	c := exec.Command(bin, p.args...)
+	c.Stdin, c.Stderr = os.Stdin, os.Stderr
+	var stdout bytes.Buffer
+	if p.output != nil {
+		c.Stdout = &stdout
+	} else {
+		c.Stdout = os.Stdout
+	}
+	err = c.Run()
+	code := 0
+	if err != nil {
+		code = 1
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+	}
+	if p.output != nil && stdout.Len() > 0 {
+		out, ferr := p.output(stdout.Bytes(), runNerdctlOut)
+		if ferr != nil {
+			fmt.Fprintln(os.Stderr, "docker: "+ferr.Error())
+			return 1
+		}
+		os.Stdout.Write(out)
+	}
+	if code == 0 && p.after != nil {
+		if err := p.after(runNerdctlOut); err != nil {
+			fmt.Fprintln(os.Stderr, "docker: warning: "+err.Error())
+		}
+	}
+	if code != 0 && p.ignoreFailure {
+		fmt.Fprintln(os.Stderr, "docker: warning: the pull failed (--ignore-pull-failures): continuing")
+		return 0
+	}
+	return code
 }
 
 func isDockerVersionCmd(args []string) bool {
@@ -214,10 +279,38 @@ func isDockerVersionCmd(args []string) bool {
 var composeValueFlags = map[string]bool{"-f": true, "--file": true, "-p": true, "--project-name": true, "--project-directory": true,
 	"--env-file": true, "--profile": true, "--parallel": true, "--ansi": true, "--progress": true}
 
+// composeSplit finds the compose subcommand behind the global flags: args is a docker command line
+// starting with "compose". sub is "" when there is none.
+func composeSplit(args []string) (globals []string, sub string, rest []string) {
+	i := 1
+	for i < len(args) && strings.HasPrefix(args[i], "-") {
+		if composeValueFlags[args[i]] {
+			i++ // its value
+		}
+		i++
+	}
+	if i >= len(args) {
+		return args, "", nil
+	}
+	return args[:i], args[i], args[i+1:]
+}
+
+// composeCreateFlags are the flags of `compose up` that `nerdctl compose create` also takes. createValue
+// are those with a separate value.
+var (
+	composeCreateFlags = map[string]bool{"--build": true, "--no-build": true, "--force-recreate": true, "--no-recreate": true, "--pull": true}
+	composeUpValue     = map[string]bool{"--pull": true, "--scale": true, "--wait-timeout": true, "-t": true, "--timeout": true, "--exit-code-from": true}
+)
+
 // translateDocker rewrites a docker command line for nerdctl and returns notes for the user. Only
-// flags nerdctl rejects are touched: "network create --attachable" (every nerdctl network is
-// attachable), "compose pull --ignore-buildable", "compose up --wait/--wait-timeout" and "--rm" of a
-// detached "run" (nerdctl refuses -d with --rm; Coolify's helper container uses both).
+// flags nerdctl rejects are touched:
+//   - "network create --attachable" (every nerdctl network is attachable);
+//   - "compose up --no-start" (Coolify, to connect networks before the start) becomes "compose create",
+//     which takes only --build, --no-build, --force-recreate, --no-recreate and --pull; the
+//     --remove-orphans it drops is done by the wrapper (see dockerPlan);
+//   - "compose up --wait/--wait-timeout", "compose pull --ignore-buildable/--ignore-pull-failures"
+//     (the wrapper keeps the second's meaning), "compose config --no-interpolate/--no-path-resolution";
+//   - "--rm" of a detached "run" (nerdctl refuses -d with --rm; Coolify's helper container uses both).
 //
 // Known limitation: nerdctl compose has no --wait, so `up --wait` returns once the containers are
 // started and does not wait for health checks; poll `docker ps` or the service's own check when
@@ -238,23 +331,23 @@ func translateDocker(args []string) (out, notes []string) {
 	case args[0] == "run" || args[0] == "create" || (len(args) >= 2 && args[0] == "container" && (args[1] == "run" || args[1] == "create")):
 		return translateRun(args)
 	case args[0] == "compose":
-		i := 1
-		for i < len(args) && strings.HasPrefix(args[i], "-") {
-			if composeValueFlags[args[i]] {
-				i++ // its value
-			}
-			i++
-		}
-		if i >= len(args) {
+		globals, sub, rest := composeSplit(args)
+		if sub == "" {
 			return args, nil
 		}
-		sub := args[i]
-		out = append(out, args[:i+1]...)
-		rest := args[i+1:]
+		if sub == "up" && slices.Contains(rest, "--no-start") {
+			return composeUpNoStart(globals, rest), nil
+		}
+		out = append(append(out, globals...), sub)
+		quiet := slices.Contains(rest, "-q") || slices.Contains(rest, "--quiet")
 		for j := 0; j < len(rest); j++ {
 			a := rest[j]
 			switch {
-			case sub == "pull" && a == "--ignore-buildable":
+			case sub == "pull" && (a == "--ignore-buildable" || a == "--ignore-pull-failures"):
+			case sub == "config" && (a == "--no-interpolate" || a == "--no-path-resolution"):
+				if !quiet {
+					notes = append(notes, a+" is not supported by nerdctl compose: the configuration is printed resolved")
+				}
 			case sub == "up" && a == "--wait":
 				notes = append(notes, "--wait is not supported by nerdctl compose: the containers are started, not waited for")
 			case sub == "up" && a == "--wait-timeout":
@@ -269,6 +362,199 @@ func translateDocker(args []string) (out, notes []string) {
 		return out, notes
 	}
 	return args, nil
+}
+
+// composeUpNoStart turns `compose up … --no-start` into `compose create` with the flags create takes.
+// Services named after the flags are kept.
+func composeUpNoStart(globals, rest []string) []string {
+	out := append(append([]string(nil), globals...), "create")
+	for j := 0; j < len(rest); j++ {
+		a := rest[j]
+		name, _, hasValue := strings.Cut(a, "=")
+		switch {
+		case a == "--":
+			return append(out, rest[j:]...)
+		case !strings.HasPrefix(a, "-"):
+			out = append(out, a) // a service
+		case composeCreateFlags[name]:
+			out = append(out, a)
+			if composeUpValue[name] && !hasValue && j+1 < len(rest) {
+				out = append(out, rest[j+1])
+				j++
+			}
+		case composeUpValue[name] && !hasValue:
+			j++ // a flag create does not take, and its value
+		}
+	}
+	return out
+}
+
+// dockerPlan is what the wrapper does with one docker command line besides running nerdctl.
+type dockerPlan struct {
+	args  []string // the nerdctl command line
+	notes []string
+	// before runs first (removing orphans for `up --no-start --remove-orphans`); its error is a warning.
+	before func(run nerdctlRunner) error
+	// ignoreFailure turns a failed command into a warning (compose pull --ignore-pull-failures).
+	ignoreFailure bool
+	// output, when set, rewrites nerdctl's stdout into Docker's shape.
+	output func(stdout []byte, run nerdctlRunner) ([]byte, error)
+	// native, when set, does the command in ziroctl instead of nerdctl (network connect/disconnect).
+	native func() error
+	// after runs when nerdctl succeeded (health checks for created compose containers); its error is a warning.
+	after func(run nerdctlRunner) error
+}
+
+// planDocker plans a docker command line: the rewrite of translateDocker, plus the steps nerdctl has
+// no flag for and the Docker-shaped output of ps, inspect and network inspect.
+func planDocker(args []string, now func() time.Time) dockerPlan {
+	nargs, notes := translateDocker(args)
+	p := dockerPlan{args: nargs, notes: notes}
+	sub, rest := args[0], args[1:]
+	if sub == "container" && len(args) >= 2 {
+		switch args[1] {
+		case "ls", "list", "ps":
+			sub, rest = "ps", args[2:]
+		case "inspect":
+			sub, rest = "inspect", args[2:]
+		}
+	}
+	switch {
+	case sub == "compose":
+		globals, csub, crest := composeSplit(args)
+		noStart := csub == "up" && slices.Contains(crest, "--no-start")
+		if noStart && slices.Contains(crest, "--remove-orphans") {
+			p.before = func(run nerdctlRunner) error { return removeComposeOrphans(globals[1:], run) }
+		}
+		if csub == "pull" && slices.Contains(crest, "--ignore-pull-failures") {
+			p.ignoreFailure = true
+		}
+		if noStart || csub == "create" {
+			p.after = func(run nerdctlRunner) error { return composeHealthLabels(globals[1:], run) }
+		}
+		if services, detached, wait, waitTimeout := composeUpFlags(crest); csub == "up" && !noStart && detached {
+			// up -d: in dependency order when a service waits for a healthy one, or with --wait
+			upArgs := nargs
+			p.notes = nil
+			p.native = func() error {
+				return composeUpNative(globals[1:], crest, upArgs, services, wait, waitTimeout, runNerdctlOut)
+			}
+		}
+	case sub == "ps":
+		r, format, ok := takeFormat(rest, false)
+		if !ok || format == "" || strings.HasPrefix(format, "table") || format == "wide" || slices.Contains(r, "-q") || slices.Contains(r, "--quiet") {
+			return p
+		}
+		p.args = append(append([]string{"ps"}, r...), "--format", psFormat)
+		p.output = func(b []byte, _ nerdctlRunner) ([]byte, error) { return formatPs(b, format, now()) }
+	case sub == "inspect":
+		r, format, _ := takeFormat(rest, true)
+		p.args = append([]string{"inspect"}, r...)
+		if args[0] == "container" {
+			p.args = append([]string{"container", "inspect"}, r...)
+		}
+		p.output = func(b []byte, _ nerdctlRunner) ([]byte, error) { return formatInspect(b, format) }
+	case sub == "network" && len(args) >= 2 && (args[1] == "connect" || args[1] == "disconnect"):
+		op, err := parseNetworkConnect(args[2:])
+		connect := args[1] == "connect"
+		p.native = func() error {
+			if err != nil {
+				return err
+			}
+			if connect {
+				return dockerNetworkConnect(context.Background(), op)
+			}
+			return dockerNetworkDisconnect(context.Background(), op)
+		}
+	case sub == "network" && len(args) >= 2 && args[1] == "inspect":
+		r, format, _ := takeFormat(args[2:], true)
+		p.args = append([]string{"network", "inspect"}, r...)
+		p.output = func(b []byte, run nerdctlRunner) ([]byte, error) { return formatNetworkInspect(b, format, run) }
+	}
+	return p
+}
+
+// composeProject is the compose project name, as Compose derives it: -p/--project-name, then
+// COMPOSE_PROJECT_NAME, then the name of the project directory (or of the first file's directory, or
+// the working directory), lowercased with characters outside [a-z0-9_-] removed.
+func composeProject(globals []string, getenv func(string) string, wd string) string {
+	var name, dir, file string
+	for i := 0; i < len(globals); i++ {
+		a := globals[i]
+		flag, val, hasVal := strings.Cut(a, "=")
+		if !hasVal && composeValueFlags[a] && i+1 < len(globals) {
+			val = globals[i+1]
+			i++
+		}
+		switch flag {
+		case "-p", "--project-name":
+			name = val
+		case "--project-directory":
+			dir = val
+		case "-f", "--file":
+			if file == "" {
+				file = val
+			}
+		}
+	}
+	if name == "" {
+		name = getenv("COMPOSE_PROJECT_NAME")
+	}
+	if name == "" {
+		switch {
+		case dir != "":
+			name = filepath.Base(dir)
+		case file != "" && file != "-":
+			name = filepath.Base(filepath.Dir(filepath.Join(wd, file)))
+		default:
+			name = filepath.Base(wd)
+		}
+	}
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// removeComposeOrphans does `up --remove-orphans` for the create path: containers of the project whose
+// service is no longer in the compose file are removed. globals are the compose flags (-f, -p, …).
+func removeComposeOrphans(globals []string, run nerdctlRunner) error {
+	wd, _ := os.Getwd()
+	project := composeProject(globals, os.Getenv, wd)
+	if project == "" {
+		return fmt.Errorf("--remove-orphans: the compose project name is unknown; no container was removed")
+	}
+	cfg, err := run(append(append([]string{"compose"}, globals...), "config", "--services")...)
+	if err != nil {
+		return fmt.Errorf("--remove-orphans: %v", err)
+	}
+	keep := map[string]bool{}
+	for _, s := range strings.Fields(string(cfg)) {
+		keep[s] = true
+	}
+	if len(keep) == 0 {
+		return fmt.Errorf("--remove-orphans: the compose file lists no services; no container was removed")
+	}
+	list, err := run("ps", "-a", "--filter", "label=com.docker.compose.project="+project,
+		"--format", `{{.ID}}{{"\t"}}{{.Label "com.docker.compose.service"}}`)
+	if err != nil {
+		return fmt.Errorf("--remove-orphans: %v", err)
+	}
+	var orphans []string
+	for _, line := range strings.Split(strings.TrimSpace(string(list)), "\n") {
+		id, svc, _ := strings.Cut(strings.TrimSpace(line), "\t")
+		if id != "" && svc != "" && !keep[svc] {
+			orphans = append(orphans, id)
+		}
+	}
+	if len(orphans) == 0 {
+		return nil
+	}
+	_, err = run(append([]string{"rm", "-f"}, orphans...)...)
+	return err
 }
 
 // runValueFlags are the `docker run` flags that take a separate value, to find where the image starts.

@@ -23,10 +23,13 @@ the host. Prerequisites that need no design (`git`, `jq`, `bash`, `ID_LIKE`) are
 - **Service.** `ziro-dockerd` is a mode of `ziroctl` (`ziroctl docker-api serve`), run by init from
   `rootfs/etc/ziro/services/dockerd.conf` only when enabled. It listens on `/run/docker.sock`, mode 0660, owner
   `root:root`. `/var/run` must resolve to `/run` so the usual path works.
-- **Endpoints (v1).** `/_ping`, `/version`, `/info`, the containers family (list, inspect, create, start, stop,
-  restart, kill, remove, logs, exec create/start/inspect, copy a tar in), networks (list, create, inspect, remove),
-  volumes (list, create, remove), images (list, pull, inspect, load) and `/events`. Anything else answers `501` with a
-  message naming the route, so a missing call is visible rather than silently wrong.
+- **Endpoints (v1).** `/_ping`, `/version`, `/info`, `/system/df`, the containers family (list, inspect, create,
+  start, stop, restart, kill, remove, rename, logs, stats, exec create/start/inspect, copy a tar in), networks (list,
+  create, inspect, remove, connect, disconnect), volumes (list, create, remove), images (list, pull, inspect, load)
+  and `/events`. Network connect and disconnect are not nerdctl commands: ziroctl changes the container's networks
+  in containerd (label and spec annotation, read by nerdctl's OCI hooks) and, for a running container, makes the
+  same CNI call and hosts entries the hook would. Stats are read from the container's cgroup v2 files. Anything
+  else answers `501` with a message naming the route, so a missing call is visible rather than silently wrong.
 - **Translation.** Each call runs the matching `nerdctl` command and maps its JSON to the Docker response shape.
   This is the smallest implementation and reuses CNI networking and containerd storage as they are. Speed is the
   cost: a call costs a process start. Move hot calls (list, inspect, events) to the containerd client once

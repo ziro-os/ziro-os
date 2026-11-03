@@ -32,7 +32,9 @@ may do. A host administrator can turn on the opt-in [Docker API socket](containe
 [`docker` command](containers.md#the-docker-command), whose version output passes Coolify's checks (Docker Engine 24
 or newer). The commands Coolify's server validation and image-based deployments run work on a test host; a complete
 Coolify install has not been validated, and deployments that build from git or a Dockerfile need BuildKit, which Ziro
-OS does not ship. To deploy your own code from git, see [`ziroctl deploy`](deploy.md).
+OS does not ship. Starting a service (`compose up --no-start`, `docker network connect`, then `compose start`),
+joining the proxy to a service's network, and deployments with a health check work. To deploy your own code from
+git, see [`ziroctl deploy`](deploy.md).
 
 ## Where apps run
 

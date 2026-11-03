@@ -378,6 +378,83 @@ docker network rm coolify >/dev/null 2>&1; echo RM=$?""")
     found = [x.strip() for x in re.findall(r"^[A-Z]+=\d+\s*$", out, re.M)][-7:]  # the console also echoes what was typed
     check("coolify deployment commands: network create --attachable, compose pull --ignore-buildable, up --wait, ps, network inspect, down",
           found == ["NET=0", "PULL=0", "UP=0", "PS=0", "INSPECT=0", "DOWN=0", "RM=0"], " ".join(found) or out[-300:])
+    # Coolify's StartService with "connect to docker network": create without starting, read the networks
+    # of a created container, start, then the ps/inspect fields its jobs read. Without the rewrite, nerdctl
+    # stops at "unknown flag: --no-start".
+    svc = (r"""mkdir -p /tmp/cs; touch /tmp/cs/.env; cat > /tmp/cs/docker-compose.yml <<'Y'
+services:
+  web:
+    image: docker.io/library/alpine:latest
+    command: sleep 600
+    container_name: web-cs1
+    networks: [cs1]
+  old:
+    image: docker.io/library/alpine:latest
+    command: sleep 600
+    container_name: old-cs1
+    networks: [cs1]
+networks:
+  cs1:
+    name: cs1
+    external: true
+Y
+C="docker compose --project-directory /tmp/cs -f /tmp/cs/docker-compose.yml --project-name cs1"
+docker network inspect cs1 >/dev/null 2>&1 || docker network create --attachable cs1 >/dev/null 2>&1; echo NET=$?
+$C up -d >/dev/null 2>&1; echo FIRST=$?
+sed -i '/^  old:/,/^    networks: \[cs1\]/d' /tmp/cs/docker-compose.yml
+$C up -d --remove-orphans --force-recreate --build --no-start < /dev/null >/dev/null 2>&1; echo NOSTART=$?
+docker ps -a --filter name=old-cs1 --format '{{.Names}}' | grep -c old-cs1; echo ORPHAN=$?
+docker container inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' web-cs1 | grep -qxF cs1; echo NETNAME=$?
+$C start < /dev/null >/dev/null 2>&1; echo START=$?
+docker ps --filter name=web-cs1 --format '{{.State}} {{.Networks}}'
+docker inspect --format '{{.Config.OpenStdin}}' web-cs1
+$C down >/dev/null 2>&1; docker network rm cs1 >/dev/null 2>&1; echo DOWN=$?""")
+    rc, out = con.run(svc, timeout=600)
+    found = re.findall(r"^(?:[A-Z]+=\d+|running cs1|false|\d)\s*$", out, re.M)
+    found = [x.strip() for x in found][-10:]
+    check("coolify StartService: up --no-start (create), --remove-orphans, network names in inspect, start, ps .State, .Config.OpenStdin",
+          found == ["NET=0", "FIRST=0", "NOSTART=0", "0", "ORPHAN=1", "NETNAME=0", "START=0", "running cs1", "false", "DOWN=0"],
+          " ".join(found) or out[-400:])
+    # docker network connect (nerdctl has none): a created container gets the network when it starts, a running
+    # one at once with a name the other containers resolve; disconnect gives the address back. Then a compose
+    # health check that turns healthy (nerdctl schedules checks with systemd, which Ziro OS has not).
+    net = (r"""docker network create nc-a >/dev/null 2>&1; docker network create nc-b >/dev/null 2>&1
+docker create --name nc-created --network nc-a docker.io/library/alpine:latest sleep 600 >/dev/null 2>&1
+docker network connect nc-b nc-created; echo CONNECT_CREATED=$?
+docker start nc-created >/dev/null 2>&1
+docker container inspect --format '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' nc-created | grep -c '^nc-'
+docker run -d --name nc-proxy --network nc-a docker.io/library/alpine:latest sleep 600 >/dev/null 2>&1
+L0=$(ls /var/lib/cni/networks/nc-b | grep -c '^[0-9]')
+docker network connect nc-b nc-proxy; echo CONNECT_RUNNING=$?
+docker exec nc-created getent hosts nc-proxy.nc-b >/dev/null; echo RESOLVE=$?
+docker network connect nc-b nc-proxy >/dev/null 2>&1; echo AGAIN=$?
+docker network disconnect nc-b nc-proxy; echo DISCONNECT=$?
+L1=$(ls /var/lib/cni/networks/nc-b | grep -c '^[0-9]'); [ "$L0" = "$L1" ]; echo LEASE=$?
+docker rm -f nc-created nc-proxy >/dev/null 2>&1; docker network rm nc-a nc-b >/dev/null 2>&1
+mkdir -p /tmp/hc; cat > /tmp/hc/docker-compose.yml <<'Y'
+services:
+  db:
+    image: docker.io/library/alpine:latest
+    command: sh -c 'sleep 3; touch /ready; sleep 600'
+    healthcheck:
+      test: ["CMD", "test", "-f", "/ready"]
+      interval: 2s
+      retries: 30
+  app:
+    image: docker.io/library/alpine:latest
+    command: sleep 600
+    depends_on:
+      db:
+        condition: service_healthy
+Y
+docker compose -f /tmp/hc/docker-compose.yml -p hc up -d --wait --wait-timeout 120 >/dev/null 2>&1; echo HEALTHY_UP=$?
+docker inspect --format '{{.State.Health.Status}}' hc-db-1
+docker compose -f /tmp/hc/docker-compose.yml -p hc down >/dev/null 2>&1""")
+    rc, out = con.run(net, timeout=600)
+    found = [x.strip() for x in re.findall(r"^(?:[A-Z_]+=\d+|\d|healthy|unhealthy|starting)\s*$", out, re.M)][-10:]
+    check("docker network connect/disconnect (created and running containers, name resolution, lease) and compose health checks",
+          found == ["CONNECT_CREATED=0", "2", "CONNECT_RUNNING=0", "RESOLVE=0", "AGAIN=1", "DISCONNECT=0", "LEASE=0", "HEALTHY_UP=0", "healthy"][-len(found):] and len(found) == 9,
+          " ".join(found) or out[-400:])
     rc, out = con.run("nerdctl run -d --name dk-co alpine sleep 600 >/dev/null 2>&1; sleep 1; "
                       "docker network create coolify --attachable >/dev/null 2>&1; echo NET=$?; docker network ls | grep -c coolify; "
                       "docker ps -a --format '{{json .}}' | jq -r .Names | grep -c dk-co; "
