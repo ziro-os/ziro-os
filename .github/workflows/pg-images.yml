@@ -67,7 +67,7 @@ jobs:
 
       - name: pgBackRest works with this Postgres
         run: |
-          docker run --rm ziro-postgres:scan sh -c 'pgbackrest version && postgres --version'
+          docker run --rm ziro-postgres:scan sh -c 'pgbackrest version && postgres --version && gosu postgres id'
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'

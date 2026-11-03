@@ -7,7 +7,7 @@
 # Backups: WAL archiving and a point-in-time restore into a new primary run through the entry script
 # with a stand-in for pgbackrest (tests/pg/pgbackrest-standin.sh: a directory for the repository, the
 # same command line and the same recovery settings). It needs root (it plays the container), the
-# PostgreSQL server binaries and util-linux's runuser, and it edits /etc/hosts for the test names
+# PostgreSQL server binaries and util-linux's runuser and setpriv, and it edits /etc/hosts for the test names
 # (removed on exit). Usage: tests/pg/entry-test.sh   (exit 0 = pass, 77 = skipped).
 set -eu
 
@@ -18,6 +18,7 @@ entry="$here/../../tools/ziroctl/cmd/pg_entry.sh"
 bindir=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 || true)
 [ -n "$bindir" ] && [ -x "$bindir/initdb" ] || { echo "skip: no PostgreSQL server binaries"; exit 77; }
 command -v runuser >/dev/null || { echo "skip: no runuser"; exit 77; }
+command -v setpriv >/dev/null || { echo "skip: no setpriv"; exit 77; }
 command -v openssl >/dev/null || { echo "skip: no openssl"; exit 77; }
 id postgres >/dev/null 2>&1 || { echo "skip: no postgres user"; exit 77; }
 major=$(basename "$(dirname "$bindir")")
@@ -25,13 +26,8 @@ major=$(basename "$(dirname "$bindir")")
 work=$(mktemp -d /tmp/ziro-pg-test.XXXXXX)
 chmod 755 "$work"
 mkdir "$work/bin"
-cat >"$work/bin/gosu" <<'SH'
-#!/bin/sh
-user=$1
-shift
-exec runuser -u "$user" -- "$@"
-SH
-chmod +x "$work/bin/gosu"
+# The Ziro Postgres image's gosu (images/postgres/gosu.sh), as the entry script runs it there.
+install -m 755 "$here/../../images/postgres/gosu.sh" "$work/bin/gosu"
 export PATH="$work/bin:$bindir:$PATH"
 
 # A cluster CA and a server certificate, as pg_tls.go makes them.
