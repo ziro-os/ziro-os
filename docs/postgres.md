@@ -30,6 +30,9 @@ The names follow the roles. After a failover they point at the new primary withi
 reconnect; no app is restarted or reconfigured. Use a driver that retries on connection errors, and for read
 traffic use the `-ro` name.
 
+Applications with many connections (or many replicas each holding a pool) should go through the
+[pooler](#connection-pooling) at `shop-pool.cluster.ziro` instead: database `app` for writes, `app_ro` for reads.
+
 To reach the database from outside the cluster, publish it through the [gateway](gateway.md):
 
 ```sh
@@ -57,8 +60,74 @@ Every replica has a physical replication slot on the primary, and `max_slot_wal_
 gone for good from filling the primary's disk. A replica that falls too far behind is rebuilt from a new base
 backup.
 
-Memory and CPU limits tune `shared_buffers`, `effective_cache_size`, `work_mem`, WAL sizes and the worker settings.
 Data checksums and `scram-sha-256` are on.
+
+## Performance
+
+Memory and CPU limits tune the members: `shared_buffers` (a quarter of memory), `effective_cache_size`, `work_mem`,
+`maintenance_work_mem`, parallel and autovacuum workers. Every cluster also gets:
+
+- `pg_stat_statements` and `auto_explain` (statements slower than 5 s are logged with their plan);
+  `create extension pg_stat_statements` in a database to query it;
+- `jit` off, WAL compressed with lz4, checkpoints every 15 minutes, autovacuum triggered earlier (5 % of a table)
+  and allowed more I/O, `idle_in_transaction_session_timeout` of 30 minutes (a forgotten open transaction stops
+  vacuum for every table);
+- on PostgreSQL 18, asynchronous I/O with a worker per CPU (`io_method = worker`).
+
+Settings a hot standby must have at least as high as its primary (`max_connections`, `max_worker_processes`) do not
+follow the limits, so resizing down never stops a replica.
+
+### Change parameters
+
+```sh
+ziroctl pg set shop work_mem=64MB statement_timeout=30s
+ziroctl pg set shop max_connections=400
+ziroctl pg set shop statement_timeout=
+```
+
+`pg set` takes a closed list of parameters, each checked by type and range (`ziroctl pg set --help` lists them).
+Parameters Postgres reloads take effect within a heartbeat on every member, without a restart. The others
+(`shared_buffers`, `max_connections`, ...) restart the members one at a time with the primary last after a
+switchover. `param=` puts a parameter back to its default. `max_connections`, `max_worker_processes` and
+`max_locks_per_transaction` can only grow. Replication, TLS and the standby list are not settable: the controller
+owns them.
+
+### Resize, upgrade, restart
+
+```sh
+ziroctl pg resize shop --memory 8Gi --cpus 4
+ziroctl pg upgrade shop --image docker.io/library/postgres:17.7@sha256:<digest>
+ziroctl pg restart shop
+```
+
+Each restarts the members one at a time, every member back and caught up before the next, with the primary last
+after a switchover: writes pause only for the switchover. `pg upgrade` takes an image of the same major version
+pinned by digest (minor versions, security rebuilds).
+
+## Connection pooling
+
+New clusters have PgBouncer in front of them, as two stateless replicas at `<name>-pool.cluster.ziro`:
+
+| Database | Goes to |
+| --- | --- |
+| `app` | the primary (`-rw`) |
+| `app_ro` | the replicas (`-ro`) |
+
+Transaction pooling lets thousands of client connections share a few dozen server connections, which keeps
+`max_connections` (and the memory each costs) small. The pooler follows failovers: it resolves the role-following
+names with a 5 s cache. It talks TLS to the members (`verify-ca`) and offers TLS to its clients, and it holds only
+the application user's password.
+
+```sh
+ziroctl pg pool shop --size 40            # server connections per database
+ziroctl pg pool shop --mode session       # for clients that rely on session state
+ziroctl pg pool shop --disable
+ziroctl pg create events --no-pooler
+```
+
+Transaction mode does not keep session state between transactions: session-level `SET`, advisory locks held across
+transactions and `LISTEN` need `--mode session` or a direct connection to `-rw`. `ziroctl pg credentials` prints
+the pooled connection strings.
 
 ## Failover
 
@@ -222,10 +291,18 @@ distinct values and appears in most queries (tenant, user or device id).
 
 `ziroctl pg status shop` lists the members with role, node, state, timeline, lag and recent events, and the reasons
 a group is not healthy. The master's
-`/metrics` has `ziro_pg_members`, `ziro_pg_primary`, `ziro_pg_epoch` and `ziro_pg_replication_lag_milliseconds` per
-cluster, group and member. Alerts of category `database` fire on a promotion, when no safe promotion exists, when
-a command to a member fails, when a switchover is aborted, when no node is free for another replica, and when a
-member's data volume is 80 % or 90 % full.
+`/metrics` has, per cluster, group and member:
+
+- roles: `ziro_pg_members`, `ziro_pg_primary`, `ziro_pg_epoch`;
+- replication: `ziro_pg_replication_lag_milliseconds`;
+- load: `ziro_pg_connections` and `ziro_pg_max_connections`, `ziro_pg_commits_total` (use `rate()` for
+  transactions per second);
+- health: `ziro_pg_xid_age` and `ziro_pg_disk_used_percent`.
+
+Alerts of category `database` fire on a promotion, when no safe promotion exists, when a command to a member
+fails, when a switchover is aborted, when no node is free for another replica, when a member's data volume is 80 %
+or 90 % full, when 90 % of the connections are in use, and when transaction ID wraparound gets near (the oldest
+unfrozen transaction is 1.5 billion transactions old).
 
 ## Security
 
@@ -251,7 +328,10 @@ ziroctl pg rm shop --purge --yes      # also deletes the data on every node and 
 
 ## Changes in behavior
 
-- `ziroctl pg create` makes two replicas by default (synchronous, no acknowledged write lost on failover).
+- `ziroctl pg create` makes two replicas by default (synchronous, no acknowledged write lost on failover), and a
+  pooler.
+- The members' tuning changed (`pg_stat_statements`, `auto_explain`, `jit` off, lz4 WAL compression,
+  `max_worker_processes` fixed at 32): existing clusters roll onto it once, one member at a time.
 - `pg expose` requires `--allow`, and `pg rm --purge` requires `--yes`.
 - The failover grace is 36 s (was 30 s), so a primary's lease always ends first.
 - New clusters use TLS, and the superuser no longer logs in over the network.
@@ -260,8 +340,9 @@ ziroctl pg rm shop --purge --yes      # also deletes the data on every node and 
 
 ## Limits
 
-- Known limitation: there is no connection pooler yet; keep `max_connections` in mind or run PgBouncer as a cluster app
-  in front of `-rw` and `-ro`.
+- Known limitation: a major version upgrade (17 to 18) is a dump and restore into a new cluster; `pg upgrade` refuses
+  it.
+- Known limitation: clusters created before the pooler have none until `ziroctl pg pool <name> --enable`.
 - Known limitation: no point-in-time recovery or WAL archiving yet; back up with `pg_dump` or the [backup](backup.md)
   tools until it lands.
 - Known limitation: Citus reads from worker replicas (`citus.use_secondary_nodes`) are not wired in; the `-ro` name of

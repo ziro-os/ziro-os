@@ -297,7 +297,7 @@ func TestPGMembersAreRenderedAsPinnedApps(t *testing.T) {
 	w := newPGWorld(t, 3)
 	w.create(pgCreateOpts{Replicas: 2, Resources: &Resources{Memory: "4Gi", CPUs: 4}})
 	w.settle(3)
-	if len(w.st.Apps) != 3 {
+	if len(w.st.Apps) != 4 || w.st.app(w.cluster().poolerApp()) == nil { // three members and the pooler
 		t.Fatalf("apps: %d", len(w.st.Apps))
 	}
 	for _, g := range w.cluster().Groups {
@@ -313,6 +313,9 @@ func TestPGMembersAreRenderedAsPinnedApps(t *testing.T) {
 	}
 	// The replicas land on the nodes the members are pinned to.
 	for _, r := range w.st.Replicas {
+		if r.App == w.cluster().poolerApp() {
+			continue // the pooler holds no data: it goes anywhere
+		}
 		_, g, m := pgFind(w.st, r.App)
 		if m == nil || r.Node != m.Node {
 			t.Fatalf("replica %+v of %v is not on its pinned node", r, g)
@@ -564,7 +567,7 @@ func TestPGAddAndRemoveReplicas(t *testing.T) {
 			t.Fatalf("scaling touched the primary: %v", w.log)
 		}
 	}
-	if len(w.st.Apps) != 4 {
+	if len(w.st.Apps) != 5 { // four members and the pooler
 		t.Fatalf("apps: %d", len(w.st.Apps))
 	}
 
@@ -577,7 +580,7 @@ func TestPGAddAndRemoveReplicas(t *testing.T) {
 	if len(g.Members) != 2 || g.Sync != "" {
 		t.Fatalf("after scaling in: %d members, sync %q (%s)", len(g.Members), g.Sync, w.events("main"))
 	}
-	if len(w.st.Apps) != 2 {
+	if len(w.st.Apps) != 3 { // two members and the pooler
 		t.Fatalf("apps after scaling in: %d", len(w.st.Apps))
 	}
 	if len(w.st.PurgeData) != 2 {
@@ -761,19 +764,19 @@ func TestParseLSN(t *testing.T) {
 }
 
 func TestPGTuning(t *testing.T) {
-	conf := pgTuning(&Resources{Memory: "8Gi", CPUs: 4}, false)
+	conf := pgTuning(&Resources{Memory: "8Gi", CPUs: 4}, false, "17")
 	for _, want := range []string{"shared_buffers = 2048MB", "effective_cache_size = 4915MB", "wal_level = replica", "max_parallel_workers = 4", "hot_standby_feedback = on", "max_slot_wal_keep_size = 8GB"} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("tuning lacks %q:\n%s", want, conf)
 		}
 	}
-	if c := pgTuning(&Resources{Memory: "8Gi"}, true); !strings.Contains(c, "wal_level = logical") || !strings.Contains(c, "max_prepared_transactions") {
+	if c := pgTuning(&Resources{Memory: "8Gi"}, true, "17"); !strings.Contains(c, "wal_level = logical") || !strings.Contains(c, "max_prepared_transactions") {
 		t.Errorf("citus tuning:\n%s", c)
 	}
-	if c := pgTuning(nil, false); !strings.Contains(c, "shared_buffers = 256MB") {
+	if c := pgTuning(nil, false, "17"); !strings.Contains(c, "shared_buffers = 256MB") {
 		t.Errorf("default tuning:\n%s", c)
 	}
-	if pgTuning(&Resources{Memory: "8Gi", CPUs: 4}, false) != conf {
+	if pgTuning(&Resources{Memory: "8Gi", CPUs: 4}, false, "17") != conf {
 		t.Fatal("rendering must be deterministic")
 	}
 }

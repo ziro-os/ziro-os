@@ -60,6 +60,9 @@ func pgEndpoints(st *ClusterState, out map[string][]string, now time.Time) {
 				out[c.Name+"-rw"], out[c.Name+"-ro"] = rw, ro
 			}
 		}
+		if c.poolerOn() {
+			out[c.Name+"-pool"] = pgPoolerIPs(st, c)
+		}
 	}
 }
 
@@ -109,6 +112,11 @@ func pgMetrics(m *metricsWriter, st *ClusterState, now time.Time) {
 	m.family("ziro_pg_members", "gauge", "Members of a group by state.")
 	m.family("ziro_pg_epoch", "gauge", "Promotions of a group so far (the failover epoch).")
 	m.family("ziro_pg_replication_lag_milliseconds", "gauge", "How far a replica's replay is behind.")
+	m.family("ziro_pg_connections", "gauge", "Client connections of a member.")
+	m.family("ziro_pg_max_connections", "gauge", "max_connections of a member.")
+	m.family("ziro_pg_commits_total", "counter", "Committed transactions of a member (per second: rate()).")
+	m.family("ziro_pg_xid_age", "gauge", "Age of a member's oldest unfrozen transaction ID (wraparound at about 2.1e9).")
+	m.family("ziro_pg_disk_used_percent", "gauge", "How full a member's data volume is.")
 	for _, v := range pgViews(st, now) {
 		for _, g := range v.Groups {
 			base := map[string]string{"cluster": v.Name, "group": g.Name}
@@ -120,6 +128,21 @@ func pgMetrics(m *metricsWriter, st *ClusterState, now time.Time) {
 				return l
 			}
 			m.sample("ziro_pg_epoch", base, float64(g.Epoch))
+			if c := st.PG[v.Name]; c != nil {
+				if gr := c.group(g.Name); gr != nil {
+					for _, mm := range gr.Members {
+						if !mm.Probe.OK {
+							continue
+						}
+						l := with(map[string]string{"member": mm.ID})
+						m.sample("ziro_pg_connections", l, float64(mm.Probe.Conns))
+						m.sample("ziro_pg_max_connections", l, float64(mm.Probe.MaxConns))
+						m.sample("ziro_pg_commits_total", l, float64(mm.Probe.Commits))
+						m.sample("ziro_pg_xid_age", l, float64(mm.Probe.XIDAge))
+						m.sample("ziro_pg_disk_used_percent", l, float64(mm.Probe.DiskPct))
+					}
+				}
+			}
 			states := map[string]int{}
 			for _, mv := range g.Members {
 				states[mv.State]++

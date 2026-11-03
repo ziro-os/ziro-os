@@ -278,13 +278,15 @@ conninfo="host=${follow:-$rw_host} port=$PORT user=replicator application_name=$
 		echo "ssl_min_protocol_version = 'TLSv1.2'"
 	fi
 	if [ -n "${ZIRO_PG_CITUS:-}" ]; then
-		echo "shared_preload_libraries = 'citus'"
+		echo "shared_preload_libraries = 'citus,pg_stat_statements,auto_explain'" # Citus first, as it requires
 		if [ -n "$tls" ]; then
 			echo "citus.node_conninfo = 'sslmode=verify-ca sslrootcert=$TLS/ca.crt'"
 		else
 			echo "citus.node_conninfo = 'sslmode=prefer'"
 		fi
 	fi
+	# The parameters set with ziroctl pg set that a reload applies (kept current by the agent).
+	echo "include_if_exists = '$CFG/params.conf'"
 } >"$PGDATA/ziro.conf"
 grep -q "^include_if_exists = 'ziro.conf'" "$PGDATA/postgresql.conf" || echo "include_if_exists = 'ziro.conf'" >>"$PGDATA/postgresql.conf"
 if [ -f "$PGDATA/postgresql.auto.conf" ]; then

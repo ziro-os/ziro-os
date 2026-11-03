@@ -89,6 +89,10 @@ type PGCluster struct {
 	// SecretEpoch counts password changes: the members restart on the new secret when it moves.
 	SecretEpoch int         `json:"secret_epoch,omitempty"`
 	Rotation    *PGRotation `json:"rotation,omitempty"`
+	// Params are the server parameters set with pg set (pg_params.go); RestartEpoch moves with pg restart.
+	Params       map[string]string `json:"params,omitempty"`
+	RestartEpoch int               `json:"restart_epoch,omitempty"`
+	Pooler       *PGPooler         `json:"pooler,omitempty"`
 }
 
 // PGGroup is one primary and its replicas: a plain cluster has one group ("main"); a sharded one has a
@@ -144,6 +148,8 @@ type PGMember struct {
 	OffTimeline bool   `json:"off_timeline,omitempty"`
 	// RolledAt is when the member's app last took a new spec (pgMayRoll waits for it to come back).
 	RolledAt time.Time `json:"rolled_at,omitempty"`
+	// Params is the hash of the reloadable parameters the member last reloaded (pgReloadPass).
+	Params string `json:"params,omitempty"`
 }
 
 // PGProbe is what the member's agent last read from Postgres.
@@ -162,6 +168,10 @@ type PGProbe struct {
 	Received  uint64 `json:"received,omitempty"`
 	SyncNames string `json:"sync_names,omitempty"`
 	DiskPct   int    `json:"disk_pct,omitempty"` // how full the data volume is
+	Conns     int64  `json:"conns,omitempty"`    // client connections
+	MaxConns  int64  `json:"max_conns,omitempty"`
+	Commits   int64  `json:"commits,omitempty"` // committed transactions since the statistics were reset
+	XIDAge    int64  `json:"xid_age,omitempty"` // age of the oldest unfrozen transaction ID
 }
 
 // PGCommand is an order for one member's agent, taken from a closed list (pg_agent.go).
@@ -324,6 +334,16 @@ func (c *PGCluster) Validate() error {
 			if m.Init != pgPrimary && m.Init != pgReplica {
 				return fmt.Errorf("group %s member %s: invalid init", g.Name, m.ID)
 			}
+		}
+	}
+	if c.Pooler != nil {
+		if err := validPooler(c.Pooler); err != nil {
+			return err
+		}
+	}
+	for k, v := range c.Params {
+		if _, ok := pgParamDefs[k]; !ok || (v != "" && pgCheckParam(k, v, "") != nil) {
+			return fmt.Errorf("invalid parameter %s", k)
 		}
 	}
 	if c.Citus != "" && c.group("coord") == nil || c.Citus == "" && (len(c.Groups) != 1 || c.Groups[0].Name != "main") {

@@ -50,7 +50,8 @@ func psqlDB(container, db string, sqls ...string) []string {
 
 // pgProbeSQL reads, in one row: recovery state, WAL position, timeline, whether a WAL receiver is
 // streaming, how far behind the replay is, read-only, the WAL received (a replica's received and flushed
-// position, which may be ahead of the replay), and synchronous_standby_names.
+// position, which may be ahead of the replay), synchronous_standby_names, and for metrics: client
+// connections, max_connections, commits so far and the oldest unfrozen transaction ID's age.
 const pgProbeSQL = `select pg_is_in_recovery()::int,
   case when pg_is_in_recovery() then coalesce(pg_last_wal_replay_lsn(), pg_last_wal_receive_lsn()) else pg_current_wal_lsn() end,
   case when pg_is_in_recovery() then coalesce((select received_tli from pg_stat_wal_receiver), 0)
@@ -60,7 +61,11 @@ const pgProbeSQL = `select pg_is_in_recovery()::int,
        then coalesce((extract(epoch from now() - pg_last_xact_replay_timestamp()) * 1000)::bigint, 0) else 0 end,
   (current_setting('default_transaction_read_only') = 'on')::int,
   case when pg_is_in_recovery() then coalesce(pg_last_wal_receive_lsn(), '0/0'::pg_lsn) else pg_current_wal_lsn() end,
-  current_setting('synchronous_standby_names')`
+  current_setting('synchronous_standby_names'),
+  (select count(*) from pg_stat_activity where backend_type = 'client backend'),
+  current_setting('max_connections')::int,
+  (select coalesce(sum(xact_commit), 0) from pg_stat_database),
+  (select max(age(datfrozenxid)) from pg_database)`
 
 // parseProbe reads the row pgProbeSQL returns.
 func parseProbe(out string) (PGReport, error) {
@@ -68,15 +73,26 @@ func parseProbe(out string) (PGReport, error) {
 	if i := strings.LastIndex(line, "\n"); i >= 0 {
 		line = line[i+1:]
 	}
-	f := strings.SplitN(line, "|", 8)
+	f := strings.Split(line, "|")
 	if len(f) == 5 { // an older probe without the read-only column
 		f = append(f, "0")
 	}
 	if len(f) == 6 { // ... and without the received position and the standby list
 		f = append(f, f[1], "")
 	}
-	if len(f) != 8 {
+	if len(f) == 8 { // ... and without the metrics
+		f = append(f, "0", "0", "0", "0")
+	}
+	if len(f) != 12 {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
+	}
+	var nums [4]int64
+	for i := range nums {
+		n, err := strconv.ParseInt(f[8+i], 10, 64)
+		if err != nil || n < 0 {
+			return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
+		}
+		nums[i] = n
 	}
 	if _, err := parseLSN(f[6]); err != nil {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
@@ -87,7 +103,7 @@ func parseProbe(out string) (PGReport, error) {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag, ReadOnly: f[5] == "1",
-		Received: f[6], SyncNames: f[7]}, nil
+		Received: f[6], SyncNames: f[7], Conns: nums[0], MaxConns: nums[1], Commits: nums[2], XIDAge: nums[3]}, nil
 }
 
 // pgProbe asks one member how it is.
@@ -146,6 +162,11 @@ func pgSteps(o PGOrder) ([][]string, error) {
 		return [][]string{psqlArgs(c, sqlResetRO, sqlSetSync(o.Arg), sqlReload)}, nil
 	case opFollow:
 		return [][]string{psqlArgs(c, "alter system set primary_conninfo = '"+o.Arg+"'", sqlReload)}, nil
+	case opReload:
+		if !pgParamsInPlace(c, o.Arg) {
+			return nil, fmt.Errorf("the new parameters are not in place yet")
+		}
+		return [][]string{psqlArgs(c, sqlReload)}, nil
 	case opPassword:
 		role, verifier, _ := strings.Cut(o.Arg, ":")
 		return [][]string{psqlArgs(c, `alter role "`+role+`" password '`+verifier+`'`)}, nil

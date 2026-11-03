@@ -466,10 +466,10 @@ paths:
     post:
       x-ziro-role: operator
       tags: [pg]
-      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit ({"member": "m3"}), add-shard, rotate-password ({"role": "replicator"}), pause or resume. Credentials are never served over the API'
+      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit ({"member": "m3"}), add-shard, rotate-password ({"role": "replicator"}), set ({"params": {"work_mem": "64MB"}}), pool ({"enabled": true, "mode": "transaction", "size": 20}), resize ({"resources": {"memory": "8Gi"}}), upgrade ({"image": "...@sha256:..."}), restart, pause or resume. Credentials are never served over the API'
       parameters:
         - $ref: "#/components/parameters/Name"
-        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, failover, reinit, add-shard, rotate-password, pause, resume] } }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, failover, reinit, add-shard, rotate-password, set, pool, resize, upgrade, restart, pause, resume] } }
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }

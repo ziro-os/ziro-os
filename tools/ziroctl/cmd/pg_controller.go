@@ -28,7 +28,8 @@ func pgDynamic(st *ClusterState, app string) map[string]string {
 			g := &c.Groups[gi]
 			for mi := range g.Members {
 				if m := &g.Members[mi]; c.memberApp(g.Name, m.ID) == app {
-					return map[string]string{"role": pgRoleFile(c, m, g), "lease": pgLeaseFile(g, m, pgNow())}
+					params, _ := pgReloadParams(c)
+					return map[string]string{"role": pgRoleFile(c, m, g), "lease": pgLeaseFile(g, m, pgNow()), "params.conf": params}
 				}
 			}
 		}
@@ -50,6 +51,7 @@ const (
 	opDropSlot = "dropslot" // drop one replication slot
 	opReinit   = "reinit"   // a replica discards its data directory and takes a new base backup (pg reinit)
 	opFollow   = "follow"   // a replica follows the named primary (primary_conninfo, reload); argument is the conninfo
+	opReload   = "reload"   // reload the configuration once params.conf has the given hash (pg set)
 )
 
 // pgFenceName is the synchronous standby no member is ever called: a primary with it waits for ever on
@@ -71,6 +73,10 @@ func validPGCommand(op, arg string) error {
 		}
 	case opPassword:
 		return validPasswordArg(arg)
+	case opReload:
+		if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(arg) {
+			return fmt.Errorf("invalid parameters hash %q", arg)
+		}
 	case opFollow:
 		if !pgConninfoRe.MatchString(arg) {
 			return fmt.Errorf("invalid primary connection %q", arg)
@@ -176,6 +182,11 @@ type PGReport struct {
 	SyncNames string `json:"sync_names,omitempty"`
 	// DiskPct: how full the member's data volume is (0 = unknown).
 	DiskPct int `json:"disk_pct,omitempty"`
+	// For metrics and alerts: client connections, max_connections, commits so far, oldest XID age.
+	Conns    int64 `json:"conns,omitempty"`
+	MaxConns int64 `json:"max_conns,omitempty"`
+	Commits  int64 `json:"commits,omitempty"`
+	XIDAge   int64 `json:"xid_age,omitempty"`
 	// Detail says what the node sees of a member that does not answer (container state, the entry
 	// script's last error); Busy: a base backup or rewind is running in it, so it is not stuck.
 	Detail string `json:"detail,omitempty"`
@@ -241,7 +252,8 @@ func pgIngest(st *ClusterState, nodeID string, reports []PGReport, results []PGR
 		}
 		received, _ := parseLSN(r.Received)
 		m.Probe = PGProbe{At: at, OK: true, Recovery: r.Recovery, Streaming: r.Streaming, LSN: lsn, Timeline: r.Timeline, LagMs: r.LagMs, Epoch: r.Epoch,
-			ReadOnly: r.ReadOnly, Received: received, SyncNames: sanitizeLabel(r.SyncNames, 200), DiskPct: min(max(r.DiskPct, 0), 100)}
+			ReadOnly: r.ReadOnly, Received: received, SyncNames: sanitizeLabel(r.SyncNames, 200), DiskPct: min(max(r.DiskPct, 0), 100),
+			Conns: max(r.Conns, 0), MaxConns: max(r.MaxConns, 0), Commits: max(r.Commits, 0), XIDAge: max(r.XIDAge, 0)}
 	}
 	if len(results) == 0 {
 		return
@@ -362,6 +374,7 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 		pgAdjustMembers(st, c, g, now)
 		pgSyncAndSlots(c, g, now)
 		pgFollowPrimary(st, c, g, now)
+		pgReloadPass(c, g, now)
 	}
 }
 
@@ -430,6 +443,28 @@ func pgSelfHeal(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) {
 	pgTrackProgress(st, g, now)
 	pgAutoRebuild(c, g, now)
 	pgDiskAlerts(g, now)
+	pgLoadAlerts(c, g, now)
+}
+
+// pgLoadAlerts warns of connections running out and of transaction ID wraparound coming (Postgres stops
+// accepting writes when the oldest unfrozen XID is about 2^31 old: vacuum must freeze before that).
+func pgLoadAlerts(c *PGCluster, g *PGGroup, now time.Time) {
+	for i := range g.Members {
+		m := &g.Members[i]
+		if !m.fresh(now) {
+			continue
+		}
+		if p := m.Probe; p.MaxConns > 0 && p.Conns*10 >= p.MaxConns*9 && g.last(now, 30*time.Minute, "conns-"+m.ID) {
+			hint := "turn the pooler on (ziroctl pg pool " + c.Name + " --enable)"
+			if c.poolerOn() {
+				hint = "raise max_connections or lower the pool size"
+			}
+			g.alert(now, "medium", "%s has %d of %d connections in use: %s", m.ID, p.Conns, p.MaxConns, hint)
+		}
+		if m.Probe.XIDAge > 1_500_000_000 && g.last(now, time.Hour, "xid-"+m.ID) {
+			g.alert(now, "high", "%s: the oldest unfrozen transaction is %d transactions old; Postgres stops writes near 2.1 billion: check long transactions and vacuum", m.ID, m.Probe.XIDAge)
+		}
+	}
 }
 
 // pgDiskAlerts warns before a data volume fills up: a primary with a full disk stops (PANIC on WAL
@@ -629,6 +664,10 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 	case opFollow:
 		if cmd.OK {
 			m.Following = cmd.Arg
+		}
+	case opReload:
+		if cmd.OK {
+			m.Params = cmd.Arg
 		}
 	case opPassword:
 		if cmd.OK && c.Rotation != nil {
@@ -1157,6 +1196,7 @@ func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 			}
 		}
 	}
+	pgEnsurePooler(st, c, want, now)
 	prefix := pgAppPrefix + c.Name + "-"
 	var kept []ClusteredApp
 	for _, a := range st.Apps {
