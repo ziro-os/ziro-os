@@ -464,3 +464,20 @@ func TestPGBackupMetrics(t *testing.T) {
 		t.Fatal("no differential yet")
 	}
 }
+
+func TestPGBackupImagesArePinned(t *testing.T) {
+	for _, v := range []string{"16", "17", "18"} {
+		img := pgBackupImages[v]
+		if !strings.HasPrefix(img, "ghcr.io/ziro-os/postgres:"+v+"-pgbackrest@sha256:") || len(img) != len("ghcr.io/ziro-os/postgres:"+v+"-pgbackrest@sha256:")+64 {
+			t.Errorf("postgres %s: %q is not a pinned Ziro image", v, img)
+		}
+	}
+	w := newPGWorld(t, 3)
+	c := w.create(pgCreateOpts{Replicas: 2, Version: "18"})
+	if err := pgBackupEnable(w.st, "db", testRepo(), "AKIAEXAMPLE", "secret", ""); err != nil {
+		t.Fatal(err)
+	}
+	if c.Image != pgBackupImages["18"] {
+		t.Fatalf("enable without --image moved to %s", c.Image)
+	}
+}

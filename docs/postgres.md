@@ -372,7 +372,7 @@ The bucket and the passphrase are all you need. On a new Ziro cluster:
 ```sh
 export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... PG_BACKUP_PASSPHRASE=...
 ziroctl pg restore shop --s3-endpoint s3.eu-west-1.amazonaws.com --bucket acme-db --region eu-west-1 \
-  --path /ziro/shop --version 17 --image ghcr.io/ziro-os/postgres:17-pgbackrest@sha256:...
+  --path /ziro/shop --version 17
 ziroctl pg status shop                                  # wait for the primary, then the replicas
 ziroctl pg credentials shop                             # new passwords: update the apps
 ```
@@ -452,8 +452,6 @@ ziroctl pg rm shop --purge --yes      # also deletes the data on every node and 
 - Known limitation: a sharded (Citus) cluster is backed up group by group, but `pg restore` refuses it: there is no
   common restore point across the groups yet.
 - Known limitation: `pgbackrest verify` is not scheduled. Restore into a scratch cluster to check the backups.
-- Known limitation: until the Ziro Postgres images are published and pinned in a release, `pg backup enable` needs
-  `--image`.
 - Known limitation: Citus reads from worker replicas (`citus.use_secondary_nodes`) are not wired in; the `-ro` name of
   a sharded cluster reads from the coordinator's replicas.
 - Known limitation: a worker group cannot be removed yet; `add-shard` is one way.

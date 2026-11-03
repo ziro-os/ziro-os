@@ -14,9 +14,9 @@ import (
 // pgImages are the member images, pinned by digest (the same references the catalog's postgres app
 // uses). A sharded cluster needs a Citus image, which is given explicitly until one is pinned here.
 var pgImages = map[string]string{
-	"16": "docker.io/library/postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
-	"17": "docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
-	"18": "docker.io/library/postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722",
+	"16": "docker.io/library/postgres:16.15@sha256:5db6dac2ef5dcff512f4f00a009c3c332b9f2f28f24277175bf3e4a3d02ef83a",
+	"17": "docker.io/library/postgres:17.11@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1",
+	"18": "docker.io/library/postgres:18.6@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81",
 }
 
 type pgCreateOpts struct {
