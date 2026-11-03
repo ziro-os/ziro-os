@@ -41,11 +41,12 @@ jobs:
       - name: go vet + staticcheck
         run: |
           # staticcheck reads the compiler's export data, so it must be built and run with the very
-          # toolchain go vet uses. go.mod asks for go 1.27.1; when the runner's Go is older, `go` would
-          # fetch 1.27.1 for vet while a staticcheck built with the older one cannot read its data
-          # ("export data version 5 is greater than maximum supported version 4"). Pin both.
+          # toolchain go vet uses. go.mod asks for go 1.27.3; when the runner's Go is older, `go` would
+          # fetch 1.27.3 for vet while a staticcheck built with the older one cannot read its data
+          # ("export data version 5 is greater than maximum supported version 4"). Pin both. Go 1.27.3
+          # writes export data version 5, which staticcheck reads from 2026.2.2 on.
           export GOTOOLCHAIN="go$(sed -n 's/^go //p' sdk/go.mod)"
-          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
           fail=0
           for m in sdk tools/ziroctl tools/ziropkg; do
             echo "== $m"

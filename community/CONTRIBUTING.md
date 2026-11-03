@@ -23,7 +23,7 @@ and CLI conventions, extension points, and the security model. Larger changes ne
 
 ### Prerequisites
 
-- **Go 1.27.1 or later** for `ziroctl`, `ziropkg`, `zirocd` and the SDK.
+- **Go 1.27.3 or later** for `ziroctl`, `ziropkg`, `zirocd` and the SDK.
 - **Docker 24.0 or later** with Buildx, for rootfs extraction and the container base image.
 - **GCC, Clang or `musl-gcc`** to compile the `ziro-init` PID 1 supervisor.
 - **QEMU** (`qemu-system-x86_64` or `qemu-system-aarch64`) for boot and cluster tests.
@@ -108,6 +108,9 @@ document how configuration overrides are applied before relying on them.
 - Organize CLI commands as Cobra subcommands under `cmd/`.
 - Every command supports `--help` and returns clear error messages.
 - Write unit tests (`_test.go`) next to the code they cover.
+- Dependencies: prefer permissive licenses (MIT, BSD, Apache-2.0). MPL-2.0 is accepted for modules used
+  unmodified, such as HashiCorp's Raft libraries; it is file-level copyleft, so a change to one of their
+  files must be published under MPL-2.0. Each accepted MPL-2.0 module is recorded in `.snyk`.
 
 ```bash
 cd tools/ziroctl && go test ./...
@@ -151,7 +154,7 @@ suppressing them.
 ```bash
 gofmt -l tools/ziroctl tools/ziropkg tools/zirocd sdk   # must print nothing
 for m in sdk tools/ziroctl tools/ziropkg tools/zirocd; do
-  (cd "$m" && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...)
+  (cd "$m" && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...)
 done
 shellcheck -S warning kernel/*.sh scripts/*.sh scripts/*/*.sh packages/*.sh images/*/*.sh
 npx markdownlint-cli2@0.23.3 "**/*.md" "#node_modules"  # Markdown style, see .markdownlint.json

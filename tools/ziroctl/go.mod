@@ -1,6 +1,6 @@
 module github.com/ziro-os/ziroctl
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/containernetworking/cni v1.3.0
