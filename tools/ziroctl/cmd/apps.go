@@ -160,6 +160,9 @@ type appDeployOpts struct {
 	// Secrets are values for the app's input secrets (API keys), stored and delivered like
 	// generated ones.
 	Secrets map[string]string
+	// PG (cluster): Postgres clusters the app uses, "shop" or "shop:role": each component gets the
+	// cluster's connection-string secret (DATABASE_URL, ...) and is allowed to connect (pg_roles.go).
+	PG []string
 	// Links are extra environment variables (values from another app's outputs, which can hold
 	// credentials): delivered like generated secrets, through env files, never argv.
 	Links map[string]string
@@ -279,6 +282,9 @@ func deployAppDef(d AppDef, version string, o appDeployOpts) error {
 		}
 	} else {
 		in.Mode = "local"
+		if len(o.PG) > 0 {
+			return fmt.Errorf("--pg connects an app to a Postgres cluster: deploy it on the cluster master")
+		}
 		err = deployAppLocal(in, o)
 	}
 	if err != nil {
@@ -451,6 +457,13 @@ func deployAppCluster(in *AppInstance, o appDeployOpts) error {
 				if prev, err := loadAppInstance(in.Name); err != nil || !slices.Contains(prev.Components, name) {
 					return nil, fmt.Errorf("cluster app %q exists and isn't part of %s", name, in.Name)
 				}
+			}
+			for _, ref := range o.PG {
+				secret, err := pgConnectApp(st, ref, name)
+				if err != nil {
+					return nil, err
+				}
+				app.Secrets = uniq(append(app.Secrets, secret))
 			}
 			return &app, nil
 		}); err != nil {
@@ -802,6 +815,7 @@ var (
 	appsPublish    int
 	appsBind       string
 	appsAllowFrom  []string
+	appsPG         []string
 	appsLocal      bool
 	appsPurge      bool
 	appsNewVersion bool
@@ -955,7 +969,7 @@ var appsDeployCmd = &cobra.Command{
 		}
 		o := appDeployOpts{Name: appsName, Set: set, Replicas: appsReplicas, Publish: appsPublish,
 			Bind: appsBind, AllowFrom: appsAllowFrom, Local: appsLocal, NewVersion: appsNewVersion,
-			Expose: appsExpose, ExposeTLS: appsExposeTLS, Secrets: secrets}
+			Expose: appsExpose, ExposeTLS: appsExposeTLS, Secrets: secrets, PG: appsPG}
 		if appsFile != "" {
 			version := ""
 			if len(args) == 1 {
@@ -1109,6 +1123,7 @@ func init() {
 	f.IntVar(&appsPublish, "publish", 0, "Host port (local default: the app's port on 127.0.0.1; cluster default: none)")
 	f.StringVar(&appsBind, "bind", "", "Local publish address (default 127.0.0.1; 0.0.0.0 exposes it, the firewall still applies)")
 	f.StringSliceVar(&appsAllowFrom, "allow-from", nil, "Cluster apps allowed to connect ('*' = any)")
+	f.StringArrayVar(&appsPG, "pg", nil, "Connect to a Postgres cluster: <cluster> or <cluster>:<role> (DATABASE_URL in the env; repeatable)")
 	f.BoolVar(&appsLocal, "local", false, "Deploy on this host even if it is a cluster master")
 	f.BoolVar(&appsNewVersion, "new-version", false, "Allow moving an existing instance to another version")
 	f.StringVar(&appsExpose, "expose", "", "Publish it through the gateway on this hostname (HTTPS)")

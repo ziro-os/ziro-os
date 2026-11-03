@@ -64,10 +64,11 @@ func TestOpenAPIMatchesRoutes(t *testing.T) {
 }
 
 // Every route that changes state requires more than a viewer, and nothing but health is public.
-// The one exception is the git webhook: public on purpose, and authenticated by the deployment's
-// hook secret (HMAC or token, checked in constant time by ziroctld) instead of an API token.
+// The exceptions: the git webhook, public on purpose and authenticated by the deployment's hook
+// secret (HMAC or token, checked in constant time by ziroctld) instead of an API token; and the
+// dashboard's static files (pg_ui.go), which hold no data: the page calls the API with the user's token.
 func TestRoutePolicy(t *testing.T) {
-	signedPublic := map[string]bool{"POST /api/v1/hooks/deploy/{app}": true}
+	signedPublic := map[string]bool{"POST /api/v1/hooks/deploy/{app}": true, "GET /ui/{file...}": true}
 	for _, rt := range apiRoutes().routes {
 		if signedPublic[rt.Method+" "+rt.Path] {
 			continue

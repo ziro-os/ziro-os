@@ -84,7 +84,8 @@ func DecodeStrict(data []byte, v any) error {
 }
 
 // Kind tells what a definition is from its shape: "stack" (a top-level stack name and apps),
-// "host" (a top-level host section), "app" (components) or "plugin".
+// "host" (a top-level host section), "postgres" (a top-level postgres section), "app" (components)
+// or "plugin".
 func Kind(data []byte) (string, error) {
 	j, err := ToJSON(data)
 	if err != nil {
@@ -99,6 +100,8 @@ func Kind(data []byte) (string, error) {
 		return "stack", nil
 	case probe["host"] != nil:
 		return "host", nil
+	case probe["postgres"] != nil:
+		return "postgres", nil
 	case probe["components"] != nil:
 		return "app", nil
 	}

@@ -25,6 +25,7 @@ Every managed thing is a named resource with one schema in [`sdk/schema`](../../
 | app (containers) | `AppDef` (`app.go`) | `name` |
 | gateway route | `GatewayRoute` (`gateway.go`) | `name` |
 | stack, host config | `Stack` (`stack.go`), `HostConfig` (`host.go`), see [RFC 0001](rfcs/0001-stacks-and-host-config.md) | `stack:` / the host |
+| Postgres cluster | `PostgresConfig` (`postgres.go`), see [RFC 0005](rfcs/0005-postgres-clusters.md) | `name` |
 | cluster app | an `AppDef` placed on the cluster | `name` |
 | catalog | signed index of modules, apps and stacks (`sdk/catalog`) | repository name |
 
@@ -34,10 +35,10 @@ Rules for every format:
 - **YAML or JSON**, same schema, same rules. YAML is converted to JSON and both go through the same strict decoder.
 - **Strict:** an unknown field is an error, so a typo never silently drops a setting. Duplicate keys and multi-document
   YAML files are refused.
-- **Kind by shape:** a top-level `stack:` is a stack, `host:` a host config, `components:` an app definition, anything
-  else a module manifest. No `kind:` field is needed.
-- **Versions:** stacks and host configs carry `version:` (currently `1`); the validator refuses versions it doesn't
-  know. Modules carry a package `version`; apps list `versions` with images pinned by digest.
+- **Kind by shape:** a top-level `stack:` is a stack, `host:` a host config, `postgres:` a Postgres cluster,
+  `components:` an app definition, anything else a module manifest. No `kind:` field is needed.
+- **Versions:** stacks, host configs and Postgres clusters carry `version:` (currently `1`); the validator refuses
+  versions it doesn't know. Modules carry a package `version`; apps list `versions` with images pinned by digest.
 - **Deprecation:** a field is marked deprecated (in its schema comment and in the docs) for at least one minor
   release before it is removed. Removing a field or changing its meaning is a breaking change. The SDK
   follows semantic versioning (`sdk/vX.Y.Z` tags), so a breaking schema change needs a major SDK release.

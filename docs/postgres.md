@@ -245,6 +245,135 @@ the next waits until it is back, streaming and caught up. The primary goes last,
 that already runs the new configuration, so writes pause only for the switchover. A member that is down anyway is
 not waited for, and a group with no replica restarts its primary in place.
 
+### Maintenance windows
+
+By default those changes roll out at once. A maintenance window holds them until a time you choose:
+
+```sh
+ziroctl pg maintenance shop --window '0 2 * * 0' --duration 2h   # Sundays 02:00-04:00 UTC
+ziroctl pg maintenance shop --open 1h                            # open it now, for an hour
+ziroctl pg maintenance shop --clear                              # no window: changes roll out at once
+```
+
+The window is a five-field cron expression in UTC for when it opens, and a duration (30 minutes to 24 hours) for
+how long it stays open.
+
+- **What waits:** a new image, restart-only parameters, a resize, `pg restart`, and a ziroctl upgrade that changes
+  the members. Until the window opens, the members keep running and `pg status` lists the ones waiting, with the
+  next opening time.
+- **What never waits:** failover, a switchover you ask for, repairs (rebuilding a replica, replacing a member on a
+  gone node), members that are not serving anyway, and the restarts that follow a password change.
+
+## Roles and databases
+
+Each app can have its own login instead of sharing the application user's:
+
+```sh
+ziroctl pg role shop web                              # reads and writes every table
+ziroctl pg role shop reports --access readonly        # reads only
+ziroctl pg db shop analytics --owner web --extension pg_trgm
+ziroctl pg db shop app --extension pgcrypto           # extensions in the cluster's own database
+ziroctl pg roles shop                                 # what exists, and whether it is applied yet
+ziroctl pg credentials shop --role reports
+```
+
+### Roles
+
+- **Access.** `readwrite` grants PostgreSQL's `pg_read_all_data` and `pg_write_all_data`; `readonly` grants only
+  the first.
+- **Passwords.** Each role gets a generated password, kept in its own cluster secret `pg-shop-role-<role>` with
+  `PGPASSWORD`, `DATABASE_URL` and `DATABASE_URL_RO`. The primary receives only the password's SCRAM verifier, never
+  the password.
+- **Removing.** `pg role shop reports --rm` stops the role from logging in (`NOLOGIN`) and deletes its credentials.
+  Its objects and grants stay.
+
+### Databases
+
+- **Owner and extensions.** A database has an owner (the application user, or a role, which can then create tables
+  in it) and extensions from the image that need no preloading: `amcheck`, `bloom`, `btree_gin`, `btree_gist`,
+  `citext`, `cube`, `dict_int`, `earthdistance`, `fuzzystrmatch`, `hstore`, `intarray`, `isn`, `lo`, `ltree`,
+  `pg_buffercache`, `pg_prewarm`, `pg_stat_statements`, `pg_trgm`, `pgcrypto`, `pgstattuple`, `postgres_fdw`, `seg`,
+  `tablefunc`, `tcn`, `unaccent` and `uuid-ossp`.
+- **Removing.** `pg db shop analytics --rm` stops managing a database. It is never dropped.
+
+### How changes are applied
+
+The controller applies one change at a time on the primary. A database waits for its
+owner role. A failed change is retried after a minute, and its alert repeats at most every 15 minutes.
+
+### Connecting an app
+
+`--pg` gives an app its credentials and lets it connect:
+
+```sh
+ziroctl apps deploy myapp --pg shop          # the application user: DATABASE_URL, DATABASE_URL_RO, DATABASE_POOL_URL
+ziroctl apps deploy myapp --pg shop:web      # the role web: DATABASE_URL, DATABASE_URL_RO, PGPASSWORD
+```
+
+Each component of the app loads the secret as environment variables and is added to the cluster's `allow_from`.
+The secrets follow password changes, so restart the app after `pg rotate-password` to pick up the new password.
+
+## Declarative clusters
+
+A cluster can be described in a file and applied, like a [host config](provisioning.md):
+
+```yaml
+postgres:
+  version: 1
+  name: shop
+  postgres: "17"
+  replicas: 2
+  resources: {memory: 4Gi, cpus: 2}
+  allow_from: [web, worker]
+  params:
+    work_mem: 64MB
+    statement_timeout: 30s
+  pooler: {enabled: true, mode: transaction, size: 40}
+  backup:
+    endpoint: s3.eu-west-1.amazonaws.com
+    bucket: acme-db
+    region: eu-west-1
+    retention: 8
+    schedule: {full: "0 1 * * 0", incr: "30 * * * *"}
+  maintenance: {window: "0 2 * * 0", duration: 2h}
+  roles:
+    - {name: web}
+    - {name: reports, access: readonly, database: analytics}
+  databases:
+    - {name: analytics, owner: web, extensions: [pg_trgm]}
+```
+
+```sh
+ziroctl pg apply -f shop.yaml --dry-run    # the plan only
+ziroctl pg apply -f shop.yaml
+ziroctl pg get shop > shop.yaml            # the cluster as it is, as a file
+ziroctl pg diff -f shop.yaml               # what applying it would change
+```
+
+How a file is applied:
+
+- **The plan comes first.** Each line is marked `+` create, `~` update, `=` unchanged, `-` remove or `!` refused,
+  with what restarts members.
+- **The plan is exact.** It runs the same operations as the `pg` commands, on a copy of the cluster state, so a dry
+  run reports what an apply would refuse.
+- **All or nothing.** If any part is refused, nothing changes. Refused changes are a different major version, sync
+  mode, database or user, fewer shards, a plain cluster becoming sharded, and a parameter that can only grow going
+  back down.
+- **A field left out keeps its current value**, or takes its default when the cluster is created. A short file
+  never scales a cluster down or resumes a paused one by accident.
+- **`params`, `allow_from`, `roles` and `databases` are whole lists** when given. A parameter left out goes back to
+  its default, a role left out can no longer log in, and a database left out is no longer managed (never
+  dropped). A role may connect to a database the same file adds, and a database may be owned by a role it adds.
+- **Turning things off is explicit:** `pooler: {enabled: false}`, `backup: {enabled: false}` (the backups stay in
+  the bucket), `maintenance: {}`, `paused: false`.
+- **No secret goes in the file.** Passwords are generated. When the file turns backups on, the repository's keys
+  come from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+- **Applying the same file twice changes nothing**, and neither does applying what `pg get` printed.
+
+Over the API: `GET /api/v1/pg/{name}/spec` returns the file, `POST /api/v1/pg-plan` (operator) plans one and
+`POST /api/v1/pg-apply` (admin) applies it. The schema is `PostgresConfig` in
+[`sdk/schema`](../sdk/schema/postgres.go).
+
 ## Add and remove replicas
 
 ```sh
@@ -390,8 +519,98 @@ Give `--database` and `--user` when they were not `app`. The restored cluster ba
 
 ## Monitoring
 
-`ziroctl pg status shop` lists the members with role, node, state, timeline, lag and recent events, and the reasons
-a group is not healthy. The master's
+`ziroctl pg status shop` lists the members with role, node, state, timeline, lag and the latest events, and the
+reasons a group is not healthy.
+
+`ziroctl pg overview` shows every cluster on one screen, the ones that need attention first:
+
+```text
+NAME             PG  HEALTH    PRIMARY      READY   LAG      CONN  DISK  BACKUP      ALERTS
+billing          17  degraded  m2@n3        2/3     1.2s     41%   83%   3 hours ago 1
+shop             17  healthy   m1@n1        3/3     0s       12%   40%   47 minutes ago 0
+
+Needs attention:
+  billing: m3 is catching up (1200ms behind)
+  billing: a data volume is 83% full
+```
+
+The health of a cluster is one of four values:
+
+| Health | Meaning |
+| --- | --- |
+| `healthy` | every member is ready and nothing needs attention |
+| `degraded` | it serves, but something needs attention |
+| `down` | a group has no primary that answers |
+| `paused` | the controller is paused |
+
+"Needs attention" covers:
+
+- the reasons from `pg status`;
+- members waiting for the maintenance window;
+- missing or old backups;
+- data volumes 80 % full or more;
+- 90 % of the connections in use.
+
+`--json` prints the same as `GET /api/v1/pg-overview`.
+
+`ziroctl pg top` is the same view, live in the terminal and refreshed every 2 seconds, with transactions per second.
+Enter opens a cluster: its members, what needs attention and the latest events.
+
+| Key | Action |
+| --- | --- |
+| `↑`/`↓` or `j`/`k` | select |
+| `Enter`, `Esc` | open a cluster, back to the fleet |
+| `s` | switchover (to the selected replica, or the one furthest ahead) |
+| `r` | rebuild the selected replica |
+| `a` | add a replica |
+| `b` | take an incremental backup now |
+| `p` | pause or resume the controller |
+| `?`, `q` | help, quit |
+
+Every action asks for confirmation. Without a terminal, `pg top` prints `pg overview` once.
+
+### Dashboard
+
+The API server also serves a dashboard for the Postgres clusters, at `https://<master>:8443/ui/`. Sign in with an API
+token:
+
+```sh
+ziroctl api token create dashboard --role operator
+```
+
+The token stays in that browser tab, in session storage, and is gone when the tab closes. The page calls the same
+API as the CLI, so it can do no more than the token's role allows:
+
+| Role | What the dashboard can do |
+| --- | --- |
+| viewer | look |
+| operator | switchovers, backups, rolling restarts and pausing |
+| admin | restores and configuration changes |
+
+The pages:
+
+- **Fleet:** every cluster's health, worst first, with what needs attention.
+- **Overview** of a cluster: members, roles, lag and a topology view, with switchover (to a chosen replica),
+  backup, rolling restart and pause.
+- **Backups:** the backups and the recoverable window, and a restore wizard that copies the cluster at the latest
+  state or a chosen moment into a new cluster.
+- **Events:** the cluster's history, newest first.
+- **Roles and databases:** what exists, and whether each is applied yet. Passwords are never shown.
+- **Configuration:** the cluster file as JSON. Edit it, see the plan, apply it.
+
+Every change asks for confirmation first. The page refreshes every 2 seconds, and holds off while you are editing
+something.
+
+The dashboard is plain HTML, CSS and JavaScript embedded in ziroctl. Nothing is loaded from anywhere else, and a
+Content-Security-Policy allows only its own files and the API. Its files are the only public route besides
+`/api/v1/health`, and they hold no data. `tests/ui/dashboard-smoke.js` drives it in Chromium against a fake API.
+
+`ziroctl pg events shop` prints the cluster's history, oldest first: promotions, switchovers, repairs, rolling
+changes, backups and alerts, with their severity. The last 200 events of each group are kept in cluster state, so
+the history survives a master change. `--since 24h` limits it to a recent period, and `--follow` keeps printing new
+events. The API serves it at `GET /api/v1/pg/{name}/events?since=<RFC 3339>`.
+
+The master's
 `/metrics` has, per cluster, group and member:
 
 - roles: `ziro_pg_members`, `ziro_pg_primary`, `ziro_pg_epoch`;
@@ -455,6 +674,10 @@ ziroctl pg rm shop --purge --yes      # also deletes the data on every node and 
 - Known limitation: Citus reads from worker replicas (`citus.use_secondary_nodes`) are not wired in; the `-ro` name of
   a sharded cluster reads from the coordinator's replicas.
 - Known limitation: a worker group cannot be removed yet; `add-shard` is one way.
+- Known limitation: roles connect directly, not through the pooler: its user list has only the application user.
+- Known limitation: `pg rotate-password` covers the application user, `replicator` and `postgres`, not the roles
+  from `pg role`. To change a role's password, remove the role and add it again.
+- Known limitation: a sharded cluster manages only its own database (`pg db` with another name is refused).
 - Known limitation: a cluster created before TLS keeps running without it. Members are probed by running `psql`
   in their containers, and orders are carried out the same way; the lease watchdog covers the case where that
   channel hangs.

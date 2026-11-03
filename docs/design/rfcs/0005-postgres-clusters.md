@@ -137,6 +137,41 @@ Credentials are never served over the API.
   The superuser is refused over the network, except between Citus nodes. `rotate-password` sends the primary a
   SCRAM verifier only.
 
+### Declarative clusters, maintenance windows and the fleet view (revision)
+
+- **File kind.** A top-level `postgres:` section is a cluster file (`schema.PostgresConfig`, with its own
+  `version: 1`). It is decoded strictly, like every other definition.
+- **Semantics.** A field left out keeps its current value; `params` and `allow_from` are whole lists when given.
+  Fixed at creation: the major version, sync mode, database, user and colocation. Shards can only grow. No secret is
+  in the file: passwords are generated, and backup keys come from the applying command's environment or request.
+- **Plan and apply.** `pg apply` runs the existing operations (`pgCreate`, `pgSetReplicas`, `pgSetParams`,
+  `pgSetPooler`, `pgBackupEnable`, `pgSetMaintenance`, ...) on a copy of the state to plan, and on the real state
+  in one transaction to apply. A plan with any refused change applies nothing. `pg get` exports a file whose plan
+  is all `=`.
+- **Maintenance window.** `PGCluster.Maintenance` is a cron schedule (UTC) and a duration; `WindowUntil` opens it by
+  hand. Outside it, `pgMayRoll` holds a serving member's new spec, and the group lists the waiting members.
+  Failover, switchover, repairs, members that are down and restarts for a new secret (`ZIRO_PG_SECRET_EPOCH`) never
+  wait.
+- **Events and overview.** Each group keeps its last 200 events in cluster state (was 20). `pg events` and
+  `GET /api/v1/pg/{name}/events` serve them. `pg overview` and `GET /api/v1/pg-overview` summarize every cluster:
+  health, primary, ready members, lag, connection and disk use, backups, alerts, and what needs attention.
+- **Roles and databases.** `PGCluster.Roles` (readwrite or readonly, through `pg_write_all_data` and
+  `pg_read_all_data`) and `PGCluster.Databases` (owner, allow-listed extensions) are applied by three new orders
+  on the entry group's primary: `role` (name, access, SCRAM verifier), `roleoff` (`NOLOGIN` for a removed role)
+  and `database` (create if missing, owner, extensions). Their arguments are validated on both sides, and the
+  statements are fixed templates. `Applied` records the hash each order applied, and `Issued` the one in flight.
+  Each role's password and connection strings are in its own secret; `pg-<name>-url` has the application user's.
+  `apps deploy --pg` attaches one of them and adds the app to `allow_from`.
+- **Purge.** `pg rm --purge` deletes every `pg-<name>-*` secret. Cluster names have no dashes, so the prefix belongs
+  to this cluster alone.
+- **Dashboard.** `GET /ui/{file...}` serves three embedded static files with a strict Content-Security-Policy:
+  only its own scripts, styles and API. It is the second public route besides health (TestRoutePolicy names
+  it), and it holds no data. The page signs in with an API token kept in the tab's `sessionStorage` and calls the
+  existing routes with it, plus `GET /api/v1/pg/{name}/roles` (viewer). It never inserts API data as HTML.
+- **API roles.** `GET .../spec`, `GET .../events` and `GET /api/v1/pg-overview` are viewer. `POST /api/v1/pg-plan`
+  is operator: it changes nothing, but the route policy keeps POST above viewer. `POST /api/v1/pg-apply` is admin,
+  because it can create a cluster and change its backups.
+
 ## Security
 
 - The controller and agent commands are the only new way to act inside a container, and they are a closed list with

@@ -187,6 +187,8 @@ func pgSteps(o PGOrder) ([][]string, error) {
 			return nil, fmt.Errorf("the new parameters are not in place yet")
 		}
 		return [][]string{psqlArgs(c, sqlReload)}, nil
+	case opRole, opRoleOff, opDatabase:
+		return pgRoleSteps(c, o), nil
 	case opPassword:
 		role, verifier, _ := strings.Cut(o.Arg, ":")
 		return [][]string{psqlArgs(c, `alter role "`+role+`" password '`+verifier+`'`)}, nil
@@ -237,8 +239,11 @@ func pgExecute(ctx context.Context, run pgRunner, o PGOrder) error {
 			return pgReinitOffline(ctx, run, o)
 		}
 	}
-	for _, argv := range steps {
+	for i, argv := range steps {
 		if out, err := run(ctx, argv...); err != nil {
+			if pgRoleStepTolerated(o.Op, i, out) {
+				continue
+			}
 			// Stopping Postgres ends the container's exec session: that is the order succeeding.
 			if (o.Op == opDemote || o.Op == opReinit) && len(argv) > 4 && argv[4] == pgPgCtl {
 				continue

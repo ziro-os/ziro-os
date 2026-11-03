@@ -259,6 +259,10 @@ func lintDefinition(path string, b []byte) []lintFinding {
 		if _, err := schema.ParseHostConfig(b); err != nil {
 			add("error", err.Error())
 		}
+	case "postgres":
+		if _, err := schema.ParsePostgresConfig(b); err != nil {
+			add("error", err.Error())
+		}
 	case "app":
 		d, err := parseAppDef(b)
 		if err != nil {

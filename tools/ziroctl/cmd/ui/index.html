@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ziro Postgres</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="bar">
+  <a class="brand" href="#/">Ziro Postgres</a>
+  <nav aria-label="Breadcrumb" id="crumbs"></nav>
+  <span class="spacer"></span>
+  <span id="updated" class="muted" aria-live="off"></span>
+  <button id="logout" class="ghost" hidden>Sign out</button>
+</header>
+<main id="main" tabindex="-1">
+  <section id="login" hidden aria-labelledby="login-title">
+    <h1 id="login-title">Sign in</h1>
+    <p>Paste an API token (<code>ziroctl api token create dash --role viewer</code>). It stays in this browser tab
+      only, and the dashboard can do no more than its role allows: viewer to look, operator for switchovers and
+      backups, admin for restores and configuration.</p>
+    <form id="login-form">
+      <label for="token">API token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" required>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+  <section id="view" aria-live="polite"></section>
+</main>
+<dialog id="confirm" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-text"></p>
+    <div class="actions">
+      <button value="cancel" class="ghost">Cancel</button>
+      <button value="ok" id="confirm-ok">Confirm</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
