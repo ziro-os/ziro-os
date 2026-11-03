@@ -34,18 +34,24 @@ To reach the database from outside the cluster, publish it through the [gateway]
 
 ```sh
 ziroctl pg expose shop --port 5432 --allow 203.0.113.0/24
-ziroctl pg expose shop --port 5433 --ro
+ziroctl pg expose shop --port 5433 --ro --allow 10.0.0.0/8
 ```
 
+`--allow` is required (`--allow 0.0.0.0/0` publishes to anyone), so a database is never open to the internet by
+accident.
+
 Passwords are cluster secrets; they are shown only by `ziroctl pg credentials` on the master and are never served
-over the API.
+over the API. See [Security](#security) for TLS and password rotation.
 
 ## Replication and durability
 
 | Setting | Behavior |
 | --- | --- |
-| `--sync quorum` (default) | With two or more replicas, a commit waits for one replica (`ANY 1 (*)`). A failover loses no acknowledged write, and an isolated old primary cannot commit. With one replica replication is asynchronous, because waiting for the only replica would stop writes when it is down. |
+| `--sync quorum` (default) | With two replicas a commit waits for one of them, with three or more for two (`ANY k (m2, m3, ...)`). A failover loses no acknowledged write, and an isolated old primary cannot commit. With one replica replication is asynchronous, because waiting for the only replica would stop writes when it is down. |
 | `--sync off` | Always asynchronous: the fastest commits; a failover can lose the writes the replica had not received. |
+
+`ziroctl pg create` makes two replicas unless told otherwise. With `--replicas 1` (or `--sync off`) it says that
+replication is asynchronous.
 
 Every replica has a physical replication slot on the primary, and `max_slot_wal_keep_size` keeps a replica that is
 gone for good from filling the primary's disk. A replica that falls too far behind is rebuilt from a new base
@@ -57,16 +63,32 @@ Data checksums and `scram-sha-256` are on.
 ## Failover
 
 The agent on each node checks every member every 5 seconds. The controller on the cluster leader declares the
-primary failed when its node is down or it has not answered for 30 seconds, and then:
+primary failed when its node is down or it has not answered for 36 seconds, and then:
 
-1. picks the replica that has replayed the most WAL. With asynchronous replication it must be within 16 MiB of the
+1. picks the replica that holds the most WAL (received, not only replayed: a replica holding an acknowledged
+   commit wins). With asynchronous replication it must be within 16 MiB of the
    failed primary's last known position: a further-behind replica is promoted only by an operator with
    `ziroctl pg failover --force`, since that loses writes;
 2. refuses to promote unless the replicas it can reach could have received every synchronous commit, so a minority
    cannot promote itself next to a live primary (with `--sync quorum`);
 3. raises the cluster epoch, orders the promotion, and moves `-rw` to the new primary when it confirms;
-4. fences the old primary: when it returns, its entry script finds another primary behind `-rw`, refuses to serve,
+4. points every replica at the new primary by name (a replica still streaming from the old primary would not move
+   by itself), and keeps a replica that is on an older timeline out of `-ro`;
+5. fences the old primary: when it returns, its entry script finds another primary behind `-rw`, refuses to serve,
    and rejoins as a replica with `pg_rewind`, or from a new base backup when the rewind is not possible.
+
+The primary also fences itself. Every heartbeat the master grants each member a lease, as long as its probe is
+fresh. A watchdog in the primary's container checks the lease every second. When the lease has ended, it sets
+`synchronous_standby_names` to a standby that does not exist and ends client sessions, so no further commit is
+acknowledged. It gives the standby list back when the lease returns. A primary that restarts without a lease starts
+fenced.
+
+The lease lasts 22 seconds from the heartbeat that carried a fresh probe, and the master waits 36 seconds before it
+fails the primary over. So the old primary has stopped acknowledging writes before a replica takes over, whatever
+silenced it: its node failing, a network cut, or a hung container runtime. A group with no replica has nothing to
+fail over to and is never fenced. With a single master, the primaries of clusters with replicas stop acknowledging
+writes while that master is down. Run three masters for production
+([Clustering](clustering.md#high-availability-control-plane)).
 
 The controller does nothing while the cluster is partitioned or when probe data is stale. `ziroctl pg pause shop`
 stops it from changing roles at all (for maintenance) and `ziroctl pg resume shop` brings it back. Every promotion
@@ -106,7 +128,7 @@ promotion, a replica far behind, a partition, a command that failed or has not c
 streaming. When the reason is one of the safety refusals, an operator can decide:
 
 ```sh
-ziroctl pg failover shop                # now, with the automatic safety checks (skips the 30 s wait and the partition brake)
+ziroctl pg failover shop                # now, with the automatic safety checks (skips the 36 s wait and the partition brake)
 ziroctl pg failover shop --to m3 --force  # promote m3 even if acknowledged writes may be lost
 ```
 
@@ -141,8 +163,18 @@ ziroctl pg switchover shop              # to the replica furthest ahead
 ziroctl pg switchover shop --to m3
 ```
 
-The primary is made read-only, the target catches up and is promoted, `-rw` moves, and the old primary becomes a
-replica. Writes pause for a few seconds and no data is lost. Use it before maintenance on the primary's node.
+The primary is made read-only and fenced: commits under way wait instead of being acknowledged, so none can be lost,
+even from a session that turned read-only off for itself. The target catches up and is promoted, `-rw` moves, and
+the old primary becomes a replica. Writes pause for a few seconds. Use it before maintenance on the primary's node.
+An aborted switchover gives the primary its standby list back.
+
+### Upgrades and configuration changes
+
+A change to a member's container is rolled out one member at a time. This covers a ziroctl upgrade that changes
+the entry script, new memory or CPU limits, a new image, and a password change. Each replica restarts in turn, and
+the next waits until it is back, streaming and caught up. The primary goes last, after a switchover to a replica
+that already runs the new configuration, so writes pause only for the switchover. A member that is down anyway is
+not waited for, and a group with no replica restarts its primary in place.
 
 ## Add and remove replicas
 
@@ -192,14 +224,39 @@ distinct values and appears in most queries (tenant, user or device id).
 a group is not healthy. The master's
 `/metrics` has `ziro_pg_members`, `ziro_pg_primary`, `ziro_pg_epoch` and `ziro_pg_replication_lag_milliseconds` per
 cluster, group and member. Alerts of category `database` fire on a promotion, when no safe promotion exists, when
-a command to a member fails, when a switchover is aborted and when no node is free for another replica.
+a command to a member fails, when a switchover is aborted, when no node is free for another replica, and when a
+member's data volume is 80 % or 90 % full.
+
+## Security
+
+- **TLS.** Every new cluster has its own CA. Members replicate with `sslmode=verify-ca`, so only a member of this
+  cluster can serve as its primary, and Citus nodes connect to each other the same way. Clients can check the
+  server with the CA: `ziroctl pg credentials shop --ca > shop-ca.crt`, then
+  `sslmode=verify-full sslrootcert=shop-ca.crt` against `shop-rw.cluster.ziro`. The connection strings
+  `ziroctl pg credentials` prints use `sslmode=require`.
+- **Who may log in.** The superuser `postgres` logs in over the container's local socket only, which is what the
+  agent uses. Over the network it is refused, except between Citus nodes. Replication has its own role.
+- **Passwords.** Passwords are generated, stored in sealed cluster secrets and checked with SCRAM-SHA-256.
+  `ziroctl pg rotate-password shop` changes the application user's password (`--role replicator` or `postgres`
+  for the others). The primary receives only the new password's SCRAM verifier, never the password itself. The
+  members then restart on the new secret one at a time, and open sessions stay open.
+- **Exposure.** `pg expose` requires `--allow`.
 
 ## Removing a cluster
 
 ```sh
-ziroctl pg rm shop              # stops the members and keeps the data and credentials
-ziroctl pg rm shop --purge      # also deletes the data on every node and the credentials
+ziroctl pg rm shop                    # stops the members and keeps the data and credentials
+ziroctl pg rm shop --purge --yes      # also deletes the data on every node and the credentials
 ```
+
+## Changes in behavior
+
+- `ziroctl pg create` makes two replicas by default (synchronous, no acknowledged write lost on failover).
+- `pg expose` requires `--allow`, and `pg rm --purge` requires `--yes`.
+- The failover grace is 36 s (was 30 s), so a primary's lease always ends first.
+- New clusters use TLS, and the superuser no longer logs in over the network.
+- A ziroctl upgrade that changes the members' entry script rolls out one member at a time, with a switchover before
+  the primary restarts, instead of restarting every member together.
 
 ## Limits
 
@@ -210,6 +267,9 @@ ziroctl pg rm shop --purge      # also deletes the data on every node and the cr
 - Known limitation: Citus reads from worker replicas (`citus.use_secondary_nodes`) are not wired in; the `-ro` name of
   a sharded cluster reads from the coordinator's replicas.
 - Known limitation: a worker group cannot be removed yet; `add-shard` is one way.
+- Known limitation: a cluster created before TLS keeps running without it. Members are probed by running `psql`
+  in their containers, and orders are carried out the same way; the lease watchdog covers the case where that
+  channel hangs.
 - Failover needs the leader master and a recent probe from the node of the replica; with three or more masters a
   master outage does not pause it (see [Clustering](clustering.md#high-availability-control-plane)).
 - The failover logic is tested by simulation of cluster state and probes, and the entry script against a real

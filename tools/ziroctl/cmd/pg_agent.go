@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -48,7 +49,8 @@ func psqlDB(container, db string, sqls ...string) []string {
 }
 
 // pgProbeSQL reads, in one row: recovery state, WAL position, timeline, whether a WAL receiver is
-// streaming, and how far behind the replay is.
+// streaming, how far behind the replay is, read-only, the WAL received (a replica's received and flushed
+// position, which may be ahead of the replay), and synchronous_standby_names.
 const pgProbeSQL = `select pg_is_in_recovery()::int,
   case when pg_is_in_recovery() then coalesce(pg_last_wal_replay_lsn(), pg_last_wal_receive_lsn()) else pg_current_wal_lsn() end,
   case when pg_is_in_recovery() then coalesce((select received_tli from pg_stat_wal_receiver), 0)
@@ -56,7 +58,9 @@ const pgProbeSQL = `select pg_is_in_recovery()::int,
   exists (select from pg_stat_wal_receiver where status = 'streaming')::int,
   case when pg_is_in_recovery() and pg_last_wal_receive_lsn() is distinct from pg_last_wal_replay_lsn()
        then coalesce((extract(epoch from now() - pg_last_xact_replay_timestamp()) * 1000)::bigint, 0) else 0 end,
-  (current_setting('default_transaction_read_only') = 'on')::int`
+  (current_setting('default_transaction_read_only') = 'on')::int,
+  case when pg_is_in_recovery() then coalesce(pg_last_wal_receive_lsn(), '0/0'::pg_lsn) else pg_current_wal_lsn() end,
+  current_setting('synchronous_standby_names')`
 
 // parseProbe reads the row pgProbeSQL returns.
 func parseProbe(out string) (PGReport, error) {
@@ -64,11 +68,17 @@ func parseProbe(out string) (PGReport, error) {
 	if i := strings.LastIndex(line, "\n"); i >= 0 {
 		line = line[i+1:]
 	}
-	f := strings.Split(line, "|")
+	f := strings.SplitN(line, "|", 8)
 	if len(f) == 5 { // an older probe without the read-only column
 		f = append(f, "0")
 	}
-	if len(f) != 6 {
+	if len(f) == 6 { // ... and without the received position and the standby list
+		f = append(f, f[1], "")
+	}
+	if len(f) != 8 {
+		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
+	}
+	if _, err := parseLSN(f[6]); err != nil {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	tli, err1 := strconv.Atoi(f[2])
@@ -76,7 +86,8 @@ func parseProbe(out string) (PGReport, error) {
 	if _, err := parseLSN(f[1]); err != nil || err1 != nil || err2 != nil || (f[0] != "0" && f[0] != "1") || (f[5] != "0" && f[5] != "1") {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
-	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag, ReadOnly: f[5] == "1"}, nil
+	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag, ReadOnly: f[5] == "1",
+		Received: f[6], SyncNames: f[7]}, nil
 }
 
 // pgProbe asks one member how it is.
@@ -95,7 +106,17 @@ const (
 	sqlResetRO   = "alter system reset default_transaction_read_only"
 	sqlSetRO     = "alter system set default_transaction_read_only = on"
 	sqlEndClient = "select pg_terminate_backend(pid) from pg_stat_activity where backend_type = 'client backend' and pid <> pg_backend_pid()"
+	// sqlFence makes every commit wait for a standby that never exists: nothing more is acknowledged.
+	sqlFence = "alter system set synchronous_standby_names = '" + pgFenceName + "'"
 )
+
+// sqlSetSync sets synchronous_standby_names to a validated value ("" = asynchronous).
+func sqlSetSync(v string) string {
+	if v == "" {
+		return "alter system reset synchronous_standby_names"
+	}
+	return "alter system set synchronous_standby_names = '" + v + "'"
+}
 
 // pgSteps turns an order into the nerdctl invocations that carry it out.
 func pgSteps(o PGOrder) ([][]string, error) {
@@ -117,19 +138,23 @@ func pgSteps(o PGOrder) ([][]string, error) {
 			{"exec", "-u", "postgres", c, "touch", pgDataDirIn + "/ziro-reinit"},
 			ctl("stop", "-m", "fast", "-D", pgDataDirIn, "-w", "-t", "60")}, nil
 	case opReadonly:
-		return [][]string{psqlArgs(c, sqlSetRO, sqlReload, sqlEndClient)}, nil
+		// Read-only refuses new writes; the fence keeps the commits already under way from being
+		// acknowledged, so none of them can be lost when the replica takes over (a session can turn
+		// read-only off for itself; it cannot get past the fence).
+		return [][]string{psqlArgs(c, sqlSetRO, sqlFence, sqlReload, sqlEndClient)}, nil
 	case opWritable:
-		return [][]string{psqlArgs(c, sqlResetRO, sqlReload)}, nil
+		return [][]string{psqlArgs(c, sqlResetRO, sqlSetSync(o.Arg), sqlReload)}, nil
+	case opFollow:
+		return [][]string{psqlArgs(c, "alter system set primary_conninfo = '"+o.Arg+"'", sqlReload)}, nil
+	case opPassword:
+		role, verifier, _ := strings.Cut(o.Arg, ":")
+		return [][]string{psqlArgs(c, `alter role "`+role+`" password '`+verifier+`'`)}, nil
 	case opDemote:
 		// Read-only first, so nothing more is accepted while it stops; the runtime restarts the
 		// container, and the entry script brings it back as a replica.
 		return [][]string{psqlArgs(c, sqlSetRO, sqlReload, sqlEndClient), ctl("stop", "-m", "fast", "-D", pgDataDirIn, "-w", "-t", "60")}, nil
 	case opSetSync:
-		set := "alter system reset synchronous_standby_names"
-		if o.Arg != "" {
-			set = "alter system set synchronous_standby_names = '" + o.Arg + "'"
-		}
-		return [][]string{psqlArgs(c, set, sqlReload)}, nil
+		return [][]string{psqlArgs(c, sqlSetSync(o.Arg), sqlReload)}, nil
 	case opSlots:
 		var sqls []string
 		for _, s := range strings.Split(o.Arg, ",") {
@@ -235,6 +260,7 @@ func lastOutputLine(s string) string {
 
 type pgAgent struct {
 	mu      sync.Mutex
+	epochs  map[string]int64     // member app -> the highest epoch an order for it carried
 	reports map[string]pgStamped // member app -> last probe
 	results map[string]pgDone    // order id -> outcome, resent until the master stops sending the order
 	seen    map[string]time.Time // orders already started
@@ -255,7 +281,7 @@ type pgDone struct {
 }
 
 func newPGAgent() *pgAgent {
-	return &pgAgent{reports: map[string]pgStamped{}, results: map[string]pgDone{}, seen: map[string]time.Time{}, run: pgNerdctl}
+	return &pgAgent{epochs: map[string]int64{}, reports: map[string]pgStamped{}, results: map[string]pgDone{}, seen: map[string]time.Time{}, run: pgNerdctl}
 }
 
 // probeAll probes the member containers this node should run.
@@ -270,6 +296,8 @@ func (p *pgAgent) probeAll(ctx context.Context, desired []Assignment, now time.T
 		r.App = a.App
 		if err != nil {
 			r = PGReport{App: a.App}
+		} else {
+			r.DiskPct = diskUsedPct(dataDir(a.App, a.Replica, pgDataPath))
 		}
 		p.mu.Lock()
 		if cur, ok := p.reports[a.App]; err != nil && ok {
@@ -320,13 +348,34 @@ func (p *pgAgent) submit(ctx context.Context, orders []PGOrder, now time.Time) {
 		if !dup {
 			p.seen[o.ID] = now
 		}
+		// An order from an older epoch was decided before a promotion this node has already been told
+		// about (a promotion the master reverted, a demotion queued behind it): it must not run.
+		if p.epochs == nil {
+			p.epochs = map[string]int64{}
+		}
+		stale := o.Epoch < p.epochs[o.App]
+		if !stale && o.Epoch > p.epochs[o.App] {
+			p.epochs[o.App] = o.Epoch
+		}
+		if stale && !dup {
+			p.results[o.ID] = pgDone{r: PGResult{ID: o.ID, Msg: fmt.Sprintf("refused: epoch %d is older than %d", o.Epoch, p.epochs[o.App])}, at: now}
+		}
 		p.mu.Unlock()
-		if dup {
+		if dup || stale {
 			continue
 		}
 		go func(o PGOrder) {
 			p.exec.Lock()
 			defer p.exec.Unlock()
+			p.mu.Lock()
+			late := o.Epoch < p.epochs[o.App] // a newer order arrived while this one waited its turn
+			p.mu.Unlock()
+			if late {
+				p.mu.Lock()
+				p.results[o.ID] = pgDone{r: PGResult{ID: o.ID, Msg: "refused: a newer epoch arrived while it waited"}, at: time.Now()}
+				p.mu.Unlock()
+				return
+			}
 			octx, cancel := context.WithTimeout(ctx, pgCommandTimeout-5*time.Second)
 			defer cancel()
 			err := pgExecute(octx, p.run, o)
@@ -353,4 +402,14 @@ func (p *pgAgent) loop(ctx context.Context, desired func() []Assignment) {
 			p.probeAll(ctx, desired(), now)
 		}
 	}
+}
+
+// diskUsedPct is how full the file system holding dir is, in percent (0 when unknown).
+func diskUsedPct(dir string) int {
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(dir, &fs); err != nil || fs.Blocks == 0 {
+		return 0
+	}
+	used := fs.Blocks - fs.Bfree
+	return int((used*100 + (used + fs.Bavail) - 1) / (used + fs.Bavail)) // as df rounds it: up
 }

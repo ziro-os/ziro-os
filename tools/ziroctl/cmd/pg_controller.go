@@ -28,7 +28,7 @@ func pgDynamic(st *ClusterState, app string) map[string]string {
 			g := &c.Groups[gi]
 			for mi := range g.Members {
 				if m := &g.Members[mi]; c.memberApp(g.Name, m.ID) == app {
-					return map[string]string{"role": pgRoleFile(m, g)}
+					return map[string]string{"role": pgRoleFile(c, m, g), "lease": pgLeaseFile(g, m, pgNow())}
 				}
 			}
 		}
@@ -49,18 +49,33 @@ const (
 	opSlots    = "slots"    // create the named physical replication slots if missing
 	opDropSlot = "dropslot" // drop one replication slot
 	opReinit   = "reinit"   // a replica discards its data directory and takes a new base backup (pg reinit)
+	opFollow   = "follow"   // a replica follows the named primary (primary_conninfo, reload); argument is the conninfo
 )
+
+// pgFenceName is the synchronous standby no member is ever called: a primary with it waits for ever on
+// each commit, so nothing is acknowledged (switchover, and the lease watchdog in pg_entry.sh).
+const pgFenceName = "ziro_fenced"
+
+// pgConninfoRe is the only primary_conninfo an opFollow may set: a member host, the replication user, the
+// member's own name and, with TLS, the cluster CA.
+var pgConninfoRe = regexp.MustCompile(`^host=[0-9a-z][0-9a-z.-]{0,200} port=5432 user=replicator application_name=m[0-9]{1,3}( sslmode=verify-ca sslrootcert=/var/lib/postgresql/data/ziro-tls/ca\.crt)?$`)
 
 var pgSyncValueRe = regexp.MustCompile(`^(ANY [12] \(m[0-9]{1,3}(, m[0-9]{1,3})*\))?$`)
 
 // validPGCommand checks an order and its argument.
 func validPGCommand(op, arg string) error {
 	switch op {
-	case opPromote, opDemote, opReadonly, opWritable, opReinit:
+	case opPromote, opDemote, opReadonly, opReinit:
 		if arg != "" {
 			return fmt.Errorf("%s takes no argument", op)
 		}
-	case opSetSync:
+	case opPassword:
+		return validPasswordArg(arg)
+	case opFollow:
+		if !pgConninfoRe.MatchString(arg) {
+			return fmt.Errorf("invalid primary connection %q", arg)
+		}
+	case opSetSync, opWritable: // writable restores the synchronous standbys the switchover fence replaced
 		if !pgSyncValueRe.MatchString(arg) {
 			return fmt.Errorf("invalid synchronous standby list %q", arg)
 		}
@@ -156,6 +171,11 @@ type PGReport struct {
 	AgeMs int64 `json:"age_ms,omitempty"`
 	// ReadOnly: default_transaction_read_only is on (a primary left read-only by an aborted switchover).
 	ReadOnly bool `json:"ro,omitempty"`
+	// Received: a replica's WAL received and flushed; SyncNames: its synchronous_standby_names.
+	Received  string `json:"received,omitempty"`
+	SyncNames string `json:"sync_names,omitempty"`
+	// DiskPct: how full the member's data volume is (0 = unknown).
+	DiskPct int `json:"disk_pct,omitempty"`
 	// Detail says what the node sees of a member that does not answer (container state, the entry
 	// script's last error); Busy: a base backup or rewind is running in it, so it is not stuck.
 	Detail string `json:"detail,omitempty"`
@@ -219,7 +239,9 @@ func pgIngest(st *ClusterState, nodeID string, reports []PGReport, results []PGR
 		if at.Before(m.Probe.At) {
 			continue // an older report than the one we have
 		}
-		m.Probe = PGProbe{At: at, OK: true, Recovery: r.Recovery, Streaming: r.Streaming, LSN: lsn, Timeline: r.Timeline, LagMs: r.LagMs, Epoch: r.Epoch, ReadOnly: r.ReadOnly}
+		received, _ := parseLSN(r.Received)
+		m.Probe = PGProbe{At: at, OK: true, Recovery: r.Recovery, Streaming: r.Streaming, LSN: lsn, Timeline: r.Timeline, LagMs: r.LagMs, Epoch: r.Epoch,
+			ReadOnly: r.ReadOnly, Received: received, SyncNames: sanitizeLabel(r.SyncNames, 200), DiskPct: min(max(r.DiskPct, 0), 100)}
 	}
 	if len(results) == 0 {
 		return
@@ -285,8 +307,9 @@ func pgPass(st *ClusterState, now time.Time) {
 				pgGroupPass(st, c, &c.Groups[gi], now, braked, held)
 			}
 			pgCitusPass(st, c, now)
+			pgRotationPass(st, c, now)
 		}
-		pgEnsureApps(st, c)
+		pgEnsureApps(st, c, now)
 	}
 	pgRemoveOrphans(st)
 }
@@ -295,6 +318,15 @@ func pgPass(st *ClusterState, now time.Time) {
 func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, braked, held bool) {
 	for i := range g.Members {
 		pgSettle(c, g, &g.Members[i], now)
+	}
+	// A replica on an older timeline than the primary still follows a former primary: no reads, no vote.
+	tl := 0
+	if p := g.primary(); p != nil && p.fresh(now) && !p.Probe.Recovery {
+		tl = p.Probe.Timeline
+	}
+	for i := range g.Members {
+		m := &g.Members[i]
+		m.OffTimeline = tl > 0 && m.Role == pgReplica && m.Probe.Timeline > 0 && m.Probe.Timeline < tl
 	}
 	// Joined: a replica that has been ready counts toward the synchronous standbys from then on.
 	for i := range g.Members {
@@ -329,6 +361,35 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 	if g.primary() != nil && g.promoting() == nil && g.Switch == nil {
 		pgAdjustMembers(st, c, g, now)
 		pgSyncAndSlots(c, g, now)
+		pgFollowPrimary(st, c, g, now)
+	}
+}
+
+// pgConninfo is the primary_conninfo of member m following primary p.
+func pgConninfo(st *ClusterState, c *PGCluster, g *PGGroup, p, m *PGMember) string {
+	s := "host=1." + c.memberApp(g.Name, p.ID) + "." + meshDomain + " port=5432 user=replicator application_name=" + m.ID
+	if pgTLSEnabled(st, c) {
+		s += " sslmode=verify-ca sslrootcert=" + pgTLSDir + "/ca.crt"
+	}
+	return s
+}
+
+// pgFollowPrimary points every replica at the primary by its member name. A replica that still streams
+// from a former primary (alive, but no longer the primary) would not move by itself: the read-write
+// name it connected through has moved, its connection has not.
+func pgFollowPrimary(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) {
+	p := g.primary()
+	if p == nil || !p.fresh(now) || p.Probe.Recovery {
+		return
+	}
+	for i := range g.Members {
+		m := &g.Members[i]
+		if m.Role != pgReplica || m.Draining || m.Cmd != nil || !m.fresh(now) || !m.Probe.Recovery {
+			continue
+		}
+		if want := pgConninfo(st, c, g, p, m); m.Following != want {
+			m.issue(opFollow, want, g.Epoch, now)
+		}
 	}
 }
 
@@ -360,14 +421,52 @@ func pgSelfHeal(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) {
 	}
 	// A primary left read-only (an aborted switchover, a failed writable order) refuses every write
 	// and nothing else would ever change it back.
-	if p != nil && p.fresh(now) && !p.Probe.Recovery && p.Probe.ReadOnly && p.Cmd == nil {
-		p.issue(opWritable, "", g.Epoch, now)
+	if p != nil && p.fresh(now) && !p.Probe.Recovery && (p.Probe.ReadOnly || pgFenceLeftOver(g, p, now)) && p.Cmd == nil {
+		p.issue(opWritable, pgSyncSpec(c, g), g.Epoch, now)
 		if g.last(now, 10*time.Minute, "readonly") {
 			g.alert(now, "medium", "primary %s is read-only and no switchover is running: making it writable", p.ID)
 		}
 	}
 	pgTrackProgress(st, g, now)
 	pgAutoRebuild(c, g, now)
+	pgDiskAlerts(g, now)
+}
+
+// pgDiskAlerts warns before a data volume fills up: a primary with a full disk stops (PANIC on WAL
+// write), and a replica that falls behind makes the primary keep WAL for it.
+func pgDiskAlerts(g *PGGroup, now time.Time) {
+	for i := range g.Members {
+		m := &g.Members[i]
+		if !m.fresh(now) {
+			continue
+		}
+		switch pct := m.Probe.DiskPct; {
+		case pct >= 90 && g.last(now, 30*time.Minute, "disk90-"+m.ID):
+			g.alert(now, "high", "the data volume of %s (%s) is %d%% full: add space or remove data before Postgres stops", m.ID, m.Role, pct)
+		case pct >= 80 && pct < 90 && g.last(now, 6*time.Hour, "disk80-"+m.ID):
+			g.alert(now, "medium", "the data volume of %s (%s) is %d%% full", m.ID, m.Role, pct)
+		}
+	}
+}
+
+// pgFenceLeftOver: the primary has waited on the fence standby for longer than its lease watchdog
+// would keep it there while the master grants it a lease (an aborted switchover, or a fence the
+// watchdog could not lift).
+func pgFenceLeftOver(g *PGGroup, p *PGMember, now time.Time) bool {
+	key := "fenced-" + p.ID
+	if g.Notes == nil {
+		g.Notes = map[string]time.Time{}
+	}
+	if p.Probe.SyncNames != pgFenceName || !pgLeaseGrant(p, now) {
+		delete(g.Notes, key)
+		return false
+	}
+	since, ok := g.Notes[key]
+	if !ok {
+		g.Notes[key] = now
+		return false
+	}
+	return now.Sub(since) > pgLeaseTTL+10*time.Second
 }
 
 // pgTrackProgress keeps UnreadySince honest. It runs while a replica does not follow the primary and
@@ -527,6 +626,17 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 		if cmd.OK {
 			g.Slots = cmd.Epoch
 		}
+	case opFollow:
+		if cmd.OK {
+			m.Following = cmd.Arg
+		}
+	case opPassword:
+		if cmd.OK && c.Rotation != nil {
+			if g.Notes == nil {
+				g.Notes = map[string]time.Time{}
+			}
+			g.Notes["rotated-"+c.Rotation.Key] = now
+		}
 	case opPromote:
 		if m.Role == pgPromoting {
 			return // pgFinishPromotion reads the result
@@ -578,8 +688,7 @@ func pgCandidate(g *PGGroup, now time.Time) (best *PGMember, reachable, total in
 			continue // its WAL position is on an older timeline: not comparable, and it lacks the newer writes
 		}
 		reachable++
-		if best == nil || m.Probe.LSN > best.Probe.LSN ||
-			m.Probe.LSN == best.Probe.LSN && m.ID < best.ID {
+		if best == nil || m.pos() > best.pos() || m.pos() == best.pos() && m.ID < best.ID {
 			best = m
 		}
 	}
@@ -633,9 +742,9 @@ func pgPromotionBlock(c *PGCluster, g *PGGroup, best *PGMember, reachable, total
 		return fmt.Sprintf("only %d of %d replicas answer; promoting could lose acknowledged writes", reachable, total)
 	}
 	if k == 0 {
-		if p := g.primary(); p != nil && p.Probe.LSN > best.Probe.LSN && p.Probe.LSN-best.Probe.LSN > pgMaxLagBytes {
+		if p := g.primary(); p != nil && p.Probe.LSN > best.pos() && p.Probe.LSN-best.pos() > pgMaxLagBytes {
 			return fmt.Sprintf("%s is %d MiB behind the primary's last known position; promoting it would lose those writes",
-				best.ID, (p.Probe.LSN-best.Probe.LSN)>>20)
+				best.ID, (p.Probe.LSN-best.pos())>>20)
 		}
 	}
 	return ""
@@ -670,7 +779,7 @@ func pgForcedFailover(c *PGCluster, g *PGGroup, now time.Time) {
 	case f.Unsafe:
 		for i := range g.Members {
 			m := &g.Members[i]
-			if m.Role == pgReplica && !m.Draining && m.fresh(now) && m.Probe.Recovery && (target == nil || m.Probe.LSN > target.Probe.LSN) {
+			if m.Role == pgReplica && !m.Draining && m.fresh(now) && m.Probe.Recovery && (target == nil || m.pos() > target.pos()) {
 				target = m
 			}
 		}
@@ -799,11 +908,11 @@ func pgStartSwitchover(c *PGCluster, g *PGGroup, to string, now time.Time) error
 	return nil
 }
 
-func pgAbortSwitch(g *PGGroup, p *PGMember, now time.Time, why string) {
+func pgAbortSwitch(c *PGCluster, g *PGGroup, p *PGMember, now time.Time, why string) {
 	g.alert(now, "medium", "switchover aborted: %s", why)
 	g.Switch = nil
 	if p != nil && p.Cmd == nil {
-		p.issue(opWritable, "", g.Epoch, now)
+		p.issue(opWritable, pgSyncSpec(c, g), g.Epoch, now)
 	}
 }
 
@@ -811,11 +920,11 @@ func pgSwitchover(c *PGCluster, g *PGGroup, now time.Time) {
 	sw := g.Switch
 	p, t := g.primary(), g.member(sw.To)
 	if p == nil || t == nil || t.Role != pgReplica {
-		pgAbortSwitch(g, p, now, "the primary or the target changed")
+		pgAbortSwitch(c, g, p, now, "the primary or the target changed")
 		return
 	}
 	if now.Sub(sw.At) > 2*time.Minute {
-		pgAbortSwitch(g, p, now, "timed out")
+		pgAbortSwitch(c, g, p, now, "timed out")
 		return
 	}
 	switch sw.Step {
@@ -830,7 +939,7 @@ func pgSwitchover(c *PGCluster, g *PGGroup, now time.Time) {
 		ok := p.Cmd.OK
 		p.Cmd = nil
 		if !ok {
-			pgAbortSwitch(g, p, now, "could not make the primary read-only")
+			pgAbortSwitch(c, g, p, now, "could not make the primary read-only")
 			return
 		}
 		sw.Step, sw.ReadOnlyAt = "catchup", now
@@ -1000,6 +1109,10 @@ func pgSyncAndSlots(c *PGCluster, g *PGGroup, now time.Time) {
 		p.issue(opSlots, strings.Join(slots, ","), g.Epoch, now)
 		return
 	}
+	// The primary says what it has: a list it lost (a restart from an older postgresql.auto.conf) is sent again.
+	if got := p.Probe.SyncNames; p.fresh(now) && got != "" && got != pgFenceName && got != g.Sync {
+		g.Sync = pgSyncUnknown
+	}
 	if want := pgSyncSpec(c, g); g.Sync != want {
 		p.issue(opSetSync, want, g.Epoch, now)
 	}
@@ -1007,11 +1120,14 @@ func pgSyncAndSlots(c *PGCluster, g *PGGroup, now time.Time) {
 
 // ---- apps ----
 
-// pgEnsureApps makes the cluster apps match the members: one pinned app per member, and no others.
-func pgEnsureApps(st *ClusterState, c *PGCluster) {
+// pgEnsureApps makes the cluster apps match the members: one pinned app per member, and no others. A
+// member whose app would change takes the new spec when pgMayRoll says it is its turn.
+func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 	want := map[string]bool{}
 	for gi := range c.Groups {
 		g := &c.Groups[gi]
+		apps := make([]*ClusteredApp, len(g.Members))
+		pending := map[string]bool{} // members whose running app is not the one they should run
 		for mi := range g.Members {
 			m := &g.Members[mi]
 			if m.Node == "" {
@@ -1021,8 +1137,24 @@ func pgEnsureApps(st *ClusterState, c *PGCluster) {
 				}
 			}
 			app := withPodNetwork(st, pgMemberApp(st, c, g, m))
+			apps[mi] = &app
 			want[app.Name] = true
-			upsertApp(st, app)
+			if cur := st.app(app.Name); cur != nil && specHash(*cur) != specHash(app) {
+				pending[m.ID] = true
+			}
+		}
+		for mi := range g.Members {
+			m, app := &g.Members[mi], apps[mi]
+			if app == nil {
+				continue
+			}
+			if pending[m.ID] && !pgMayRoll(c, g, m, pending, now) {
+				continue
+			}
+			if upsertApp(st, *app) && pending[m.ID] {
+				m.RolledAt = now
+				delete(pending, m.ID)
+			}
 		}
 	}
 	prefix := pgAppPrefix + c.Name + "-"
@@ -1035,6 +1167,62 @@ func pgEnsureApps(st *ClusterState, c *PGCluster) {
 		kept = append(kept, a)
 	}
 	st.Apps = kept
+}
+
+// pgRollTimeout is how long a member that took a new spec may take to come back before the next one goes.
+const pgRollTimeout = 10 * time.Minute
+
+// pgBack: a member that took a new spec has answered since, as what it should be.
+func pgBack(m *PGMember, now time.Time) bool {
+	if m.RolledAt.IsZero() || now.Sub(m.RolledAt) > pgRollTimeout {
+		return true
+	}
+	if !m.Probe.At.After(m.RolledAt) {
+		return false
+	}
+	return m.Role == pgPrimary && m.fresh(now) && !m.Probe.Recovery || m.ready(now)
+}
+
+// pgMayRoll decides whether a member may take a new spec now (a ziroctl upgrade changed the entry script,
+// new tuning, a new image): replicas one at a time, each back and caught up before the next, and the
+// primary last, after a switchover to a replica that already runs the new spec. A member that is not
+// serving anyway (down, rebuilding) is not waited for. Without a replica to hand over to, the primary
+// restarts in place. pending lists the members whose app is out of date.
+func pgMayRoll(c *PGCluster, g *PGGroup, m *PGMember, pending map[string]bool, now time.Time) bool {
+	if c.Paused || g.Switch != nil || g.promoting() != nil {
+		return false // paused: the operator decides when members restart (pg resume)
+	}
+	for i := range g.Members {
+		o := &g.Members[i]
+		if o.ID != m.ID && !pgBack(o, now) {
+			return false // another member is still coming back
+		}
+	}
+	serving := m.fresh(now) && (m.Role == pgPrimary && !m.Probe.Recovery || m.ready(now))
+	if !serving || m.Role != pgPrimary {
+		return true
+	}
+	// The primary: every serving replica first, then hand over to one on the new spec.
+	var target *PGMember
+	for i := range g.Members {
+		o := &g.Members[i]
+		if o.Role != pgReplica || o.Draining || !o.ready(now) {
+			continue
+		}
+		if pending[o.ID] {
+			return false // it goes first
+		}
+		if target == nil || o.pos() > target.pos() {
+			target = o
+		}
+	}
+	if target == nil {
+		return true // nothing to hand over to: a restart in place
+	}
+	if err := pgStartSwitchover(c, g, target.ID, now); err == nil {
+		g.note(now, "%s takes a new configuration: switching over to %s first", m.ID, target.ID)
+	}
+	return false
 }
 
 // pgRemoveOrphans deletes the apps of clusters that no longer exist.

@@ -328,7 +328,7 @@ func TestPGMembersAreRenderedAsPinnedApps(t *testing.T) {
 	if got := pgDynamic(w.st, w.app("main", "m1")); got["role"] != "role=primary\nepoch=0\ninitialised=1\n" {
 		t.Fatalf("primary role file: %q", got)
 	}
-	if got := pgDynamic(w.st, w.app("main", "m2")); got["role"] != "role=replica\nepoch=0\n" {
+	if got := pgDynamic(w.st, w.app("main", "m2")); got["role"] != "role=replica\nepoch=0\nfollow=1.pgc-db-main-m1.cluster.ziro\n" {
 		t.Fatalf("replica role file: %q", got)
 	}
 	if pgDynamic(w.st, "web") != nil {

@@ -204,12 +204,12 @@ func TestPGInitialisedIsInTheRoleFileNotTheSpec(t *testing.T) {
 	w.create(pgCreateOpts{Replicas: 2})
 	m1 := w.member("main", "m1")
 	g := w.cluster().group("main")
-	if strings.Contains(pgRoleFile(m1, g), "initialised") {
+	if strings.Contains(pgRoleFile(w.cluster(), m1, g), "initialised") {
 		t.Fatal("initialised before the member has ever served")
 	}
 	before := specHash(pgMemberApp(w.st, w.cluster(), g, m1))
 	w.settle(8)
-	if !m1.Initialised || !strings.Contains(pgRoleFile(m1, g), "initialised=1\n") {
+	if !m1.Initialised || !strings.Contains(pgRoleFile(w.cluster(), m1, g), "initialised=1\n") {
 		t.Fatalf("a primary that served was not marked: %+v", m1)
 	}
 	if after := specHash(pgMemberApp(w.st, w.cluster(), g, m1)); after != before {

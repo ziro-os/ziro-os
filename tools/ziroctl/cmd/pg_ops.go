@@ -104,10 +104,18 @@ func pgCreate(st *ClusterState, o pgCreateOpts, now time.Time) (*PGCluster, erro
 		}
 		secrets[k] = v
 	}
+	member, ca, err := pgIssueTLS(c, now)
+	if err != nil {
+		return nil, fmt.Errorf("TLS certificates: %v", err)
+	}
+	for k, v := range member {
+		secrets[k] = v
+	}
 	if st.Secrets == nil {
 		st.Secrets = map[string]map[string]string{}
 	}
 	st.Secrets[c.secretName()] = secrets
+	st.Secrets[c.caSecretName()] = ca
 	if st.PG == nil {
 		st.PG = map[string]*PGCluster{}
 	}
@@ -139,6 +147,7 @@ func pgDelete(st *ClusterState, name string, purge bool) error {
 		}
 		markPurge(st, apps...)
 		delete(st.Secrets, c.secretName())
+		delete(st.Secrets, c.caSecretName())
 	}
 	delete(st.PG, name)
 	return nil
@@ -535,5 +544,9 @@ func pgConnString(st *ClusterState, c *PGCluster, ro bool) string {
 	if ro {
 		host = c.Name + "-ro"
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s.%s:%s/%s", c.User, pw, host, meshDomain, pgPort, c.Database)
+	u := fmt.Sprintf("postgres://%s:%s@%s.%s:%s/%s", c.User, pw, host, meshDomain, pgPort, c.Database)
+	if pgTLSEnabled(st, c) {
+		u += "?sslmode=require" // encrypted; verify-full with the cluster CA (pg credentials --ca) also checks the name
+	}
+	return u
 }

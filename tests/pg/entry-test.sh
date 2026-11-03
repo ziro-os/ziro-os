@@ -2,7 +2,8 @@
 # Runs the Postgres member entry script (tools/ziroctl/cmd/pg_entry.sh) against real PostgreSQL
 # binaries, outside a container: a primary, a replica taken with pg_basebackup, a promotion, and the
 # old primary rejoining by pg_rewind (clean stop) or a new base backup (crash), including the refusal
-# to start as primary when another primary is serving. It needs root (it plays the container), the
+# to start as primary when another primary is serving; members talk TLS (verify-ca) to each other, the
+# superuser cannot log in over the network, and the lease watchdog fences a primary whose lease ended. It needs root (it plays the container), the
 # PostgreSQL server binaries and util-linux's runuser, and it edits /etc/hosts for the test names
 # (removed on exit). Usage: tests/pg/entry-test.sh   (exit 0 = pass, 77 = skipped).
 set -eu
@@ -14,6 +15,7 @@ entry="$here/../../tools/ziroctl/cmd/pg_entry.sh"
 bindir=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 || true)
 [ -n "$bindir" ] && [ -x "$bindir/initdb" ] || { echo "skip: no PostgreSQL server binaries"; exit 77; }
 command -v runuser >/dev/null || { echo "skip: no runuser"; exit 77; }
+command -v openssl >/dev/null || { echo "skip: no openssl"; exit 77; }
 id postgres >/dev/null 2>&1 || { echo "skip: no postgres user"; exit 77; }
 major=$(basename "$(dirname "$bindir")")
 
@@ -28,6 +30,16 @@ exec runuser -u "$user" -- "$@"
 SH
 chmod +x "$work/bin/gosu"
 export PATH="$work/bin:$bindir:$PATH"
+
+# A cluster CA and a server certificate, as pg_tls.go makes them.
+(
+	cd "$work"
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ca.key -out ca.crt -days 2 -subj "/CN=test CA" 2>/dev/null
+	openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout server.key -out server.csr -subj "/CN=rw.pgtest" 2>/dev/null
+	openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 2 2>/dev/null
+)
+b64() { base64 -w0 <"$work/$1"; }
+TLS_CA=$(b64 ca.crt) TLS_CERT=$(b64 server.crt) TLS_KEY=$(b64 server.key)
 
 ip1=127.0.0.11 ip2=127.0.0.12
 hosts_mark="# ziro-pg-test $$"
@@ -80,6 +92,7 @@ start() {
 		ZIRO_PG_PASSFILE="$d/pgpass" PG_MAJOR="$major" PGDATA="$d/data/pgdata" \
 		ZIRO_PG_RW=rw.pgtest ZIRO_PG_SELF="$n.pgtest" ZIRO_PG_MEMBER="$n" ZIRO_PG_INIT="$init" ZIRO_PG_NET=127.0.0.0/8 \
 		POSTGRES_USER=app POSTGRES_DB=appdb POSTGRES_PASSWORD=apppass PG_REPL_PASSWORD=replpass PG_SUPERUSER_PASSWORD=superpass \
+		PG_TLS_CA="$TLS_CA" PG_TLS_CERT="$TLS_CERT" PG_TLS_KEY="$TLS_KEY" \
 		bash "$entry" >>"$d/log" 2>&1 &
 	echo $! >"$d/pid"
 }
@@ -251,5 +264,58 @@ wait "$(cat "$work/m4/pid")" || rc=$?
 [ "$rc" -ne 0 ] || fail "a replica with no primary to copy started"
 grep -q "^no primary at rw.pgtest" "$work/m4/data/ziro-last-error" || fail "the reason was not written for the agent"
 ok "a start that fails records its reason"
+
+# 12. TLS between members, and who may log in over the network
+set_rw $ip2
+wait_for "m1 to stream from m2" streaming m1
+[ "$(q m2 'show ssl')" = on ] || fail "the primary does not serve TLS"
+[ "$(q m2 "select s.ssl from pg_stat_replication r join pg_stat_ssl s using (pid)")" = t ] || fail "replication is not encrypted"
+tcp() { PGCONNECT_TIMEOUT=3 PGPASSWORD=$3 runuser -u postgres -- psql -X -h "$ip2" -p 5499 -U "$2" -d appdb "sslmode=$1" -Atc 'select 1' 2>&1; }
+[ "$(PGCONNECT_TIMEOUT=3 PGPASSWORD=apppass runuser -u postgres -- psql -X "host=$ip2 port=5499 user=app dbname=appdb sslmode=verify-ca sslrootcert=$work/ca.crt" -Atc 'select ssl from pg_stat_ssl where pid = pg_backend_pid()')" = t ] ||
+	fail "the application user cannot connect with TLS checked against the cluster CA"
+PGCONNECT_TIMEOUT=3 PGPASSWORD=superpass runuser -u postgres -- psql -X "host=$ip2 port=5499 user=postgres dbname=appdb" -Atc 'select 1' >/dev/null 2>&1 &&
+	fail "the superuser logged in over the network"
+ok "members replicate over TLS checked against the cluster CA; the superuser is local only"
+
+# 13. the lease watchdog: a primary whose lease ended stops acknowledging commits, and starts again when renewed
+printf 'grant=1\nttl=22\nepoch=1\nfence=1\n' >"$work/m2/cfg/lease"
+echo "$(($(date +%s) + 60)) 1" >"$work/m2/cfg/lease-until"
+sleep 3
+[ "$(q m2 'show synchronous_standby_names')" = "" ] || fail "a primary with a valid lease was fenced"
+q m2 "alter system set synchronous_standby_names = 'ANY 1 (m1)'" >/dev/null
+q m2 "select pg_reload_conf()" >/dev/null
+echo "$(($(date +%s) - 1)) 1" >"$work/m2/cfg/lease-until"
+fenced() { [ "$(q m2 'show synchronous_standby_names')" = ziro_fenced ]; }
+wait_for "m2 to fence itself" fenced
+grep -q "lease from the master ended" "$work/m2/log" || fail "the fence was not logged"
+# A commit waits for the fence standby, which never comes: no acknowledgement within 10 s (statement_timeout
+# does not apply to the wait for a synchronous standby, so the client is stopped from outside).
+rc=0
+out=$(timeout 10 runuser -u postgres -- psql -X -h "$work/m2/sock" -p 5499 -d appdb -c "insert into t values ('fenced')" 2>&1) || rc=$?
+[ "$rc" = 124 ] && ! printf '%s' "$out" | grep -q 'INSERT 0 1' || fail "a commit was acknowledged while fenced (rc $rc): $out"
+echo "$(($(date +%s) + 60)) 1" >"$work/m2/cfg/lease-until"
+unfenced() { [ "$(q m2 'show synchronous_standby_names')" = "ANY 1 (m1)" ]; }
+wait_for "m2 to lift the fence" unfenced
+q m2 "insert into t values ('after-fence')" >/dev/null || fail "no commit after the lease came back"
+ok "a primary fences itself when its lease ends and restores its standby list when it is renewed"
+
+# 14. a primary that restarts without a lease starts fenced
+echo "$(($(date +%s) - 1)) 1" >"$work/m2/cfg/lease-until"
+wait_for "m2 to fence itself" fenced
+stop_clean m2
+start m2 $ip2 primary
+wait_for "m2 to accept connections" ready m2
+fenced || fail "a primary without a lease started unfenced"
+grep -q "no lease from the master: starting fenced" "$work/m2/log" || fail "the fenced start was not logged"
+echo "$(($(date +%s) + 60)) 1" >"$work/m2/cfg/lease-until"
+wait_for "m2 to lift the fence" unfenced
+ok "a primary that restarts without a lease starts fenced and is released when the lease comes"
+
+# 15. a group without replicas (fence=0) is never fenced
+printf 'grant=0\nttl=22\nepoch=1\nfence=0\n' >"$work/m2/cfg/lease"
+echo "$(($(date +%s) - 1)) 1" >"$work/m2/cfg/lease-until"
+sleep 3
+fenced && fail "a primary with nothing to fail over to was fenced"
+ok "a primary with no replica to fail over to is not fenced"
 
 echo "pass: $pass checks against PostgreSQL $major"

@@ -634,6 +634,7 @@ var clusterAgentCmd = &cobra.Command{
 			// Last good master first, then the configured one, then every other master (failover).
 			hb.Have = ag.delta.have()
 			var err error
+			sentAt := time.Now() // Postgres leases count from when the request left (pg_lease.go)
 			for _, addr := range uniqueAddrs(active, cfg.MasterAddr, cfg.Masters) {
 				if err = clusterPost(addr, cfg.CAHash, "/cluster/v1/heartbeat", nodeAuth(cfg), hb, &resp); err == nil {
 					active = addr
@@ -753,6 +754,7 @@ var clusterAgentCmd = &cobra.Command{
 					changed := !ag.synced || !reflect.DeepEqual(ag.desired, resp.Assignments)
 					ag.desired, ag.synced = resp.Assignments, true
 					ag.mu.Unlock()
+					pgRenewLeases(resp.Assignments, sentAt)
 					if changed {
 						select {
 						case ag.kick <- struct{}{}:

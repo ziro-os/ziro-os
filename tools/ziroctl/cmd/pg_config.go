@@ -118,8 +118,9 @@ func pgTuning(res *Resources, citus bool) string {
 	return b.String()
 }
 
-// pgRoleFile is the content of the role file: the one thing a restarting member needs to know.
-func pgRoleFile(m *PGMember, g *PGGroup) string {
+// pgRoleFile is the content of the role file: the one thing a restarting member needs to know. A
+// replica also learns which member to follow, so it comes back to the current primary by name.
+func pgRoleFile(c *PGCluster, m *PGMember, g *PGGroup) string {
 	role := pgReplica
 	if m.Role == pgPrimary || m.Role == pgPromoting {
 		role = pgPrimary
@@ -127,6 +128,9 @@ func pgRoleFile(m *PGMember, g *PGGroup) string {
 	s := fmt.Sprintf("role=%s\nepoch=%d\n", role, g.Epoch)
 	if m.Initialised {
 		s += "initialised=1\n"
+	}
+	if p := g.primary(); role == pgReplica && p != nil && p.ID != m.ID {
+		s += "follow=1." + c.memberApp(g.Name, p.ID) + "." + meshDomain + "\n"
 	}
 	return s
 }
@@ -159,6 +163,9 @@ func pgMemberApp(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) Cluste
 	}
 	if c.Citus != "" {
 		env["ZIRO_PG_CITUS"] = "1"
+	}
+	if c.SecretEpoch > 0 { // only once a password changed, so existing members keep their spec
+		env["ZIRO_PG_SECRET_EPOCH"] = strconv.Itoa(c.SecretEpoch)
 	}
 	allow := []string{}
 	for _, og := range c.Groups {

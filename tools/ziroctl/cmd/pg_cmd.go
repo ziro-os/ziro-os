@@ -27,7 +27,8 @@ var pgFlags struct {
 	memory                                                             string
 	cpus                                                               float64
 	allowFrom, allow                                                   []string
-	colocate, purge, ro, force                                         bool
+	colocate, purge, ro, force, yes, ca                                bool
+	role                                                               string
 }
 
 // pgEdit runs one change of the Postgres state on the master.
@@ -68,6 +69,12 @@ with two or more replicas, so a failover loses no acknowledged write. --shards N
 		fmt.Printf("✓ Postgres cluster %s: %d members per group on %d group(s). Watch: ziroctl pg status %s\n",
 			created.Name, created.Replicas+1, len(created.Groups), created.Name)
 		fmt.Printf("  Connection details: ziroctl pg credentials %s\n", created.Name)
+		switch {
+		case created.Replicas == 0:
+			fmt.Println("  note: no replica: a node failure takes the database down until its node is back")
+		case created.Replicas == 1 || created.Sync == pgSyncOff:
+			fmt.Println("  note: replication is asynchronous: a failover can lose the last writes the replica had not received (use --replicas 2 or more for none)")
+		}
 		return nil
 	},
 }
@@ -156,9 +163,12 @@ var pgStatusCmd = &cobra.Command{
 var pgCredentialsCmd = &cobra.Command{
 	Use:   "credentials <name>",
 	Short: "Print connection strings",
-	Long:  `Prints the write and read connection strings. They hold the password, so they are only available on the master and never over the API.`,
+	Long: `Prints the write and read connection strings. They hold the password, so they are only available on the master
+and never over the API. --ca prints the cluster's CA certificate, for clients that check the server with
+sslmode=verify-full.`,
 	Example: `  ziroctl pg credentials shop
-  psql "$(ziroctl pg credentials shop --ro)"`,
+  psql "$(ziroctl pg credentials shop --ro)"
+  ziroctl pg credentials shop --ca > shop-ca.crt`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
@@ -171,6 +181,14 @@ var pgCredentialsCmd = &cobra.Command{
 		c, err := pgCluster(st, args[0])
 		if err != nil {
 			return err
+		}
+		if pgFlags.ca {
+			pem, err := pgCACert(st, c)
+			if err != nil {
+				return err
+			}
+			fmt.Print(pem)
+			return nil
 		}
 		if pgFlags.ro {
 			fmt.Println(pgConnString(st, c, true))
@@ -321,13 +339,17 @@ shard rebalance. Reads and writes continue while shards move.`,
 var pgExposeCmd = &cobra.Command{
 	Use:   "expose <name>",
 	Short: "Publish the cluster through the gateway on a TCP port",
-	Long: `Creates a gateway TCP route to the cluster's read-write name (or the read-only one with --ro). Restrict who
-may connect with --allow (CIDRs); the host firewall opens the port.`,
+	Long: `Creates a gateway TCP route to the cluster's read-write name (or the read-only one with --ro). --allow names the
+networks that may connect (CIDRs); it is required, so a database is never published to everyone by accident.
+The host firewall opens the port.`,
 	Example: "  ziroctl pg expose shop --port 5432 --allow 203.0.113.0/24",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if pgFlags.port <= 0 {
 			return fmt.Errorf("--port is required")
+		}
+		if len(pgFlags.allow) == 0 {
+			return fmt.Errorf("--allow is required: name the networks that may connect (--allow 0.0.0.0/0 for anyone)")
 		}
 		if _, err := requireMaster(); err != nil {
 			return err
@@ -390,14 +412,36 @@ func pgSetPaused(name string, paused bool) error {
 	return nil
 }
 
+var pgRotateCmd = &cobra.Command{
+	Use:   "rotate-password <name>",
+	Short: "Change a database password without downtime",
+	Long: `Makes a new password for the application user (or --role replicator or postgres) and gives the primary only
+its SCRAM verifier. Then the cluster secret changes and the members restart on it one at a time, the primary
+last after a switchover. Open sessions stay open; clients use the new password from ziroctl pg credentials.`,
+	Example: "  ziroctl pg rotate-password shop\n  ziroctl pg rotate-password shop --role replicator",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := pgEdit("pg rotate-password", args[0], func(st *ClusterState, now time.Time) error {
+			return pgRequestRotation(st, args[0], pgFlags.role, now)
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("✓ password change requested. Follow it with: ziroctl pg status %s\n", args[0])
+		return nil
+	},
+}
+
 var pgRmCmd = &cobra.Command{
 	Use:   "rm <name>",
 	Short: "Remove a cluster",
 	Long: `Removes the cluster's members; --purge also deletes its data and credentials. Without --purge the data stays on the nodes (/var/lib/ziro/apps/pgc-<name>-*)
 and the credentials stay in the cluster, so nothing is lost by mistake.`,
-	Example: "  ziroctl pg rm shop --purge",
+	Example: "  ziroctl pg rm shop --purge --yes",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if pgFlags.purge && !pgFlags.yes {
+			return fmt.Errorf("--purge deletes the data of %s on every node and its credentials: add --yes to confirm", args[0])
+		}
 		if err := pgEdit("pg rm", args[0], func(st *ClusterState, now time.Time) error {
 			return pgDelete(st, args[0], pgFlags.purge)
 		}); err != nil {
@@ -412,7 +456,7 @@ func init() {
 	f := pgCreateCmd.Flags()
 	f.StringVar(&pgFlags.version, "version", "17", "PostgreSQL major version: 16, 17 or 18")
 	f.StringVar(&pgFlags.image, "image", "", "Member image (default: the pinned official image of --version)")
-	f.IntVar(&pgFlags.replicas, "replicas", 1, "Replicas per group")
+	f.IntVar(&pgFlags.replicas, "replicas", 2, "Replicas per group (2 or more: synchronous, no acknowledged write lost on failover)")
 	f.StringVar(&pgFlags.sync, "sync", pgSyncQuorum, "Replication: quorum (synchronous with two or more replicas) or off")
 	f.StringVar(&pgFlags.memory, "memory", "", "Memory limit per member (4Gi); tunes shared_buffers and the cache estimate")
 	f.Float64Var(&pgFlags.cpus, "cpus", 0, "CPU limit per member")
@@ -435,9 +479,12 @@ func init() {
 	pgExposeCmd.Flags().StringSliceVar(&pgFlags.allow, "allow", nil, "CIDRs allowed to connect")
 	pgExposeCmd.Flags().BoolVar(&pgFlags.ro, "ro", false, "Route to the read-only name")
 	pgCredentialsCmd.Flags().BoolVar(&pgFlags.ro, "ro", false, "Print only the read-only connection string")
+	pgCredentialsCmd.Flags().BoolVar(&pgFlags.ca, "ca", false, "Print the cluster CA certificate (PEM)")
 	pgRmCmd.Flags().BoolVar(&pgFlags.purge, "purge", false, "Also delete the data on every node and the credentials")
+	pgRmCmd.Flags().BoolVar(&pgFlags.yes, "yes", false, "Confirm --purge")
+	pgRotateCmd.Flags().StringVar(&pgFlags.role, "role", "", "Role: the application user (default), replicator or postgres")
 	pgCmd.AddCommand(pgCreateCmd, pgLsCmd, pgStatusCmd, pgCredentialsCmd, pgScaleCmd, pgAddReplicaCmd, pgRmReplicaCmd,
-		pgSwitchoverCmd, pgFailoverCmd, pgReinitCmd, pgAddShardCmd, pgExposeCmd, pgPauseCmd, pgResumeCmd, pgRmCmd)
+		pgSwitchoverCmd, pgFailoverCmd, pgReinitCmd, pgAddShardCmd, pgExposeCmd, pgPauseCmd, pgResumeCmd, pgRotateCmd, pgRmCmd)
 	rootCmd.AddCommand(pgCmd)
 }
 
@@ -513,6 +560,7 @@ func registerPGRoutes(a *apiRouter) {
 			Member   string `json:"member"`
 			To       string `json:"to"`
 			Force    bool   `json:"force"`
+			Role     string `json:"role"`
 		}
 		if r.ContentLength != 0 && !decodeBody(w, r, &req) {
 			return
@@ -542,6 +590,8 @@ func registerPGRoutes(a *apiRouter) {
 				g, err := pgAddShard(st, name, now)
 				out = map[string]string{"group": g}
 				return err
+			case "rotate-password":
+				return pgRequestRotation(st, name, req.Role, now)
 			case "pause", "resume":
 				c, err := pgCluster(st, name)
 				if err == nil {
