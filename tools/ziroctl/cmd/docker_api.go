@@ -70,6 +70,9 @@ type dockerAPI struct {
 	stream  streamFunc
 	runProc dockerProc // nil: nerdctl; tests replace it (docker_api_build.go)
 	audit   func(actor, action, target string, err error)
+	// netOp connects (true) or disconnects a container (docker_network.go); tests replace it.
+	netOp func(ctx context.Context, connect bool, op dockerNetOp) error
+	ctrd  *ctrdClient // nil: containerd's socket (docker_api_stats.go)
 }
 
 // dockerPeerKey carries the peer of a connection (its uid and pid) from the listener to the audit entry.
@@ -135,8 +138,11 @@ func (d *dockerAPI) handler() http.Handler {
 	mux.HandleFunc("DELETE /containers/{id}", d.containerRemove)
 	mux.HandleFunc("GET /networks", d.networks)
 	mux.HandleFunc("GET /networks/{id}", d.networkInspect)
+	mux.HandleFunc("POST /networks/{id}/connect", d.networkConnect(true))
+	mux.HandleFunc("POST /networks/{id}/disconnect", d.networkConnect(false))
 	mux.HandleFunc("GET /events", d.events)
 	d.registerWrite(mux)
+	d.registerStats(mux)
 	d.registerBuild(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		dockerError(w, http.StatusNotImplemented, fmt.Sprintf("ziro-dockerd: %s %s is not supported", r.Method, r.URL.Path))
@@ -284,6 +290,9 @@ func (d *dockerAPI) inspectContainers(ctx context.Context, all bool) ([]dockerIn
 	if err != nil {
 		return nil, err
 	}
+	if fixed, err := formatInspect(raw, ""); err == nil {
+		raw = fixed // networks under their names (docker_compat_output.go)
+	}
 	var list []dockerInspect
 	if err := json.Unmarshal(raw, &list); err != nil {
 		return nil, fmt.Errorf("nerdctl inspect: %v", err)
@@ -315,6 +324,20 @@ func (d *dockerAPI) containers(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out = append(out, containerSummary(c))
+	}
+	if q.Get("size") == "1" || q.Get("size") == "true" {
+		sizes := map[string][2]int64{}
+		if raw, err := d.run(r.Context(), "ps", "-a", "--no-trunc", "--size", "--format", "{{.ID}}\t{{.Size}}"); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+				id, size, _ := strings.Cut(line, "\t")
+				rw, root := sizeOf(size)
+				sizes[id] = [2]int64{rw, root}
+			}
+		}
+		for _, s := range out {
+			sz := sizes[fmt.Sprint(s["Id"])]
+			s["SizeRw"], s["SizeRootFs"] = sz[0], sz[1]
+		}
 	}
 	dockerJSON(w, out)
 }
@@ -350,6 +373,9 @@ func (d *dockerAPI) containerInspect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		d.fail(w, err)
 		return
+	}
+	if fixed, err := formatInspect(out, ""); err == nil {
+		out = fixed
 	}
 	var list []json.RawMessage
 	if err := json.Unmarshal(out, &list); err != nil || len(list) == 0 {
@@ -462,6 +488,56 @@ func (d *dockerAPI) networks(w http.ResponseWriter, r *http.Request) {
 	dockerJSON(w, kept)
 }
 
+// networkConnect is POST /networks/{id}/connect ({"Container", "EndpointConfig": {"Aliases"}}) and
+// /disconnect ({"Container", "Force"}).
+func (d *dockerAPI) networkConnect(connect bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		var body struct {
+			Container      string
+			Force          bool
+			EndpointConfig *struct {
+				Aliases    []string
+				IPAMConfig *struct{ IPv4Address, IPv6Address string }
+			}
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			dockerError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if !dockerIDRe.MatchString(id) || !dockerIDRe.MatchString(body.Container) {
+			dockerError(w, http.StatusNotFound, "no such network or container")
+			return
+		}
+		op := dockerNetOp{Network: id, Container: body.Container, Force: body.Force}
+		if ec := body.EndpointConfig; ec != nil {
+			op.Aliases = ec.Aliases
+			if ec.IPAMConfig != nil && (ec.IPAMConfig.IPv4Address != "" || ec.IPAMConfig.IPv6Address != "") {
+				dockerError(w, http.StatusNotImplemented, "ziro-dockerd: a fixed address for network connect is not supported")
+				return
+			}
+		}
+		netOp := d.netOp
+		if netOp == nil {
+			netOp = func(ctx context.Context, connect bool, op dockerNetOp) error {
+				if connect {
+					return dockerNetworkConnect(ctx, op)
+				}
+				return dockerNetworkDisconnect(ctx, op)
+			}
+		}
+		if err := netOp(r.Context(), connect, op); err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				dockerError(w, http.StatusForbidden, err.Error())
+				return
+			}
+			d.fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 func (d *dockerAPI) networkInspect(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !dockerIDRe.MatchString(id) {
@@ -472,6 +548,10 @@ func (d *dockerAPI) networkInspect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		d.fail(w, err)
 		return
+	}
+	run := func(args ...string) ([]byte, error) { return d.run(r.Context(), args...) }
+	if fixed, err := formatNetworkInspect(raw, "", run); err == nil {
+		raw = fixed // Driver, Scope, EnableIPv6 and the containers' addresses (docker_compat_output.go)
 	}
 	var list []json.RawMessage
 	if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {

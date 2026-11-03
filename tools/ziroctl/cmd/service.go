@@ -95,6 +95,15 @@ var defaultServices = []ServiceDef{
 		Autostart:   true,
 	},
 	{
+		Name:        "container-health",
+		Description: "Container health checks (nerdctl's, without systemd)",
+		Exec:        "/usr/bin/ziroctl",
+		Args:        "container health serve",
+		PIDFile:     "/run/ziro-container-health.pid",
+		LogFile:     "/var/log/container-health.log",
+		Autostart:   true,
+	},
+	{
 		Name:        "cloud-init",
 		Description: "Cloud metadata SSH keys & user-data bootstrap (once per instance)",
 		Exec:        "/usr/bin/ziroctl",

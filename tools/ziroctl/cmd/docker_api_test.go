@@ -132,7 +132,9 @@ func TestDockerAPIContainers(t *testing.T) {
 	if r := do(h, "GET", "/networks"); r.Code != 200 || !strings.Contains(r.Body.String(), "coolify") {
 		t.Fatalf("networks: %d %s", r.Code, r.Body)
 	}
-	if r := do(h, "GET", "/networks/coolify"); !strings.HasPrefix(strings.TrimSpace(r.Body.String()), `{"Name":"coolify"`) {
+	r = do(h, "GET", "/networks/coolify")
+	var nw map[string]any
+	if json.Unmarshal(r.Body.Bytes(), &nw) != nil || nw["Name"] != "coolify" || nw["Driver"] != "bridge" || nw["Scope"] != "local" {
 		t.Fatalf("network: %s", r.Body)
 	}
 }

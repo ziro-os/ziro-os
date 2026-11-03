@@ -3,11 +3,13 @@ module github.com/ziro-os/ziroctl
 go 1.27.1
 
 require (
+	github.com/containernetworking/cni v1.3.0
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/google/go-tpm v0.9.8
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/raft v1.8.0
 	github.com/hashicorp/raft-boltdb/v2 v2.4.2
+	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/quic-go/quic-go v0.64.0
 	github.com/spf13/cobra v1.10.2
 	github.com/ziro-os/ziro-os/sdk v0.3.0

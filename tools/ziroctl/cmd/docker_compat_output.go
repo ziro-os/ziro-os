@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -137,9 +138,37 @@ func stringMap(v any) map[string]string {
 	return out
 }
 
+// cniConfigs are the CNI network configurations the inspect fixes match addresses against; tests
+// replace it.
+var cniConfigs = func() []cniNetwork { return cniNetworks(defaultCNIConfDir) }
+
+// networkForAddress is the network among the container's whose subnet holds ip, if exactly one does.
+// It names an interface correctly even after a disconnect changed the order of the networks list.
+func networkForAddress(ip string, networks []string, confs []cniNetwork) string {
+	addr := net.ParseIP(ip)
+	if addr == nil {
+		return ""
+	}
+	found := ""
+	for _, c := range confs {
+		if !slices.Contains(networks, c.Name) {
+			continue
+		}
+		for _, sn := range c.Subnets {
+			if sn.Contains(addr) {
+				if found != "" && found != c.Name {
+					return ""
+				}
+				found = c.Name
+			}
+		}
+	}
+	return found
+}
+
 // fixContainerInspect fills in what nerdctl's container inspect lacks. obj is one element of
-// `nerdctl inspect` output, decoded with UseNumber.
-func fixContainerInspect(obj map[string]any) {
+// `nerdctl inspect` output, decoded with UseNumber; confs are the CNI configurations.
+func fixContainerInspect(obj map[string]any, confs []cniNetwork) {
 	cfg := asMap(obj["Config"])
 	if cfg == nil {
 		cfg = map[string]any{}
@@ -165,6 +194,10 @@ func fixContainerInspect(obj map[string]any) {
 	fixed := make(map[string]any, len(nets))
 	for k, v := range nets {
 		name := dockerNetworkName(k, networks)
+		ip, _ := asMap(v)["IPAddress"].(string)
+		if n := networkForAddress(ip, networks, confs); n != "" && strings.HasPrefix(k, "unknown-") {
+			name = n
+		}
 		if ep := asMap(v); ep != nil {
 			if _, ok := ep["NetworkID"]; !ok {
 				ep["NetworkID"] = name
@@ -224,9 +257,13 @@ func formatInspect(raw []byte, format string) ([]byte, error) {
 		return nil, err
 	}
 	items := make([]any, len(objs))
+	var confs []cniNetwork
 	for i, o := range objs {
 		if isContainerInspect(o) {
-			fixContainerInspect(o)
+			if confs == nil {
+				confs = cniConfigs()
+			}
+			fixContainerInspect(o, confs)
 		}
 		items[i] = o
 	}
@@ -286,7 +323,7 @@ func fixNetworkInspect(obj map[string]any, inspectContainers func(ids []string) 
 		if ep == nil {
 			continue
 		}
-		fixContainerInspect(info)
+		fixContainerInspect(info, cniConfigs())
 		net := asMap(asMap(asMap(info["NetworkSettings"])["Networks"])[name])
 		if net == nil {
 			continue

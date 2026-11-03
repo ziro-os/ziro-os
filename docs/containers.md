@@ -110,11 +110,13 @@ clients send: `status`, `label`, `name`, `id`, `ancestor` and `network` for cont
 than being ignored, because answering with everything would make Compose treat unrelated containers as its own.
 
 Supported calls: `_ping`, `version`, `info` and `events`; containers (list, inspect, create, start, stop, restart,
-kill, remove and logs); images (list, inspect and pull); volumes (list, inspect, create and remove, local driver);
-networks (list, inspect, create and remove, bridge driver); and what `docker buildx` needs to build images: exec
-(create, start over a hijacked connection, inspect; no terminal), copying a tar into a container (`PUT
-/containers/{id}/archive`, regular files and directories only) and `POST /images/load`. Other calls, including
-attach, the classic `/build`, stats and the registry auth header, answer `501` with the route in the message; pull
+kill, remove, logs, rename, and stats from the container's cgroup); `system/df`; images (list, inspect and pull);
+volumes (list, inspect, create and remove, local driver); networks (list, inspect, create, remove, connect and
+disconnect, bridge driver); and what `docker buildx` needs to build images: exec (create, start over a hijacked
+connection, inspect; no terminal), copying a tar into a container (`PUT /containers/{id}/archive`, regular files and
+directories only) and `POST /images/load`. Container list and inspect name a container's networks as Docker does,
+and `containers/json?size=1` reports sizes. Other calls, including attach, the classic `/build` and the registry
+auth header, answer `501` with the route in the message; pull
 private images with `docker login` on the host. Container create maps the common fields (image, command,
 entrypoint, environment, labels, ports, binds and mounts, networks and aliases, restart policy, memory, CPUs,
 privileged, capabilities, DNS, tmpfs, sysctls) and ignores the rest, such as health checks and devices. The
@@ -131,8 +133,7 @@ Docker host trip over:
   installed Docker Engine. The real runtime (nerdctl, containerd, runc) is listed under `Components`.
 - `docker network create --attachable` ignores the flag (every nerdctl network is attachable), and
   `docker compose pull --ignore-buildable` and `docker compose up --wait` drop the flag nerdctl does not know.
-  nerdctl compose has no `--wait`, so `up --wait` returns once the containers are started and does not wait for
-  health checks; it prints a note saying so.
+  `up --wait` waits for health checks (see below).
 - `docker compose up --no-start` (Coolify starts a service this way, to connect its networks before it starts)
   becomes `docker compose create` with the flags create takes (`--build`, `--force-recreate`, `--pull`, ...). Its
   `--remove-orphans` is done by the wrapper: containers of the project whose service is no longer in the compose
@@ -150,6 +151,16 @@ Docker host trip over:
   container's hostname to `X` when none is given, because nerdctl has no network alias but makes a hostname
   resolvable on the container's network. One alias per container works; further ones do not resolve.
 - `docker run --init` and `init: true` in a compose file work: the image carries `tini`.
+- `docker network connect [--alias A] NETWORK CONTAINER` and `docker network disconnect [-f]`, which nerdctl does
+  not have, are done by ziroctl. A created container gets the network when it starts; a running one is attached at
+  once (same CNI call and hosts entries as nerdctl, so containers on that network resolve its name) and keeps the
+  network across restarts. Known limitation: `--ip`, `--ip6` and `--link` are not supported, and an alias other
+  than the container's name or hostname does not resolve.
+- Health checks run. nerdctl schedules them with systemd, which Ziro OS does not have; the `container-health`
+  service runs each container's check on its schedule instead, so `docker inspect` shows `.State.Health`. A
+  compose service's `healthcheck:` is applied to its containers (nerdctl compose ignores it), `docker compose up -d`
+  waits for `depends_on: condition: service_healthy` before it starts a service, and `--wait` waits for the
+  services to be healthy (`--wait-timeout` seconds, 10 minutes when not given).
 - Everything else goes to nerdctl untouched. Ziro OS does not ship BuildKit, so `docker build` run on the host itself
   does not work. A tool that talks to the [socket](#docker-api-socket), such as Coolify's helper container running
   `docker compose build`, does: `docker buildx` starts its own `moby/buildkit` container (privileged, as in Docker),

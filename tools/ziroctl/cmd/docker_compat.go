@@ -212,6 +212,13 @@ func runDockerPlan(p dockerPlan) int {
 	for _, n := range p.notes {
 		fmt.Fprintln(os.Stderr, "docker: note: "+n)
 	}
+	if p.native != nil {
+		if err := p.native(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error response from daemon: "+err.Error())
+			return 1
+		}
+		return 0
+	}
 	if p.before != nil {
 		if err := p.before(runNerdctlOut); err != nil {
 			fmt.Fprintln(os.Stderr, "docker: warning: "+err.Error())
@@ -222,7 +229,7 @@ func runDockerPlan(p dockerPlan) int {
 		fmt.Fprintln(os.Stderr, "docker: "+err.Error())
 		return 127
 	}
-	if p.output == nil && !p.ignoreFailure {
+	if p.output == nil && !p.ignoreFailure && p.after == nil {
 		err := syscall.Exec(bin, append([]string{"nerdctl"}, p.args...), os.Environ())
 		fmt.Fprintln(os.Stderr, "docker: "+err.Error())
 		return 126
@@ -250,6 +257,11 @@ func runDockerPlan(p dockerPlan) int {
 			return 1
 		}
 		os.Stdout.Write(out)
+	}
+	if code == 0 && p.after != nil {
+		if err := p.after(runNerdctlOut); err != nil {
+			fmt.Fprintln(os.Stderr, "docker: warning: "+err.Error())
+		}
 	}
 	if code != 0 && p.ignoreFailure {
 		fmt.Fprintln(os.Stderr, "docker: warning: the pull failed (--ignore-pull-failures): continuing")
@@ -387,6 +399,10 @@ type dockerPlan struct {
 	ignoreFailure bool
 	// output, when set, rewrites nerdctl's stdout into Docker's shape.
 	output func(stdout []byte, run nerdctlRunner) ([]byte, error)
+	// native, when set, does the command in ziroctl instead of nerdctl (network connect/disconnect).
+	native func() error
+	// after runs when nerdctl succeeded (health checks for created compose containers); its error is a warning.
+	after func(run nerdctlRunner) error
 }
 
 // planDocker plans a docker command line: the rewrite of translateDocker, plus the steps nerdctl has
@@ -406,11 +422,23 @@ func planDocker(args []string, now func() time.Time) dockerPlan {
 	switch {
 	case sub == "compose":
 		globals, csub, crest := composeSplit(args)
-		if csub == "up" && slices.Contains(crest, "--no-start") && slices.Contains(crest, "--remove-orphans") {
+		noStart := csub == "up" && slices.Contains(crest, "--no-start")
+		if noStart && slices.Contains(crest, "--remove-orphans") {
 			p.before = func(run nerdctlRunner) error { return removeComposeOrphans(globals[1:], run) }
 		}
 		if csub == "pull" && slices.Contains(crest, "--ignore-pull-failures") {
 			p.ignoreFailure = true
+		}
+		if noStart || csub == "create" {
+			p.after = func(run nerdctlRunner) error { return composeHealthLabels(globals[1:], run) }
+		}
+		if services, detached, wait, waitTimeout := composeUpFlags(crest); csub == "up" && !noStart && detached {
+			// up -d: in dependency order when a service waits for a healthy one, or with --wait
+			upArgs := nargs
+			p.notes = nil
+			p.native = func() error {
+				return composeUpNative(globals[1:], crest, upArgs, services, wait, waitTimeout, runNerdctlOut)
+			}
 		}
 	case sub == "ps":
 		r, format, ok := takeFormat(rest, false)
@@ -426,6 +454,18 @@ func planDocker(args []string, now func() time.Time) dockerPlan {
 			p.args = append([]string{"container", "inspect"}, r...)
 		}
 		p.output = func(b []byte, _ nerdctlRunner) ([]byte, error) { return formatInspect(b, format) }
+	case sub == "network" && len(args) >= 2 && (args[1] == "connect" || args[1] == "disconnect"):
+		op, err := parseNetworkConnect(args[2:])
+		connect := args[1] == "connect"
+		p.native = func() error {
+			if err != nil {
+				return err
+			}
+			if connect {
+				return dockerNetworkConnect(context.Background(), op)
+			}
+			return dockerNetworkDisconnect(context.Background(), op)
+		}
 	case sub == "network" && len(args) >= 2 && args[1] == "inspect":
 		r, format, _ := takeFormat(args[2:], true)
 		p.args = append([]string{"network", "inspect"}, r...)
