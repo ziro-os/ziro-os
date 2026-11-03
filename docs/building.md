@@ -107,7 +107,7 @@ the default for builds and new installs. `alpine` is the fallback.
 
 | | `alpine` | `custom` (default) |
 |---|---|---|
-| Kernel | Alpine `linux-virt` LTS package | Ziro kernel built from kernel.org LTS sources (`KERNEL_VERSION`, default 6.18.57) |
+| Kernel | Alpine `linux-virt` LTS package | Ziro kernel built from kernel.org LTS sources (`KERNEL_VERSION`, default 6.18.60) |
 | Config | Alpine's (tuned for VMs) | upstream arch `defconfig` (broad hardware) + `kernel/configs/ziro-common.config` + `ziro-<arch>.config` |
 | Targets | KVM/QEMU, Proxmox, most cloud VMs | bare metal plus KVM, Xen, Hyper-V/Azure, VMware, AWS Nitro (ENA/NVMe), GCP (gVNIC); boot-critical drivers built in |
 | Hardening | Alpine defaults | See [kernel/README.md](../kernel/README.md#security-defaults): lockdown, Yama + Landlock + IMA + BPF LSMs, init-on-alloc/free, page-table checks, KFENCE, no kexec/hibernation/SysRq, enforced module signing (persistent Ziro key in releases) |
