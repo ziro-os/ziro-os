@@ -627,6 +627,7 @@ func init() {
 // registerPGRoutes: reading is for any token; changing members needs operator; creating and removing
 // clusters needs admin. Credentials are never served over the API.
 func registerPGRoutes(a *apiRouter) {
+	registerPGBackupRoutes(a)
 	a.get("/api/v1/pg", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		st, err := readState()
 		if err != nil {
@@ -703,6 +704,7 @@ func registerPGRoutes(a *apiRouter) {
 			Size      int               `json:"size"`
 			Resources *Resources        `json:"resources"`
 			Image     string            `json:"image"`
+			Type      string            `json:"type"` // backup
 		}
 		if r.ContentLength != 0 && !decodeBody(w, r, &req) {
 			return
@@ -744,6 +746,12 @@ func registerPGRoutes(a *apiRouter) {
 				return pgUpgradeImage(st, name, req.Image)
 			case "restart":
 				return pgRestartAll(st, name)
+			case "backup":
+				typ := req.Type
+				if typ == "" {
+					typ = "incr"
+				}
+				return pgBackupNow(st, name, req.Group, typ)
 			case "pause", "resume":
 				c, err := pgCluster(st, name)
 				if err == nil {

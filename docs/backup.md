@@ -4,6 +4,9 @@
 A nightly backup runs by default, an upgrade or an update takes a snapshot first, and a restore takes one before it
 changes anything.
 
+Postgres clusters have their own backups, with WAL archiving and point-in-time recovery into S3-compatible storage:
+see [Postgres clusters](postgres.md#backups-and-recovery).
+
 ```sh
 ziroctl backup create                                  # /var/backups/ziro/ziro-backup-<date>.tar.gz.enc
 ziroctl backup list

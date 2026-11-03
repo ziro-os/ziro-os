@@ -287,6 +287,107 @@ The Citus image is not bundled: pass an image pinned by digest, as with every im
 [Clustering](clustering.md#image-policy)). Choosing the distribution key is the user's job; a good key has many
 distinct values and appears in most queries (tenant, user or device id).
 
+## Backups and recovery
+
+Backups use [pgBackRest](https://pgbackrest.org) and go to S3-compatible object storage: AWS S3, Cloudflare R2,
+Backblaze B2, MinIO, or anything else that speaks the S3 API.
+
+```sh
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+ziroctl pg backup enable shop --s3-endpoint s3.eu-west-1.amazonaws.com --bucket acme-db --region eu-west-1
+ziroctl pg backup passphrase shop     # store it in your password manager: a restore needs it
+ziroctl pg backups shop               # backups, and the window a restore can target
+ziroctl pg backup now shop --type full
+ziroctl pg restore shop-copy --from shop --to 2026-11-03T08:00:00Z
+```
+
+### What happens when backups are on
+
+- **WAL archiving.** Every member archives its WAL to the repository as it is written. The push is asynchronous,
+  through a spool on the data volume, and happens at least once a minute while there are writes
+  (`archive_timeout`).
+- **Scheduled backups.** The controller takes the backups the schedule asks for, on the group's primary. The
+  schedule is recorded in the cluster state, so it survives a master change.
+
+  | Type | Default schedule (UTC) | What it copies |
+  | --- | --- | --- |
+  | Full | `0 1 * * 0`, Sundays at 01:00 | everything |
+  | Differential | `0 1 * * 1-6`, the other days at 01:00 | changes since the last full backup |
+  | Incremental | `30 * * * *`, every hour | changes since the last backup |
+
+  Change the schedule with `--full`, `--diff` and `--incr` (five-field cron expressions). The first full backup
+  starts as soon as the repository is ready.
+- **Compression and encryption.** Backups are compressed with zstd and encrypted with AES-256. The passphrase is
+  generated for each cluster.
+- **Retention.** pgBackRest keeps `--retention` full backups (4 by default), with the differentials, incrementals
+  and WAL they need, and expires the rest after each backup.
+- **Replica catch-up.** A replica whose slot no longer has the WAL it needs fetches it from the repository, so it
+  catches up instead of being rebuilt.
+- **Image.** The members move to the Ziro Postgres image with pgBackRest (`ghcr.io/ziro-os/postgres:<version>-pgbackrest`,
+  built by `.github/workflows/pg-images.yml` and pinned by digest), restarting one at a time. Pass `--image` to use
+  your own image with pgBackRest, pinned by digest.
+
+### Keys and the passphrase
+
+- **Keys.** The repository's keys come from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, never from the command
+  line. They are kept in the sealed cluster secret `pg-<name>-backup` with the passphrase, and only the members
+  receive them.
+- **The passphrase.** The API never serves the passphrase; `ziroctl pg backup passphrase` prints it on the master.
+  **Keep a copy outside the cluster.** If every node is lost, the bucket is all that is left, and without the
+  passphrase it cannot be read.
+- **Changing the configuration.** `pg backup enable` again changes the bucket, schedule or retention and keeps the
+  passphrase.
+- **Turning backups off.** `pg backup disable` stops archiving and the schedule. The backups stay in the bucket.
+
+### Where the backups are
+
+The repository for a cluster is `s3://<bucket>/<path>/<name>`, with `--path` defaulting to `/ziro`. Each group is a
+stanza in it: `main` for a plain cluster, `coord` and `w1`, `w2` and so on for Citus.
+
+### Restore
+
+`ziroctl pg restore` always creates a new cluster, so the cluster being restored keeps running until you move the
+apps:
+
+```sh
+ziroctl pg restore shop2 --from shop                              # the latest state
+ziroctl pg restore shop2 --from shop --to 2026-11-03T08:00:00Z    # the state at that moment (UTC)
+```
+
+How a restore runs:
+
+1. The new cluster's first primary restores the newest backup taken before the target.
+2. It replays the archived WAL up to the target and is promoted on a new timeline.
+3. Its replicas then copy it.
+
+The target can be any moment from the end of the oldest kept backup up to the last archived WAL, as shown by
+`pg backups`. Postgres stops just before the first commit after the target, so a transaction committed at the
+target itself is not included. The new cluster writes its own backups to `<path>/<new name>` in the same bucket.
+Point the apps at `<new name>-rw` (or rename them over) once it is healthy.
+
+### Disaster recovery: every node is lost
+
+The bucket and the passphrase are all you need. On a new Ziro cluster:
+
+```sh
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... PG_BACKUP_PASSPHRASE=...
+ziroctl pg restore shop --s3-endpoint s3.eu-west-1.amazonaws.com --bucket acme-db --region eu-west-1 \
+  --path /ziro/shop --version 17 --image ghcr.io/ziro-os/postgres:17-pgbackrest@sha256:...
+ziroctl pg status shop                                  # wait for the primary, then the replicas
+ziroctl pg credentials shop                             # new passwords: update the apps
+```
+
+Give `--database` and `--user` when they were not `app`. The restored cluster backs itself up to
+`/ziro/shop/shop` in the same bucket, so the old backups stay untouched.
+
+### Recovery point and recovery time
+
+- **RPO.** Up to about a minute of commits (`archive_timeout`), plus whatever was still in the archive spool.
+  Within the cluster, a failover loses nothing.
+- **RTO.** The restore downloads the newest backup and replays the WAL archived since it. With an hourly
+  incremental, that is at most an hour of WAL plus the size of the database at the bucket's throughput. Practise
+  it: restore into a scratch cluster now and then, and delete it afterwards.
+
 ## Monitoring
 
 `ziroctl pg status shop` lists the members with role, node, state, timeline, lag and recent events, and the reasons
@@ -297,12 +398,15 @@ a group is not healthy. The master's
 - replication: `ziro_pg_replication_lag_milliseconds`;
 - load: `ziro_pg_connections` and `ziro_pg_max_connections`, `ziro_pg_commits_total` (use `rate()` for
   transactions per second);
-- health: `ziro_pg_xid_age` and `ziro_pg_disk_used_percent`.
+- health: `ziro_pg_xid_age` and `ziro_pg_disk_used_percent`;
+- backups: `ziro_pg_backup_last_seconds` (by type), `ziro_pg_backup_repository_bytes`,
+  `ziro_pg_archive_failed_total` and `ziro_pg_archive_last_seconds`.
 
 Alerts of category `database` fire on a promotion, when no safe promotion exists, when a command to a member
 fails, when a switchover is aborted, when no node is free for another replica, when a member's data volume is 80 %
-or 90 % full, when 90 % of the connections are in use, and when transaction ID wraparound gets near (the oldest
-unfrozen transaction is 1.5 billion transactions old).
+or 90 % full, when 90 % of the connections are in use, when transaction ID wraparound gets near (the oldest
+unfrozen transaction is 1.5 billion transactions old), when WAL archiving fails, and when no backup has finished
+for longer than the schedule allows.
 
 ## Security
 
@@ -343,8 +447,13 @@ ziroctl pg rm shop --purge --yes      # also deletes the data on every node and 
 - Known limitation: a major version upgrade (17 to 18) is a dump and restore into a new cluster; `pg upgrade` refuses
   it.
 - Known limitation: clusters created before the pooler have none until `ziroctl pg pool <name> --enable`.
-- Known limitation: no point-in-time recovery or WAL archiving yet; back up with `pg_dump` or the [backup](backup.md)
-  tools until it lands.
+- Known limitation: backups run on the primary. Backing up from a standby needs pgBackRest's TLS server, which is not
+  set up.
+- Known limitation: a sharded (Citus) cluster is backed up group by group, but `pg restore` refuses it: there is no
+  common restore point across the groups yet.
+- Known limitation: `pgbackrest verify` is not scheduled. Restore into a scratch cluster to check the backups.
+- Known limitation: until the Ziro Postgres images are published and pinned in a release, `pg backup enable` needs
+  `--image`.
 - Known limitation: Citus reads from worker replicas (`citus.use_secondary_nodes`) are not wired in; the `-ro` name of
   a sharded cluster reads from the coordinator's replicas.
 - Known limitation: a worker group cannot be removed yet; `add-shard` is one way.

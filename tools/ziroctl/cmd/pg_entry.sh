@@ -136,6 +136,14 @@ wait_for_primary() {
 	return 1
 }
 
+# Backups (pg_backup.go): pgBackRest's logs, archive spool and locks live on the data volume.
+stanza="${ZIRO_PG_STANZA:-}"
+case "$stanza" in *[!a-z0-9]*) stanza= ;; esac
+if [ -n "$stanza" ]; then
+	mkdir -p "$STATE/ziro-pgbackrest/log" "$STATE/ziro-pgbackrest/spool" "$STATE/ziro-pgbackrest/lock"
+	chown -R postgres "$STATE/ziro-pgbackrest"
+fi
+
 # ---- first start ----
 
 init_primary() {
@@ -148,6 +156,27 @@ init_primary() {
 	as_pg initdb -D "$PGDATA" -U postgres --pwfile="$pwfile" --data-checksums \
 		--auth-local=trust --auth-host=scram-sha-256 --encoding=UTF8
 	rm -f "$pwfile"
+}
+
+# restore_primary: the first primary of a cluster made from a backup repository (pg restore) takes its
+# data from there: the latest state, or the state at ZIRO_PG_RESTORE_TARGET. Postgres then replays the
+# archived WAL and becomes the primary on a new timeline.
+restore_primary() {
+	local path=${ZIRO_PG_RESTORE_PATH:?} rstanza=${ZIRO_PG_RESTORE_STANZA:?} target=${ZIRO_PG_RESTORE_TARGET:-}
+	log "restoring from the backup repository ($path, stanza $rstanza, ${target:-the latest state})"
+	touch "$BUILD"
+	busy
+	rm -rf "${PGDATA:?}"/* "${PGDATA:?}"/.[!.]* 2>/dev/null || true
+	as_pg mkdir -p "$PGDATA"
+	set -- --stanza="$rstanza" --repo1-path="$path" --pg1-path="$PGDATA"
+	if [ -n "$target" ]; then
+		set -- "$@" --type=time --target="$target" --target-action=promote
+	fi
+	if ! as_pg pgbackrest "$@" restore; then
+		fail "the restore from the backup repository failed (see the container log)"
+	fi
+	idle
+	rm -f "$BUILD"
 }
 
 # basebackup HOST: a fresh copy of the primary. The slot keeps the WAL the copy needs until it
@@ -230,7 +259,9 @@ fi
 echo "$starts" >"$STARTS"
 
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
-	if [ "${ZIRO_PG_INIT:-replica}" = primary ] && [ "$role" = primary ]; then
+	if [ "${ZIRO_PG_INIT:-replica}" = restore ] && [ "$role" = primary ] && [ "$initialised" != 1 ]; then
+		restore_primary
+	elif [ "${ZIRO_PG_INIT:-replica}" = primary ] && [ "$role" = primary ]; then
 		if [ "$initialised" = 1 ]; then
 			# This member served a database before: an empty data directory is a loss, and a new empty
 			# database here would silently replace it. Stay down so the controller fails over to a replica.
@@ -285,6 +316,14 @@ conninfo="host=${follow:-$rw_host} port=$PORT user=replicator application_name=$
 			echo "citus.node_conninfo = 'sslmode=prefer'"
 		fi
 	fi
+	if [ -n "$stanza" ]; then
+		# WAL goes to the repository as it is written (asynchronously, through the spool), at least once a
+		# minute while there are writes; a replica whose slot no longer has a segment fetches it from there.
+		echo "archive_mode = on"
+		echo "archive_command = 'pgbackrest --stanza=$stanza archive-push %p'"
+		echo "archive_timeout = 60"
+		echo "restore_command = 'pgbackrest --stanza=$stanza archive-get %f \"%p\"'"
+	fi
 	# The parameters set with ziroctl pg set that a reload applies (kept current by the agent).
 	echo "include_if_exists = '$CFG/params.conf'"
 } >"$PGDATA/ziro.conf"
@@ -292,6 +331,11 @@ grep -q "^include_if_exists = 'ziro.conf'" "$PGDATA/postgresql.conf" || echo "in
 if [ -f "$PGDATA/postgresql.auto.conf" ]; then
 	# The controller's primary_conninfo (opFollow) is for the running server; a start takes it from the role file.
 	sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf"
+	if [ ! -f "$PGDATA/recovery.signal" ]; then
+		# A restore's settings (pgBackRest writes them here) are for that one recovery: left in place, a
+		# later standby would stop replaying at the old target and fetch WAL from the source repository.
+		sed -i '/^restore_command/d; /^recovery_target/d' "$PGDATA/postgresql.auto.conf"
+	fi
 	if [ "$role" = replica ]; then
 		sed -i '/^default_transaction_read_only/d' "$PGDATA/postgresql.auto.conf"
 	fi
@@ -317,8 +361,13 @@ chown postgres "$PGDATA/ziro.conf" "$PGDATA/pg_hba.conf" "$PGDATA/postgresql.con
 
 if [ "$role" = primary ]; then
 	(
+		server=$$
 		until as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select 1' >/dev/null 2>&1; do sleep 1; done
-		[ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select pg_is_in_recovery()')" = f ] || exit 0
+		# A restored primary replays the archive first; the accounts are set once it has finished.
+		until [ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select pg_is_in_recovery()' 2>/dev/null || true)" = f ]; do
+			kill -0 "$server" 2>/dev/null || exit 0
+			sleep 2
+		done
 		as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 \
 			-v repl="$PG_REPL_PASSWORD" -v app_user="$app_user" -v app_pass="$POSTGRES_PASSWORD" -v app_db="$app_db" <<'SQL'
 SELECT format('CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD %L', :'repl')

@@ -93,6 +93,7 @@ type PGCluster struct {
 	Params       map[string]string `json:"params,omitempty"`
 	RestartEpoch int               `json:"restart_epoch,omitempty"`
 	Pooler       *PGPooler         `json:"pooler,omitempty"`
+	Backup       *PGBackup         `json:"backup,omitempty"` // backups and WAL archiving (pg_backup.go)
 }
 
 // PGGroup is one primary and its replicas: a plain cluster has one group ("main"); a sharded one has a
@@ -109,6 +110,7 @@ type PGGroup struct {
 	Force      *PGForce             `json:"force,omitempty"`      // an operator's request to promote now (pg failover)
 	Registered bool                 `json:"registered,omitempty"` // Citus: the coordinator knows this worker group
 	Events     []PGEvent            `json:"events,omitempty"`     // the last few role changes, newest last
+	Backup     *PGGroupBackup       `json:"backup,omitempty"`
 }
 
 // PGForce is an operator's request to promote now. It is read once by the controller and expires if
@@ -172,6 +174,10 @@ type PGProbe struct {
 	MaxConns  int64  `json:"max_conns,omitempty"`
 	Commits   int64  `json:"commits,omitempty"` // committed transactions since the statistics were reset
 	XIDAge    int64  `json:"xid_age,omitempty"` // age of the oldest unfrozen transaction ID
+	// ArchiveFailed counts failed WAL archive attempts; ArchivedAgo is the seconds since the last WAL was
+	// archived (-1 = never): pg_stat_archiver.
+	ArchiveFailed int64 `json:"archive_failed,omitempty"`
+	ArchivedAgo   int64 `json:"archived_ago,omitempty"`
 }
 
 // PGCommand is an order for one member's agent, taken from a closed list (pg_agent.go).
@@ -331,13 +337,18 @@ func (c *PGCluster) Validate() error {
 				return fmt.Errorf("group %s: invalid or repeated member %q", g.Name, m.ID)
 			}
 			ids[m.ID] = true
-			if m.Init != pgPrimary && m.Init != pgReplica {
+			if m.Init != pgPrimary && m.Init != pgReplica && m.Init != pgRestoreInit {
 				return fmt.Errorf("group %s member %s: invalid init", g.Name, m.ID)
 			}
 		}
 	}
 	if c.Pooler != nil {
 		if err := validPooler(c.Pooler); err != nil {
+			return err
+		}
+	}
+	if c.Backup != nil {
+		if err := c.Backup.validate(); err != nil {
 			return err
 		}
 	}

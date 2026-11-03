@@ -192,6 +192,7 @@ func pgMemberApp(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) Cluste
 	if c.RestartEpoch > 0 { // pg restart
 		env["ZIRO_PG_RESTART_EPOCH"] = strconv.Itoa(c.RestartEpoch)
 	}
+	pgBackupEnv(c, g, env)
 	allow := []string{}
 	for _, og := range c.Groups {
 		for _, om := range og.Members {
@@ -203,11 +204,17 @@ func pgMemberApp(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) Cluste
 	}
 	allow = uniq(append(allow, c.AllowFrom...))
 	sticky := true
+	files := map[string]string{"entry.sh": pgEntryScript, "postgresql.conf": pgTuning(c.Resources, c.Citus != "", c.Version) + pgRestartParams(c)}
+	secrets := []string{c.secretName()}
+	if c.backupsOn() {
+		files["pgbackrest.conf"] = pgBackrestConfig(c, g, c.Resources)
+		secrets = append(secrets, c.backupSecret())
+	}
 	return ClusteredApp{
 		Name: app, Image: image, Replicas: 1, Env: env, Args: []string{"bash", configMountPoint + "/entry.sh"},
-		Secrets: []string{c.secretName()}, Data: []string{pgDataPath}, DataUID: pgDataUID, Resources: c.Resources,
+		Secrets: secrets, Data: []string{pgDataPath}, DataUID: pgDataUID, Resources: c.Resources,
 		AllowFrom: allow, Node: m.Node, Sticky: &sticky, Replicated: true, StopTimeout: pgStopTimeout,
-		ConfigFiles: map[string]string{"entry.sh": pgEntryScript, "postgresql.conf": pgTuning(c.Resources, c.Citus != "", c.Version) + pgRestartParams(c)},
+		ConfigFiles: files,
 	}
 }
 

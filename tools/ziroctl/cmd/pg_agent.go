@@ -65,7 +65,9 @@ const pgProbeSQL = `select pg_is_in_recovery()::int,
   (select count(*) from pg_stat_activity where backend_type = 'client backend'),
   current_setting('max_connections')::int,
   (select coalesce(sum(xact_commit), 0) from pg_stat_database),
-  (select max(age(datfrozenxid)) from pg_database)`
+  (select max(age(datfrozenxid)) from pg_database),
+  (select failed_count from pg_stat_archiver),
+  coalesce((select extract(epoch from now() - last_archived_time)::bigint from pg_stat_archiver), -1)`
 
 // parseProbe reads the row pgProbeSQL returns.
 func parseProbe(out string) (PGReport, error) {
@@ -83,7 +85,15 @@ func parseProbe(out string) (PGReport, error) {
 	if len(f) == 8 { // ... and without the metrics
 		f = append(f, "0", "0", "0", "0")
 	}
-	if len(f) != 12 {
+	if len(f) == 12 { // ... and without the archiver
+		f = append(f, "0", "-1")
+	}
+	if len(f) != 14 {
+		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
+	}
+	failed, err3 := strconv.ParseInt(f[12], 10, 64)
+	ago, err4 := strconv.ParseInt(f[13], 10, 64)
+	if err3 != nil || err4 != nil || failed < 0 || ago < -1 {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	var nums [4]int64
@@ -103,7 +113,7 @@ func parseProbe(out string) (PGReport, error) {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag, ReadOnly: f[5] == "1",
-		Received: f[6], SyncNames: f[7], Conns: nums[0], MaxConns: nums[1], Commits: nums[2], XIDAge: nums[3]}, nil
+		Received: f[6], SyncNames: f[7], Conns: nums[0], MaxConns: nums[1], Commits: nums[2], XIDAge: nums[3], ArchiveFailed: failed, ArchivedAgo: ago}, nil
 }
 
 // pgProbe asks one member how it is.
@@ -162,6 +172,16 @@ func pgSteps(o PGOrder) ([][]string, error) {
 		return [][]string{psqlArgs(c, sqlResetRO, sqlSetSync(o.Arg), sqlReload)}, nil
 	case opFollow:
 		return [][]string{psqlArgs(c, "alter system set primary_conninfo = '"+o.Arg+"'", sqlReload)}, nil
+	case opStanza:
+		return [][]string{{"exec", "-u", "postgres", c, "pgbackrest", "--stanza=" + o.Arg, "stanza-create"}}, nil
+	case opBackup:
+		// A backup runs for minutes to hours: it is started detached, and its progress and outcome come
+		// from pgbackrest info (pgBackupInfo) and its log.
+		stanza, err := pgStanzaOf(o.App)
+		if err != nil {
+			return nil, err
+		}
+		return [][]string{{"exec", "-d", "-u", "postgres", c, "pgbackrest", "--stanza=" + stanza, "--type=" + o.Arg, "backup"}}, nil
 	case opReload:
 		if !pgParamsInPlace(c, o.Arg) {
 			return nil, fmt.Errorf("the new parameters are not in place yet")
@@ -281,10 +301,12 @@ func lastOutputLine(s string) string {
 
 type pgAgent struct {
 	mu      sync.Mutex
-	epochs  map[string]int64     // member app -> the highest epoch an order for it carried
-	reports map[string]pgStamped // member app -> last probe
-	results map[string]pgDone    // order id -> outcome, resent until the master stops sending the order
-	seen    map[string]time.Time // orders already started
+	info    map[string]time.Time     // member app -> when pgbackrest info last ran
+	backups map[string]*PGBackupInfo // member app -> its last result
+	epochs  map[string]int64         // member app -> the highest epoch an order for it carried
+	reports map[string]pgStamped     // member app -> last probe
+	results map[string]pgDone        // order id -> outcome, resent until the master stops sending the order
+	seen    map[string]time.Time     // orders already started
 	run     pgRunner
 	exec    sync.Mutex // one order at a time on this node
 }
@@ -319,7 +341,15 @@ func (p *pgAgent) probeAll(ctx context.Context, desired []Assignment, now time.T
 			r = PGReport{App: a.App}
 		} else {
 			r.DiskPct = diskUsedPct(dataDir(a.App, a.Replica, pgDataPath))
+			if stanza := a.Env["ZIRO_PG_STANZA"]; stanza != "" && !r.Recovery {
+				p.backupInfo(ctx, a, stanza, now)
+			}
 		}
+		p.mu.Lock()
+		if bi := p.backups[a.App]; bi != nil && err == nil && !r.Recovery {
+			r.Backup = bi
+		}
+		p.mu.Unlock()
 		p.mu.Lock()
 		if cur, ok := p.reports[a.App]; err != nil && ok {
 			// A failed probe keeps the last good one (with its age): the master judges by age.
@@ -433,4 +463,69 @@ func diskUsedPct(dir string) int {
 	}
 	used := fs.Blocks - fs.Bfree
 	return int((used*100 + (used + fs.Bavail) - 1) / (used + fs.Bavail)) // as df rounds it: up
+}
+
+// pgStanzaOf is the stanza of a member app (pgc-<cluster>-<group>-<member>): its group.
+func pgStanzaOf(app string) (string, error) {
+	parts := strings.Split(strings.TrimPrefix(app, pgAppPrefix), "-")
+	if len(parts) != 3 || !pgGroupRe.MatchString(parts[1]) {
+		return "", fmt.Errorf("not a Postgres member: %s", app)
+	}
+	return parts[1], nil
+}
+
+// backupInfo runs pgbackrest info for a primary at most once a minute, in the background (it reads the
+// repository, which can take seconds), and keeps the result for the next reports.
+func (p *pgAgent) backupInfo(ctx context.Context, a Assignment, stanza string, now time.Time) {
+	p.mu.Lock()
+	if p.info == nil {
+		p.info, p.backups = map[string]time.Time{}, map[string]*PGBackupInfo{}
+	}
+	if now.Sub(p.info[a.App]) < pgInfoEvery {
+		p.mu.Unlock()
+		return
+	}
+	p.info[a.App] = now
+	p.mu.Unlock()
+	go func() {
+		ictx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		out, err := p.run(ictx, "exec", "-u", "postgres", a.Name, "pgbackrest", "--stanza="+stanza, "--output=json", "info")
+		info, perr := parseBackrestInfo(out)
+		if err != nil || perr != nil {
+			info = &PGBackupInfo{Status: "pgbackrest info failed: " + sanitizeLabel(lastOutputLine(out), 200)}
+		}
+		info.LastLog = backupLogError(filepath.Join(dataDir(a.App, a.Replica, pgDataPath), "ziro-pgbackrest", "log", stanza+"-backup.log"))
+		p.mu.Lock()
+		p.backups[a.App] = info
+		p.mu.Unlock()
+	}()
+}
+
+// backupLogError is the last error line of a pgBackRest log ("" when the last run had none).
+func backupLogError(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	off := max(st.Size()-64<<10, 0)
+	buf := make([]byte, st.Size()-off)
+	if _, err := f.ReadAt(buf, off); err != nil && len(buf) == 0 {
+		return ""
+	}
+	last := ""
+	for _, line := range strings.Split(string(buf), "\n") {
+		switch {
+		case strings.Contains(line, "-------------------PROCESS START-------------------"):
+			last = "" // a new run: only its errors count
+		case strings.Contains(line, " ERROR: "):
+			last = strings.TrimSpace(line[strings.Index(line, " ERROR: ")+1:])
+		}
+	}
+	return sanitizeLabel(last, 300)
 }

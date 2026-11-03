@@ -52,6 +52,8 @@ const (
 	opReinit   = "reinit"   // a replica discards its data directory and takes a new base backup (pg reinit)
 	opFollow   = "follow"   // a replica follows the named primary (primary_conninfo, reload); argument is the conninfo
 	opReload   = "reload"   // reload the configuration once params.conf has the given hash (pg set)
+	opStanza   = "stanza"   // create the group's pgBackRest stanza (pg_backup.go); argument is the stanza
+	opBackup   = "backup"   // start a pgBackRest backup in the background; argument is full, diff or incr
 )
 
 // pgFenceName is the synchronous standby no member is ever called: a primary with it waits for ever on
@@ -73,6 +75,14 @@ func validPGCommand(op, arg string) error {
 		}
 	case opPassword:
 		return validPasswordArg(arg)
+	case opStanza:
+		if !pgGroupRe.MatchString(arg) {
+			return fmt.Errorf("invalid stanza %q", arg)
+		}
+	case opBackup:
+		if arg != "full" && arg != "diff" && arg != "incr" {
+			return fmt.Errorf("invalid backup type %q", arg)
+		}
 	case opReload:
 		if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(arg) {
 			return fmt.Errorf("invalid parameters hash %q", arg)
@@ -182,6 +192,11 @@ type PGReport struct {
 	SyncNames string `json:"sync_names,omitempty"`
 	// DiskPct: how full the member's data volume is (0 = unknown).
 	DiskPct int `json:"disk_pct,omitempty"`
+	// ArchiveFailed and ArchivedAgo: pg_stat_archiver; Backup: what pgbackrest info said (a primary, every minute).
+	// Conns, MaxConns, Commits, XIDAge: see PGProbe.
+	ArchiveFailed int64         `json:"archive_failed,omitempty"`
+	ArchivedAgo   int64         `json:"archived_ago,omitempty"`
+	Backup        *PGBackupInfo `json:"backup,omitempty"`
 	// For metrics and alerts: client connections, max_connections, commits so far, oldest XID age.
 	Conns    int64 `json:"conns,omitempty"`
 	MaxConns int64 `json:"max_conns,omitempty"`
@@ -253,7 +268,21 @@ func pgIngest(st *ClusterState, nodeID string, reports []PGReport, results []PGR
 		received, _ := parseLSN(r.Received)
 		m.Probe = PGProbe{At: at, OK: true, Recovery: r.Recovery, Streaming: r.Streaming, LSN: lsn, Timeline: r.Timeline, LagMs: r.LagMs, Epoch: r.Epoch,
 			ReadOnly: r.ReadOnly, Received: received, SyncNames: sanitizeLabel(r.SyncNames, 200), DiskPct: min(max(r.DiskPct, 0), 100),
-			Conns: max(r.Conns, 0), MaxConns: max(r.MaxConns, 0), Commits: max(r.Commits, 0), XIDAge: max(r.XIDAge, 0)}
+			Conns: max(r.Conns, 0), MaxConns: max(r.MaxConns, 0), Commits: max(r.Commits, 0), XIDAge: max(r.XIDAge, 0),
+			ArchiveFailed: max(r.ArchiveFailed, 0), ArchivedAgo: max(r.ArchivedAgo, -1)}
+		if r.Backup != nil && !r.Recovery {
+			if c, g, _ := pgFind(st, r.App); c != nil && c.backupsOn() {
+				if g.Backup == nil {
+					g.Backup = &PGGroupBackup{}
+				}
+				info := *r.Backup
+				info.At, info.Status, info.LastLog = at, sanitizeLabel(info.Status, 120), sanitizeLabel(info.LastLog, 300)
+				if len(info.Backups) > 50 {
+					info.Backups = info.Backups[len(info.Backups)-50:]
+				}
+				g.Backup.Info = &info
+			}
+		}
 	}
 	if len(results) == 0 {
 		return
@@ -375,6 +404,7 @@ func pgGroupPass(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time, brak
 		pgSyncAndSlots(c, g, now)
 		pgFollowPrimary(st, c, g, now)
 		pgReloadPass(c, g, now)
+		pgBackupPass(c, g, now)
 	}
 }
 
@@ -669,6 +699,8 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 		if cmd.OK {
 			m.Params = cmd.Arg
 		}
+	case opStanza, opBackup:
+		pgBackupSettle(g, cmd, now)
 	case opPassword:
 		if cmd.OK && c.Rotation != nil {
 			if g.Notes == nil {

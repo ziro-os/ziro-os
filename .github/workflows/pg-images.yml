@@ -1,0 +1,99 @@
+name: Postgres images
+
+# The Ziro Postgres member images (images/postgres): the official PostgreSQL image of each supported major
+# version plus pgBackRest. Pull requests build them (amd64 and arm64) and scan them; main publishes them
+# to ghcr.io/<owner>/postgres with a build provenance attestation, and a weekly run rebuilds them so
+# security fixes of the Debian packages land. The digests ziroctl pins are updated from the run's output
+# (scripts/pg-image-digests.sh).
+
+on:
+  pull_request:
+    paths:
+      - images/postgres/**
+      - tools/ziroctl/cmd/pg_ops.go
+      - .github/workflows/pg-images.yml
+  push:
+    branches: [main]
+    paths:
+      - images/postgres/**
+      - tools/ziroctl/cmd/pg_ops.go
+      - .github/workflows/pg-images.yml
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: postgres ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write      # ghcr.io/<owner>/postgres
+      id-token: write      # build provenance attestation
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["16", "17", "18"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Base image
+        id: base
+        run: |
+          base=$(grep -o "\"${{ matrix.version }}\": \"docker.io/library/postgres:[^\"]*\"" tools/ziroctl/cmd/pg_ops.go | cut -d'"' -f4)
+          case "$base" in *@sha256:*) ;; *) echo "no digest-pinned base for ${{ matrix.version }}: $base"; exit 1 ;; esac
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/postgres" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build (amd64, for the scan)
+        run: |
+          docker buildx build --platform linux/amd64 --build-arg BASE="${{ steps.base.outputs.base }}" \
+            -t ziro-postgres:scan --load images/postgres
+
+      - name: Scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ziro-postgres:scan
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: pgBackRest works with this Postgres
+        run: |
+          docker run --rm ziro-postgres:scan sh -c 'pgbackrest version && postgres --version'
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (amd64, arm64)
+        if: github.event_name != 'pull_request'
+        id: push
+        run: |
+          name="${{ steps.base.outputs.name }}"
+          tag="${{ matrix.version }}-pgbackrest"
+          docker buildx build --platform linux/amd64,linux/arm64 --build-arg BASE="${{ steps.base.outputs.base }}" \
+            --sbom=true --provenance=mode=max \
+            -t "$name:$tag" -t "$name:$tag-$(date -u +%Y%m%d)" --metadata-file /tmp/meta.json --push images/postgres
+          digest=$(jq -r '."containerimage.digest"' /tmp/meta.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "### postgres ${{ matrix.version }}: \`$name:$tag@$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest image provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.base.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

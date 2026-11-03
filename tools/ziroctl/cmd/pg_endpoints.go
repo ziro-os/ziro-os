@@ -117,6 +117,10 @@ func pgMetrics(m *metricsWriter, st *ClusterState, now time.Time) {
 	m.family("ziro_pg_commits_total", "counter", "Committed transactions of a member (per second: rate()).")
 	m.family("ziro_pg_xid_age", "gauge", "Age of a member's oldest unfrozen transaction ID (wraparound at about 2.1e9).")
 	m.family("ziro_pg_disk_used_percent", "gauge", "How full a member's data volume is.")
+	m.family("ziro_pg_backup_last_seconds", "gauge", "Seconds since the newest finished backup of a group, by type.")
+	m.family("ziro_pg_backup_repository_bytes", "gauge", "Size of a group's backups in the repository (compressed, without the WAL).")
+	m.family("ziro_pg_archive_failed_total", "counter", "Failed WAL archive attempts of a primary since it started.")
+	m.family("ziro_pg_archive_last_seconds", "gauge", "Seconds since a primary last archived a WAL segment.")
 	for _, v := range pgViews(st, now) {
 		for _, g := range v.Groups {
 			base := map[string]string{"cluster": v.Name, "group": g.Name}
@@ -130,6 +134,7 @@ func pgMetrics(m *metricsWriter, st *ClusterState, now time.Time) {
 			m.sample("ziro_pg_epoch", base, float64(g.Epoch))
 			if c := st.PG[v.Name]; c != nil {
 				if gr := c.group(g.Name); gr != nil {
+					pgBackupMetrics(m, c, gr, with, now)
 					for _, mm := range gr.Members {
 						if !mm.Probe.OK {
 							continue
@@ -155,6 +160,37 @@ func pgMetrics(m *metricsWriter, st *ClusterState, now time.Time) {
 			for _, s := range []string{"ready", "catching-up", "starting", "down", "draining"} {
 				m.sample("ziro_pg_members", with(map[string]string{"state": s}), float64(states[s]))
 			}
+		}
+	}
+}
+
+// pgBackupMetrics adds a group's backups: the age of the newest of each type, the repository's size and,
+// from the primary, archiving.
+func pgBackupMetrics(m *metricsWriter, c *PGCluster, g *PGGroup, with func(map[string]string) map[string]string, now time.Time) {
+	if !c.backupsOn() {
+		return
+	}
+	if g.Backup != nil && g.Backup.Info != nil {
+		newest := map[string]time.Time{}
+		var size int64
+		for _, b := range g.Backup.Info.Backups {
+			if b.Stop.After(newest[b.Type]) {
+				newest[b.Type] = b.Stop
+			}
+			size += b.Repo
+		}
+		for _, typ := range []string{"full", "diff", "incr"} {
+			if t := newest[typ]; !t.IsZero() {
+				m.sample("ziro_pg_backup_last_seconds", with(map[string]string{"type": typ}), now.Sub(t).Seconds())
+			}
+		}
+		m.sample("ziro_pg_backup_repository_bytes", with(nil), float64(size))
+	}
+	if p := g.primary(); p != nil && p.Probe.OK {
+		l := with(map[string]string{"member": p.ID})
+		m.sample("ziro_pg_archive_failed_total", l, float64(p.Probe.ArchiveFailed))
+		if p.Probe.ArchivedAgo >= 0 {
+			m.sample("ziro_pg_archive_last_seconds", l, float64(p.Probe.ArchivedAgo))
 		}
 	}
 }
