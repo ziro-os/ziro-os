@@ -15,7 +15,6 @@ import (
 
 	"github.com/containernetworking/cni/libcni"
 	types100 "github.com/containernetworking/cni/pkg/types/100"
-	"golang.org/x/net/http2"
 )
 
 // fakeContainerd serves the four calls the minimal client makes, over HTTP/2 on a unix socket, from
@@ -116,9 +115,9 @@ func (f *fakeContainerd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var p pbBuf
 		p.str(1, field(1))
-		p.b = binary.AppendUvarint(p.b, 3<<3|0)
+		p.b = binary.AppendUvarint(p.b, 3<<3) // field 3, varint
 		p.b = binary.AppendUvarint(p.b, uint64(t.Pid))
-		p.b = binary.AppendUvarint(p.b, 4<<3|0)
+		p.b = binary.AppendUvarint(p.b, 4<<3) // field 4, varint
 		p.b = binary.AppendUvarint(p.b, uint64(t.Status))
 		out.msg(1, p.b)
 	default:
@@ -140,17 +139,11 @@ func startFakeContainerd(t *testing.T) (*fakeContainerd, string) {
 		t.Fatal(err)
 	}
 	f := &fakeContainerd{containers: map[string]*ctrdContainer{}, tasks: map[string]ctrdTask{}}
-	srv := &http2.Server{}
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go srv.ServeConn(c, &http2.ServeConnOpts{Handler: f})
-		}
-	}()
-	t.Cleanup(func() { ln.Close() })
+	var protos http.Protocols
+	protos.SetUnencryptedHTTP2(true)
+	srv := &http.Server{Handler: f, Protocols: &protos}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
 	return f, sock
 }
 

@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,12 +12,10 @@ import (
 	"net/url"
 	"strconv"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
-// A minimal containerd client: the four calls `docker network connect` needs (containers List, Get and
-// Update, tasks Get), as gRPC unary calls over HTTP/2 on containerd's unix socket. The official client
+// A minimal containerd client: the calls `docker network connect` and the health checks need (containers
+// List, Get and Update, tasks Get), as gRPC unary calls over HTTP/2 on containerd's unix socket. The official client
 // pulls in gRPC, protobuf and OpenTelemetry (about 9 MB in ziroctl) for what is here a few hundred
 // bytes of protobuf; the messages are encoded by hand from containerd's API definitions
 // (api/services/containers/v1/containers.proto, api/services/tasks/v1/tasks.proto,
@@ -47,9 +44,12 @@ type ctrdClient struct {
 }
 
 func newCtrdClient(socket, namespace string) *ctrdClient {
-	tr := &http2.Transport{
-		AllowHTTP: true, // h2c on a unix socket, as gRPC does
-		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
+	// HTTP/2 without TLS and without an upgrade (prior knowledge), as gRPC speaks on a unix socket.
+	var protos http.Protocols
+	protos.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{
+		Protocols: &protos,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
 		},
