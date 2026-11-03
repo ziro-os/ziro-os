@@ -505,6 +505,25 @@ paths:
         - { name: group, in: query, schema: { type: string } }
       responses:
         "200": { $ref: "#/components/responses/Object" }
+  /ui/{file...}:
+    get:
+      x-ziro-role: public
+      tags: [pg]
+      summary: The Postgres dashboard (index.html, app.js, app.css); static files with no data, served with a strict Content-Security-Policy. The page signs in with an API token and calls the API with it
+      parameters:
+        - { name: file, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "The file (text/html, text/javascript or text/css)" }
+        "404": { $ref: "#/components/responses/Message" }
+  /api/v1/pg/{name}/roles:
+    get:
+      x-ziro-role: viewer
+      tags: [pg]
+      summary: The cluster's roles and databases, whether each is applied on the primary yet, and the secret holding each role's credentials (never the credentials)
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/pg/{name}/backups:
     get:
       x-ziro-role: viewer

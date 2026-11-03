@@ -654,6 +654,7 @@ func registerPGRoutes(a *apiRouter) {
 	registerPGEventRoutes(a)
 	registerPGOverviewRoutes(a)
 	registerPGApplyRoutes(a)
+	registerPGUIRoutes(a)
 	a.get("/api/v1/pg", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		st, err := readState()
 		if err != nil {

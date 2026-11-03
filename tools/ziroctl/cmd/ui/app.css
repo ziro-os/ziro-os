@@ -1,0 +1,74 @@
+/* Ziro Postgres dashboard. Colors meet WCAG AA contrast in both themes. */
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #555d66; --line: #d5d9de; --panel: #f5f7f9;
+  --accent: #0b5cad; --ok: #146c2e; --warn: #8a5300; --bad: #b3261e; --paused: #6b3fa0;
+  --focus: #0b5cad;
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e8eaed; --muted: #a3aab2; --line: #343a40; --panel: #1d2125;
+    --accent: #7cb4f5; --ok: #6fd28a; --warn: #f2b45c; --bad: #ff8a80; --paused: #c4a3f0; --focus: #7cb4f5;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+a { color: var(--accent); }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.skip { position: absolute; left: -999px; }
+.skip:focus { left: 8px; top: 8px; background: var(--bg); padding: 4px 8px; z-index: 10; }
+.bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-bottom: 1px solid var(--line); }
+.brand { font-weight: 700; text-decoration: none; color: var(--fg); }
+.spacer { flex: 1; }
+#crumbs a, #crumbs span { margin-right: 6px; }
+main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+h1 { font-size: 1.4rem; margin: 0 0 12px; }
+h2 { font-size: 1.1rem; margin: 24px 0 8px; }
+.muted { color: var(--muted); }
+.error { color: var(--bad); }
+table { border-collapse: collapse; width: 100%; }
+caption { text-align: left; padding: 16px 0 6px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 0.85rem; }
+tbody tr:hover { background: var(--panel); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; border: 1px solid currentColor; }
+.healthy, .ready { color: var(--ok); }
+.degraded, .catching-up, .pending, .starting { color: var(--warn); }
+.down, .failing { color: var(--bad); }
+.paused, .draining { color: var(--paused); }
+.attention { border-left: 4px solid var(--warn); background: var(--panel); padding: 8px 12px; margin: 12px 0; }
+.attention li { margin: 2px 0; }
+button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: var(--bg); cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+button.danger { border-color: var(--bad); background: var(--bad); }
+button.ghost.danger { background: transparent; color: var(--bad); }
+button:disabled { opacity: 0.5; cursor: default; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 16px 0; }
+.tabs a { padding: 8px 14px; text-decoration: none; color: var(--muted); border-bottom: 3px solid transparent; }
+.tabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+label { display: block; font-weight: 600; margin: 10px 0 4px; }
+input, textarea, select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); width: 100%; max-width: 480px; }
+input[type="checkbox"] { width: auto; margin: 0 8px 0 0; vertical-align: middle; }
+textarea { max-width: 100%; min-height: 360px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+#login { max-width: 560px; }
+#login form button { margin-top: 12px; }
+dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); max-width: 520px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+#toast { position: fixed; bottom: 16px; right: 16px; max-width: 420px; }
+#toast div { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin-top: 8px; }
+.plan { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; background: var(--panel); padding: 10px; border-radius: 6px; white-space: pre-wrap; }
+.topology { width: 100%; max-width: 900px; height: auto; }
+.topology rect { fill: var(--panel); stroke: var(--line); }
+.topology .primary circle { fill: var(--accent); }
+.topology .replica circle { fill: var(--bg); stroke: var(--accent); stroke-width: 2; }
+.topology .down circle { stroke: var(--bad); fill: var(--bg); stroke-dasharray: 4 3; }
+.topology text { fill: var(--fg); font-size: 12px; }
+.topology line { stroke: var(--muted); stroke-width: 1.5; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; }
+.card h3 { margin: 0 0 6px; font-size: 0.95rem; color: var(--muted); }
+.card .big { font-size: 1.4rem; font-weight: 700; }

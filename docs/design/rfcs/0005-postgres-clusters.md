@@ -164,6 +164,10 @@ Credentials are never served over the API.
   `apps deploy --pg` attaches one of them and adds the app to `allow_from`.
 - **Purge.** `pg rm --purge` deletes every `pg-<name>-*` secret. Cluster names have no dashes, so the prefix belongs
   to this cluster alone.
+- **Dashboard.** `GET /ui/{file...}` serves three embedded static files with a strict Content-Security-Policy:
+  only its own scripts, styles and API. It is the second public route besides health (TestRoutePolicy names
+  it), and it holds no data. The page signs in with an API token kept in the tab's `sessionStorage` and calls the
+  existing routes with it, plus `GET /api/v1/pg/{name}/roles` (viewer). It never inserts API data as HTML.
 - **API roles.** `GET .../spec`, `GET .../events` and `GET /api/v1/pg-overview` are viewer. `POST /api/v1/pg-plan`
   is operator: it changes nothing, but the route policy keeps POST above viewer. `POST /api/v1/pg-apply` is admin,
   because it can create a cluster and change its backups.

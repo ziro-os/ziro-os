@@ -569,6 +569,42 @@ Enter opens a cluster: its members, what needs attention and the latest events.
 
 Every action asks for confirmation. Without a terminal, `pg top` prints `pg overview` once.
 
+### Dashboard
+
+The API server also serves a dashboard for the Postgres clusters, at `https://<master>:8443/ui/`. Sign in with an API
+token:
+
+```sh
+ziroctl api token create dashboard --role operator
+```
+
+The token stays in that browser tab, in session storage, and is gone when the tab closes. The page calls the same
+API as the CLI, so it can do no more than the token's role allows:
+
+| Role | What the dashboard can do |
+| --- | --- |
+| viewer | look |
+| operator | switchovers, backups, rolling restarts and pausing |
+| admin | restores and configuration changes |
+
+The pages:
+
+- **Fleet:** every cluster's health, worst first, with what needs attention.
+- **Overview** of a cluster: members, roles, lag and a topology view, with switchover (to a chosen replica),
+  backup, rolling restart and pause.
+- **Backups:** the backups and the recoverable window, and a restore wizard that copies the cluster at the latest
+  state or a chosen moment into a new cluster.
+- **Events:** the cluster's history, newest first.
+- **Roles and databases:** what exists, and whether each is applied yet. Passwords are never shown.
+- **Configuration:** the cluster file as JSON. Edit it, see the plan, apply it.
+
+Every change asks for confirmation first. The page refreshes every 2 seconds, and holds off while you are editing
+something.
+
+The dashboard is plain HTML, CSS and JavaScript embedded in ziroctl. Nothing is loaded from anywhere else, and a
+Content-Security-Policy allows only its own files and the API. Its files are the only public route besides
+`/api/v1/health`, and they hold no data. `tests/ui/dashboard-smoke.js` drives it in Chromium against a fake API.
+
 `ziroctl pg events shop` prints the cluster's history, oldest first: promotions, switchovers, repairs, rolling
 changes, backups and alerts, with their severity. The last 200 events of each group are kept in cluster state, so
 the history survives a master change. `--since 24h` limits it to a recent period, and `--follow` keeps printing new
