@@ -133,6 +133,17 @@ Docker host trip over:
   `docker compose pull --ignore-buildable` and `docker compose up --wait` drop the flag nerdctl does not know.
   nerdctl compose has no `--wait`, so `up --wait` returns once the containers are started and does not wait for
   health checks; it prints a note saying so.
+- `docker compose up --no-start` (Coolify starts a service this way, to connect its networks before it starts)
+  becomes `docker compose create` with the flags create takes (`--build`, `--force-recreate`, `--pull`, ...). Its
+  `--remove-orphans` is done by the wrapper: containers of the project whose service is no longer in the compose
+  file are removed.
+- `docker compose pull --ignore-pull-failures` keeps its meaning (a failed pull is a warning), and
+  `docker compose config --no-interpolate --no-path-resolution -q` validates the file as before.
+- `docker ps --format`, `docker inspect` and `docker network inspect` print what Docker prints where nerdctl
+  differs: a container's networks under their names (nerdctl says `unknown-eth0`), `ps` fields `State`,
+  `Networks`, `RunningFor`, `Mounts` and `.Label "key"`, `Config.OpenStdin`, and a network's `EnableIPv6`,
+  `Driver`, `Scope` and container addresses. `--format` templates have Docker's functions (`json`, `join`,
+  `split`, `title`, `lower`, `upper`, `pad`, `truncate`). `docker ps` without `--format` is nerdctl's table.
 - `docker run -d --rm` drops `--rm` (nerdctl refuses the two together) and prints a note: the container is not
   removed when it exits, so remove it with `docker rm -f`, as Coolify does for its helper container.
 - `docker run --network-alias X` (and a Compose service name, which Docker clients send as an alias) sets the

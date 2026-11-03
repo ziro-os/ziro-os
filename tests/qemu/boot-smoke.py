@@ -378,6 +378,43 @@ docker network rm coolify >/dev/null 2>&1; echo RM=$?""")
     found = [x.strip() for x in re.findall(r"^[A-Z]+=\d+\s*$", out, re.M)][-7:]  # the console also echoes what was typed
     check("coolify deployment commands: network create --attachable, compose pull --ignore-buildable, up --wait, ps, network inspect, down",
           found == ["NET=0", "PULL=0", "UP=0", "PS=0", "INSPECT=0", "DOWN=0", "RM=0"], " ".join(found) or out[-300:])
+    # Coolify's StartService with "connect to docker network": create without starting, read the networks
+    # of a created container, start, then the ps/inspect fields its jobs read. Without the rewrite, nerdctl
+    # stops at "unknown flag: --no-start".
+    svc = (r"""mkdir -p /tmp/cs; touch /tmp/cs/.env; cat > /tmp/cs/docker-compose.yml <<'Y'
+services:
+  web:
+    image: docker.io/library/alpine:latest
+    command: sleep 600
+    container_name: web-cs1
+    networks: [cs1]
+  old:
+    image: docker.io/library/alpine:latest
+    command: sleep 600
+    container_name: old-cs1
+    networks: [cs1]
+networks:
+  cs1:
+    name: cs1
+    external: true
+Y
+C="docker compose --project-directory /tmp/cs -f /tmp/cs/docker-compose.yml --project-name cs1"
+docker network inspect cs1 >/dev/null 2>&1 || docker network create --attachable cs1 >/dev/null 2>&1; echo NET=$?
+$C up -d >/dev/null 2>&1; echo FIRST=$?
+sed -i '/^  old:/,/^    networks: \[cs1\]/d' /tmp/cs/docker-compose.yml
+$C up -d --remove-orphans --force-recreate --build --no-start < /dev/null >/dev/null 2>&1; echo NOSTART=$?
+docker ps -a --filter name=old-cs1 --format '{{.Names}}' | grep -c old-cs1; echo ORPHAN=$?
+docker container inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' web-cs1 | grep -qxF cs1; echo NETNAME=$?
+$C start < /dev/null >/dev/null 2>&1; echo START=$?
+docker ps --filter name=web-cs1 --format '{{.State}} {{.Networks}}'
+docker inspect --format '{{.Config.OpenStdin}}' web-cs1
+$C down >/dev/null 2>&1; docker network rm cs1 >/dev/null 2>&1; echo DOWN=$?""")
+    rc, out = con.run(svc, timeout=600)
+    found = re.findall(r"^(?:[A-Z]+=\d+|running cs1|false|\d)\s*$", out, re.M)
+    found = [x.strip() for x in found][-10:]
+    check("coolify StartService: up --no-start (create), --remove-orphans, network names in inspect, start, ps .State, .Config.OpenStdin",
+          found == ["NET=0", "FIRST=0", "NOSTART=0", "0", "ORPHAN=1", "NETNAME=0", "START=0", "running cs1", "false", "DOWN=0"],
+          " ".join(found) or out[-400:])
     rc, out = con.run("nerdctl run -d --name dk-co alpine sleep 600 >/dev/null 2>&1; sleep 1; "
                       "docker network create coolify --attachable >/dev/null 2>&1; echo NET=$?; docker network ls | grep -c coolify; "
                       "docker ps -a --format '{{json .}}' | jq -r .Names | grep -c dk-co; "

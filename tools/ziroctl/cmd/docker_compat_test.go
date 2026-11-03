@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fakeLook(bin string, args ...string) string {
@@ -162,7 +163,8 @@ func TestDockerSocketReportsTheCompatVersion(t *testing.T) {
 }
 
 // Runs the real wrapper with stand-ins for nerdctl and ziroctl that print their arguments: only the
-// version commands, "network" and "compose" go through ziroctl; everything else is nerdctl untouched.
+// version commands, network, compose, run, create, ps, inspect and container go through ziroctl;
+// everything else is nerdctl untouched.
 func TestDockerWrapperRouting(t *testing.T) {
 	src, err := os.ReadFile("../../../rootfs/usr/bin/docker")
 	if err != nil {
@@ -195,8 +197,12 @@ func TestDockerWrapperRouting(t *testing.T) {
 		{[]string{"network", "create", "x", "--attachable"}, "ZIROCTL: [docker-compat] [network] [create] [x] [--attachable]"},
 		{[]string{"run", "--rm", "-v", "/a:/b", "alpine", "sh", "-c", "echo hi"}, "ZIROCTL: [docker-compat] [run] [--rm] [-v] [/a:/b] [alpine] [sh] [-c] [echo hi]"},
 		{[]string{"create", "--name", "x", "alpine"}, "ZIROCTL: [docker-compat] [create] [--name] [x] [alpine]"},
-		{[]string{"ps", "-a", "--format", "{{json .}}"}, "NERDCTL: [ps] [-a] [--format] [{{json .}}]"},
-		{[]string{"container", "inspect", "--format", "{{json .}}", "abc"}, "NERDCTL: [container] [inspect] [--format] [{{json .}}] [abc]"},
+		{[]string{"ps", "-a", "--format", "{{json .}}"}, "ZIROCTL: [docker-compat] [ps] [-a] [--format] [{{json .}}]"},
+		{[]string{"container", "inspect", "--format", "{{json .}}", "abc"}, "ZIROCTL: [docker-compat] [container] [inspect] [--format] [{{json .}}] [abc]"},
+		{[]string{"inspect", "abc"}, "ZIROCTL: [docker-compat] [inspect] [abc]"},
+		{[]string{"logs", "-n", "10", "abc"}, "NERDCTL: [logs] [-n] [10] [abc]"},
+		{[]string{"exec", "abc", "ps"}, "NERDCTL: [exec] [abc] [ps]"},
+		{[]string{"images", "--format", "{{json .}}"}, "NERDCTL: [images] [--format] [{{json .}}]"},
 	} {
 		if got := run(c.args...); got != c.want {
 			t.Errorf("docker %q:\n got %s\nwant %s", c.args, got, c.want)
@@ -244,6 +250,16 @@ func TestTranslateDockerDropsOnlyWhatNerdctlRejects(t *testing.T) {
 		{"compose up -d --wait=true", "compose up -d", 1},
 		{"compose -p p up -d", "compose -p p up -d", 0},
 		{"compose -f a.yml down --remove-orphans", "compose -f a.yml down --remove-orphans", 0},
+		// Coolify's StartService with "connect to docker network": create now, connect, then start
+		{"compose --project-directory /w -f /w/docker-compose.yml --project-name u up -d --remove-orphans --force-recreate --build --no-start",
+			"compose --project-directory /w -f /w/docker-compose.yml --project-name u create --force-recreate --build", 0},
+		{"compose up --no-start --pull always --wait-timeout 30 web db", "compose create --pull always web db", 0},
+		{"compose up --no-start --pull=never --quiet-pull -- web", "compose create --pull=never -- web", 0},
+		{"compose -p u start", "compose -p u start", 0},
+		// Coolify's log drain and compose validation
+		{"compose -f f.yml pull --quiet --ignore-pull-failures", "compose -f f.yml pull --quiet", 0},
+		{"compose -f x.yml config --no-interpolate --no-path-resolution -q", "compose -f x.yml config -q", 0},
+		{"compose -f x.yml config --no-interpolate", "compose -f x.yml config", 1},
 		{"compose ps", "compose ps", 0},
 		{"compose", "compose", 0},
 		{"compose -f a.yml", "compose -f a.yml", 0},
@@ -256,6 +272,231 @@ func TestTranslateDockerDropsOnlyWhatNerdctlRejects(t *testing.T) {
 		out, notes := translateDocker(strings.Fields(tc.in))
 		if got := strings.Join(out, " "); got != tc.out || len(notes) != tc.notes {
 			t.Errorf("%s:\n got %q (%d notes)\nwant %q (%d notes)", tc.in, got, len(notes), tc.out, tc.notes)
+		}
+	}
+}
+
+func TestPlanDockerStepsNerdctlHasNoFlagFor(t *testing.T) {
+	now := func() time.Time { return time.Unix(0, 0) }
+	p := planDocker(strings.Fields("compose -p u up -d --remove-orphans --build --no-start"), now)
+	if p.before == nil || p.ignoreFailure || p.output != nil {
+		t.Fatalf("up --no-start --remove-orphans: %+v", p)
+	}
+	if p := planDocker(strings.Fields("compose -p u up -d --remove-orphans"), now); p.before != nil {
+		t.Fatal("nerdctl compose up removes orphans itself: no extra step")
+	}
+	if p := planDocker(strings.Fields("compose pull --ignore-pull-failures"), now); !p.ignoreFailure {
+		t.Fatal("pull --ignore-pull-failures must not fail the script")
+	}
+	for in, want := range map[string]string{
+		"ps -a --format {{.State}}":                    "ps -a --format " + psFormat,
+		"container ls --filter name=x --format json":   "ps --filter name=x --format " + psFormat,
+		"inspect --format {{.State}} c1 c2":            "inspect c1 c2",
+		"container inspect -f {{.Config.OpenStdin}} c": "container inspect c",
+		"network inspect coolify -f {{.Containers}}":   "network inspect coolify",
+	} {
+		p := planDocker(strings.Fields(in), now)
+		if got := strings.Join(p.args, " "); got != want || p.output == nil {
+			t.Errorf("%s: %q (output %v), want %q", in, got, p.output != nil, want)
+		}
+	}
+	for _, in := range []string{"ps", "ps -a", "ps -q", "ps --format table", "ps -a -q --format {{.ID}}", "logs c"} {
+		if p := planDocker(strings.Fields(in), now); p.output != nil || strings.Join(p.args, " ") != in {
+			t.Errorf("%s is nerdctl's own output: %q", in, p.args)
+		}
+	}
+}
+
+func TestComposeProject(t *testing.T) {
+	env := func(map[string]string) func(string) string { return func(string) string { return "" } }
+	for _, c := range []struct {
+		globals []string
+		env     string
+		want    string
+	}{
+		{[]string{"--project-name", "U-1"}, "", "u-1"},
+		{[]string{"-p=abc"}, "", "abc"},
+		{[]string{"--project-directory", "/data/My App"}, "", "myapp"},
+		{[]string{"-f", "/srv/shop/docker-compose.yml"}, "", "shop"},
+		{nil, "fromenv", "fromenv"},
+		{nil, "", "wd"},
+	} {
+		getenv := env(nil)
+		if c.env != "" {
+			getenv = func(k string) string {
+				if k == "COMPOSE_PROJECT_NAME" {
+					return c.env
+				}
+				return ""
+			}
+		}
+		if got := composeProject(c.globals, getenv, "/home/wd"); got != c.want {
+			t.Errorf("%v: %q, want %q", c.globals, got, c.want)
+		}
+	}
+}
+
+func TestRemoveComposeOrphans(t *testing.T) {
+	var calls []string
+	run := func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		switch {
+		case args[len(args)-1] == "--services":
+			return []byte("web\ndb\n"), nil
+		case args[0] == "ps":
+			return []byte("a1\tweb\nb2\told-worker\nc3\tdb\nd4\t\n"), nil
+		}
+		return nil, nil
+	}
+	if err := removeComposeOrphans([]string{"-f", "/w/c.yml", "--project-name", "u"}, run); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"compose -f /w/c.yml --project-name u config --services",
+		`ps -a --filter label=com.docker.compose.project=u --format {{.ID}}{{"\t"}}{{.Label "com.docker.compose.service"}}`,
+		"rm -f b2",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s", strings.Join(calls, "\n"))
+	}
+	calls = nil
+	run2 := func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return nil, nil
+	}
+	if err := removeComposeOrphans([]string{"-p", "u"}, run2); err == nil || len(calls) != 1 {
+		t.Fatalf("an empty service list must not remove every container: %v %v", err, calls)
+	}
+}
+
+// nerdctl 2.2.1 `inspect` of a container on two networks, as it prints it.
+const nerdctlInspectFixture = `[
+    {
+        "Id": "3c1f",
+        "Created": "2026-11-03T04:57:47.1Z",
+        "Path": "/docker-entrypoint.sh",
+        "Args": ["nginx", "-g", "daemon off;"],
+        "State": {"Status": "running", "Running": true, "Paused": false, "Restarting": false, "Pid": 4242, "ExitCode": 0, "FinishedAt": ""},
+        "Image": "docker.io/library/nginx:alpine",
+        "Name": "web-u1",
+        "HostConfig": {"NetworkMode": "unknown-eth0"},
+        "Config": {"Hostname": "web", "AttachStdin": false, "Labels": {"com.docker.compose.service": "web", "nerdctl/networks": "[\"u1\",\"coolify\"]"}, "Image": "nginx"},
+        "NetworkSettings": {
+            "Ports": {},
+            "IPAddress": "10.4.1.2", "IPPrefixLen": 24, "MacAddress": "aa:bb",
+            "Networks": {
+                "unknown-eth0": {"IPAddress": "10.4.1.2", "IPPrefixLen": 24, "MacAddress": "aa:bb"},
+                "unknown-eth1": {"IPAddress": "10.4.0.7", "IPPrefixLen": 24, "MacAddress": "cc:dd"}
+            }
+        }
+    }
+]
+`
+
+func TestFormatInspectNamesNetworksAndFillsFields(t *testing.T) {
+	for format, want := range map[string]string{
+		// Coolify StartService: is the container already on the destination network?
+		`{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}`: "coolify\nu1\n\n",
+		// proxy.php: the networks of coolify-proxy
+		`{{json .NetworkSettings.Networks }}`: `{"coolify":{"Aliases":null,"IPAddress":"10.4.0.7","IPPrefixLen":24,"MacAddress":"cc:dd","NetworkID":"coolify"},"u1":{"Aliases":null,"IPAddress":"10.4.1.2","IPPrefixLen":24,"MacAddress":"aa:bb","NetworkID":"u1"}}` + "\n",
+		// Terminal.php
+		`{{.Config.OpenStdin}}`:                                 "false\n",
+		`{{.HostConfig.NetworkMode}}`:                           "u1\n",
+		`{{.State.Pid}} {{.Name}}`:                              "4242 web-u1\n",
+		`{{index .Config.Labels "com.docker.compose.service"}}`: "web\n",
+		`{{upper .State.Status}}`:                               "RUNNING\n",
+	} {
+		out, err := formatInspect([]byte(nerdctlInspectFixture), format)
+		if err != nil || string(out) != want {
+			t.Errorf("%s:\n got %q %v\nwant %q", format, out, err, want)
+		}
+	}
+	out, err := formatInspect([]byte(nerdctlInspectFixture), "")
+	if err != nil || !strings.HasPrefix(string(out), "[\n") || strings.Contains(string(out), "unknown-eth") {
+		t.Fatalf("plain inspect: %v\n%s", err, out)
+	}
+	// Health is absent until a check ran: never "healthy" (Docker errors on the nil pointer instead).
+	if out, _ := formatInspect([]byte(nerdctlInspectFixture), `{{json .State.Health.Status}}`); strings.Contains(string(out), "healthy") {
+		t.Fatalf("no health check, yet %q", out)
+	}
+	// images and other objects are left as they are
+	img := `[{"Id":"sha256:1","RepoTags":["nginx:alpine"],"Config":{"Labels":null}}]`
+	if out, err := formatInspect([]byte(img), "{{index .RepoTags 0}}"); err != nil || string(out) != "nginx:alpine\n" {
+		t.Fatalf("image: %q %v", out, err)
+	}
+}
+
+func TestFormatNetworkInspect(t *testing.T) {
+	raw := `[{"Name":"coolify","Id":"9a","IPAM":{"Config":[{"Subnet":"10.4.0.0/24","Gateway":"10.4.0.1"}]},"Labels":{},"Containers":{"3c1f":{"Name":"web-u1"}}}]`
+	run := func(args ...string) ([]byte, error) {
+		if strings.Join(args, " ") != "container inspect 3c1f" {
+			t.Fatalf("unexpected nerdctl %v", args)
+		}
+		return []byte(nerdctlInspectFixture), nil
+	}
+	for format, want := range map[string]string{
+		`{{json .Containers}}`:                   `{"3c1f":{"EndpointID":"","IPv4Address":"10.4.0.7/24","IPv6Address":"","MacAddress":"cc:dd","Name":"web-u1"}}` + "\n",
+		`{{.EnableIPv6}}`:                        "false\n",
+		`{{.Driver}} {{.Scope}} {{.Attachable}}`: "bridge local true\n",
+	} {
+		out, err := formatNetworkInspect([]byte(raw), format, run)
+		if err != nil || string(out) != want {
+			t.Errorf("%s:\n got %q %v\nwant %q", format, out, err, want)
+		}
+	}
+	v6 := `[{"Name":"v6","IPAM":{"Config":[{"Subnet":"fd00::/64"}]},"Containers":{}}]`
+	if out, _ := formatNetworkInspect([]byte(v6), "{{.EnableIPv6}} {{.Id}}", run); string(out) != "true v6\n" {
+		t.Fatalf("ipv6: %q", out)
+	}
+}
+
+func TestFormatPsHasDockerFields(t *testing.T) {
+	created := time.Date(2026, 11, 3, 4, 0, 0, 0, time.UTC)
+	row := func(name, status, nets string) string {
+		labels := `{"com.docker.compose.project":"u1","nerdctl/networks":"` + strings.ReplaceAll(nets, `"`, `\"`) + `","a":"x,y"}`
+		return `{"Command":"\"nginx\"","CreatedAt":"` + created.Format(time.RFC3339Nano) + `","ID":"3c1f","Image":"nginx","Platform":"linux","Names":"` + name +
+			`","Ports":"","Status":"` + status + `","Runtime":"io.containerd.runc.v2","Size":"","Labels":"ignored"}` + "\t" + labels
+	}
+	raw := row("coolify-sentinel", "Up 5 minutes", `["coolify"]`) + "\n" + row("old", "Exited (0) 2 minutes ago", `["a","b"]`) + "\n" + row("new", "Created", `[]`) + "\n"
+	now := created.Add(90 * time.Minute)
+	for format, want := range map[string]string{
+		// CheckAndStartSentinelJob
+		`{{.State}} {{.Status}}`:                                 "running Up 5 minutes\nexited Exited (0) 2 minutes ago\ncreated Created\n",
+		`{{.Names}} {{.Networks}}`:                               "coolify-sentinel coolify\nold a,b\nnew \n",
+		`{{.Label "com.docker.compose.project"}} {{.Label "a"}}`: "u1 x,y\nu1 x,y\nu1 x,y\n",
+		`{{.RunningFor}}`:                                        "2 hours ago\n2 hours ago\n2 hours ago\n",
+	} {
+		out, err := formatPs([]byte(raw), format, now)
+		if err != nil || string(out) != want {
+			t.Errorf("%s:\n got %q %v\nwant %q", format, out, err, want)
+		}
+	}
+	out, err := formatPs([]byte(raw), "json", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(strings.SplitN(string(out), "\n", 2)[0]), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"State", "Status", "Names", "Networks", "RunningFor", "CreatedAt", "Labels", "Mounts", "LocalVolumes"} {
+		if _, ok := doc[k]; !ok {
+			t.Errorf("ps JSON has no %s: %v", k, doc)
+		}
+	}
+	if doc["Labels"] != "a=x,y,com.docker.compose.project=u1,nerdctl/networks=[\"coolify\"]" || doc["CreatedAt"] != "2026-11-03 04:00:00 +0000 UTC" {
+		t.Errorf("labels/created: %v %v", doc["Labels"], doc["CreatedAt"])
+	}
+	if out, _ := formatPs(nil, "{{.ID}}", now); len(out) != 0 {
+		t.Fatalf("no containers, no output: %q", out)
+	}
+}
+
+func TestDockerState(t *testing.T) {
+	for in, want := range map[string]string{"Up 3 seconds": "running", "Up 1 hour (Paused)": "paused", "Created": "created",
+		"Exited (137) 1 second ago": "exited", "Restarting (1) 2 seconds ago": "restarting", "Removing": "removing"} {
+		if got := dockerState(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
 		}
 	}
 }
