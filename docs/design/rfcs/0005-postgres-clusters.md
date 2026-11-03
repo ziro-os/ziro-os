@@ -107,14 +107,35 @@ ziroctl pg rm-replica db <member>
 ziroctl pg switchover db [--to member]
 ziroctl pg failover db [--to member] [--force]
 ziroctl pg reinit db <member>
-ziroctl pg expose db --port 5432 [--allow CIDR]
+ziroctl pg expose db --port 5432 --allow CIDR
 ziroctl pg add-shard db
-ziroctl pg rm db [--purge]
+ziroctl pg rotate-password db [--role replicator|postgres]
+ziroctl pg rm db [--purge --yes]
 ```
 
 API: `GET /api/v1/pg`, `GET|DELETE /api/v1/pg/{name}`, `POST /api/v1/pg` (admin), `POST
-/api/v1/pg/{name}/{action}` for `scale`, `add-replica`, `rm-replica`, `switchover`, `failover`, `reinit`, `add-shard` (operator).
+/api/v1/pg/{name}/{action}` for `scale`, `add-replica`, `rm-replica`, `switchover`, `failover`, `reinit`,
+`add-shard` and `rotate-password` (operator).
 Credentials are never served over the API.
+
+### Leases, rolling changes and TLS (revision)
+
+- **Leases.** With every heartbeat the master grants each member whose probe is fresh a lease of 22 s (the `lease`
+  dynamic file; the agent writes `lease-until` on the node's clock). A watchdog in the member's container fences a
+  primary whose lease has ended: `synchronous_standby_names` is set to a standby that does not exist, so no commit
+  is acknowledged, and client sessions end. The failover grace is 36 s, longer than a lease can outlive its last
+  probe (7 s + 22 s), so an old primary has stopped acknowledging before a replica is promoted. A group without
+  replicas is never fenced, and a member that never had a lease (agents that predate leases) is not enforced.
+- **Epochs.** The agent refuses an order whose epoch is older than one it has already seen for that member.
+- **Ranking and timelines.** The candidate is the replica holding the most WAL, received or replayed. A replica on
+  an older timeline than the primary leaves `-ro` and the standby vote. After a promotion every replica is told to
+  follow the new primary by name (`follow`, primary_conninfo plus reload).
+- **Switchover.** The read-only step also fences commits, and an abort restores the standby list.
+- **Rolling changes.** A member whose spec changes takes it when it is its turn. Replicas go one at a time, each back
+  and caught up first, and the primary goes last after a switchover to an updated replica.
+- **TLS and access.** New clusters get their own CA and a server certificate. Members replicate with `verify-ca`.
+  The superuser is refused over the network, except between Citus nodes. `rotate-password` sends the primary a
+  SCRAM verifier only.
 
 ## Security
 

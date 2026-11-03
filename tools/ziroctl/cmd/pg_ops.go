@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -30,6 +32,7 @@ type pgCreateOpts struct {
 	User      string
 	AllowFrom []string
 	Colocate  bool
+	NoPooler  bool // no PgBouncer in front of the cluster (it is on by default)
 }
 
 // pgCreate declares a cluster: its groups and members, spread over the cluster's nodes, and its
@@ -93,6 +96,9 @@ func pgCreate(st *ClusterState, o pgCreateOpts, now time.Time) (*PGCluster, erro
 		}
 		c.Groups = append(c.Groups, g)
 	}
+	if !o.NoPooler {
+		c.Pooler = &PGPooler{Enabled: true, Mode: "transaction", Size: 20}
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -104,10 +110,18 @@ func pgCreate(st *ClusterState, o pgCreateOpts, now time.Time) (*PGCluster, erro
 		}
 		secrets[k] = v
 	}
+	member, ca, err := pgIssueTLS(c, now)
+	if err != nil {
+		return nil, fmt.Errorf("TLS certificates: %v", err)
+	}
+	for k, v := range member {
+		secrets[k] = v
+	}
 	if st.Secrets == nil {
 		st.Secrets = map[string]map[string]string{}
 	}
 	st.Secrets[c.secretName()] = secrets
+	st.Secrets[c.caSecretName()] = ca
 	if st.PG == nil {
 		st.PG = map[string]*PGCluster{}
 	}
@@ -139,6 +153,7 @@ func pgDelete(st *ClusterState, name string, purge bool) error {
 		}
 		markPurge(st, apps...)
 		delete(st.Secrets, c.secretName())
+		delete(st.Secrets, c.caSecretName())
 	}
 	delete(st.PG, name)
 	return nil
@@ -535,5 +550,67 @@ func pgConnString(st *ClusterState, c *PGCluster, ro bool) string {
 	if ro {
 		host = c.Name + "-ro"
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s.%s:%s/%s", c.User, pw, host, meshDomain, pgPort, c.Database)
+	u := fmt.Sprintf("postgres://%s:%s@%s.%s:%s/%s", c.User, pw, host, meshDomain, pgPort, c.Database)
+	if pgTLSEnabled(st, c) {
+		u += "?sslmode=require" // encrypted; verify-full with the cluster CA (pg credentials --ca) also checks the name
+	}
+	return u
+}
+
+// pgResize changes the members' memory and CPU limits: the members restart on them one at a time.
+func pgResize(st *ClusterState, name string, res *Resources) error {
+	c, err := pgCluster(st, name)
+	if err != nil {
+		return err
+	}
+	if err := res.Validate(); err != nil {
+		return err
+	}
+	c.Resources = res
+	return nil
+}
+
+// pgUpgradeImage moves the members to another image of the same major version (a minor upgrade or a
+// rebuilt image); they restart on it one at a time. A different major version needs a migration.
+func pgUpgradeImage(st *ClusterState, name, image string) error {
+	c, err := pgCluster(st, name)
+	if err != nil {
+		return err
+	}
+	if image == "" || strings.ContainsAny(image, " \t\r\n") || len(image) > 512 || !strings.Contains(image, "@sha256:") {
+		return fmt.Errorf("the image must be pinned by digest (name:tag@sha256:...)")
+	}
+	if m := regexp.MustCompile(`postgres:([0-9]+)`).FindStringSubmatch(image); m != nil && m[1] != c.Version {
+		return fmt.Errorf("%s is PostgreSQL %s, the cluster runs %s: a major upgrade needs a dump and restore into a new cluster", image, m[1], c.Version)
+	}
+	if c.Citus != "" {
+		c.Citus = image
+	} else {
+		c.Image = image
+	}
+	return nil
+}
+
+// pgRestartAll restarts every member, one at a time with the primary last.
+func pgRestartAll(st *ClusterState, name string) error {
+	c, err := pgCluster(st, name)
+	if err != nil {
+		return err
+	}
+	c.RestartEpoch++
+	return nil
+}
+
+// pgPoolString is the connection string through the pooler (ro: the read-only pool).
+func pgPoolString(st *ClusterState, c *PGCluster, ro bool) string {
+	pw := st.Secrets[c.secretName()]["POSTGRES_PASSWORD"]
+	db := c.Database
+	if ro {
+		db += "_ro"
+	}
+	u := fmt.Sprintf("postgres://%s:%s@%s-pool.%s:%s/%s", c.User, pw, c.Name, meshDomain, pgPort, db)
+	if pgTLSEnabled(st, c) {
+		u += "?sslmode=require"
+	}
+	return u
 }

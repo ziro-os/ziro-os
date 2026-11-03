@@ -7,10 +7,13 @@
 #     pg_basebackup (replica), which never interrupts the primary;
 #   - a member that is not the primary rewinds to the primary's timeline (pg_rewind, or a new base
 #     backup) before it follows it;
-#   - a member that believes it is primary but finds another live primary refuses to serve.
+#   - a member that believes it is primary but finds another live primary refuses to serve;
+#   - a primary whose lease from the master ended stops acknowledging commits (the watchdog below), so
+#     it never accepts writes next to a replica promoted in its place.
 #
 # Inputs: the environment (ZIRO_PG_*, PGDATA, passwords from the cluster secret) and the files in
-# /etc/ziro-config: postgresql.conf (tuning) and role (key=value, written by the agent).
+# /etc/ziro-config: postgresql.conf (tuning), role and lease (key=value, kept current by the agent) and
+# lease-until (when the lease ends, on this node's clock).
 set -eu
 umask 077
 
@@ -58,16 +61,19 @@ idle() {
 role=replica
 epoch=0
 initialised=0
+follow=
 if [ -r "$CFG/role" ]; then
 	while IFS='=' read -r key value; do
 		case "$key" in
 		role) role=$value ;;
 		epoch) epoch=$value ;;
 		initialised) initialised=$value ;;
+		follow) follow=$value ;;
 		esac
 	done <"$CFG/role"
 fi
 case "$role" in primary | replica) ;; *) role=replica ;; esac
+case "$follow" in *[!0-9a-z.-]* | '') follow= ;; esac
 
 rw_host="${ZIRO_PG_RW:?}"
 self_host="${ZIRO_PG_SELF:?}"
@@ -75,6 +81,30 @@ member="${ZIRO_PG_MEMBER:?}"
 slot="ziro_${member}"
 app_user="${POSTGRES_USER:?}"
 app_db="${POSTGRES_DB:?}"
+
+# TLS: the cluster CA, and this cluster's server certificate (pg_tls.go). Members connect to each other with
+# sslmode=verify-ca: only a member of this cluster has a certificate its CA signed.
+TLS="$STATE/ziro-tls"
+tls=
+sslmode=prefer
+PGSSLROOTCERT=
+if [ -n "${PG_TLS_CERT:-}" ] && [ -n "${PG_TLS_KEY:-}" ] && [ -n "${PG_TLS_CA:-}" ]; then
+	mkdir -p "$TLS"
+	printf %s "$PG_TLS_CA" | base64 -d >"$TLS/ca.crt"
+	printf %s "$PG_TLS_CERT" | base64 -d >"$TLS/server.crt"
+	printf %s "$PG_TLS_KEY" | base64 -d >"$TLS/server.key"
+	chown -R postgres "$TLS"
+	chmod 700 "$TLS"
+	chmod 600 "$TLS/server.key"
+	chmod 644 "$TLS/ca.crt" "$TLS/server.crt"
+	tls=1
+	sslmode=verify-ca
+	PGSSLROOTCERT="$TLS/ca.crt"
+fi
+# Given to our own connections only (psql_at, pg_basebackup, pg_rewind): exported, the server would pass it
+# on to every connection it makes (postgres_fdw, dblink).
+PGSSLMODE="$sslmode"
+export -n PGSSLMODE PGSSLROOTCERT 2>/dev/null || true
 
 # Passwords for connections between members (and, with Citus, between nodes).
 {
@@ -91,7 +121,7 @@ ip_of() { getent hosts "$1" | awk '{print $1; exit}'; }
 psql_at() {
 	local host=$1
 	shift
-	PGCONNECT_TIMEOUT=3 as_pg env PGPASSFILE="$PGPASSFILE" psql -X -h "$host" -p "$PORT" -U replicator -d postgres "$@"
+	PGCONNECT_TIMEOUT=3 as_pg env PGPASSFILE="$PGPASSFILE" PGSSLMODE="$PGSSLMODE" ${PGSSLROOTCERT:+PGSSLROOTCERT="$PGSSLROOTCERT"} psql -X -h "$host" -p "$PORT" -U replicator -d postgres "$@"
 }
 
 # serving_primary HOST: true when HOST accepts connections and is not in recovery.
@@ -106,6 +136,14 @@ wait_for_primary() {
 	return 1
 }
 
+# Backups (pg_backup.go): pgBackRest's logs, archive spool and locks live on the data volume.
+stanza="${ZIRO_PG_STANZA:-}"
+case "$stanza" in *[!a-z0-9]*) stanza= ;; esac
+if [ -n "$stanza" ]; then
+	mkdir -p "$STATE/ziro-pgbackrest/log" "$STATE/ziro-pgbackrest/spool" "$STATE/ziro-pgbackrest/lock"
+	chown -R postgres "$STATE/ziro-pgbackrest"
+fi
+
 # ---- first start ----
 
 init_primary() {
@@ -118,6 +156,27 @@ init_primary() {
 	as_pg initdb -D "$PGDATA" -U postgres --pwfile="$pwfile" --data-checksums \
 		--auth-local=trust --auth-host=scram-sha-256 --encoding=UTF8
 	rm -f "$pwfile"
+}
+
+# restore_primary: the first primary of a cluster made from a backup repository (pg restore) takes its
+# data from there: the latest state, or the state at ZIRO_PG_RESTORE_TARGET. Postgres then replays the
+# archived WAL and becomes the primary on a new timeline.
+restore_primary() {
+	local path=${ZIRO_PG_RESTORE_PATH:?} rstanza=${ZIRO_PG_RESTORE_STANZA:?} target=${ZIRO_PG_RESTORE_TARGET:-}
+	log "restoring from the backup repository ($path, stanza $rstanza, ${target:-the latest state})"
+	touch "$BUILD"
+	busy
+	rm -rf "${PGDATA:?}"/* "${PGDATA:?}"/.[!.]* 2>/dev/null || true
+	as_pg mkdir -p "$PGDATA"
+	set -- --stanza="$rstanza" --repo1-path="$path" --pg1-path="$PGDATA"
+	if [ -n "$target" ]; then
+		set -- "$@" --type=time --target="$target" --target-action=promote
+	fi
+	if ! as_pg pgbackrest "$@" restore; then
+		fail "the restore from the backup repository failed (see the container log)"
+	fi
+	idle
+	rm -f "$BUILD"
 }
 
 # basebackup HOST: a fresh copy of the primary. The slot keeps the WAL the copy needs until it
@@ -136,7 +195,7 @@ basebackup() {
 	rm -rf "${PGDATA:?}"/* "${PGDATA:?}"/.[!.]* 2>/dev/null || true
 	as_pg mkdir -p "$PGDATA"
 	psql_at "$host" -Atc "select pg_drop_replication_slot('$slot') from pg_replication_slots where slot_name = '$slot' and not active" >/dev/null 2>&1 || true
-	if ! as_pg env PGPASSFILE="$PGPASSFILE" pg_basebackup -h "$host" -p "$PORT" -U replicator -D "$PGDATA" \
+	if ! as_pg env PGPASSFILE="$PGPASSFILE" PGSSLMODE="$PGSSLMODE" ${PGSSLROOTCERT:+PGSSLROOTCERT="$PGSSLROOTCERT"} pg_basebackup -h "$host" -p "$PORT" -U replicator -D "$PGDATA" \
 		-X stream -C -S "$slot" --checkpoint=fast --no-password; then
 		fail "pg_basebackup from $host failed (see the container log)"
 	fi
@@ -152,7 +211,7 @@ rejoin() {
 	fi
 	touch "$BUILD"
 	busy
-	if as_pg env PGPASSFILE="$PGPASSFILE" pg_rewind --target-pgdata="$PGDATA" \
+	if as_pg env PGPASSFILE="$PGPASSFILE" PGSSLMODE="$PGSSLMODE" ${PGSSLROOTCERT:+PGSSLROOTCERT="$PGSSLROOTCERT"} pg_rewind --target-pgdata="$PGDATA" \
 		--source-server="host=$rw_host port=$PORT user=replicator dbname=postgres" >&2; then
 		idle
 		rm -f "$BUILD"
@@ -200,7 +259,9 @@ fi
 echo "$starts" >"$STARTS"
 
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
-	if [ "${ZIRO_PG_INIT:-replica}" = primary ] && [ "$role" = primary ]; then
+	if [ "${ZIRO_PG_INIT:-replica}" = restore ] && [ "$role" = primary ] && [ "$initialised" != 1 ]; then
+		restore_primary
+	elif [ "${ZIRO_PG_INIT:-replica}" = primary ] && [ "$role" = primary ]; then
 		if [ "$initialised" = 1 ]; then
 			# This member served a database before: an empty data directory is a loss, and a new empty
 			# database here would silently replace it. Stay down so the controller fails over to a replica.
@@ -233,24 +294,66 @@ fi
 
 # Settings. ziro.conf is rewritten on every start; the controller changes the rest (the synchronous
 # standbys, read-only fencing) with ALTER SYSTEM, which lands in postgresql.auto.conf.
+# The primary to follow: the member the controller names (role file), else the read-write name.
+conninfo="host=${follow:-$rw_host} port=$PORT user=replicator application_name=$member"
+[ -n "$tls" ] && conninfo="$conninfo sslmode=verify-ca sslrootcert=$TLS/ca.crt"
 {
 	cat "$CFG/postgresql.conf"
-	echo "primary_conninfo = 'host=$rw_host port=$PORT user=replicator application_name=$member'"
+	echo "primary_conninfo = '$conninfo'"
 	echo "primary_slot_name = '$slot'"
-	if [ -n "${ZIRO_PG_CITUS:-}" ]; then
-		echo "shared_preload_libraries = 'citus'"
-		echo "citus.node_conninfo = 'sslmode=prefer'"
+	if [ -n "$tls" ]; then
+		echo "ssl = on"
+		echo "ssl_cert_file = '$TLS/server.crt'"
+		echo "ssl_key_file = '$TLS/server.key'"
+		echo "ssl_ca_file = '$TLS/ca.crt'"
+		echo "ssl_min_protocol_version = 'TLSv1.2'"
 	fi
+	if [ -n "${ZIRO_PG_CITUS:-}" ]; then
+		echo "shared_preload_libraries = 'citus,pg_stat_statements,auto_explain'" # Citus first, as it requires
+		if [ -n "$tls" ]; then
+			echo "citus.node_conninfo = 'sslmode=verify-ca sslrootcert=$TLS/ca.crt'"
+		else
+			echo "citus.node_conninfo = 'sslmode=prefer'"
+		fi
+	fi
+	if [ -n "$stanza" ]; then
+		# WAL goes to the repository as it is written (asynchronously, through the spool), at least once a
+		# minute while there are writes; a replica whose slot no longer has a segment fetches it from there.
+		echo "archive_mode = on"
+		echo "archive_command = 'pgbackrest --stanza=$stanza archive-push %p'"
+		echo "archive_timeout = 60"
+		echo "restore_command = 'pgbackrest --stanza=$stanza archive-get %f \"%p\"'"
+	fi
+	# The parameters set with ziroctl pg set that a reload applies (kept current by the agent).
+	echo "include_if_exists = '$CFG/params.conf'"
 } >"$PGDATA/ziro.conf"
 grep -q "^include_if_exists = 'ziro.conf'" "$PGDATA/postgresql.conf" || echo "include_if_exists = 'ziro.conf'" >>"$PGDATA/postgresql.conf"
-if [ "$role" = replica ] && [ -f "$PGDATA/postgresql.auto.conf" ]; then
-	sed -i '/^default_transaction_read_only/d' "$PGDATA/postgresql.auto.conf"
+if [ -f "$PGDATA/postgresql.auto.conf" ]; then
+	# The controller's primary_conninfo (opFollow) is for the running server; a start takes it from the role file.
+	sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf"
+	if [ ! -f "$PGDATA/recovery.signal" ]; then
+		# A restore's settings (pgBackRest writes them here) are for that one recovery: left in place, a
+		# later standby would stop replaying at the old target and fetch WAL from the source repository.
+		sed -i '/^restore_command/d; /^recovery_target/d' "$PGDATA/postgresql.auto.conf"
+	fi
+	if [ "$role" = replica ]; then
+		sed -i '/^default_transaction_read_only/d' "$PGDATA/postgresql.auto.conf"
+	fi
 fi
-cat >"$PGDATA/pg_hba.conf" <<EOF
-local all all trust
-host replication replicator ${ZIRO_PG_NET:?} scram-sha-256
-host all all ${ZIRO_PG_NET} scram-sha-256
-EOF
+# The superuser connects over the local socket only (the agent uses it); Citus nodes connect to each
+# other as the superuser, with TLS when the cluster has it. Replication uses its own role.
+host=host
+[ -n "$tls" ] && host=hostssl
+{
+	echo "local all all trust"
+	echo "$host replication replicator ${ZIRO_PG_NET:?} scram-sha-256"
+	if [ -n "${ZIRO_PG_CITUS:-}" ]; then
+		echo "$host all postgres ${ZIRO_PG_NET} scram-sha-256"
+	else
+		echo "host all postgres ${ZIRO_PG_NET} reject"
+	fi
+	echo "host all all ${ZIRO_PG_NET} scram-sha-256"
+} >"$PGDATA/pg_hba.conf"
 chown postgres "$PGDATA/ziro.conf" "$PGDATA/pg_hba.conf" "$PGDATA/postgresql.conf"
 [ -f "$PGDATA/postgresql.auto.conf" ] && chown postgres "$PGDATA/postgresql.auto.conf"
 
@@ -258,8 +361,13 @@ chown postgres "$PGDATA/ziro.conf" "$PGDATA/pg_hba.conf" "$PGDATA/postgresql.con
 
 if [ "$role" = primary ]; then
 	(
+		server=$$
 		until as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select 1' >/dev/null 2>&1; do sleep 1; done
-		[ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select pg_is_in_recovery()')" = f ] || exit 0
+		# A restored primary replays the archive first; the accounts are set once it has finished.
+		until [ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc 'select pg_is_in_recovery()' 2>/dev/null || true)" = f ]; do
+			kill -0 "$server" 2>/dev/null || exit 0
+			sleep 2
+		done
 		as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 \
 			-v repl="$PG_REPL_PASSWORD" -v app_user="$app_user" -v app_pass="$POSTGRES_PASSWORD" -v app_db="$app_db" <<'SQL'
 SELECT format('CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD %L', :'repl')
@@ -290,6 +398,79 @@ fi
 		rm -f "$LASTERR"
 	fi
 ) &
+
+# ---- the lease watchdog (pg_lease.go) ----
+
+LEASE_UNTIL="$CFG/lease-until"
+LEASE_SEEN="$STATE/ziro-lease-seen" # this member has had a lease: from now on a missing one counts as ended
+FENCED="$STATE/ziro-lease-fence"    # present while fenced; holds the standby list the fence replaced
+FENCE_NAME=ziro_fenced
+
+lease_enforced() { grep -qx 'fence=1' "$CFG/lease" 2>/dev/null; }
+lease_valid() {
+	local until=0
+	[ -r "$LEASE_UNTIL" ] && read -r until _ <"$LEASE_UNTIL" 2>/dev/null
+	case "$until" in '' | *[!0-9]*) until=0 ;; esac
+	[ "$(date +%s)" -lt "$until" ]
+}
+q() { as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc "$1" 2>/dev/null; }
+fence() {
+	local cur
+	cur=$(q "select current_setting('synchronous_standby_names')") || return 0
+	[ -f "$FENCED" ] || printf '%s' "$cur" >"$FENCED"
+	[ "$cur" = "$FENCE_NAME" ] && return 0
+	q "alter system set synchronous_standby_names = '$FENCE_NAME'" >/dev/null &&
+		q "select pg_reload_conf()" >/dev/null &&
+		q "select pg_terminate_backend(pid) from pg_stat_activity where backend_type = 'client backend' and pid <> pg_backend_pid()" >/dev/null &&
+		log "the lease from the master ended: commits are no longer acknowledged until it is renewed"
+}
+unfence() {
+	local saved cur
+	saved=$(cat "$FENCED" 2>/dev/null || true)
+	cur=$(q "select current_setting('synchronous_standby_names')") || return 0
+	if [ "$cur" = "$FENCE_NAME" ] && [ "$saved" != "$FENCE_NAME" ]; then
+		if [ -z "$saved" ]; then
+			q "alter system reset synchronous_standby_names" >/dev/null || return 0
+		elif printf '%s' "$saved" | grep -Eqx 'ANY [12] \(m[0-9]{1,3}(, m[0-9]{1,3})*\)'; then
+			q "alter system set synchronous_standby_names = '$saved'" >/dev/null || return 0
+		else
+			return 0
+		fi
+		q "select pg_reload_conf()" >/dev/null
+		log "the lease was renewed: commits are acknowledged again"
+	fi
+	rm -f "$FENCED"
+}
+watchdog() {
+	local server=$$ # this shell's pid, which becomes the server's with the exec below
+	while :; do
+		sleep 1
+		kill -0 "$server" 2>/dev/null || exit 0 # the server is gone: so is the reason to watch
+		if ! lease_enforced; then
+			[ -f "$FENCED" ] && unfence
+			continue
+		fi
+		[ -f "$LEASE_UNTIL" ] && [ ! -f "$LEASE_SEEN" ] && touch "$LEASE_SEEN"
+		[ -f "$LEASE_SEEN" ] || continue
+		[ "$(q 'select pg_is_in_recovery()')" = f ] || continue
+		if lease_valid; then
+			[ -f "$FENCED" ] && unfence
+		else
+			fence
+		fi
+	done
+}
+
+# A primary that restarts without a lease (it had one before) starts fenced, so not even its first
+# seconds accept a commit the master does not know about.
+if [ "$role" = primary ] && lease_enforced && [ -f "$LEASE_SEEN" ] && ! lease_valid && [ -f "$PGDATA/postgresql.auto.conf" ]; then
+	cur=$(sed -n "s/^synchronous_standby_names = '\(.*\)'\$/\1/p" "$PGDATA/postgresql.auto.conf" | tail -n 1)
+	[ -f "$FENCED" ] || printf '%s' "$cur" >"$FENCED"
+	sed -i '/^synchronous_standby_names/d' "$PGDATA/postgresql.auto.conf"
+	echo "synchronous_standby_names = '$FENCE_NAME'" >>"$PGDATA/postgresql.auto.conf"
+	log "no lease from the master: starting fenced"
+fi
+watchdog &
 
 log "starting as $role (epoch $epoch)"
 exec gosu postgres postgres -D "$PGDATA" -c "listen_addresses=$LISTEN" -c "port=$PORT" -c "unix_socket_directories=$SOCK" \

@@ -462,14 +462,41 @@ paths:
         - { name: purge, in: query, schema: { type: boolean } }
       responses:
         "200": { $ref: "#/components/responses/Message" }
+  /api/v1/pg/{name}/backups:
+    get:
+      x-ziro-role: viewer
+      tags: [pg]
+      summary: The cluster's backups per group, the recoverable window, the schedule and archiving state; the repository's keys and passphrase are never served
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/pg/{name}/backup-config:
+    post:
+      x-ziro-role: admin
+      tags: [pg]
+      summary: 'Turn backups to an S3-compatible repository on or off ({"enabled": true, "config": {"endpoint": "s3.amazonaws.com", "bucket": "b", "region": "us-east-1", "retention": 4, "full": "0 1 * * 0"}, "access_key_id": "...", "secret_access_key": "..."}); WAL archiving starts with a rolling restart'
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Message" }
+  /api/v1/pg-restore:
+    post:
+      x-ziro-role: admin
+      tags: [pg]
+      summary: 'Restore a cluster''s backups into a new cluster ({"name": "shop-copy", "from": "shop", "to": "2026-11-03T04:00:00Z"}); "to" is latest or an RFC 3339 time. With "repository", "stanza" and "passphrase" instead of "from", restore a lost cluster from its repository'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/pg/{name}/{action}:
     post:
       x-ziro-role: operator
       tags: [pg]
-      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit ({"member": "m3"}), add-shard, pause or resume. Credentials are never served over the API'
+      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit ({"member": "m3"}), add-shard, rotate-password ({"role": "replicator"}), set ({"params": {"work_mem": "64MB"}}), pool ({"enabled": true, "mode": "transaction", "size": 20}), resize ({"resources": {"memory": "8Gi"}}), upgrade ({"image": "...@sha256:..."}), restart, backup ({"type": "full|diff|incr"}), pause or resume. Credentials are never served over the API'
       parameters:
         - $ref: "#/components/parameters/Name"
-        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, failover, reinit, add-shard, pause, resume] } }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, failover, reinit, add-shard, rotate-password, set, pool, resize, upgrade, restart, backup, pause, resume] } }
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }

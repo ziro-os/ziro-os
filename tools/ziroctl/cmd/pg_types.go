@@ -46,8 +46,9 @@ const (
 	// heartbeats every 10 s), so a member that has been silent for pgGrace is gone. The same limit
 	// decides whether a replica counts as reachable, which keeps the two judgements consistent: a
 	// replica is never reachable while the primary it would replace is already declared dead for
-	// the same silence.
-	pgGrace             = 30 * time.Second
+	// the same silence. It is longer than a primary's lease can outlive its last probe (pg_lease.go),
+	// so an old primary has stopped acknowledging writes before a replica is promoted.
+	pgGrace             = 36 * time.Second
 	pgReadyAge          = 20 * time.Second // a probe older than this does not make a replica serve reads
 	pgMaxLagBytes       = 16 << 20         // a replica further behind is not promoted without --force, and is not served reads
 	pgReadyLagMillis    = 5000             // a replica serves reads when it replays within this many ms
@@ -85,6 +86,14 @@ type PGCluster struct {
 	CitusReady       bool `json:"citus_ready,omitempty"`       // the coordinator is registered under its DNS name
 	MetaSynced       bool `json:"meta_synced,omitempty"`       // the metadata reached every node
 	RebalancePending bool `json:"rebalance_pending,omitempty"` // a worker joined: shards should move
+	// SecretEpoch counts password changes: the members restart on the new secret when it moves.
+	SecretEpoch int         `json:"secret_epoch,omitempty"`
+	Rotation    *PGRotation `json:"rotation,omitempty"`
+	// Params are the server parameters set with pg set (pg_params.go); RestartEpoch moves with pg restart.
+	Params       map[string]string `json:"params,omitempty"`
+	RestartEpoch int               `json:"restart_epoch,omitempty"`
+	Pooler       *PGPooler         `json:"pooler,omitempty"`
+	Backup       *PGBackup         `json:"backup,omitempty"` // backups and WAL archiving (pg_backup.go)
 }
 
 // PGGroup is one primary and its replicas: a plain cluster has one group ("main"); a sharded one has a
@@ -101,6 +110,7 @@ type PGGroup struct {
 	Force      *PGForce             `json:"force,omitempty"`      // an operator's request to promote now (pg failover)
 	Registered bool                 `json:"registered,omitempty"` // Citus: the coordinator knows this worker group
 	Events     []PGEvent            `json:"events,omitempty"`     // the last few role changes, newest last
+	Backup     *PGGroupBackup       `json:"backup,omitempty"`
 }
 
 // PGForce is an operator's request to promote now. It is read once by the controller and expires if
@@ -134,6 +144,14 @@ type PGMember struct {
 	// Detail and Busy are what the node last said about the member (PGReport): soft state, like Probe.
 	Detail string `json:"detail,omitempty"`
 	Busy   bool   `json:"busy,omitempty"`
+	// Following is the primary a replica was last told to follow (opFollow), OffTimeline that it is on an
+	// older timeline than the primary: it still follows a former primary and must not serve reads.
+	Following   string `json:"following,omitempty"`
+	OffTimeline bool   `json:"off_timeline,omitempty"`
+	// RolledAt is when the member's app last took a new spec (pgMayRoll waits for it to come back).
+	RolledAt time.Time `json:"rolled_at,omitempty"`
+	// Params is the hash of the reloadable parameters the member last reloaded (pgReloadPass).
+	Params string `json:"params,omitempty"`
 }
 
 // PGProbe is what the member's agent last read from Postgres.
@@ -147,6 +165,19 @@ type PGProbe struct {
 	LagMs     int64     `json:"lag_ms"`
 	Epoch     int64     `json:"epoch"`        // the epoch of the role file the container has seen
 	ReadOnly  bool      `json:"ro,omitempty"` // default_transaction_read_only is on
+	// Received is a replica's WAL received and flushed (it can be ahead of LSN, the replay position): a
+	// commit the primary acknowledged is in it. SyncNames is synchronous_standby_names as the member has it.
+	Received  uint64 `json:"received,omitempty"`
+	SyncNames string `json:"sync_names,omitempty"`
+	DiskPct   int    `json:"disk_pct,omitempty"` // how full the data volume is
+	Conns     int64  `json:"conns,omitempty"`    // client connections
+	MaxConns  int64  `json:"max_conns,omitempty"`
+	Commits   int64  `json:"commits,omitempty"` // committed transactions since the statistics were reset
+	XIDAge    int64  `json:"xid_age,omitempty"` // age of the oldest unfrozen transaction ID
+	// ArchiveFailed counts failed WAL archive attempts; ArchivedAgo is the seconds since the last WAL was
+	// archived (-1 = never): pg_stat_archiver.
+	ArchiveFailed int64 `json:"archive_failed,omitempty"`
+	ArchivedAgo   int64 `json:"archived_ago,omitempty"`
 }
 
 // PGCommand is an order for one member's agent, taken from a closed list (pg_agent.go).
@@ -236,8 +267,12 @@ func (m *PGMember) fresh(now time.Time) bool {
 // ready reports whether a replica may serve reads: it answers, replays close to the primary and is not
 // being removed.
 func (m *PGMember) ready(now time.Time) bool {
-	return m.Role == pgReplica && !m.Draining && m.fresh(now) && now.Sub(m.Probe.At) <= pgReadyAge && m.Probe.Recovery && m.Probe.Streaming && m.Probe.LagMs <= pgReadyLagMillis
+	return m.Role == pgReplica && !m.Draining && !m.OffTimeline && m.fresh(now) && now.Sub(m.Probe.At) <= pgReadyAge && m.Probe.Recovery && m.Probe.Streaming && m.Probe.LagMs <= pgReadyLagMillis
 }
+
+// pos is how far a member's WAL goes: for a replica the larger of what it received and what it replayed.
+// A replica that received a commit holds it even if it has not replayed it yet.
+func (m *PGMember) pos() uint64 { return max(m.Probe.LSN, m.Probe.Received) }
 
 // ---- LSN ----
 
@@ -302,9 +337,24 @@ func (c *PGCluster) Validate() error {
 				return fmt.Errorf("group %s: invalid or repeated member %q", g.Name, m.ID)
 			}
 			ids[m.ID] = true
-			if m.Init != pgPrimary && m.Init != pgReplica {
+			if m.Init != pgPrimary && m.Init != pgReplica && m.Init != pgRestoreInit {
 				return fmt.Errorf("group %s member %s: invalid init", g.Name, m.ID)
 			}
+		}
+	}
+	if c.Pooler != nil {
+		if err := validPooler(c.Pooler); err != nil {
+			return err
+		}
+	}
+	if c.Backup != nil {
+		if err := c.Backup.validate(); err != nil {
+			return err
+		}
+	}
+	for k, v := range c.Params {
+		if _, ok := pgParamDefs[k]; !ok || (v != "" && pgCheckParam(k, v, "") != nil) {
+			return fmt.Errorf("invalid parameter %s", k)
 		}
 	}
 	if c.Citus != "" && c.group("coord") == nil || c.Citus == "" && (len(c.Groups) != 1 || c.Groups[0].Name != "main") {

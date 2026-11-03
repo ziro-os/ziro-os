@@ -50,8 +50,11 @@ func pgSyncSpec(c *PGCluster, g *PGGroup) string {
 
 // pgTuning is the postgresql.conf fragment for a member with the given limits. Memory-derived values
 // follow the usual guidance (a quarter of memory for shared buffers, most of the rest as cache
-// estimate); connections are kept modest because clients should go through a pooler.
-func pgTuning(res *Resources, citus bool) string {
+// estimate). The settings a hot standby must have at least as high as its primary (max_connections,
+// max_worker_processes, max_wal_senders, max_prepared_transactions) do not follow the limits: a resize
+// down restarts the replicas first, and a replica with less than its primary would not start.
+// Connections are kept modest because clients should go through the pooler.
+func pgTuning(res *Resources, citus bool, version string) string {
 	mem := int64(1 << 30) // without a limit, tune for 1 GiB
 	cpus := 2.0
 	if res != nil {
@@ -67,9 +70,9 @@ func pgTuning(res *Resources, citus bool) string {
 	maintenance := max(64*mi, min(mem/16, 2<<10*mi))
 	maxConn := int64(200)
 	workMem := max(4*mi, min((mem/4)/(maxConn*3), 64*mi))
-	workers := int(max(2, min(int64(cpus*2), 64)))
 	parallel := int(max(2, min(int64(cpus), 32)))
 	gather := max(1, min(parallel/2, 4))
+	vacuumWorkers := int(max(3, min(int64(cpus), 8)))
 	walLevel := "replica"
 	if citus {
 		walLevel = "logical" // Citus moves shards with logical replication
@@ -86,11 +89,12 @@ func pgTuning(res *Resources, citus bool) string {
 	set("huge_pages", "try")
 	set("password_encryption", "scram-sha-256")
 	set("wal_level", walLevel)
-	set("wal_compression", "on")
+	set("wal_compression", "lz4")
 	set("wal_log_hints", "on")
 	set("wal_buffers", "16MB")
 	set("min_wal_size", "1GB")
 	set("max_wal_size", "4GB")
+	set("checkpoint_timeout", "15min")
 	set("checkpoint_completion_target", 0.9)
 	set("max_wal_senders", 20)
 	set("max_replication_slots", 20)
@@ -102,24 +106,43 @@ func pgTuning(res *Resources, citus bool) string {
 	set("synchronous_commit", "on")
 	set("random_page_cost", 1.1)
 	set("effective_io_concurrency", 200)
-	set("max_worker_processes", workers+4)
+	set("maintenance_io_concurrency", 100)
+	if version >= "18" { // asynchronous I/O: a worker pool reads ahead for sequential and bitmap scans
+		set("io_method", "worker")
+		set("io_workers", int(max(3, min(int64(cpus), 16))))
+	}
+	set("max_worker_processes", 32)
 	set("max_parallel_workers", parallel)
 	set("max_parallel_workers_per_gather", gather)
+	set("max_parallel_maintenance_workers", gather)
+	set("jit", "off") // short OLTP queries pay JIT compilation and never win it back
+	set("autovacuum_max_workers", vacuumWorkers)
+	set("autovacuum_naptime", "30s")
+	set("autovacuum_vacuum_cost_limit", 2000)
+	set("autovacuum_vacuum_scale_factor", 0.05)
+	set("autovacuum_analyze_scale_factor", 0.02)
+	set("idle_in_transaction_session_timeout", "30min") // a forgotten open transaction stops vacuum for every table
 	set("tcp_keepalives_idle", 60)
 	set("tcp_keepalives_interval", 10)
 	set("tcp_keepalives_count", 6)
 	set("log_checkpoints", "on")
 	set("log_lock_waits", "on")
 	set("log_min_duration_statement", "1000ms")
-	set("shared_preload_libraries", "''")
+	set("shared_preload_libraries", "'pg_stat_statements,auto_explain'")
+	set("pg_stat_statements.max", 10000)
+	set("pg_stat_statements.track", "top")
+	set("auto_explain.log_min_duration", "'5s'")
+	set("auto_explain.log_nested_statements", "on")
+	set("track_io_timing", "on")
 	if citus {
 		set("max_prepared_transactions", maxConn)
 	}
 	return b.String()
 }
 
-// pgRoleFile is the content of the role file: the one thing a restarting member needs to know.
-func pgRoleFile(m *PGMember, g *PGGroup) string {
+// pgRoleFile is the content of the role file: the one thing a restarting member needs to know. A
+// replica also learns which member to follow, so it comes back to the current primary by name.
+func pgRoleFile(c *PGCluster, m *PGMember, g *PGGroup) string {
 	role := pgReplica
 	if m.Role == pgPrimary || m.Role == pgPromoting {
 		role = pgPrimary
@@ -127,6 +150,9 @@ func pgRoleFile(m *PGMember, g *PGGroup) string {
 	s := fmt.Sprintf("role=%s\nepoch=%d\n", role, g.Epoch)
 	if m.Initialised {
 		s += "initialised=1\n"
+	}
+	if p := g.primary(); role == pgReplica && p != nil && p.ID != m.ID {
+		s += "follow=1." + c.memberApp(g.Name, p.ID) + "." + meshDomain + "\n"
 	}
 	return s
 }
@@ -160,19 +186,35 @@ func pgMemberApp(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) Cluste
 	if c.Citus != "" {
 		env["ZIRO_PG_CITUS"] = "1"
 	}
+	if c.SecretEpoch > 0 { // only once a password changed, so existing members keep their spec
+		env["ZIRO_PG_SECRET_EPOCH"] = strconv.Itoa(c.SecretEpoch)
+	}
+	if c.RestartEpoch > 0 { // pg restart
+		env["ZIRO_PG_RESTART_EPOCH"] = strconv.Itoa(c.RestartEpoch)
+	}
+	pgBackupEnv(c, g, env)
 	allow := []string{}
 	for _, og := range c.Groups {
 		for _, om := range og.Members {
 			allow = append(allow, c.memberApp(og.Name, om.ID))
 		}
 	}
+	if c.poolerOn() {
+		allow = append(allow, c.poolerApp())
+	}
 	allow = uniq(append(allow, c.AllowFrom...))
 	sticky := true
+	files := map[string]string{"entry.sh": pgEntryScript, "postgresql.conf": pgTuning(c.Resources, c.Citus != "", c.Version) + pgRestartParams(c)}
+	secrets := []string{c.secretName()}
+	if c.backupsOn() {
+		files["pgbackrest.conf"] = pgBackrestConfig(c, g, c.Resources)
+		secrets = append(secrets, c.backupSecret())
+	}
 	return ClusteredApp{
 		Name: app, Image: image, Replicas: 1, Env: env, Args: []string{"bash", configMountPoint + "/entry.sh"},
-		Secrets: []string{c.secretName()}, Data: []string{pgDataPath}, DataUID: pgDataUID, Resources: c.Resources,
+		Secrets: secrets, Data: []string{pgDataPath}, DataUID: pgDataUID, Resources: c.Resources,
 		AllowFrom: allow, Node: m.Node, Sticky: &sticky, Replicated: true, StopTimeout: pgStopTimeout,
-		ConfigFiles: map[string]string{"entry.sh": pgEntryScript, "postgresql.conf": pgTuning(c.Resources, c.Citus != "")},
+		ConfigFiles: files,
 	}
 }
 
