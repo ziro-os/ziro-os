@@ -6,11 +6,15 @@
 # the PostgreSQL (PGDG) apt repository, so pgbackrest comes from the same source as Postgres itself.
 #
 # The base image's gosu is replaced by gosu.sh (the same interface, on util-linux's setpriv): the gosu
-# binary is built with an old Go release that scanners flag for standard library CVEs.
+# binary is built with an old Go release that scanners flag for standard library CVEs. The binary is
+# deleted (a scanner still reports a file that a later layer only overwrites) and the script goes to
+# /usr/local/sbin, which comes first on PATH, so `gosu` finds it.
 ARG BASE=postgres
 FROM ${BASE}
-COPY --chmod=0755 gosu.sh /usr/local/bin/gosu
+COPY --chmod=0755 gosu.sh /usr/local/sbin/gosu
 RUN set -eux; \
+	rm -f /usr/local/bin/gosu; \
+	test "$(command -v gosu)" = /usr/local/sbin/gosu; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends pgbackrest ca-certificates; \
 	rm -rf /var/lib/apt/lists/*; \
