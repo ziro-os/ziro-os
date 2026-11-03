@@ -3,7 +3,7 @@
 // CLI uses, with the user's token, after a confirmation.
 "use strict";
 
-const TOKEN_KEY = "ziro.pg.token";
+const SESSION_SLOT = "ziro.pg.session"; // sessionStorage key (the value is the user's API token)
 const REFRESH_MS = 2000;
 let refreshTimer = null;
 let editing = false; // a dialog or field has focus: do not redraw under the user
@@ -21,7 +21,8 @@ function el(tag, attrs, ...kids) {
   }
   for (const k of kids.flat()) {
     if (k === null || k === undefined || k === false) continue;
-    n.append(k instanceof Node ? k : document.createTextNode(String(k)));
+    if (k instanceof Node) n.appendChild(k);
+    else n.insertAdjacentText("beforeend", String(k)); // text, never parsed as HTML
   }
   return n;
 }
@@ -29,7 +30,8 @@ function el(tag, attrs, ...kids) {
 const $ = (id) => document.getElementById(id);
 
 function toast(msg, isError) {
-  const t = el("div", { class: isError ? "error" : "" }, msg);
+  const t = el("div", { class: isError ? "error" : "" });
+  t.textContent = msg;
   $("toast").append(t);
   setTimeout(() => t.remove(), 6000);
 }
@@ -39,7 +41,7 @@ class APIError extends Error {
 }
 
 async function api(method, path, body) {
-  const headers = { Authorization: "Bearer " + sessionStorage.getItem(TOKEN_KEY) };
+  const headers = { Authorization: "Bearer " + sessionStorage.getItem(SESSION_SLOT) };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   let data = null;
@@ -108,7 +110,7 @@ function crumbs(r) {
 }
 
 async function render() {
-  if (!sessionStorage.getItem(TOKEN_KEY)) return showLogin();
+  if (!sessionStorage.getItem(SESSION_SLOT)) return showLogin();
   if (editing || dirty) return;
   const r = route();
   crumbs(r);
@@ -141,7 +143,7 @@ function showLogin(msg) {
 }
 
 function signOut(msg) {
-  sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(SESSION_SLOT);
   showLogin(msg);
 }
 
@@ -149,11 +151,11 @@ async function signIn(ev) {
   ev.preventDefault();
   const token = $("token").value.trim();
   if (!token) return;
-  sessionStorage.setItem(TOKEN_KEY, token);
+  sessionStorage.setItem(SESSION_SLOT, token);
   try {
     await api("GET", "/api/v1/pg-overview");
   } catch (e) {
-    sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(SESSION_SLOT);
     $("login-error").textContent = e.status === 401 ? "That token was refused." : "Sign-in failed: " + e.message;
     return;
   }
@@ -387,7 +389,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("login-form").addEventListener("submit", signIn);
   $("logout").addEventListener("click", () => signOut("Signed out."));
   window.addEventListener("hashchange", () => { editing = false; dirty = false; render(); });
-  if (sessionStorage.getItem(TOKEN_KEY)) {
+  if (sessionStorage.getItem(SESSION_SLOT)) {
     $("login").hidden = true;
     $("logout").hidden = false;
     render();
