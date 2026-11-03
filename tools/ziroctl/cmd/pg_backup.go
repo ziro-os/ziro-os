@@ -33,12 +33,12 @@ import (
 // restore point; `pgbackrest verify` is not scheduled.
 
 // pgBackupImages are the Ziro Postgres images with pgBackRest, pinned by digest once published by
-// .github/workflows/pg-images.yml (scripts/pg-image-digests.sh). Empty: not published yet, so
-// `pg backup enable` needs --image.
+// .github/workflows/pg-images.yml (scripts/pg-image-digests.sh, after each run that publishes). An
+// empty entry would mean the version is not published, and `pg backup enable` would need --image.
 var pgBackupImages = map[string]string{
-	"16": "",
-	"17": "",
-	"18": "",
+	"16": "ghcr.io/ziro-os/postgres:16-pgbackrest@sha256:36e4711475705c284e31cc5741326bc30814a37feb7d9e91d8ee6e76dca3667e",
+	"17": "ghcr.io/ziro-os/postgres:17-pgbackrest@sha256:f5696685e8fc5d68b30f42f80129f598b1cb631e713a62774c02bde6d15aa0ee",
+	"18": "ghcr.io/ziro-os/postgres:18-pgbackrest@sha256:a762a1e81f3e860aef02871d9547388f3a2ddc9e34963fa4ced54f50313f0265",
 }
 
 const (
