@@ -94,6 +94,10 @@ type PGCluster struct {
 	RestartEpoch int               `json:"restart_epoch,omitempty"`
 	Pooler       *PGPooler         `json:"pooler,omitempty"`
 	Backup       *PGBackup         `json:"backup,omitempty"` // backups and WAL archiving (pg_backup.go)
+	// Maintenance is when members may restart for a new spec (pg_maintenance.go); WindowUntil keeps a
+	// window open by hand (pg maintenance open) until then.
+	Maintenance *PGMaintenance `json:"maintenance,omitempty"`
+	WindowUntil time.Time      `json:"window_until,omitempty"`
 }
 
 // PGGroup is one primary and its replicas: a plain cluster has one group ("main"); a sharded one has a
@@ -111,6 +115,7 @@ type PGGroup struct {
 	Registered bool                 `json:"registered,omitempty"` // Citus: the coordinator knows this worker group
 	Events     []PGEvent            `json:"events,omitempty"`     // the last few role changes, newest last
 	Backup     *PGGroupBackup       `json:"backup,omitempty"`
+	Waiting    []string             `json:"waiting,omitempty"` // members whose new spec waits for the maintenance window
 }
 
 // PGForce is an operator's request to promote now. It is read once by the controller and expires if
@@ -349,6 +354,11 @@ func (c *PGCluster) Validate() error {
 	}
 	if c.Backup != nil {
 		if err := c.Backup.validate(); err != nil {
+			return err
+		}
+	}
+	if c.Maintenance != nil {
+		if err := c.Maintenance.validate(); err != nil {
 			return err
 		}
 	}

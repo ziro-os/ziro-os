@@ -109,6 +109,22 @@ func (c *pgCron) prev(t time.Time) time.Time {
 	return time.Time{}
 }
 
+// next is the first time after t the schedule fires (zero if none in the next 400 days).
+func (c *pgCron) next(t time.Time) time.Time {
+	t = t.UTC().Truncate(time.Minute).Add(time.Minute)
+	for i := 0; i < 400*24*60; i++ {
+		if c.matches(t) {
+			return t
+		}
+		if !c.hour[t.Hour()] || !c.mon[int(t.Month())] { // skip the rest of the hour
+			t = t.Truncate(time.Hour).Add(time.Hour)
+			continue
+		}
+		t = t.Add(time.Minute)
+	}
+	return time.Time{}
+}
+
 // gap is the longest time between two firings within the next two weeks (for "a backup is late").
 func (c *pgCron) gap(from time.Time) time.Duration {
 	var longest time.Duration

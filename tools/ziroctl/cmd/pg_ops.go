@@ -455,6 +455,7 @@ type pgView struct {
 	Database  string        `json:"database"`
 	User      string        `json:"user"`
 	Sharded   bool          `json:"sharded"`
+	Window    string        `json:"maintenance,omitempty"` // the maintenance window, and whether it is open
 	Endpoints pgEndpointsV  `json:"endpoints"`
 	Groups    []pgGroupView `json:"groups"`
 }
@@ -471,7 +472,8 @@ type pgGroupView struct {
 	Primary string         `json:"primary,omitempty"`
 	Members []pgMemberView `json:"members"`
 	Reasons []string       `json:"reasons,omitempty"` // why the group is not healthy, if it is not
-	Events  []string       `json:"events,omitempty"`
+	Waiting []string       `json:"waiting,omitempty"` // members whose new configuration waits for the maintenance window
+	Events  []string       `json:"events,omitempty"`  // the latest few (pg events has them all)
 }
 
 type pgMemberView struct {
@@ -488,7 +490,7 @@ type pgMemberView struct {
 
 func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
 	v := pgView{Name: c.Name, Version: c.Version, Sync: c.Sync, Replicas: c.Replicas, Paused: c.Paused, Database: c.Database, User: c.User,
-		Sharded:   c.Citus != "",
+		Sharded: c.Citus != "", Window: pgWindowLabel(c, now),
 		Endpoints: pgEndpointsV{RW: c.Name + "-rw." + meshDomain + ":" + pgPort, RO: c.Name + "-ro." + meshDomain + ":" + pgPort}}
 	for gi := range c.Groups {
 		g := &c.Groups[gi]
@@ -522,7 +524,12 @@ func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
 			gv.Members = append(gv.Members, mv)
 		}
 		gv.Reasons = pgGroupReasons(st, c, g, now)
-		for _, e := range g.Events {
+		gv.Waiting = g.Waiting
+		events := g.Events
+		if len(events) > pgEventsStatus {
+			events = events[len(events)-pgEventsStatus:]
+		}
+		for _, e := range events {
 			gv.Events = append(gv.Events, e.At.UTC().Format("15:04:05")+" "+e.Msg)
 		}
 		v.Groups = append(v.Groups, gv)

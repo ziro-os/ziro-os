@@ -448,10 +448,11 @@ QEMU uses KVM on Linux and HVF on macOS when the VM's arch matches the host, oth
 		if def != nil {
 			kind, _ := schema.Kind(def)
 			install := map[string]string{
-				"plugin": "ziroctl plugin install -f /tmp/dev.json",
-				"app":    "ziroctl apps deploy -f /tmp/dev.json --local",
-				"stack":  "ziroctl stack up -f /tmp/dev.json", // catalog apps (local files aren't copied)
-				"host":   "ziroctl apply -f /tmp/dev.json",
+				"plugin":   "ziroctl plugin install -f /tmp/dev.json",
+				"app":      "ziroctl apps deploy -f /tmp/dev.json --local",
+				"stack":    "ziroctl stack up -f /tmp/dev.json", // catalog apps (local files aren't copied)
+				"host":     "ziroctl apply -f /tmp/dev.json",
+				"postgres": "ziroctl pg apply -f /tmp/dev.json",
 			}[kind]
 			if kind == "app" && len(devForwards) > 0 {
 				install += " --bind 0.0.0.0" // reachable by --forward

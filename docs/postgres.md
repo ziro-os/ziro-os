@@ -245,6 +245,79 @@ the next waits until it is back, streaming and caught up. The primary goes last,
 that already runs the new configuration, so writes pause only for the switchover. A member that is down anyway is
 not waited for, and a group with no replica restarts its primary in place.
 
+### Maintenance windows
+
+By default those changes roll out at once. A maintenance window holds them until a time you choose:
+
+```sh
+ziroctl pg maintenance shop --window '0 2 * * 0' --duration 2h   # Sundays 02:00-04:00 UTC
+ziroctl pg maintenance shop --open 1h                            # open it now, for an hour
+ziroctl pg maintenance shop --clear                              # no window: changes roll out at once
+```
+
+The window is a five-field cron expression in UTC for when it opens, and a duration (30 minutes to 24 hours) for
+how long it stays open.
+
+- **What waits:** a new image, restart-only parameters, a resize, `pg restart`, and a ziroctl upgrade that changes
+  the members. Until the window opens, the members keep running and `pg status` lists the ones waiting, with the
+  next opening time.
+- **What never waits:** failover, a switchover you ask for, repairs (rebuilding a replica, replacing a member on a
+  gone node), members that are not serving anyway, and the restarts that follow a password change.
+
+## Declarative clusters
+
+A cluster can be described in a file and applied, like a [host config](provisioning.md):
+
+```yaml
+postgres:
+  version: 1
+  name: shop
+  postgres: "17"
+  replicas: 2
+  resources: {memory: 4Gi, cpus: 2}
+  allow_from: [web, worker]
+  params:
+    work_mem: 64MB
+    statement_timeout: 30s
+  pooler: {enabled: true, mode: transaction, size: 40}
+  backup:
+    endpoint: s3.eu-west-1.amazonaws.com
+    bucket: acme-db
+    region: eu-west-1
+    retention: 8
+    schedule: {full: "0 1 * * 0", incr: "30 * * * *"}
+  maintenance: {window: "0 2 * * 0", duration: 2h}
+```
+
+```sh
+ziroctl pg apply -f shop.yaml --dry-run    # the plan only
+ziroctl pg apply -f shop.yaml
+ziroctl pg get shop > shop.yaml            # the cluster as it is, as a file
+ziroctl pg diff -f shop.yaml               # what applying it would change
+```
+
+How a file is applied:
+
+- **The plan comes first.** Each line is marked `+` create, `~` update, `=` unchanged, `-` remove or `!` refused,
+  with what restarts members.
+- **The plan is exact.** It runs the same operations as the `pg` commands, on a copy of the cluster state, so a dry
+  run reports what an apply would refuse.
+- **All or nothing.** If any part is refused, nothing changes. Refused changes are a different major version, sync
+  mode, database or user, fewer shards, a plain cluster becoming sharded, and a parameter that can only grow going
+  back down.
+- **A field left out keeps its current value**, or takes its default when the cluster is created. A short file
+  never scales a cluster down or resumes a paused one by accident.
+- **`params` and `allow_from` are whole lists** when given: a parameter left out goes back to its default.
+- **Turning things off is explicit:** `pooler: {enabled: false}`, `backup: {enabled: false}` (the backups stay in
+  the bucket), `maintenance: {}`, `paused: false`.
+- **No secret goes in the file.** Passwords are generated. When the file turns backups on, the repository's keys
+  come from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+- **Applying the same file twice changes nothing**, and neither does applying what `pg get` printed.
+
+Over the API: `GET /api/v1/pg/{name}/spec` returns the file, `POST /api/v1/pg-plan` (operator) plans one and
+`POST /api/v1/pg-apply` (admin) applies it. The schema is `PostgresConfig` in
+[`sdk/schema`](../sdk/schema/postgres.go).
+
 ## Add and remove replicas
 
 ```sh
@@ -390,8 +463,46 @@ Give `--database` and `--user` when they were not `app`. The restored cluster ba
 
 ## Monitoring
 
-`ziroctl pg status shop` lists the members with role, node, state, timeline, lag and recent events, and the reasons
-a group is not healthy. The master's
+`ziroctl pg status shop` lists the members with role, node, state, timeline, lag and the latest events, and the
+reasons a group is not healthy.
+
+`ziroctl pg overview` shows every cluster on one screen, the ones that need attention first:
+
+```text
+NAME             PG  HEALTH    PRIMARY      READY   LAG      CONN  DISK  BACKUP      ALERTS
+billing          17  degraded  m2@n3        2/3     1.2s     41%   83%   3 hours ago 1
+shop             17  healthy   m1@n1        3/3     0s       12%   40%   47 minutes ago 0
+
+Needs attention:
+  billing: m3 is catching up (1200ms behind)
+  billing: a data volume is 83% full
+```
+
+The health of a cluster is one of four values:
+
+| Health | Meaning |
+| --- | --- |
+| `healthy` | every member is ready and nothing needs attention |
+| `degraded` | it serves, but something needs attention |
+| `down` | a group has no primary that answers |
+| `paused` | the controller is paused |
+
+"Needs attention" covers:
+
+- the reasons from `pg status`;
+- members waiting for the maintenance window;
+- missing or old backups;
+- data volumes 80 % full or more;
+- 90 % of the connections in use.
+
+`--json` prints the same as `GET /api/v1/pg-overview`.
+
+`ziroctl pg events shop` prints the cluster's history, oldest first: promotions, switchovers, repairs, rolling
+changes, backups and alerts, with their severity. The last 200 events of each group are kept in cluster state, so
+the history survives a master change. `--since 24h` limits it to a recent period, and `--follow` keeps printing new
+events. The API serves it at `GET /api/v1/pg/{name}/events?since=<RFC 3339>`.
+
+The master's
 `/metrics` has, per cluster, group and member:
 
 - roles: `ziro_pg_members`, `ziro_pg_primary`, `ziro_pg_epoch`;

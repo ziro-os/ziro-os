@@ -139,8 +139,8 @@ func (g *PGGroup) alert(now time.Time, severity, format string, a ...any) {
 
 func (g *PGGroup) record(now time.Time, severity, format string, a ...any) {
 	g.Events = append(g.Events, PGEvent{At: now, Msg: fmt.Sprintf(format, a...), Alert: severity})
-	if len(g.Events) > 20 {
-		g.Events = g.Events[len(g.Events)-20:]
+	if len(g.Events) > pgEventsKept {
+		g.Events = g.Events[len(g.Events)-pgEventsKept:]
 	}
 }
 
@@ -1199,6 +1199,7 @@ func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 		g := &c.Groups[gi]
 		apps := make([]*ClusteredApp, len(g.Members))
 		pending := map[string]bool{} // members whose running app is not the one they should run
+		urgent := map[string]bool{}  // ... for a password change: it does not wait for the maintenance window
 		for mi := range g.Members {
 			m := &g.Members[mi]
 			if m.Node == "" {
@@ -1212,6 +1213,7 @@ func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 			want[app.Name] = true
 			if cur := st.app(app.Name); cur != nil && specHash(*cur) != specHash(app) {
 				pending[m.ID] = true
+				urgent[m.ID] = cur.Env["ZIRO_PG_SECRET_EPOCH"] != app.Env["ZIRO_PG_SECRET_EPOCH"]
 			}
 		}
 		for mi := range g.Members {
@@ -1219,7 +1221,7 @@ func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 			if app == nil {
 				continue
 			}
-			if pending[m.ID] && !pgMayRoll(c, g, m, pending, now) {
+			if pending[m.ID] && !pgMayRoll(c, g, m, pending, urgent[m.ID], now) {
 				continue
 			}
 			if upsertApp(st, *app) && pending[m.ID] {
@@ -1227,6 +1229,7 @@ func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 				delete(pending, m.ID)
 			}
 		}
+		pgNoteWaiting(c, g, pending, urgent, now)
 	}
 	pgEnsurePooler(st, c, want, now)
 	prefix := pgAppPrefix + c.Name + "-"
@@ -1239,6 +1242,23 @@ func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 		kept = append(kept, a)
 	}
 	st.Apps = kept
+}
+
+// pgNoteWaiting records the members whose new spec waits for the maintenance window, and says so once
+// when they start waiting.
+func pgNoteWaiting(c *PGCluster, g *PGGroup, pending, urgent map[string]bool, now time.Time) {
+	var waiting []string
+	if !pgWindowOpen(c, now) {
+		for _, m := range g.Members {
+			if pending[m.ID] && !urgent[m.ID] {
+				waiting = append(waiting, m.ID)
+			}
+		}
+	}
+	if len(waiting) > 0 && len(g.Waiting) == 0 {
+		g.note(now, "%d member(s) have a new configuration and restart in the maintenance window (%s)", len(waiting), pgWindowLabel(c, now))
+	}
+	g.Waiting = waiting
 }
 
 // pgRollTimeout is how long a member that took a new spec may take to come back before the next one goes.
@@ -1260,9 +1280,12 @@ func pgBack(m *PGMember, now time.Time) bool {
 // primary last, after a switchover to a replica that already runs the new spec. A member that is not
 // serving anyway (down, rebuilding) is not waited for. Without a replica to hand over to, the primary
 // restarts in place. pending lists the members whose app is out of date.
-func pgMayRoll(c *PGCluster, g *PGGroup, m *PGMember, pending map[string]bool, now time.Time) bool {
+func pgMayRoll(c *PGCluster, g *PGGroup, m *PGMember, pending map[string]bool, urgent bool, now time.Time) bool {
 	if c.Paused || g.Switch != nil || g.promoting() != nil {
 		return false // paused: the operator decides when members restart (pg resume)
+	}
+	if !urgent && !pgWindowOpen(c, now) && m.fresh(now) {
+		return false // a serving member restarts in the maintenance window (one that is down takes it now)
 	}
 	for i := range g.Members {
 		o := &g.Members[i]

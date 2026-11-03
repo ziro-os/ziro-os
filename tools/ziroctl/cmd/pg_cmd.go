@@ -137,6 +137,9 @@ var pgStatusCmd = &cobra.Command{
 			if v.Paused {
 				fmt.Printf("  ! the controller is PAUSED: it changes no roles (ziroctl pg resume %s)\n", v.Name)
 			}
+			if v.Window != "" {
+				fmt.Printf("  maintenance window: %s\n", v.Window)
+			}
 			for _, g := range v.Groups {
 				fmt.Printf("\ngroup %s (epoch %d", g.Name, g.Epoch)
 				if g.Sync != "" {
@@ -153,6 +156,9 @@ var pgStatusCmd = &cobra.Command{
 				}
 				for _, r := range g.Reasons {
 					fmt.Printf("  ! %s\n", r)
+				}
+				if len(g.Waiting) > 0 {
+					fmt.Printf("  ~ %s restart for a new configuration in the maintenance window\n", strings.Join(g.Waiting, ", "))
 				}
 				for _, e := range g.Events {
 					fmt.Printf("  · %s\n", e)
@@ -628,6 +634,9 @@ func init() {
 // clusters needs admin. Credentials are never served over the API.
 func registerPGRoutes(a *apiRouter) {
 	registerPGBackupRoutes(a)
+	registerPGEventRoutes(a)
+	registerPGOverviewRoutes(a)
+	registerPGApplyRoutes(a)
 	a.get("/api/v1/pg", "viewer", func(w http.ResponseWriter, r *http.Request) {
 		st, err := readState()
 		if err != nil {
@@ -705,6 +714,11 @@ func registerPGRoutes(a *apiRouter) {
 			Resources *Resources        `json:"resources"`
 			Image     string            `json:"image"`
 			Type      string            `json:"type"` // backup
+			// maintenance: a window ({"window": "0 2 * * 0", "duration": "2h"}, or "" to remove it), and/or
+			// one kept open by hand ({"open_for": "1h"}; "0s" closes it)
+			Window   *string `json:"window"`
+			Duration string  `json:"duration"`
+			OpenFor  string  `json:"open_for"`
 		}
 		if r.ContentLength != 0 && !decodeBody(w, r, &req) {
 			return
@@ -752,6 +766,23 @@ func registerPGRoutes(a *apiRouter) {
 					typ = "incr"
 				}
 				return pgBackupNow(st, name, req.Group, typ)
+			case "maintenance":
+				if req.Window == nil && req.OpenFor == "" {
+					return fmt.Errorf("window or open_for is required")
+				}
+				if req.Window != nil {
+					if err := pgSetMaintenance(st, name, *req.Window, req.Duration); err != nil {
+						return err
+					}
+				}
+				if req.OpenFor != "" {
+					d, err := time.ParseDuration(req.OpenFor)
+					if err != nil {
+						return fmt.Errorf("open_for: a duration such as 1h")
+					}
+					return pgOpenWindow(st, name, d, now)
+				}
+				return nil
 			case "pause", "resume":
 				c, err := pgCluster(st, name)
 				if err == nil {

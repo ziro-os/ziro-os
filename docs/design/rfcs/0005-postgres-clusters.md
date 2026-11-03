@@ -137,6 +137,28 @@ Credentials are never served over the API.
   The superuser is refused over the network, except between Citus nodes. `rotate-password` sends the primary a
   SCRAM verifier only.
 
+### Declarative clusters, maintenance windows and the fleet view (revision)
+
+- **File kind.** A top-level `postgres:` section is a cluster file (`schema.PostgresConfig`, with its own
+  `version: 1`). It is decoded strictly, like every other definition.
+- **Semantics.** A field left out keeps its current value; `params` and `allow_from` are whole lists when given.
+  Fixed at creation: the major version, sync mode, database, user and colocation. Shards can only grow. No secret is
+  in the file: passwords are generated, and backup keys come from the applying command's environment or request.
+- **Plan and apply.** `pg apply` runs the existing operations (`pgCreate`, `pgSetReplicas`, `pgSetParams`,
+  `pgSetPooler`, `pgBackupEnable`, `pgSetMaintenance`, ...) on a copy of the state to plan, and on the real state
+  in one transaction to apply. A plan with any refused change applies nothing. `pg get` exports a file whose plan
+  is all `=`.
+- **Maintenance window.** `PGCluster.Maintenance` is a cron schedule (UTC) and a duration; `WindowUntil` opens it by
+  hand. Outside it, `pgMayRoll` holds a serving member's new spec, and the group lists the waiting members.
+  Failover, switchover, repairs, members that are down and restarts for a new secret (`ZIRO_PG_SECRET_EPOCH`) never
+  wait.
+- **Events and overview.** Each group keeps its last 200 events in cluster state (was 20). `pg events` and
+  `GET /api/v1/pg/{name}/events` serve them. `pg overview` and `GET /api/v1/pg-overview` summarize every cluster:
+  health, primary, ready members, lag, connection and disk use, backups, alerts, and what needs attention.
+- **API roles.** `GET .../spec`, `GET .../events` and `GET /api/v1/pg-overview` are viewer. `POST /api/v1/pg-plan`
+  is operator: it changes nothing, but the route policy keeps POST above viewer. `POST /api/v1/pg-apply` is admin,
+  because it can create a cluster and change its backups.
+
 ## Security
 
 - The controller and agent commands are the only new way to act inside a container, and they are a closed list with

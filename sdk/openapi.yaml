@@ -462,6 +462,49 @@ paths:
         - { name: purge, in: query, schema: { type: boolean } }
       responses:
         "200": { $ref: "#/components/responses/Message" }
+  /api/v1/pg-overview:
+    get:
+      x-ziro-role: viewer
+      tags: [pg]
+      summary: Every Postgres cluster's health on one screen (healthy, degraded, down or paused), primary, ready members, lag, connection and disk use, last backup, recent alerts and what needs attention; worst first
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/pg-plan:
+    post:
+      x-ziro-role: operator
+      tags: [pg]
+      summary: 'Plan a declarative cluster file without changing anything ({"spec": {"postgres": {"version": 1, "name": "shop", "replicas": 2}}}); each change is create, update, unchanged, remove or refused'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/pg-apply:
+    post:
+      x-ziro-role: admin
+      tags: [pg]
+      summary: 'Create or change a cluster from a declarative file ({"spec": {...}, "access_key_id": "...", "secret_access_key": "..."} when it turns backups on); all of it applies or nothing does'
+      requestBody: { $ref: "#/components/requestBodies/Object" }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/pg/{name}/spec:
+    get:
+      x-ziro-role: viewer
+      tags: [pg]
+      summary: The cluster as a declarative file for pg-apply (no secrets); applying it changes nothing
+      parameters:
+        - $ref: "#/components/parameters/Name"
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
+  /api/v1/pg/{name}/events:
+    get:
+      x-ziro-role: viewer
+      tags: [pg]
+      summary: The cluster's event history, oldest first (the last 200 per group), with the severity of the alerts they raised
+      parameters:
+        - $ref: "#/components/parameters/Name"
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: group, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Object" }
   /api/v1/pg/{name}/backups:
     get:
       x-ziro-role: viewer
@@ -493,10 +536,10 @@ paths:
     post:
       x-ziro-role: operator
       tags: [pg]
-      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit ({"member": "m3"}), add-shard, rotate-password ({"role": "replicator"}), set ({"params": {"work_mem": "64MB"}}), pool ({"enabled": true, "mode": "transaction", "size": 20}), resize ({"resources": {"memory": "8Gi"}}), upgrade ({"image": "...@sha256:..."}), restart, backup ({"type": "full|diff|incr"}), pause or resume. Credentials are never served over the API'
+      summary: 'Change a cluster: scale ({"replicas": n}), add-replica, rm-replica ({"member": "m3"}), switchover ({"to": "m2"}), failover ({"to": "m2", "force": true}), reinit ({"member": "m3"}), add-shard, rotate-password ({"role": "replicator"}), set ({"params": {"work_mem": "64MB"}}), pool ({"enabled": true, "mode": "transaction", "size": 20}), resize ({"resources": {"memory": "8Gi"}}), upgrade ({"image": "...@sha256:..."}), restart, backup ({"type": "full|diff|incr"}), maintenance ({"window": "0 2 * * 0", "duration": "2h"}, "window": "" removes it; {"open_for": "1h"} opens it now), pause or resume. Credentials are never served over the API'
       parameters:
         - $ref: "#/components/parameters/Name"
-        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, failover, reinit, add-shard, rotate-password, set, pool, resize, upgrade, restart, backup, pause, resume] } }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [scale, add-replica, rm-replica, switchover, failover, reinit, add-shard, rotate-password, set, pool, resize, upgrade, restart, backup, maintenance, pause, resume] } }
       requestBody: { $ref: "#/components/requestBodies/Object" }
       responses:
         "200": { $ref: "#/components/responses/Object" }
