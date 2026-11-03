@@ -75,6 +75,14 @@ func validPGCommand(op, arg string) error {
 		}
 	case opPassword:
 		return validPasswordArg(arg)
+	case opRole:
+		return validRoleArg(arg)
+	case opRoleOff:
+		if !pgIdentRe.MatchString(arg) || pgReservedRoleRe.MatchString(arg) {
+			return fmt.Errorf("invalid role %q", arg)
+		}
+	case opDatabase:
+		return validDatabaseArg(arg)
 	case opStanza:
 		if !pgGroupRe.MatchString(arg) {
 			return fmt.Errorf("invalid stanza %q", arg)
@@ -349,8 +357,10 @@ func pgPass(st *ClusterState, now time.Time) {
 			}
 			pgCitusPass(st, c, now)
 			pgRotationPass(st, c, now)
+			pgRolesPass(st, c, now)
 		}
 		pgEnsureApps(st, c, now)
+		pgEnsureRoleSecrets(st, c)
 	}
 	pgRemoveOrphans(st)
 }
@@ -701,6 +711,8 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 		}
 	case opStanza, opBackup:
 		pgBackupSettle(g, cmd, now)
+	case opRole, opRoleOff, opDatabase:
+		pgRolesSettle(c, g, cmd, now)
 	case opPassword:
 		if cmd.OK && c.Rotation != nil {
 			if g.Notes == nil {

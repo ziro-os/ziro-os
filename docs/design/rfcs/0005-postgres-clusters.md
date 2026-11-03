@@ -155,6 +155,15 @@ Credentials are never served over the API.
 - **Events and overview.** Each group keeps its last 200 events in cluster state (was 20). `pg events` and
   `GET /api/v1/pg/{name}/events` serve them. `pg overview` and `GET /api/v1/pg-overview` summarize every cluster:
   health, primary, ready members, lag, connection and disk use, backups, alerts, and what needs attention.
+- **Roles and databases.** `PGCluster.Roles` (readwrite or readonly, through `pg_write_all_data` and
+  `pg_read_all_data`) and `PGCluster.Databases` (owner, allow-listed extensions) are applied by three new orders
+  on the entry group's primary: `role` (name, access, SCRAM verifier), `roleoff` (`NOLOGIN` for a removed role)
+  and `database` (create if missing, owner, extensions). Their arguments are validated on both sides, and the
+  statements are fixed templates. `Applied` records the hash each order applied, and `Issued` the one in flight.
+  Each role's password and connection strings are in its own secret; `pg-<name>-url` has the application user's.
+  `apps deploy --pg` attaches one of them and adds the app to `allow_from`.
+- **Purge.** `pg rm --purge` deletes every `pg-<name>-*` secret. Cluster names have no dashes, so the prefix belongs
+  to this cluster alone.
 - **API roles.** `GET .../spec`, `GET .../events` and `GET /api/v1/pg-overview` are viewer. `POST /api/v1/pg-plan`
   is operator: it changes nothing, but the route policy keeps POST above viewer. `POST /api/v1/pg-apply` is admin,
   because it can create a cluster and change its backups.

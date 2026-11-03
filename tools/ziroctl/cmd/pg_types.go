@@ -98,6 +98,13 @@ type PGCluster struct {
 	// window open by hand (pg maintenance open) until then.
 	Maintenance *PGMaintenance `json:"maintenance,omitempty"`
 	WindowUntil time.Time      `json:"window_until,omitempty"`
+	// Roles and Databases are managed for apps (pg_roles.go); Applied records what the primary has
+	// (key -> hash), RolesOff the removed roles still to lock out.
+	Roles     []PGRole          `json:"roles,omitempty"`
+	Databases []PGDatabase      `json:"databases,omitempty"`
+	Applied   map[string]string `json:"applied,omitempty"`
+	Issued    map[string]string `json:"issued,omitempty"` // the hash an order in flight applies
+	RolesOff  []string          `json:"roles_off,omitempty"`
 }
 
 // PGGroup is one primary and its replicas: a plain cluster has one group ("main"); a sharded one has a
@@ -361,6 +368,19 @@ func (c *PGCluster) Validate() error {
 		if err := c.Maintenance.validate(); err != nil {
 			return err
 		}
+	}
+	seen = map[string]bool{}
+	for _, d := range c.Databases {
+		if err := pgCheckDatabase(c, d); err != nil || seen["db:"+d.Name] {
+			return fmt.Errorf("invalid or repeated database %q", d.Name)
+		}
+		seen["db:"+d.Name] = true
+	}
+	for _, r := range c.Roles {
+		if err := pgCheckRole(c, r); err != nil || seen["role:"+r.Name] {
+			return fmt.Errorf("invalid or repeated role %q", r.Name)
+		}
+		seen["role:"+r.Name] = true
 	}
 	for k, v := range c.Params {
 		if _, ok := pgParamDefs[k]; !ok || (v != "" && pgCheckParam(k, v, "") != nil) {

@@ -40,6 +40,24 @@ type PostgresSpec struct {
 	Backup      *PostgresBackup      `json:"backup,omitempty"`      // new clusters: none
 	Maintenance *PostgresMaintenance `json:"maintenance,omitempty"` // new clusters: none, changes roll out at once
 	Paused      *bool                `json:"paused,omitempty"`      // the controller leaves roles alone
+	Roles       []PostgresRole       `json:"roles,omitempty"`       // login roles for apps; the whole list when given
+	Databases   []PostgresDatabase   `json:"databases,omitempty"`   // managed databases; the whole list when given
+}
+
+// PostgresRole is a login role for apps, with a generated password in its own cluster secret. A role
+// left out of a list that is given can no longer log in; its objects stay.
+type PostgresRole struct {
+	Name     string `json:"name"`
+	Access   string `json:"access,omitempty"`   // readwrite (default) or readonly
+	Database string `json:"database,omitempty"` // the database its connection strings name (default: the cluster's)
+}
+
+// PostgresDatabase is a database the cluster creates and keeps: its owner and extensions. A database
+// left out of a list that is given is no longer managed; it is never dropped.
+type PostgresDatabase struct {
+	Name       string   `json:"name"`
+	Owner      string   `json:"owner,omitempty"` // a role, or the application user (default)
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // PostgresPooler is the PgBouncer in front of the cluster.
@@ -83,6 +101,7 @@ var (
 	pgIdentRe       = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 	cronFieldsRe    = regexp.MustCompile(`^[0-9*/,\- ]+$`)
 	pgParamNameRe   = regexp.MustCompile(`^[a-z_][a-z0-9_.]{0,62}$`)
+	pgExtensionRe   = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
 )
 
 // ParsePostgresConfig reads a declarative Postgres file (YAML or JSON) strictly and checks its shape.
@@ -175,6 +194,33 @@ func (c PostgresConfig) Validate() error {
 			d, err := time.ParseDuration(m.Duration)
 			if err != nil || d < 30*time.Minute || d > 24*time.Hour {
 				return fmt.Errorf("maintenance.duration: 30m to 24h")
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, r := range s.Roles {
+		if !pgIdentRe.MatchString(r.Name) || seen["r:"+r.Name] {
+			return fmt.Errorf("roles: invalid or repeated name %q", r.Name)
+		}
+		seen["r:"+r.Name] = true
+		if r.Access != "" && r.Access != "readwrite" && r.Access != "readonly" {
+			return fmt.Errorf("role %s: access is readwrite or readonly", r.Name)
+		}
+		if r.Database != "" && !pgIdentRe.MatchString(r.Database) {
+			return fmt.Errorf("role %s: bad database %q", r.Name, r.Database)
+		}
+	}
+	for _, d := range s.Databases {
+		if !pgIdentRe.MatchString(d.Name) || seen["d:"+d.Name] {
+			return fmt.Errorf("databases: invalid or repeated name %q", d.Name)
+		}
+		seen["d:"+d.Name] = true
+		if d.Owner != "" && !pgIdentRe.MatchString(d.Owner) {
+			return fmt.Errorf("database %s: bad owner %q", d.Name, d.Owner)
+		}
+		for _, e := range d.Extensions {
+			if !pgExtensionRe.MatchString(e) {
+				return fmt.Errorf("database %s: bad extension name %q", d.Name, e)
 			}
 		}
 	}

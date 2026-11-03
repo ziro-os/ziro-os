@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -278,6 +279,9 @@ func (p *pgPlanner) reconcile(c *PGCluster, s schema.PostgresSpec, keys pgApplyK
 			})
 		}
 	}
+	if s.Roles != nil || s.Databases != nil {
+		p.rolesAndDatabases(c, s)
+	}
 	if s.Paused != nil {
 		if *s.Paused == c.Paused {
 			p.same("paused", strconv.FormatBool(c.Paused))
@@ -288,6 +292,105 @@ func (p *pgPlanner) reconcile(c *PGCluster, s schema.PostgresSpec, keys pgApplyK
 			})
 		}
 	}
+}
+
+// pgPendingOp is a role or database change waiting for the ones it depends on.
+type pgPendingOp struct {
+	change pgChange
+	op     func() error
+	err    error
+}
+
+// rolesAndDatabases sets the file's roles and databases. A role may connect to a database the file adds,
+// and a database may be owned by a role the file adds, so the changes run in rounds until none can make
+// progress; what is left is refused with its reason.
+func (p *pgPlanner) rolesAndDatabases(c *PGCluster, s schema.PostgresSpec) {
+	var ops []*pgPendingOp
+	add := func(section, item, action, detail string, op func() error) {
+		ops = append(ops, &pgPendingOp{change: pgChange{Section: section, Item: item, Action: action, Detail: detail}, op: op})
+	}
+	if s.Databases != nil {
+		want := map[string]bool{}
+		for _, d := range s.Databases {
+			want[d.Name] = true
+			d := PGDatabase{Name: d.Name, Owner: d.Owner, Extensions: append([]string{}, d.Extensions...)}
+			sort.Strings(d.Extensions)
+			d.Extensions = slices.Compact(d.Extensions)
+			label := pgDatabaseLabel(c, d)
+			cur := c.database(d.Name)
+			switch {
+			case cur != nil && pgDatabaseLabel(c, *cur) == label:
+				p.same("database", d.Name+" ("+label+")")
+			case cur != nil:
+				add("database", d.Name+" ("+label+")", "update", "from "+pgDatabaseLabel(c, *cur), func() error { return pgSetDatabase(p.st, c.Name, d) })
+			default:
+				add("database", d.Name+" ("+label+")", "create", "", func() error { return pgSetDatabase(p.st, c.Name, d) })
+			}
+		}
+		for _, d := range slices.Clone(c.Databases) {
+			if !want[d.Name] {
+				add("database", d.Name, "remove", "no longer managed; the database is kept", func() error { return pgRemoveDatabase(p.st, c.Name, d.Name) })
+			}
+		}
+	}
+	if s.Roles != nil {
+		want := map[string]bool{}
+		for _, r := range s.Roles {
+			want[r.Name] = true
+			r := PGRole{Name: r.Name, Access: r.Access, Database: r.Database}
+			if r.Access == "" {
+				r.Access = "readwrite"
+			}
+			label := r.Access
+			if r.Database != "" {
+				label += ", " + r.Database
+			}
+			cur := c.role(r.Name)
+			switch {
+			case cur != nil && *cur == r:
+				p.same("role", r.Name+" ("+label+")")
+			case cur != nil:
+				add("role", r.Name+" ("+label+")", "update", "", func() error { return pgSetRole(p.st, c.Name, r) })
+			default:
+				add("role", r.Name+" ("+label+")", "create", "a generated password in secret "+c.roleSecret(r.Name), func() error { return pgSetRole(p.st, c.Name, r) })
+			}
+		}
+		for _, r := range slices.Clone(c.Roles) {
+			if !want[r.Name] {
+				add("role", r.Name, "remove", "it can no longer log in; its objects stay", func() error { return pgRemoveRole(p.st, c.Name, r.Name) })
+			}
+		}
+	}
+	for progress := true; progress; {
+		progress = false
+		for _, o := range ops {
+			if o.op == nil {
+				continue
+			}
+			if o.err = o.op(); o.err == nil {
+				p.plan.Changes = append(p.plan.Changes, o.change)
+				o.op, progress = nil, true
+			}
+		}
+	}
+	for _, o := range ops {
+		if o.op != nil {
+			o.change.Action, o.change.Detail = "refused", o.err.Error()
+			p.plan.Changes = append(p.plan.Changes, o.change)
+		}
+	}
+}
+
+func pgDatabaseLabel(c *PGCluster, d PGDatabase) string {
+	owner := d.Owner
+	if owner == "" {
+		owner = c.User
+	}
+	l := "owner " + owner
+	if len(d.Extensions) > 0 {
+		l += ", " + strings.Join(d.Extensions, ", ")
+	}
+	return l
 }
 
 // params sets the file's parameters exactly: one left out goes back to its default.
@@ -436,6 +539,14 @@ func pgSpecOf(c *PGCluster) PostgresConfig {
 	s.Maintenance = &schema.PostgresMaintenance{}
 	if m := c.Maintenance; m != nil {
 		s.Maintenance = &schema.PostgresMaintenance{Window: m.Window, Duration: m.Duration}
+	}
+	s.Roles = []schema.PostgresRole{}
+	for _, r := range c.Roles {
+		s.Roles = append(s.Roles, schema.PostgresRole{Name: r.Name, Access: r.Access, Database: r.Database})
+	}
+	s.Databases = []schema.PostgresDatabase{}
+	for _, d := range c.Databases {
+		s.Databases = append(s.Databases, schema.PostgresDatabase{Name: d.Name, Owner: d.Owner, Extensions: append([]string{}, d.Extensions...)})
 	}
 	return PostgresConfig{Postgres: s}
 }

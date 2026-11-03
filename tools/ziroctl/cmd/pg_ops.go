@@ -152,7 +152,13 @@ func pgDelete(st *ClusterState, name string, purge bool) error {
 			}
 		}
 		markPurge(st, apps...)
-		delete(st.Secrets, c.secretName())
+		// The cluster's own secret and every pg-<name>-* one (CA, pooler, backup, roles, connection
+		// strings): cluster names have no dashes, so the prefix is this cluster's alone.
+		for s := range st.Secrets {
+			if s == c.secretName() || strings.HasPrefix(s, c.secretName()+"-") {
+				delete(st.Secrets, s)
+			}
+		}
 		delete(st.Secrets, c.caSecretName())
 	}
 	delete(st.PG, name)

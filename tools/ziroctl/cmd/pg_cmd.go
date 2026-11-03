@@ -176,7 +176,8 @@ and never over the API. --ca prints the cluster's CA certificate, for clients th
 sslmode=verify-full.`,
 	Example: `  ziroctl pg credentials shop
   psql "$(ziroctl pg credentials shop --ro)"
-  ziroctl pg credentials shop --ca > shop-ca.crt`,
+  ziroctl pg credentials shop --ca > shop-ca.crt
+  ziroctl pg credentials shop --role reports`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := requireMaster(); err != nil {
@@ -196,6 +197,21 @@ sslmode=verify-full.`,
 				return err
 			}
 			fmt.Print(pem)
+			return nil
+		}
+		if pgFlags.role != "" {
+			if c.role(pgFlags.role) == nil {
+				return fmt.Errorf("%s has no role %s (ziroctl pg role %s %s)", c.Name, pgFlags.role, c.Name, pgFlags.role)
+			}
+			sec := st.Secrets[c.roleSecret(pgFlags.role)]
+			if sec["DATABASE_URL"] == "" {
+				return fmt.Errorf("the credentials of %s are made on the controller's next pass: try again in a few seconds", pgFlags.role)
+			}
+			if pgFlags.ro {
+				fmt.Println(sec["DATABASE_URL_RO"])
+				return nil
+			}
+			fmt.Printf("write: %s\nread:  %s\n", sec["DATABASE_URL"], sec["DATABASE_URL_RO"])
 			return nil
 		}
 		if pgFlags.ro {
@@ -612,6 +628,7 @@ func init() {
 	pgExposeCmd.Flags().BoolVar(&pgFlags.ro, "ro", false, "Route to the read-only name")
 	pgCredentialsCmd.Flags().BoolVar(&pgFlags.ro, "ro", false, "Print only the read-only connection string")
 	pgCredentialsCmd.Flags().BoolVar(&pgFlags.ca, "ca", false, "Print the cluster CA certificate (PEM)")
+	pgCredentialsCmd.Flags().StringVar(&pgFlags.role, "role", "", "A role's connection strings (pg role)")
 	pgRmCmd.Flags().BoolVar(&pgFlags.purge, "purge", false, "Also delete the data on every node and the credentials")
 	pgRmCmd.Flags().BoolVar(&pgFlags.yes, "yes", false, "Confirm --purge")
 	pgRotateCmd.Flags().StringVar(&pgFlags.role, "role", "", "Role: the application user (default), replicator or postgres")
@@ -714,6 +731,14 @@ func registerPGRoutes(a *apiRouter) {
 			Resources *Resources        `json:"resources"`
 			Image     string            `json:"image"`
 			Type      string            `json:"type"` // backup
+			// role and database ({"name": "web", "access": "readwrite", "database": "app"}, {"name": "x",
+			// "owner": "web", "extensions": ["pg_trgm"]}); "remove": true takes it off
+			Name       string   `json:"name"`
+			Access     string   `json:"access"`
+			Database   string   `json:"database"`
+			Owner      string   `json:"owner"`
+			Extensions []string `json:"extensions"`
+			Remove     bool     `json:"remove"`
 			// maintenance: a window ({"window": "0 2 * * 0", "duration": "2h"}, or "" to remove it), and/or
 			// one kept open by hand ({"open_for": "1h"}; "0s" closes it)
 			Window   *string `json:"window"`
@@ -766,6 +791,19 @@ func registerPGRoutes(a *apiRouter) {
 					typ = "incr"
 				}
 				return pgBackupNow(st, name, req.Group, typ)
+			case "role":
+				if req.Remove {
+					return pgRemoveRole(st, name, req.Name)
+				}
+				if req.Access == "" {
+					req.Access = "readwrite"
+				}
+				return pgSetRole(st, name, PGRole{Name: req.Name, Access: req.Access, Database: req.Database})
+			case "database":
+				if req.Remove {
+					return pgRemoveDatabase(st, name, req.Name)
+				}
+				return pgSetDatabase(st, name, PGDatabase{Name: req.Name, Owner: req.Owner, Extensions: req.Extensions})
 			case "maintenance":
 				if req.Window == nil && req.OpenFor == "" {
 					return fmt.Errorf("window or open_for is required")
