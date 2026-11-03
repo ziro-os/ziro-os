@@ -9,7 +9,11 @@
 # binary is built with an old Go release that scanners flag for standard library CVEs. The binary is
 # deleted (a scanner still reports a file that a later layer only overwrites) and the script goes to
 # /usr/local/sbin, which comes first on PATH, so `gosu` finds it.
-ARG BASE=postgres:18.4-alpine3.22
+#
+# BASE defaults to the newest pinned official image (Debian: this file needs apt-get and util-linux's
+# setpriv), so a plain `docker build` and image scanners see the base that ships. The workflow passes
+# each version's pin explicitly.
+ARG BASE=docker.io/library/postgres:18.6@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
 FROM ${BASE}
 COPY --chmod=0755 gosu.sh /usr/local/sbin/gosu
 RUN set -eux; \
