@@ -4,5 +4,5 @@ ID=ziro-os
 ID_LIKE=alpine
 PRETTY_NAME="Ziro-OS 1.0.38"
 HOME_URL="https://github.com/ziro-os/ziro-os"
-BUILD_DATE="2026-11-03T16:51:11Z"
+BUILD_DATE="2026-11-04T02:49:30Z"
 ARCH="arm64"
