@@ -1502,9 +1502,38 @@ static void handle_child_exit(pid_t pid, int status) {
     }
 }
 
+/* Databases are ended below like any other process: SIGTERM, which Postgres reads as "smart shutdown" (wait for every
+ * client to leave), then SIGKILL three seconds later. A database killed that way replays its WAL for minutes when the
+ * host is back, and answers nothing meanwhile. 'ziroctl pg stop-local' asks each Postgres member on this node for a fast
+ * shutdown first, from outside the container so the restart policy is left alone, and waits for them (it is given 120 s;
+ * this waits 150 s for the command itself and never longer, so a stuck one cannot hold up a reboot). */
+static void stop_databases(void) {
+    if (access("/usr/bin/ziroctl", X_OK) != 0) return;
+    printf("[init] shutting down databases cleanly...\n");
+    pid_t pid = fork();
+    if (pid < 0) return;
+    if (pid == 0) {
+        char *argv[] = {"ziroctl", "pg", "stop-local", "--timeout", "120s", NULL};
+        execv("/usr/bin/ziroctl", argv);
+        _exit(127);
+    }
+    int done = 0;
+    for (int i = 0; i < 1500 && !done; i++) {
+        pid_t r = waitpid(pid, NULL, WNOHANG);
+        if (r != 0) done = 1; /* it exited, or it is not ours to wait for any more */
+        else usleep(100000);
+    }
+    if (!done) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    }
+}
+
 static void perform_shutdown(int is_reboot) {
     printf("\n[init] syncing disks...\n");
     sync();
+
+    stop_databases();
 
     printf("[init] stopping services (sshd, containerd)...\n");
     if (sshd_pid > 0) {

@@ -195,6 +195,13 @@ is an alert in the category `database` and is listed in `ziroctl pg status`.
 Repeated failures of the same command raise one alert per quarter hour, not one per attempt, and `ziroctl pg status`
 shows what each group is waiting for.
 
+`ziroctl pg status` also says why a member does not answer. Each node looks into a member whose probe fails (at most
+every 15 seconds) and reports its container's state, the last error its start script recorded or the last line of
+its log, and the probe's own error. A member whose Postgres is up but still starting or replaying WAL shows as
+`starting`, and is not told to be rebuilt. The last order that failed on a member stays in the status for an hour
+(`m3: reinit: ...`), and the LAG column shows how many bytes a replica is behind next to the milliseconds. The
+members of a node are probed in parallel, so one slow container does not hold up the others.
+
 ### When the controller does not fail over
 
 `ziroctl pg status shop` ends each group with lines starting `!` that say why it is not healthy: a paused
@@ -251,6 +258,16 @@ even from a session that turned read-only off for itself. The target catches up 
 the old primary becomes a replica. Writes pause for a few seconds. Use it before maintenance on the primary's node.
 An aborted switchover gives the primary its standby list back.
 
+A switchover is refused up front when the target cannot take over: it is not answering, not streaming from the
+primary, on an older timeline, or more than 16 MiB (or 5 s) behind. The primary is then not fenced at all. The
+primary reports the WAL position it had once it was fenced, and the target is promoted as soon as it holds that
+position, whenever its own last probe was taken. The switchover is given up, and the primary made writable again,
+when the target stops receiving for 30 seconds, or after 3 minutes in all. While it runs, `pg status` says what it
+is waiting for (`switchover to m3 in progress (catchup, 12s): waiting for m3 to receive up to 0/B000168: it is at
+0/B0000F0 (120 B behind), streaming=true`), and the abort in `pg events` names the step and the same numbers. A
+rolling restart whose switchover was given up does not start another for 10 minutes. A paused controller refuses
+a switchover.
+
 ### Upgrades and configuration changes
 
 A change to a member's container is rolled out one member at a time. This covers a ziroctl upgrade that changes
@@ -258,6 +275,37 @@ the entry script, new memory or CPU limits, a new image, and a password change. 
 the next waits until it is back, streaming and caught up. The primary goes last, after a switchover to a replica
 that already runs the new configuration, so writes pause only for the switchover. A member that is down anyway is
 not waited for, and a group with no replica restarts its primary in place.
+
+"Back" means that the member's new server is answering, not only that a probe arrived after the change: the old
+container keeps answering until the node stops it, so each probe carries how long the server has been up, and the
+next member waits for one that started after the change. A replica must also be within 16 MiB of the primary, not
+only streaming. A replica is left out of `-ro` until its new server answers. A new cluster leader rolls nothing
+until the members have reported (the first 72 seconds), so a restart of the master cannot restart a primary in place.
+The members take the new configuration with the settings a hot standby must not undercut (`max_connections`,
+`max_worker_processes`, `max_wal_senders`, `max_prepared_transactions`, `max_locks_per_transaction`) raised to the
+primary's values when they are lower, so a replica that restarts first, or after limits were reduced, still starts.
+
+A replica that is replaying WAL after a restart or a crash is not stuck: one whose Postgres is up but not yet
+accepting connections shows as `starting` and is rebuilt only after 30 minutes, not 10, and one that restarted for a
+new configuration is not rebuilt for 30 minutes. `recovery_init_sync_method` is `syncfs`, so recovery after a crash
+makes the volume durable with one call instead of an fsync per file. A pinned image that is already on the node is
+not pulled again when a member restarts, so a slow registry cannot hold the member up.
+
+### Rebooting a node
+
+A reboot ends every process: init sends `SIGTERM` (which Postgres reads as "wait for every client to leave") and
+`SIGKILL` three seconds later, and each member then replays WAL for minutes when the host is back, answering nothing
+meanwhile. So `ziroctl upgrade --reboot` and the shutdown in init first run
+
+```sh
+ziroctl pg stop-local --timeout 2m
+```
+
+which asks each Postgres member on the node for a fast shutdown (a checkpoint, the WAL sent to the standbys, then
+exit) and waits for them. It does not stop the containers through the runtime, so their restart policy is untouched
+and they start again at boot as before. Members still running after the timeout are left to init. To reboot a node
+by hand, run it first. A primary shut down this way gives its standbys all its WAL, which lets one of them take over
+without losing anything if the cluster fails over meanwhile.
 
 ### Maintenance windows
 

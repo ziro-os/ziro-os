@@ -265,6 +265,10 @@ func pgRequestSwitchover(st *ClusterState, name, groupName, to string, now time.
 	if g == nil {
 		return errNotFound(fmt.Sprintf("group %q not found", groupName))
 	}
+	if c.Paused {
+		// A paused controller takes no step: the switchover would sit there and be given up on resume.
+		return fmt.Errorf("the controller of %s is paused: `ziroctl pg resume %s` first", name, name)
+	}
 	if to == "" { // the replica furthest ahead
 		best, _, _ := pgCandidate(g, now)
 		if best == nil {
@@ -368,7 +372,11 @@ func pgGroupReasons(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) [
 		r = append(r, fmt.Sprintf("the controller is paused: it changes no roles (ziroctl pg resume %s)", c.Name))
 	}
 	if sw := g.Switch; sw != nil {
-		r = append(r, fmt.Sprintf("switchover to %s in progress (%s)", sw.To, sw.Step))
+		line := fmt.Sprintf("switchover to %s in progress (%s, %s)", sw.To, sw.Step, now.Sub(sw.At).Round(time.Second))
+		if sw.Wait != "" {
+			line += ": " + sw.Wait
+		}
+		r = append(r, line)
 	}
 	if f := g.Force; f != nil {
 		r = append(r, fmt.Sprintf("an operator failover is waiting for a replica that can be promoted (%s left)", (2*time.Minute-now.Sub(f.At)).Round(time.Second)))
@@ -412,6 +420,9 @@ func pgGroupReasons(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time) [
 				r = append(r, fmt.Sprintf("%s: %s has not completed after %s", m.ID, m.Cmd.Op, now.Sub(m.Cmd.At).Round(time.Second)))
 			}
 		}
+		if m.LastFail != "" && now.Sub(m.LastFailAt) < time.Hour {
+			r = append(r, fmt.Sprintf("%s: %s (%s ago)", m.ID, m.LastFail, now.Sub(m.LastFailAt).Round(time.Second)))
+		}
 		if !m.UnreadySince.IsZero() {
 			if left := pgRebuildAfter - now.Sub(m.UnreadySince); left > 0 {
 				r = append(r, fmt.Sprintf("%s makes no progress; the controller rebuilds it from the primary in %s", m.ID, left.Round(time.Second)))
@@ -440,6 +451,8 @@ func pgMemberWhy(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) string
 	switch {
 	case m.Busy:
 		return " (copying the primary's data; this takes as long as the database is big)"
+	case m.Starting:
+		return " (Postgres is starting up or replaying WAL after a restart; it answers once it is consistent" + pgDetailSuffix(m.Detail) + ")"
 	case m.Detail != "":
 		return " (" + m.Detail + "; ziroctl pg reinit " + c.Name + " " + m.ID + " rebuilds it)"
 	}
@@ -449,6 +462,13 @@ func pgMemberWhy(st *ClusterState, c *PGCluster, g *PGGroup, m *PGMember) string
 		}
 	}
 	return ""
+}
+
+func pgDetailSuffix(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	return "; " + detail
 }
 
 // pgView is one cluster for `pg status` and the API.
@@ -490,8 +510,9 @@ type pgMemberView struct {
 	LSN      string `json:"lsn,omitempty"`
 	Timeline int    `json:"timeline,omitempty"`
 	LagMs    int64  `json:"lag_ms,omitempty"`
-	Joined   bool   `json:"joined,omitempty"` // counts toward the synchronous standbys and is a promotion candidate
-	Detail   string `json:"detail,omitempty"` // what the node says about a member that does not answer
+	LagBytes uint64 `json:"lag_bytes,omitempty"` // WAL the primary has that a replica has not received
+	Joined   bool   `json:"joined,omitempty"`    // counts toward the synchronous standbys and is a promotion candidate
+	Detail   string `json:"detail,omitempty"`    // what the node says about a member that does not answer
 }
 
 func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
@@ -509,12 +530,15 @@ func pgViewOf(st *ClusterState, c *PGCluster, now time.Time) pgView {
 			if m.Probe.OK {
 				mv.LSN = formatLSN(m.Probe.LSN)
 			}
+			if pr := g.primary(); pr != nil && m.Role == pgReplica && m.Probe.OK && pr.Probe.OK && pr.Probe.LSN > m.pos() {
+				mv.LagBytes = pr.Probe.LSN - m.pos()
+			}
 			switch {
 			case m.Draining:
 				mv.State = "draining"
 			case !m.fresh(now):
 				mv.State = "down"
-				if m.Probe.At.IsZero() {
+				if m.Probe.At.IsZero() || m.Starting {
 					mv.State = "starting"
 				}
 			case m.Role == pgPrimary:

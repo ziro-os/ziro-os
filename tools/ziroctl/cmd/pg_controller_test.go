@@ -28,6 +28,21 @@ type pgWorld struct {
 	broken       map[string]bool
 	busy         map[string]bool
 	rebuildFixes bool
+	// late: member apps whose probes do not reach the controller (a slow node, a probe that hangs) while
+	// Postgres itself keeps running and replicating.
+	late map[string]bool
+	// started: when a member's server process started (reported as uptime; unset = not reported, as by an
+	// agent that is not upgraded); starting: a member whose Postgres is up but refuses connections while it replays WAL.
+	started  map[string]time.Time
+	starting map[string]bool
+}
+
+// upSecs is the uptime a member's probe reports (0 = not reported).
+func (w *pgWorld) upSecs(app string) int64 {
+	if t, ok := w.started[app]; ok {
+		return max(1, int64(w.now.Sub(t).Seconds()))
+	}
+	return 0
 }
 
 type simPG struct {
@@ -50,7 +65,7 @@ func newPGWorld(t *testing.T, nodes int) *pgWorld {
 		st.Nodes = append(st.Nodes, ClusterNode{ID: fmt.Sprintf("n%d", i), Status: "Ready", LastSeen: now, PodCIDR: fmt.Sprintf("10.200.%d.0/24", i), MeshIP: fmt.Sprintf("10.100.0.%d", i)})
 	}
 	w := &pgWorld{t: t, st: st, now: now, down: map[string]bool{}, pg: map[string]*simPG{}, done: map[string]bool{},
-		fails: map[string]bool{}, stalled: map[string]bool{}, broken: map[string]bool{}, busy: map[string]bool{}}
+		fails: map[string]bool{}, stalled: map[string]bool{}, broken: map[string]bool{}, busy: map[string]bool{}, late: map[string]bool{}, started: map[string]time.Time{}, starting: map[string]bool{}}
 	old := pgNow
 	pgNow = func() time.Time { return w.now }
 	t.Cleanup(func() { pgNow = old })
@@ -111,18 +126,18 @@ func (w *pgWorld) step(d time.Duration) {
 				for _, m := range g.Members {
 					app := c.memberApp(g.Name, m.ID)
 					if m.Node == n.ID && w.broken[app] {
-						reports = append(reports, PGReport{App: app, Detail: "container running (exit 1): the data directory is not usable"})
+						reports = append(reports, PGReport{App: app, Detail: "container running (exit 1): the data directory is not usable", Starting: w.starting[app]})
 					}
 					if m.Node == n.ID && w.busy[app] {
 						reports = append(reports, PGReport{App: app, Busy: true, Detail: "container running (exit 0)"})
 					}
-					if s := w.pg[app]; s != nil && s.up && m.Node == n.ID {
+					if s := w.pg[app]; s != nil && s.up && m.Node == n.ID && !w.late[app] {
 						primaryUp := false
 						for _, o := range w.pg {
 							primaryUp = primaryUp || o.up && o.primary
 						}
 						reports = append(reports, PGReport{App: app, OK: true, Recovery: !s.primary, LSN: formatLSN(s.lsn), Timeline: s.tli, ReadOnly: s.readonly,
-							Streaming: !s.primary && primaryUp && !w.stalled[app]})
+							Streaming: !s.primary && primaryUp && !w.stalled[app], UpSecs: w.upSecs(app)})
 					}
 				}
 			}
@@ -221,6 +236,8 @@ func (w *pgWorld) exec(o PGOrder) PGResult {
 		}
 	case opReadonly:
 		s.readonly = true
+		// The real order reports the WAL position the primary had once it was fenced.
+		return PGResult{ID: o.ID, OK: true, Msg: "lsn=" + formatLSN(s.lsn)}
 	case opWritable:
 		s.readonly = false
 	case opSetSync:

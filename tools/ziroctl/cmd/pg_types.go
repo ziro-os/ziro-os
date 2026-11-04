@@ -49,12 +49,17 @@ const (
 	// the same silence. It is longer than a primary's lease can outlive its last probe (pg_lease.go),
 	// so an old primary has stopped acknowledging writes before a replica is promoted.
 	pgGrace             = 36 * time.Second
+	pgSwitchTimeout     = 3 * time.Minute  // a planned switchover that has not finished by then is given up (the primary is writable again)
+	pgSwitchStall       = 30 * time.Second // ... and one whose target stops making progress is given up after this
+	pgSwitchRetryAfter  = 10 * time.Minute // a rolling restart waits this long after a switchover was given up
 	pgReadyAge          = 20 * time.Second // a probe older than this does not make a replica serve reads
 	pgMaxLagBytes       = 16 << 20         // a replica further behind is not promoted without --force, and is not served reads
 	pgReadyLagMillis    = 5000             // a replica serves reads when it replays within this many ms
 	pgCommandTimeout    = 60 * time.Second
 	pgRebuildAfter      = 10 * time.Minute // a replica that answers but makes no progress this long is rebuilt from the primary
 	pgRebuildCooldown   = time.Hour        // ... and not again within this: something else is wrong
+	pgStartingGrace     = 30 * time.Minute // a replica whose Postgres is up but still starting (crash recovery, WAL replay) is rebuilt after this
+	pgRollGrace         = 30 * time.Minute // ... and one that restarted for a new spec is not rebuilt for this long
 	pgHoldAfterElection = 2 * pgGrace      // a new cluster leader waits for the members to report before it fails anything over
 	pgReplaceEvery      = time.Hour        // a group replaces a member that a rebuild did not mend at most this often
 	pgReplaceWindow     = 6 * time.Hour    // a member still broken this long after its rebuild is replaced; after that it is a new problem
@@ -154,9 +159,15 @@ type PGMember struct {
 	UnreadySince time.Time `json:"unready_since,omitempty"`
 	UnreadyLSN   uint64    `json:"unready_lsn,omitempty"`
 	RebuiltAt    time.Time `json:"rebuilt_at,omitempty"`
-	// Detail and Busy are what the node last said about the member (PGReport): soft state, like Probe.
-	Detail string `json:"detail,omitempty"`
-	Busy   bool   `json:"busy,omitempty"`
+	// Detail, Busy and Starting are what the node last said about the member (PGReport): soft state, like
+	// Probe. Starting: the container is up and Postgres is starting or recovering (it refuses connections).
+	Detail   string `json:"detail,omitempty"`
+	Busy     bool   `json:"busy,omitempty"`
+	Starting bool   `json:"starting,omitempty"`
+	// LastFail is the last order on this member that failed (op, why), and when: an order is forgotten
+	// as soon as it is settled, so this is what `pg status` can still say about it.
+	LastFail   string    `json:"last_fail,omitempty"`
+	LastFailAt time.Time `json:"last_fail_at,omitempty"`
 	// Following is the primary a replica was last told to follow (opFollow), OffTimeline that it is on an
 	// older timeline than the primary: it still follows a former primary and must not serve reads.
 	Following   string `json:"following,omitempty"`
@@ -191,6 +202,9 @@ type PGProbe struct {
 	// archived (-1 = never): pg_stat_archiver.
 	ArchiveFailed int64 `json:"archive_failed,omitempty"`
 	ArchivedAgo   int64 `json:"archived_ago,omitempty"`
+	// Started is when the server process started (zero = not reported): a probe from before a restart
+	// was taken from the old server.
+	Started time.Time `json:"started,omitempty"`
 }
 
 // PGCommand is an order for one member's agent, taken from a closed list (pg_agent.go).
@@ -212,6 +226,13 @@ type PGSwitch struct {
 	At         time.Time `json:"at"`
 	Step       string    `json:"step"`                  // readonly, catchup
 	ReadOnlyAt time.Time `json:"readonly_at,omitempty"` // when the primary became read-only
+	// LSN is the primary's WAL position once it was fenced, as the readonly order reported it (0 = it did
+	// not): the target must hold it before it is promoted. Best and BestAt track the target's progress.
+	LSN    uint64    `json:"lsn,omitempty"`
+	Best   uint64    `json:"best,omitempty"`
+	BestAt time.Time `json:"best_at,omitempty"`
+	// Wait says, in words, what the switchover is waiting for (pg status shows it, and the abort names it).
+	Wait string `json:"wait,omitempty"`
 }
 
 // PGEvent records a role change for `pg status`.

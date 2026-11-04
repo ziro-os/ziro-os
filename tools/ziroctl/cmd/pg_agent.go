@@ -67,7 +67,8 @@ const pgProbeSQL = `select pg_is_in_recovery()::int,
   (select coalesce(sum(xact_commit), 0) from pg_stat_database),
   (select max(age(datfrozenxid)) from pg_database),
   (select failed_count from pg_stat_archiver),
-  coalesce((select extract(epoch from now() - last_archived_time)::bigint from pg_stat_archiver), -1)`
+  coalesce((select extract(epoch from now() - last_archived_time)::bigint from pg_stat_archiver), -1),
+  coalesce(extract(epoch from now() - pg_postmaster_start_time())::bigint, 0)`
 
 // parseProbe reads the row pgProbeSQL returns.
 func parseProbe(out string) (PGReport, error) {
@@ -88,12 +89,16 @@ func parseProbe(out string) (PGReport, error) {
 	if len(f) == 12 { // ... and without the archiver
 		f = append(f, "0", "-1")
 	}
-	if len(f) != 14 {
+	if len(f) == 14 { // ... and without how long the server has been up (0 = unknown)
+		f = append(f, "0")
+	}
+	if len(f) != 15 {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	failed, err3 := strconv.ParseInt(f[12], 10, 64)
 	ago, err4 := strconv.ParseInt(f[13], 10, 64)
-	if err3 != nil || err4 != nil || failed < 0 || ago < -1 {
+	up, err5 := strconv.ParseInt(f[14], 10, 64)
+	if err3 != nil || err4 != nil || err5 != nil || failed < 0 || ago < -1 || up < 0 {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	var nums [4]int64
@@ -113,7 +118,7 @@ func parseProbe(out string) (PGReport, error) {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag, ReadOnly: f[5] == "1",
-		Received: f[6], SyncNames: f[7], Conns: nums[0], MaxConns: nums[1], Commits: nums[2], XIDAge: nums[3], ArchiveFailed: failed, ArchivedAgo: ago}, nil
+		Received: f[6], SyncNames: f[7], Conns: nums[0], MaxConns: nums[1], Commits: nums[2], XIDAge: nums[3], ArchiveFailed: failed, ArchivedAgo: ago, UpSecs: up}, nil
 }
 
 // pgProbe asks one member how it is.
@@ -134,6 +139,10 @@ const (
 	sqlEndClient = "select pg_terminate_backend(pid) from pg_stat_activity where backend_type = 'client backend' and pid <> pg_backend_pid()"
 	// sqlFence makes every commit wait for a standby that never exists: nothing more is acknowledged.
 	sqlFence = "alter system set synchronous_standby_names = '" + pgFenceName + "'"
+	// sqlSettle gives the reload and the terminated sessions a moment to take effect; sqlWALPos then reads
+	// the position every commit acknowledged before the fence is below: the target must hold it.
+	sqlSettle = "select pg_sleep(1)"
+	sqlWALPos = "select pg_current_wal_lsn()"
 )
 
 // sqlSetSync sets synchronous_standby_names to a validated value ("" = asynchronous).
@@ -167,7 +176,8 @@ func pgSteps(o PGOrder) ([][]string, error) {
 		// Read-only refuses new writes; the fence keeps the commits already under way from being
 		// acknowledged, so none of them can be lost when the replica takes over (a session can turn
 		// read-only off for itself; it cannot get past the fence).
-		return [][]string{psqlArgs(c, sqlSetRO, sqlFence, sqlReload, sqlEndClient)}, nil
+		// The last statement prints the WAL position; pgExecuteMsg reports it as the order's outcome.
+		return [][]string{psqlArgs(c, sqlSetRO, sqlFence, sqlReload, sqlEndClient, sqlSettle, sqlWALPos)}, nil
 	case opWritable:
 		return [][]string{psqlArgs(c, sqlResetRO, sqlSetSync(o.Arg), sqlReload)}, nil
 	case opFollow:
@@ -218,12 +228,19 @@ func pgSteps(o PGOrder) ([][]string, error) {
 // pgExecute runs an order. The container name comes from the master: it must be a cluster container
 // of this node's own naming scheme.
 func pgExecute(ctx context.Context, run pgRunner, o PGOrder) error {
+	_, err := pgExecuteMsg(ctx, run, o)
+	return err
+}
+
+// pgExecuteMsg runs an order and returns what it has to report: the WAL position a readonly order read
+// ("lsn=0/B000168"), empty for the others.
+func pgExecuteMsg(ctx context.Context, run pgRunner, o PGOrder) (string, error) {
 	if !strings.HasPrefix(o.Container, "zc-"+pgAppPrefix) || strings.ContainsAny(o.Container, " /\t\n") {
-		return fmt.Errorf("not a Postgres member container")
+		return "", fmt.Errorf("not a Postgres member container")
 	}
 	steps, err := pgSteps(o)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if o.Op == opReinit {
 		// The first step proves the member is a replica. When the container does not answer at all (it is
@@ -234,13 +251,15 @@ func pgExecute(ctx context.Context, run pgRunner, o PGOrder) error {
 		case err == nil:
 			steps = steps[1:]
 		case strings.Contains(out, "division by zero"):
-			return fmt.Errorf("reinit: not a replica: a primary is never rebuilt")
+			return "", fmt.Errorf("reinit: not a replica: a primary is never rebuilt")
 		default:
-			return pgReinitOffline(ctx, run, o)
+			return "", pgReinitOffline(ctx, run, o)
 		}
 	}
+	msg := ""
 	for i, argv := range steps {
-		if out, err := run(ctx, argv...); err != nil {
+		out, err := run(ctx, argv...)
+		if err != nil {
 			if pgRoleStepTolerated(o.Op, i, out) {
 				continue
 			}
@@ -248,10 +267,18 @@ func pgExecute(ctx context.Context, run pgRunner, o PGOrder) error {
 			if (o.Op == opDemote || o.Op == opReinit) && len(argv) > 4 && argv[4] == pgPgCtl {
 				continue
 			}
-			return fmt.Errorf("%s: %v: %s", o.Op, err, condenseRuntimeError(lastOutputLine(out)))
+			return "", fmt.Errorf("%s: %v: %s", o.Op, err, condenseRuntimeError(lastOutputLine(out)))
+		}
+		if o.Op == opReadonly {
+			// The position the primary had once it was fenced: the target must hold it before it is promoted.
+			if lsn := lastOutputLine(out); lsn != "" {
+				if _, err := parseLSN(lsn); err == nil {
+					msg = "lsn=" + lsn
+				}
+			}
 		}
 	}
-	return nil
+	return msg, nil
 }
 
 // pgReinitOffline asks for a rebuild of a member whose container cannot be asked: the entry script finds
@@ -322,10 +349,24 @@ type pgAgent struct {
 }
 
 type pgStamped struct {
-	r      PGReport
-	at     time.Time
-	detail string
-	busy   bool
+	r        PGReport
+	at       time.Time
+	detail   string
+	busy     bool
+	starting bool
+	whyAt    time.Time // when detail was last worked out (pgWhy reads files and asks the runtime twice)
+}
+
+const (
+	pgWhyEvery      = 15 * time.Second // a member that does not answer is looked into at most this often
+	pgProbeParallel = 4                // members probed at once: one slow container does not hold up the others
+)
+
+// pgStarting: the probe's error says Postgres is up but not accepting connections yet (it is starting, or
+// replaying WAL to a consistent state), which is no reason to treat the member as stuck.
+func pgStarting(probeErr string) bool {
+	e := strings.ToLower(probeErr)
+	return strings.Contains(e, "starting up") || strings.Contains(e, "not yet accepting connections") || strings.Contains(e, "in recovery mode")
 }
 
 type pgDone struct {
@@ -339,36 +380,67 @@ func newPGAgent() *pgAgent {
 
 // probeAll probes the member containers this node should run.
 func (p *pgAgent) probeAll(ctx context.Context, desired []Assignment, now time.Time) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, pgProbeParallel)
 	for _, a := range desired {
 		if !a.PG {
 			continue
 		}
-		cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		r, err := pgProbe(cctx, p.run, a.Name)
-		cancel()
-		r.App = a.App
-		if err != nil {
-			r = PGReport{App: a.App}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(a Assignment) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p.probeOne(ctx, a, now)
+		}(a)
+	}
+	wg.Wait()
+}
+
+// probeOne probes one member. A member that does not answer is looked into as well: whether a copy is
+// running, what state its container is in, what the entry script last said, and whether Postgres is simply
+// still starting. Without that `pg status` can only say "not answering".
+func (p *pgAgent) probeOne(ctx context.Context, a Assignment, now time.Time) {
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	r, err := pgProbe(cctx, p.run, a.Name)
+	cancel()
+	r.App = a.App
+	var detail string
+	var busy, starting bool
+	var whyAt time.Time
+	if err != nil {
+		r = PGReport{App: a.App}
+		p.mu.Lock()
+		prev := p.reports[a.App]
+		p.mu.Unlock()
+		starting = pgStarting(err.Error())
+		if now.Sub(prev.whyAt) < pgWhyEvery {
+			detail, busy, whyAt = prev.detail, prev.busy, prev.whyAt
 		} else {
-			r.DiskPct = diskUsedPct(dataDir(a.App, a.Replica, pgDataPath))
-			if stanza := a.Env["ZIRO_PG_STANZA"]; stanza != "" && !r.Recovery {
-				p.backupInfo(ctx, a, stanza, now)
+			wctx, wcancel := context.WithTimeout(ctx, 4*time.Second)
+			detail, busy = pgWhy(wctx, p.run, a, now)
+			wcancel()
+			whyAt = now
+			if e := condenseRuntimeError(lastOutputLine(err.Error())); e != "" && !starting {
+				detail += " (probe: " + sanitizeLabel(e, 80) + ")"
 			}
 		}
-		p.mu.Lock()
-		if bi := p.backups[a.App]; bi != nil && err == nil && !r.Recovery {
-			r.Backup = bi
+	} else {
+		r.DiskPct = diskUsedPct(dataDir(a.App, a.Replica, pgDataPath))
+		if stanza := a.Env["ZIRO_PG_STANZA"]; stanza != "" && !r.Recovery {
+			p.backupInfo(ctx, a, stanza, now)
 		}
-		p.mu.Unlock()
-		p.mu.Lock()
-		if cur, ok := p.reports[a.App]; err != nil && ok {
-			// A failed probe keeps the last good one (with its age): the master judges by age.
-			r = cur.r
-			p.reports[a.App] = pgStamped{r: r, at: cur.at}
-		} else {
-			p.reports[a.App] = pgStamped{r: r, at: now}
-		}
-		p.mu.Unlock()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if bi := p.backups[a.App]; bi != nil && err == nil && !r.Recovery {
+		r.Backup = bi
+	}
+	if cur, ok := p.reports[a.App]; err != nil && ok {
+		// A failed probe keeps the last good one (with its age): the master judges by age.
+		p.reports[a.App] = pgStamped{r: cur.r, at: cur.at, detail: detail, busy: busy, starting: starting, whyAt: whyAt}
+	} else {
+		p.reports[a.App] = pgStamped{r: r, at: now, detail: detail, busy: busy, starting: starting, whyAt: whyAt}
 	}
 }
 
@@ -380,7 +452,7 @@ func (p *pgAgent) report(now time.Time) ([]PGReport, []PGResult) {
 	var reps []PGReport
 	for app, s := range p.reports {
 		r := s.r
-		r.App, r.AgeMs, r.Detail, r.Busy = app, now.Sub(s.at).Milliseconds(), s.detail, s.busy
+		r.App, r.AgeMs, r.Detail, r.Busy, r.Starting = app, now.Sub(s.at).Milliseconds(), s.detail, s.busy, s.starting
 		reps = append(reps, r)
 	}
 	sort.Slice(reps, func(i, j int) bool { return reps[i].App < reps[j].App })
@@ -439,8 +511,8 @@ func (p *pgAgent) submit(ctx context.Context, orders []PGOrder, now time.Time) {
 			}
 			octx, cancel := context.WithTimeout(ctx, pgCommandTimeout-5*time.Second)
 			defer cancel()
-			err := pgExecute(octx, p.run, o)
-			res := PGResult{ID: o.ID, OK: err == nil}
+			msg, err := pgExecuteMsg(octx, p.run, o)
+			res := PGResult{ID: o.ID, OK: err == nil, Msg: msg}
 			if err != nil {
 				res.Msg = err.Error()
 			}

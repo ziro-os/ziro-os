@@ -130,7 +130,13 @@ Credentials are never served over the API.
 - **Ranking and timelines.** The candidate is the replica holding the most WAL, received or replayed. A replica on
   an older timeline than the primary leaves `-ro` and the standby vote. After a promotion every replica is told to
   follow the new primary by name (`follow`, primary_conninfo plus reload).
-- **Switchover.** The read-only step also fences commits, and an abort restores the standby list.
+- **Switchover.** The read-only step also fences commits, and an abort restores the standby list. The step reports
+  the primary's WAL position once fenced, the target is promoted when it holds it (any probe of the target will do:
+  positions only grow, so the two members' probes need not be paired), and the switchover is refused up front for
+  a target that is not streaming, on an older timeline or far behind, abandoned after 30 s without progress or 3
+  minutes in all, with the step and the numbers in the abort. A rolling restart waits 10 minutes after an abort.
+- **Why a member does not answer.** The node looks into a member whose probe fails (state, last start error,
+  probe error) and reports whether Postgres is still starting; `pg status` shows both.
 - **Rolling changes.** A member whose spec changes takes it when it is its turn. Replicas go one at a time, each back
   and caught up first, and the primary goes last after a switchover to an updated replica.
 - **Rebuild and replace.** A member that a rebuild did not mend is replaced, not rebuilt the same way again, when
@@ -153,6 +159,12 @@ Credentials are never served over the API.
   `pgSetPooler`, `pgBackupEnable`, `pgSetMaintenance`, ...) on a copy of the state to plan, and on the real state
   in one transaction to apply. A plan with any refused change applies nothing. `pg get` exports a file whose plan
   is all `=`.
+- **Restarts and reboots.** A member that took a new spec is "back" when its new server answers (the probe carries
+  the server's uptime, since the old container answers until the node stops it) and is within 16 MiB of the primary;
+  nothing rolls while a new cluster leader has no probes. A replica that is replaying WAL is rebuilt after 30 minutes
+  and not 10. Replicas keep at least the primary's `max_connections`, `max_worker_processes` and the like, read at
+  start. Before a reboot, `pg stop-local` asks each member for a fast shutdown from outside the container (not
+  `nerdctl stop`, which would stop the runtime restarting it at boot); init and `ziroctl upgrade --reboot` run it.
 - **Maintenance window.** `PGCluster.Maintenance` is a cron schedule (UTC) and a duration; `WindowUntil` opens it by
   hand. Outside it, `pgMayRoll` holds a serving member's new spec, and the group lists the waiting members.
   Failover, switchover, repairs, members that are down and restarts for a new secret (`ZIRO_PG_SECRET_EPOCH`) never

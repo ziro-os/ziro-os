@@ -152,6 +152,26 @@ why_not() {
 	echo "${err:-it answers but is not a primary}"
 }
 
+# hot_standby_floor prints the settings a hot standby must not have lower than its primary: Postgres refuses to start
+# a replica whose max_connections, max_worker_processes, max_wal_senders, max_prepared_transactions or
+# max_locks_per_transaction are below the primary's (it checks against the control file the copy brought). A
+# replica restarts before its primary when a new spec rolls out and when the limits shrink, so it asks the
+# primary for its values and keeps the higher of the two: the primary then restarts with its own, lower ones,
+# which a replica with higher ones may keep. Without a primary to ask, the configured values stand.
+hot_standby_floor() {
+	local rows name value mine
+	rows=$(psql_at "$rw_host" -Atc "select name || '=' || setting from pg_settings where name in ('max_connections','max_worker_processes','max_wal_senders','max_prepared_transactions','max_locks_per_transaction')" 2>/dev/null) || return 0
+	while IFS='=' read -r name value; do
+		case "$name" in max_connections | max_worker_processes | max_wal_senders | max_prepared_transactions | max_locks_per_transaction) ;; *) continue ;; esac
+		case "$value" in '' | *[!0-9]*) continue ;; esac
+		mine=$(sed -n "s/^$name = \([0-9][0-9]*\)\$/\1/p" "$CFG/postgresql.conf" | tail -n 1)
+		if [ -z "$mine" ] || [ "$value" -gt "$mine" ]; then
+			echo "$name = $value"
+			log "raising $name to the primary's $value (configured: ${mine:-the default}): a replica may not have less" >&2
+		fi
+	done <<<"$rows"
+}
+
 # Backups (pg_backup.go): pgBackRest's logs, archive spool and locks live on the data volume.
 stanza="${ZIRO_PG_STANZA:-}"
 case "$stanza" in *[!a-z0-9]*) stanza= ;; esac
@@ -341,6 +361,7 @@ conninfo="host=${follow:-$rw_host} port=$PORT user=replicator application_name=$
 [ -n "$tls" ] && conninfo="$conninfo sslmode=verify-ca sslrootcert=$TLS/ca.crt"
 {
 	cat "$CFG/postgresql.conf"
+	if [ "$role" = replica ]; then hot_standby_floor; fi
 	echo "primary_conninfo = '$conninfo'"
 	echo "primary_slot_name = '$slot'"
 	if [ -n "$tls" ]; then

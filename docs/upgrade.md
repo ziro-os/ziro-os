@@ -70,7 +70,9 @@ The command stops at the first failed step, and nothing on the host changes befo
    The SHA-256 is computed while streaming.
 6. **Verify.** The image must be listed in the release `SHA256SUMS` and must match it. `--force` never skips this.
 7. **Snapshot.** Creates `/var/backups/ziro/ziro-backup-preupgrade-<version>-<time>.tar.gz`.
-8. **Apply**, then reboot (with `--reboot`, or when you answer the prompt).
+8. **Apply**, then reboot (with `--reboot`, or when you answer the prompt). Before it reboots, Postgres members
+   running on the host are asked for a fast shutdown (`ziroctl pg stop-local`, up to 2 minutes), so they do
+   not replay WAL for minutes when the host is back ([Postgres](postgres.md#rebooting-a-node)).
 
 `--force` lets the upgrade continue past failed doctor or config checks (steps 2–3) only.
 

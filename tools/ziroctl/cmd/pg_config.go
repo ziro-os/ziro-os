@@ -95,6 +95,10 @@ func pgTuning(res *Resources, citus bool, version string) string {
 	set("min_wal_size", "1GB")
 	set("max_wal_size", "4GB")
 	set("checkpoint_timeout", "15min")
+	// After a crash (a host reboot kills the members) recovery first makes the data directory durable. One
+	// syncfs of the volume does it in seconds; the default fsyncs every file, which on a large database takes
+	// minutes during which the member refuses connections.
+	set("recovery_init_sync_method", "syncfs")
 	set("checkpoint_completion_target", 0.9)
 	set("max_wal_senders", 20)
 	set("max_replication_slots", 20)

@@ -354,6 +354,20 @@ sleep 3
 fenced && fail "a primary with nothing to fail over to was fenced"
 ok "a primary with no replica to fail over to is not fenced"
 
+# 15b. a replica configured with less than its primary (a roll starts replicas before the primary, and limits
+# can shrink): Postgres would refuse to start it, so it keeps the primary's values
+member m7
+role m7 replica 2
+echo "max_worker_processes = 4" >>"$work/m7/cfg/postgresql.conf"
+primary_workers=$(q m2 'show max_worker_processes')
+[ "$primary_workers" -gt 4 ] || fail "the test needs a primary with more than 4 worker processes (has $primary_workers)"
+start m7 127.0.0.17 replica
+wait_for "m7 to start although it is configured with fewer workers than its primary" ready m7
+wait_for "m7 to stream" streaming m7
+[ "$(q m7 'show max_worker_processes')" = "$primary_workers" ] || fail "m7 runs $(q m7 'show max_worker_processes') worker processes, the primary $primary_workers"
+grep -q "raising max_worker_processes to the primary's $primary_workers (configured: 4)" "$work/m7/log" || fail "the floor was not logged"
+ok "a replica configured with less than its primary keeps the primary's values and starts"
+
 # 16. backups: WAL goes to the repository, and a restore to a point in time makes a new primary
 stop_clean m1 2>/dev/null || true
 stop_clean m2 2>/dev/null || true

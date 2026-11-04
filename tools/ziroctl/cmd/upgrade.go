@@ -1209,6 +1209,9 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 
 	if upgradeReboot || (!upgradeYes && confirm("Reboot now to finish? [y/N]: ")) {
 		fmt.Println("🔄 Rebooting...")
+		// Databases first: init ends everything with SIGTERM and then SIGKILL three seconds later, and a
+		// Postgres killed that way replays WAL for minutes when the host is back.
+		pgStopLocalBeforeReboot()
 		return exec.Command("/sbin/reboot").Run()
 	}
 	fmt.Println("Reboot to start the new version.")
