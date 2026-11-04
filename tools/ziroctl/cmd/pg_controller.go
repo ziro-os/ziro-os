@@ -214,6 +214,8 @@ type PGReport struct {
 	// script's last error); Busy: a base backup or rewind is running in it, so it is not stuck.
 	Detail string `json:"detail,omitempty"`
 	Busy   bool   `json:"busy,omitempty"`
+	// Starting: the container is up and Postgres is starting or recovering, so it refuses connections.
+	Starting bool `json:"starting,omitempty"`
 }
 
 // PGResult is the outcome of an order.
@@ -260,7 +262,7 @@ func pgIngest(st *ClusterState, nodeID string, reports []PGReport, results []PGR
 		if m == nil || m.Node != nodeID {
 			continue
 		}
-		m.Detail, m.Busy = sanitizeLabel(r.Detail, 200), r.Busy
+		m.Detail, m.Busy, m.Starting = sanitizeLabel(r.Detail, 200), r.Busy, r.Starting
 		if !r.OK {
 			m.Probe.OK = false // the time of the last good probe stays: failure is judged by its age
 			continue
@@ -645,7 +647,7 @@ func pgWithoutProbes(pg map[string]*PGCluster) map[string]*PGCluster {
 			g.Members = append([]PGMember(nil), g.Members...)
 			for j := range g.Members {
 				g.Members[j].Probe = PGProbe{}
-				g.Members[j].Detail, g.Members[j].Busy = "", false
+				g.Members[j].Detail, g.Members[j].Busy, g.Members[j].Starting = "", false, false
 				// The progress timer moves with every probe of a replica that is catching up: soft too.
 				g.Members[j].UnreadySince, g.Members[j].UnreadyLSN = time.Time{}, 0
 			}
@@ -739,12 +741,15 @@ func pgSettle(c *PGCluster, g *PGGroup, m *PGMember, now time.Time) {
 		pgCitusSettle(c, g, m, cmd, now)
 	}
 	if !cmd.OK {
+		m.LastFail, m.LastFailAt = cmd.Op+": "+cmd.Msg, now
 		// A command that keeps failing is re-issued every pass: one alert per quarter hour, not one per try.
 		if g.last(now, 15*time.Minute, "cmdfail-"+cmd.Op+"-"+m.ID) {
 			g.alert(now, "medium", "%s on %s failed: %s", cmd.Op, m.ID, cmd.Msg)
 		} else {
 			g.note(now, "%s on %s failed again: %s", cmd.Op, m.ID, cmd.Msg)
 		}
+	} else if strings.HasPrefix(m.LastFail, cmd.Op+": ") {
+		m.LastFail, m.LastFailAt = "", time.Time{} // the same order worked since
 	}
 	m.Cmd = nil
 }
@@ -986,17 +991,61 @@ func pgStartSwitchover(c *PGCluster, g *PGGroup, to string, now time.Time) error
 	case !t.fresh(now) || !t.Probe.Recovery:
 		return fmt.Errorf("%s is not answering", to)
 	}
+	// The primary is fenced for as long as the switchover lasts: do not start one that cannot finish.
+	if why := pgTakeoverBlock(p, t, now); why != "" {
+		return fmt.Errorf("%s %s, so it cannot take over now (ziroctl pg status %s)", to, why, c.Name)
+	}
 	g.Switch = &PGSwitch{To: to, At: now, Step: "readonly"}
 	g.note(now, "switchover from %s to %s", p.ID, to)
 	return nil
 }
 
+// pgTakeoverBlock says why a replica cannot take over from the primary now ("" = it can): it follows the
+// primary's timeline, streams from it and is not far behind.
+func pgTakeoverBlock(p, t *PGMember, now time.Time) string {
+	switch {
+	case !t.fresh(now) || !t.Probe.Recovery:
+		return "is not answering"
+	case t.OffTimeline:
+		return "is on an older timeline than the primary"
+	case !t.Probe.Streaming:
+		return "is not streaming from the primary"
+	case t.Probe.LagMs > pgReadyLagMillis:
+		return fmt.Sprintf("is %dms behind the primary", t.Probe.LagMs)
+	case p.Probe.LSN > t.pos() && p.Probe.LSN-t.pos() > pgMaxLagBytes:
+		return fmt.Sprintf("is %s behind the primary", humanBytes(p.Probe.LSN-t.pos()))
+	}
+	return ""
+}
+
+// pgSwitchAbortedKey records when a switchover was last given up: a rolling restart does not start the
+// next one at once, which would fence the primary again for as long.
+const pgSwitchAbortedKey = "switch-aborted"
+
 func pgAbortSwitch(c *PGCluster, g *PGGroup, p *PGMember, now time.Time, why string) {
+	if g.Notes == nil {
+		g.Notes = map[string]time.Time{}
+	}
+	g.Notes[pgSwitchAbortedKey] = now
 	g.alert(now, "medium", "switchover aborted: %s", why)
 	g.Switch = nil
+	// A primary whose order slot is busy is made writable by pgSelfHeal as soon as it is free.
 	if p != nil && p.Cmd == nil {
 		p.issue(opWritable, pgSyncSpec(c, g), g.Epoch, now)
 	}
+}
+
+// pgReportedLSN reads the WAL position a readonly order reports ("lsn=0/B000168").
+func pgReportedLSN(msg string) uint64 {
+	v, ok := strings.CutPrefix(strings.TrimSpace(msg), "lsn=")
+	if !ok {
+		return 0
+	}
+	n, err := parseLSN(v)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func pgSwitchover(c *PGCluster, g *PGGroup, now time.Time) {
@@ -1006,32 +1055,63 @@ func pgSwitchover(c *PGCluster, g *PGGroup, now time.Time) {
 		pgAbortSwitch(c, g, p, now, "the primary or the target changed")
 		return
 	}
-	if now.Sub(sw.At) > 2*time.Minute {
-		pgAbortSwitch(c, g, p, now, "timed out")
+	if elapsed := now.Sub(sw.At); elapsed > pgSwitchTimeout {
+		pgAbortSwitch(c, g, p, now, fmt.Sprintf("timed out after %s in step %s: %s", elapsed.Round(time.Second), sw.Step, sw.Wait))
 		return
 	}
 	switch sw.Step {
 	case "readonly":
 		if p.Cmd == nil {
 			p.issue(opReadonly, "", g.Epoch, now)
+			sw.Wait = fmt.Sprintf("making %s read-only", p.ID)
 			return
 		}
 		if p.Cmd.Op != opReadonly || !p.Cmd.Done {
+			if p.Cmd.Op != opReadonly {
+				sw.Wait = fmt.Sprintf("%s is still busy with %s", p.ID, p.Cmd.Op)
+			} else {
+				sw.Wait = fmt.Sprintf("making %s read-only: the order has been out for %s", p.ID, now.Sub(p.Cmd.At).Round(time.Second))
+			}
 			return
 		}
-		ok := p.Cmd.OK
+		ok, msg := p.Cmd.OK, p.Cmd.Msg
 		p.Cmd = nil
 		if !ok {
-			pgAbortSwitch(c, g, p, now, "could not make the primary read-only")
+			pgAbortSwitch(c, g, p, now, "could not make the primary read-only: "+msg)
 			return
 		}
-		sw.Step, sw.ReadOnlyAt = "catchup", now
+		sw.Step, sw.ReadOnlyAt, sw.LSN = "catchup", now, pgReportedLSN(msg)
+		sw.Best, sw.BestAt = t.pos(), now
 	case "catchup":
-		// The primary is read-only: its position no longer moves in a way that matters. The target
-		// must have replayed it, as seen by probes taken after the primary stopped accepting writes.
-		if p.Probe.OK && t.Probe.OK && p.Probe.At.After(sw.ReadOnlyAt) && !t.Probe.At.Before(p.Probe.At) && t.Probe.Recovery && t.Probe.LSN >= p.Probe.LSN {
+		// The primary is fenced: no commit is acknowledged from here on, so its WAL position cannot move
+		// in a way that matters. The target must hold everything up to it. Any probe of the target will
+		// do (positions only grow), so the two members' probes need not be taken at the same time. The
+		// readonly order reports the position (read a second after the fence); a probe of the primary taken
+		// after the fence is a later reading and raises it when there is one, but is not waited for.
+		need, have := sw.LSN, sw.LSN != 0
+		if p.Probe.OK && p.Probe.At.After(sw.ReadOnlyAt) {
+			need, have = max(need, p.Probe.LSN), true
+		}
+		if !have {
+			sw.Wait = fmt.Sprintf("waiting for a probe of %s taken after it became read-only (its last is %s old)", p.ID, now.Sub(p.Probe.At).Round(time.Second))
+			return
+		}
+		if !t.fresh(now) || !t.Probe.Recovery {
+			sw.Wait = fmt.Sprintf("%s is not answering (its last probe is %s old)", t.ID, now.Sub(t.Probe.At).Round(time.Second))
+		} else if t.pos() >= need {
 			pgPromote(c, g, t, now, "planned switchover")
 			g.Switch = nil
+			return
+		} else {
+			sw.Wait = fmt.Sprintf("waiting for %s to receive up to %s: it is at %s (%s behind), streaming=%t", t.ID, formatLSN(need), formatLSN(t.pos()), humanBytes(need-t.pos()), t.Probe.Streaming)
+		}
+		// A target that makes no progress will not get there: give up now instead of keeping commits blocked
+		// until the time is out.
+		if t.fresh(now) && t.pos() > sw.Best {
+			sw.Best, sw.BestAt = t.pos(), now
+		}
+		if stalled := now.Sub(sw.BestAt); stalled > pgSwitchStall {
+			pgAbortSwitch(c, g, p, now, fmt.Sprintf("%s made no progress for %s in step catchup: %s", t.ID, stalled.Round(time.Second), sw.Wait))
 		}
 	}
 }
@@ -1325,6 +1405,9 @@ func pgMayRoll(c *PGCluster, g *PGGroup, m *PGMember, pending map[string]bool, u
 	}
 	if target == nil {
 		return true // nothing to hand over to: a restart in place
+	}
+	if at, ok := g.Notes[pgSwitchAbortedKey]; ok && now.Sub(at) < pgSwitchRetryAfter {
+		return false // a switchover was just given up: not again at once (the primary was fenced for all that time)
 	}
 	if err := pgStartSwitchover(c, g, target.ID, now); err == nil {
 		g.note(now, "%s takes a new configuration: switching over to %s first", m.ID, target.ID)

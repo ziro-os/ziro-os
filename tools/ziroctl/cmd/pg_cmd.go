@@ -151,6 +151,9 @@ var pgStatusCmd = &cobra.Command{
 					lag := "-"
 					if m.Role != pgPrimary && m.LSN != "" {
 						lag = fmt.Sprintf("%dms", m.LagMs)
+						if m.LagBytes > 0 {
+							lag += ", " + humanBytes(m.LagBytes) + " behind"
+						}
 					}
 					fmt.Printf("  %-5s %-14s %-9s %-12s %-12s %s\n", m.ID, m.Node, m.Role, m.State, m.LSN, lag)
 				}

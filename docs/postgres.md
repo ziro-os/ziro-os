@@ -189,6 +189,13 @@ is an alert in the category `database` and is listed in `ziroctl pg status`.
 Repeated failures of the same command raise one alert per quarter hour, not one per attempt, and `ziroctl pg status`
 shows what each group is waiting for.
 
+`ziroctl pg status` also says why a member does not answer. Each node looks into a member whose probe fails (at most
+every 15 seconds) and reports its container's state, the last error its start script recorded or the last line of
+its log, and the probe's own error. A member whose Postgres is up but still starting or replaying WAL shows as
+`starting`, and is not told to be rebuilt. The last order that failed on a member stays in the status for an hour
+(`m3: reinit: ...`), and the LAG column shows how many bytes a replica is behind next to the milliseconds. The
+members of a node are probed in parallel, so one slow container does not hold up the others.
+
 ### When the controller does not fail over
 
 `ziroctl pg status shop` ends each group with lines starting `!` that say why it is not healthy: a paused
@@ -236,6 +243,16 @@ The primary is made read-only and fenced: commits under way wait instead of bein
 even from a session that turned read-only off for itself. The target catches up and is promoted, `-rw` moves, and
 the old primary becomes a replica. Writes pause for a few seconds. Use it before maintenance on the primary's node.
 An aborted switchover gives the primary its standby list back.
+
+A switchover is refused up front when the target cannot take over: it is not answering, not streaming from the
+primary, on an older timeline, or more than 16 MiB (or 5 s) behind. The primary is then not fenced at all. The
+primary reports the WAL position it had once it was fenced, and the target is promoted as soon as it holds that
+position, whenever its own last probe was taken. The switchover is given up, and the primary made writable again,
+when the target stops receiving for 30 seconds, or after 3 minutes in all. While it runs, `pg status` says what it
+is waiting for (`switchover to m3 in progress (catchup, 12s): waiting for m3 to receive up to 0/B000168: it is at
+0/B0000F0 (120 B behind), streaming=true`), and the abort in `pg events` names the step and the same numbers. A
+rolling restart whose switchover was given up does not start another for 10 minutes. A paused controller refuses
+a switchover.
 
 ### Upgrades and configuration changes
 

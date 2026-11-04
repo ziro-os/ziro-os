@@ -130,7 +130,13 @@ Credentials are never served over the API.
 - **Ranking and timelines.** The candidate is the replica holding the most WAL, received or replayed. A replica on
   an older timeline than the primary leaves `-ro` and the standby vote. After a promotion every replica is told to
   follow the new primary by name (`follow`, primary_conninfo plus reload).
-- **Switchover.** The read-only step also fences commits, and an abort restores the standby list.
+- **Switchover.** The read-only step also fences commits, and an abort restores the standby list. The step reports
+  the primary's WAL position once fenced, the target is promoted when it holds it (any probe of the target will do:
+  positions only grow, so the two members' probes need not be paired), and the switchover is refused up front for
+  a target that is not streaming, on an older timeline or far behind, abandoned after 30 s without progress or 3
+  minutes in all, with the step and the numbers in the abort. A rolling restart waits 10 minutes after an abort.
+- **Why a member does not answer.** The node looks into a member whose probe fails (state, last start error,
+  probe error) and reports whether Postgres is still starting; `pg status` shows both.
 - **Rolling changes.** A member whose spec changes takes it when it is its turn. Replicas go one at a time, each back
   and caught up first, and the primary goes last after a switchover to an updated replica.
 - **TLS and access.** New clusters get their own CA and a server certificate. Members replicate with `verify-ca`.

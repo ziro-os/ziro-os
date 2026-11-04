@@ -28,6 +28,9 @@ type pgWorld struct {
 	broken       map[string]bool
 	busy         map[string]bool
 	rebuildFixes bool
+	// late: member apps whose probes do not reach the controller (a slow node, a probe that hangs) while
+	// Postgres itself keeps running and replicating.
+	late map[string]bool
 }
 
 type simPG struct {
@@ -50,7 +53,7 @@ func newPGWorld(t *testing.T, nodes int) *pgWorld {
 		st.Nodes = append(st.Nodes, ClusterNode{ID: fmt.Sprintf("n%d", i), Status: "Ready", LastSeen: now, PodCIDR: fmt.Sprintf("10.200.%d.0/24", i), MeshIP: fmt.Sprintf("10.100.0.%d", i)})
 	}
 	w := &pgWorld{t: t, st: st, now: now, down: map[string]bool{}, pg: map[string]*simPG{}, done: map[string]bool{},
-		fails: map[string]bool{}, stalled: map[string]bool{}, broken: map[string]bool{}, busy: map[string]bool{}}
+		fails: map[string]bool{}, stalled: map[string]bool{}, broken: map[string]bool{}, busy: map[string]bool{}, late: map[string]bool{}}
 	old := pgNow
 	pgNow = func() time.Time { return w.now }
 	t.Cleanup(func() { pgNow = old })
@@ -116,7 +119,7 @@ func (w *pgWorld) step(d time.Duration) {
 					if m.Node == n.ID && w.busy[app] {
 						reports = append(reports, PGReport{App: app, Busy: true, Detail: "container running (exit 0)"})
 					}
-					if s := w.pg[app]; s != nil && s.up && m.Node == n.ID {
+					if s := w.pg[app]; s != nil && s.up && m.Node == n.ID && !w.late[app] {
 						primaryUp := false
 						for _, o := range w.pg {
 							primaryUp = primaryUp || o.up && o.primary
@@ -221,6 +224,8 @@ func (w *pgWorld) exec(o PGOrder) PGResult {
 		}
 	case opReadonly:
 		s.readonly = true
+		// The real order reports the WAL position the primary had once it was fenced.
+		return PGResult{ID: o.ID, OK: true, Msg: "lsn=" + formatLSN(s.lsn)}
 	case opWritable:
 		s.readonly = false
 	case opSetSync:
