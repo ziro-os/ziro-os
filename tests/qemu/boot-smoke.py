@@ -808,12 +808,18 @@ def main():
                   '"exec":"/usr/bin/tail","args":"-f /dev/null","pidfile":"/run/ziro-capsvc.pid","logfile":"/var/log/capsvc.log",'
                   '"user":"nobody","caps":["net_admin","net_raw"]}]}')
         con.run(f"printf '%s' '{capsvc}' > /tmp/capsvc.json && ziroctl plugin install -f /tmp/capsvc.json >/dev/null 2>&1", timeout=120)
+        # Wait until the launcher has become the daemon (Name tail): it sets no_new_privs just before its exec, so
+        # waiting on that alone can stop in between. On arm64 under TCG, right after the memory hog above, the
+        # launcher can take more than 30 s to get there (v1.0.38 was caught at the exec, uid and caps already set).
         ok, out = retry(con, "P=$(cat /run/ziro-capsvc.pid); grep -E '^(Name|Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/$P/status",
-                        lambda rc, o: "NoNewPrivs:\t1" in o, 30)
+                        lambda rc, o: "Name:\ttail" in o, 120)
         st = {k: " ".join(v.split()) for k, _, v in (l.partition(":") for l in out.splitlines())}
-        check("service caps: runs as nobody with only net_admin+net_raw, no_new_privs set",
-              ok and st.get("Name") == "tail" and st.get("Uid") == "65534 65534 65534 65534"
-              and all(st.get(k) == "0000000000003000" for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")), out)
+        passed = (ok and st.get("Name") == "tail" and st.get("Uid") == "65534 65534 65534 65534" and st.get("NoNewPrivs") == "1"
+                  and all(st.get(k) == "0000000000003000" for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")))
+        if not passed:  # say why: a launcher that keeps failing shows in the service status and its log
+            out += "\n" + con.run("ziroctl service status capsvc 2>&1 | tail -3; tail -5 /var/log/capsvc.log; cat /proc/loadavg")[1]
+        check("service caps: runs as nobody with only net_admin+net_raw, no_new_privs set", passed,
+              " ".join(out.split()), limit=600)
         con.run("ziroctl plugin disable capsvc --purge >/dev/null 2>&1; rm -f /tmp/capsvc.json", timeout=120)
 
         # Tailscale module wiring (no tailnet in CI): a stand-in module plus fake binaries exercise what the real
