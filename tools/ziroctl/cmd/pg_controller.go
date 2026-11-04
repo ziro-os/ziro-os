@@ -576,9 +576,11 @@ func pgNodeReady(st *ClusterState, id string) bool {
 
 // pgAutoRebuild rebuilds a replica that has made no progress for pgRebuildAfter (twice that for one that
 // has never reported: its first image pull and base backup take time), one at a time and only while the
-// primary answers (it is the copy source). A member that still does not work between one and six hours
-// after its rebuild is replaced by a new one (at most one replacement per pgReplaceEvery): the cause is
-// then not its data. Later than that it is a new problem and is rebuilt again.
+// primary answers (it is the copy source). A member that still does not work between pgRebuildCooldown and
+// pgReplaceWindow after its rebuild is replaced by a new one: the cause is then not its data, and the same
+// rebuild again would fail the same way. The replacement waits, and says what for, when it is not safe or not
+// its turn (see pgReplaceBlock); it is never turned into one more identical rebuild. Later than the window it
+// is a new problem and is rebuilt again.
 func pgAutoRebuild(c *PGCluster, g *PGGroup, now time.Time) {
 	p := g.primary()
 	if p == nil || !p.fresh(now) {
@@ -606,18 +608,48 @@ func pgAutoRebuild(c *PGCluster, g *PGGroup, now time.Time) {
 	}
 	if !worst.RebuiltAt.IsZero() && now.Sub(worst.RebuiltAt) < pgRebuildCooldown {
 		if g.last(now, 30*time.Minute, "rebuilt-"+worst.ID) {
-			g.alert(now, "high", "%s was rebuilt less than an hour ago and still does not follow the primary: it is replaced if that still holds after the hour, otherwise it is left to an operator (ziroctl pg status %s)", worst.ID, c.Name)
+			g.alert(now, "high", "%s was rebuilt less than an hour ago and still does not follow the primary: after the hour it is replaced by a new member (when another replica is healthy and the group has not just replaced one); until then it is left alone (ziroctl pg status %s)", worst.ID, c.Name)
 		}
 		return
 	}
-	if !worst.RebuiltAt.IsZero() && now.Sub(worst.RebuiltAt) < pgReplaceEvery && g.last(now, pgReplaceEvery, "autoreplace") {
+	if !worst.RebuiltAt.IsZero() && now.Sub(worst.RebuiltAt) < pgReplaceWindow {
+		why := pgReplaceBlock(g, worst, now)
+		if why == "" && !g.last(now, pgReplaceEvery, "autoreplace") {
+			why = fmt.Sprintf("the group replaced a member at %s and replaces one at a time (next from %s)", g.Notes["autoreplace"].Format("15:04"), g.Notes["autoreplace"].Add(pgReplaceEvery).Format("15:04"))
+		}
+		if why != "" {
+			if g.last(now, 30*time.Minute, "replace-wait-"+worst.ID) {
+				g.alert(now, "high", "%s still does not work after a rebuild and is not replaced yet: %s (ziroctl pg status %s)", worst.ID, why, c.Name)
+			}
+			return
+		}
 		worst.Draining = true
 		g.alert(now, "high", "%s still does not work after a rebuild: replacing it with a new member", worst.ID)
 		return
 	}
+	worst.From = "" // the copy comes from the primary: whatever member it was taken from before may be the problem
 	worst.issue(opReinit, "", g.Epoch, now)
 	worst.RebuiltAt, worst.UnreadySince = now, time.Time{}
 	g.alert(now, "medium", "%s has not followed the primary for %s: rebuilding it from the primary", worst.ID, pgRebuildAfter)
+}
+
+// pgReplaceBlock says why a member that a rebuild did not mend is not replaced now ("" = it may be). When
+// every other replica is broken too, the fault is the primary's, the network's or the cluster's and not this
+// member's, and replacing members one after another would not help.
+func pgReplaceBlock(g *PGGroup, m *PGMember, now time.Time) string {
+	others, ready := 0, 0
+	for i := range g.Members {
+		if o := &g.Members[i]; o.ID != m.ID && o.Role == pgReplica && !o.Draining {
+			others++
+			if o.ready(now) {
+				ready++
+			}
+		}
+	}
+	if others > 0 && ready == 0 {
+		return "no other replica is healthy, so the fault may be the primary's or the network's and not this member's"
+	}
+	return ""
 }
 
 func (g *PGGroup) promoting() *PGMember {

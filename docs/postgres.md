@@ -171,11 +171,17 @@ is an alert in the category `database` and is listed in `ziroctl pg status`.
 - **A replica whose container does not come up** (it crash-loops, its data directory is unusable, it never
   started) is rebuilt the same way after 10 minutes, 20 for one that has never reported (its first image pull and
   base backup take time), as long as its node is up and the primary answers. A member that is copying the primary's
-  data is not stuck and is never interrupted, however long the copy takes. A member still broken between one and
-  six hours after its rebuild is replaced by a new member (at most one replacement per group every six hours).
-  One on a node that has been gone for 10 minutes is replaced on another node.
-- **A replica that is stuck again** within an hour of its rebuild is left alone, with an alert: the cause is then
-  not its data.
+  data is not stuck and is never interrupted, however long the copy takes (a node reports it only while it can
+  look into the member, see `pg status` below). One on a node that has been gone for 10 minutes is replaced on
+  another node.
+- **A replica that a rebuild did not mend** is not rebuilt the same way again: a copy of the primary cannot be what
+  is wrong with it. Within an hour of its rebuild it is left alone, with an alert. Between one and six hours after
+  it, it is replaced by a new member on another node, if another replica is healthy (when every replica is broken
+  the fault is the primary's, the network's or the cluster's, and replacing them one by one would not help) and the
+  group has not replaced one in the last hour (the group replaces one member at a time). A member that has to wait
+  for its turn raises an alert that says what it waits for and is not rebuilt in the meantime. A member that is the
+  only replica is replaced all the same. More than six hours after its rebuild a failure is a new problem and is
+  rebuilt again, from the primary even if the member was added with `--from`.
 - **A primary left read-only** by an aborted switchover is made writable again.
 - **The synchronous standby list** is sent to every new primary after a promotion, even when it is empty, so commits
   never wait for replicas that are not there.
@@ -220,6 +226,14 @@ It also works on a replica that shows `down` or `starting` in `pg status`. Its c
 leaves a marker on the data directory and restarts the container; the entry script then copies the primary. The
 `!` line for such a member says what the node sees (the container's state, and the last error its start script
 recorded, for example `no primary at shop-main-rw.cluster.ziro yet`).
+
+A start that cannot copy says why in the `!` line, as psql said it (`no primary at shop-main-rw.cluster.ziro:
+connection to server at "10.200.2.4", port 5432 failed: Connection refused`, a wrong password, a certificate that
+does not match, or `it answers but is not a primary`), not only that there is no primary. A replica whose starts
+never run healthy takes a new copy of the primary, the first at once and then after 1, 2, 3 ... minutes (at most 10)
+and says so, instead of copying the primary over and over. `pg add-replica --from m2` copies from another replica
+to spare the primary: the primary creates the new member's replication slot before the copy, so the WAL since then
+is kept, and the new member streams from the primary once it is copied.
 
 A start that is cut short never leaves a half-copied data directory in use: a marker next to the data directory is
 set before a base backup or rewind and removed when it finishes, and a replica that has started four times without

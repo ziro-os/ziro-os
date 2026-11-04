@@ -133,6 +133,11 @@ Credentials are never served over the API.
 - **Switchover.** The read-only step also fences commits, and an abort restores the standby list.
 - **Rolling changes.** A member whose spec changes takes it when it is its turn. Replicas go one at a time, each back
   and caught up first, and the primary goes last after a switchover to an updated replica.
+- **Rebuild and replace.** A member that a rebuild did not mend is replaced, not rebuilt the same way again, when
+  another replica is healthy and the group has not replaced one in the last hour; otherwise it waits and the alert
+  says for what. A copy of the primary comes from the primary (`--from` is for adding a replica), a replica can be
+  a copy source (its `standby.signal` is readable, and the primary creates the new slot first), and repeated
+  automatic copies back off.
 - **TLS and access.** New clusters get their own CA and a server certificate. Members replicate with `verify-ca`.
   The superuser is refused over the network, except between Citus nodes. `rotate-password` sends the primary a
   SCRAM verifier only.
