@@ -91,7 +91,7 @@ start() {
 		ZIRO_PG_PASSFILE="$d/pgpass" PG_MAJOR="$major" PGDATA="$d/data/pgdata" \
 		ZIRO_PG_RW=rw.pgtest ZIRO_PG_SELF="$n.pgtest" ZIRO_PG_MEMBER="$n" ZIRO_PG_INIT="$init" ZIRO_PG_NET=127.0.0.0/8 \
 		POSTGRES_USER=app POSTGRES_DB=appdb POSTGRES_PASSWORD=apppass PG_REPL_PASSWORD=replpass PG_SUPERUSER_PASSWORD=superpass \
-		PG_TLS_CA="$TLS_CA" PG_TLS_CERT="$TLS_CERT" PG_TLS_KEY="$TLS_KEY" \
+		PG_TLS_CA="$TLS_CA" PG_TLS_CERT="$TLS_CERT" PG_TLS_KEY="$TLS_KEY" ${FROM:+ZIRO_PG_FROM="$FROM"} \
 		bash "$entry" >>"$d/log" 2>&1 &
 	echo $! >"$d/pid"
 }
@@ -257,12 +257,24 @@ ok "a replica that never runs healthy is rebuilt from the primary"
 member m4
 printf 'role=replica\nepoch=2\n' >"$work/m4/cfg/role"
 set_rw 127.0.0.99
-ZIRO_PG_MAX_STARTS=4 start m4 $ip2 replica
+ZIRO_PG_MAX_STARTS=4 ZIRO_PG_WAIT_TRIES=2 start m4 $ip2 replica
 rc=0
 wait "$(cat "$work/m4/pid")" || rc=$?
 [ "$rc" -ne 0 ] || fail "a replica with no primary to copy started"
 grep -q "^no primary at rw.pgtest" "$work/m4/data/ziro-last-error" || fail "the reason was not written for the agent"
 ok "a start that fails records its reason"
+
+# 11b. and the reason is psql's own, not just "no primary": a refused connection is not a name that points at a replica
+grep -Eq "^no primary at rw.pgtest: .*(refused|timeout|failed)" "$work/m4/data/ziro-last-error" || fail "the connection error is missing: $(cat "$work/m4/data/ziro-last-error")"
+member m5
+role m5 replica 2
+set_rw $ip1 # m1 is a replica: it answers, but it is not a primary to copy
+ZIRO_PG_WAIT_TRIES=2 start m5 127.0.0.15 replica
+rc=0
+wait "$(cat "$work/m5/pid")" || rc=$?
+[ "$rc" -ne 0 ] || fail "a replica copied from a replica that was named as the primary"
+grep -q "^no primary at rw.pgtest: it answers but is not a primary" "$work/m5/data/ziro-last-error" || fail "an answering replica is not told apart from a refused connection: $(cat "$work/m5/data/ziro-last-error")"
+ok "a start that cannot copy says whether the host refused, or answers but is not a primary"
 
 # 12. TLS between members, and who may log in over the network
 set_rw $ip2
@@ -275,6 +287,31 @@ tcp() { PGCONNECT_TIMEOUT=3 PGPASSWORD=$3 runuser -u postgres -- psql -X -h "$ip
 PGCONNECT_TIMEOUT=3 PGPASSWORD=superpass runuser -u postgres -- psql -X "host=$ip2 port=5499 user=postgres dbname=appdb" -Atc 'select 1' >/dev/null 2>&1 &&
 	fail "the superuser logged in over the network"
 ok "members replicate over TLS checked against the cluster CA; the superuser is local only"
+
+# 12c. a replica copied from another replica (pg add-replica --from): the primary gets a slot for it first,
+# so the WAL since the copy began is kept, and the new replica streams from the primary, not from its source
+member m6
+role m6 replica 2
+FROM=m1.pgtest start m6 127.0.0.16 replica
+wait_for "m6 to be copied from m1 and accept connections" ready m6
+wait_for "m6 to stream" streaming m6
+is_replica m6 || fail "m6 should be a replica"
+grep -q "taking a base backup from m1.pgtest" "$work/m6/log" || fail "m6 did not copy m1: $(tail -n 5 "$work/m6/log")"
+[ "$(q m2 "select count(*) from pg_replication_slots where slot_name = 'ziro_m6' and active")" = 1 ] || fail "m6 does not stream through its slot on the primary"
+[ "$(q m1 "select count(*) from pg_replication_slots where slot_name = 'ziro_m6'")" = 0 ] || fail "a slot was left on the replica m6 was copied from"
+wait_for "m6 to have the data" has_row m6 three
+ok "a replica copied from another replica streams from the primary through a slot created before the copy"
+
+# 12d. copies that do not mend a member come ever more slowly, and say so
+stop_clean m6
+echo 9 >"$work/m6/data/ziro-starts"
+echo 2 >"$work/m6/data/ziro-rebuilds"
+ZIRO_PG_REBUILD_BACKOFF=1 start m6 127.0.0.16 replica
+wait_for "m6 to be copied again" ready m6
+grep -q "2 copies before did not help: waiting 2s before copying the primary again" "$work/m6/log" || fail "the backoff was not logged"
+[ "$(cat "$work/m6/data/ziro-rebuilds")" = 3 ] || fail "the copies were not counted: $(cat "$work/m6/data/ziro-rebuilds")"
+ok "repeated copies of a member that never runs healthy are spaced out and counted"
+set_rw $ip2
 
 # 13. the lease watchdog: a primary whose lease ended stops acknowledging commits, and starts again when renewed
 printf 'grant=1\nttl=22\nepoch=1\nfence=1\n' >"$work/m2/cfg/lease"

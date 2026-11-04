@@ -31,6 +31,7 @@ export PGPASSFILE
 STATE="$(dirname "$PGDATA")"
 BUILD="$STATE/ziro-building" # present while a base backup or rewind is under way: PGDATA is not to be trusted
 STARTS="$STATE/ziro-starts"  # starts since this member last ran healthy for a minute
+REBUILDS="$STATE/ziro-rebuilds" # base backups taken because the starts did not run healthy, since it last did
 LASTERR="$STATE/ziro-last-error"
 BUSY="$STATE/ziro-busy" # touched every 10 s while a copy runs: the agent reports it so a slow copy is not mistaken for a stuck member
 BUSY_PID=
@@ -127,13 +128,28 @@ psql_at() {
 # serving_primary HOST: true when HOST accepts connections and is not in recovery.
 serving_primary() { [ "$(psql_at "$1" -Atc 'select pg_is_in_recovery()' 2>/dev/null || true)" = f ]; }
 
-wait_for_primary() {
-	local host=$1 i
-	for i in $(seq 1 120); do
-		if serving_primary "$host"; then return 0; fi
+# accepting HOST: true when HOST accepts connections (a replica to copy from need not be a primary).
+accepting() { [ "$(psql_at "$1" -Atc 'select 1' 2>/dev/null || true)" = 1 ]; }
+
+# wait_until CHECK HOST: poll CHECK HOST every 2 s (ZIRO_PG_WAIT_TRIES times, 120 = 4 minutes by default).
+wait_until() {
+	local check=$1 host=$2 i
+	for i in $(seq 1 "${ZIRO_PG_WAIT_TRIES:-120}"); do
+		if "$check" "$host"; then return 0; fi
 		sleep 2
 	done
 	return 1
+}
+wait_for_primary() { wait_until serving_primary "$1"; }
+
+# why_not HOST: in one line, why HOST cannot be copied: psql's own reason (a refused connection, a wrong
+# password, a certificate that does not match) or that it answers but is not a primary. "No primary" alone
+# hides which of these it is, and the fix is different for each.
+why_not() {
+	local err
+	# psql prints the error on its first line and a hint ("Is the server running ...") after it.
+	err=$(psql_at "$1" -Atc 'select pg_is_in_recovery()' 2>&1 >/dev/null | head -n 1 | tr -d '\r' | sed 's/^psql: error: //' | cut -c1-160) || true
+	echo "${err:-it answers but is not a primary}"
 }
 
 # Backups (pg_backup.go): pgBackRest's logs, archive spool and locks live on the data volume.
@@ -182,10 +198,19 @@ restore_primary() {
 # basebackup HOST: a fresh copy of the primary. The slot keeps the WAL the copy needs until it
 # connects. Nothing is written to the primary besides the slot, and its clients are not affected.
 basebackup() {
-	local host=$1
+	local host=$1 slot_args="-C -S $slot"
 	log "taking a base backup from $host"
-	if ! wait_for_primary "$host"; then
-		fail "no primary at $host"
+	if [ "$host" = "$rw_host" ]; then
+		wait_for_primary "$host" || fail "no primary at $host: $(why_not "$host")"
+	else
+		# Another replica was named as the source, to spare the primary (pg add-replica --from). It has no slot
+		# of ours to create: the primary does, and it must exist before the copy so the WAL since then is kept
+		# (the controller creates the slots of a group once per epoch, which is too late for a new member).
+		wait_for_primary "$rw_host" || fail "no primary at $rw_host: $(why_not "$rw_host")"
+		psql_at "$rw_host" -Atc "select pg_create_physical_replication_slot('$slot', true) where not exists (select from pg_replication_slots where slot_name = '$slot')" >/dev/null 2>&1 ||
+			fail "cannot create the replication slot $slot on $rw_host"
+		wait_until accepting "$host" || fail "cannot copy from $host: $(why_not "$host")"
+		slot_args=
 	fi
 	# The marker goes down before anything is deleted and comes up only when the copy is whole: a copy
 	# that dies half way leaves a PG_VERSION behind, and without the marker the next start would run
@@ -194,9 +219,12 @@ basebackup() {
 	busy
 	rm -rf "${PGDATA:?}"/* "${PGDATA:?}"/.[!.]* 2>/dev/null || true
 	as_pg mkdir -p "$PGDATA"
-	psql_at "$host" -Atc "select pg_drop_replication_slot('$slot') from pg_replication_slots where slot_name = '$slot' and not active" >/dev/null 2>&1 || true
+	if [ -n "$slot_args" ]; then # the copy creates its slot on the primary: an old one that nothing uses is dropped first
+		psql_at "$host" -Atc "select pg_drop_replication_slot('$slot') from pg_replication_slots where slot_name = '$slot' and not active" >/dev/null 2>&1 || true
+	fi
+	# shellcheck disable=SC2086 # slot_args is two words or none
 	if ! as_pg env PGPASSFILE="$PGPASSFILE" PGSSLMODE="$PGSSLMODE" ${PGSSLROOTCERT:+PGSSLROOTCERT="$PGSSLROOTCERT"} pg_basebackup -h "$host" -p "$PORT" -U replicator -D "$PGDATA" \
-		-X stream -C -S "$slot" --checkpoint=fast --no-password; then
+		-X stream $slot_args --checkpoint=fast --no-password; then
 		fail "pg_basebackup from $host failed (see the container log)"
 	fi
 	idle
@@ -207,7 +235,7 @@ basebackup() {
 rejoin() {
 	log "rejoining the primary at $rw_host"
 	if ! wait_for_primary "$rw_host"; then
-		fail "no primary at $rw_host yet"
+		fail "no primary at $rw_host yet: $(why_not "$rw_host")"
 	fi
 	touch "$BUILD"
 	busy
@@ -249,6 +277,20 @@ case "$starts" in '' | *[!0-9]*) starts=0 ;; esac
 starts=$((starts + 1))
 if [ "$starts" -gt "${ZIRO_PG_MAX_STARTS:-4}" ] && [ "$role" = replica ] && [ -f "$PGDATA/PG_VERSION" ]; then
 	if serving_primary "$rw_host"; then
+		# Copies that do not mend it come ever more slowly: a member that cannot run on a fresh copy has a
+		# problem the copy does not touch (its node, its disk, its configuration), and copying the primary
+		# over and over only loads the primary and the network. The first is at once, then 1, 2, 3 ... minutes.
+		rebuilds=$(cat "$REBUILDS" 2>/dev/null || echo 0)
+		case "$rebuilds" in '' | *[!0-9]*) rebuilds=0 ;; esac
+		rebuilds=$((rebuilds + 1))
+		echo "$rebuilds" >"$REBUILDS"
+		if [ "$rebuilds" -gt 1 ]; then
+			pause=$(((rebuilds - 1) * ${ZIRO_PG_REBUILD_BACKOFF:-60}))
+			[ "$pause" -le 600 ] || pause=600
+			log "$((starts - 1)) starts in a row did not run healthy, and $((rebuilds - 1)) copies before did not help: waiting ${pause}s before copying the primary again"
+			echo "copied ${rebuilds} times without running healthy: the copy is not the problem (see the container log); waiting ${pause}s" >"$LASTERR" 2>/dev/null || true
+			sleep "$pause"
+		fi
 		log "$((starts - 1)) starts in a row did not run healthy: taking a new base backup"
 		rm -f "$PGDATA/PG_VERSION"
 		starts=1
@@ -270,7 +312,7 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
 		init_primary
 	else
 		basebackup "${ZIRO_PG_FROM:-$rw_host}"
-		touch "$PGDATA/standby.signal"
+		as_pg touch "$PGDATA/standby.signal"
 	fi
 fi
 
@@ -289,7 +331,7 @@ if [ "$role" = replica ] && [ ! -f "$PGDATA/standby.signal" ]; then
 	rejoin
 fi
 if [ "$role" = replica ]; then
-	touch "$PGDATA/standby.signal"
+	as_pg touch "$PGDATA/standby.signal"
 fi
 
 # Settings. ziro.conf is rewritten on every start; the controller changes the rest (the synchronous
@@ -356,6 +398,9 @@ host=host
 } >"$PGDATA/pg_hba.conf"
 chown postgres "$PGDATA/ziro.conf" "$PGDATA/pg_hba.conf" "$PGDATA/postgresql.conf"
 [ -f "$PGDATA/postgresql.auto.conf" ] && chown postgres "$PGDATA/postgresql.auto.conf"
+# The server reads standby.signal only to know it exists, but a base backup taken from this replica (pg add-replica
+# --from) streams it like every other file, and a root-owned 0600 file (this script's umask) stops that copy.
+[ -f "$PGDATA/standby.signal" ] && chown postgres "$PGDATA/standby.signal"
 
 # ---- accounts, once the primary accepts connections ----
 
@@ -395,7 +440,7 @@ fi
 	sleep 60
 	if [ "$(as_pg psql -X -h "$SOCK" -p "$PORT" -d postgres -Atc "select (not pg_is_in_recovery()) or exists (select from pg_stat_wal_receiver where status = 'streaming')" 2>/dev/null || true)" = t ]; then
 		echo 0 >"$STARTS"
-		rm -f "$LASTERR"
+		rm -f "$LASTERR" "$REBUILDS"
 	fi
 ) &
 

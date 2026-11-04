@@ -267,7 +267,12 @@ func pgReinitOffline(ctx context.Context, run pgRunner, o PGOrder) error {
 	if err := os.WriteFile(filepath.Join(dir, "ziro-reinit"), nil, 0600); err != nil {
 		return fmt.Errorf("reinit: %v", err)
 	}
-	run(ctx, "restart", "-t", "20", o.Container) // best effort: a container that does not exist yet starts with the marker in place
+	// The data is going to be discarded, so the container gets no long grace to stop. One that does not exist
+	// yet starts with the marker in place; one that exists and cannot be restarted is not rebuilding, and the
+	// order says so (it used to report success, and the controller then waited an hour for nothing).
+	if out, err := run(ctx, "restart", "-t", "20", o.Container); err != nil && !strings.Contains(strings.ToLower(out), "no such container") {
+		return fmt.Errorf("reinit: the rebuild marker is in place, but restarting %s failed: %v: %s", o.Container, err, condenseRuntimeError(lastOutputLine(out)))
+	}
 	return nil
 }
 

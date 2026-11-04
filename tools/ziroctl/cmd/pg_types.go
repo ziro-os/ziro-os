@@ -56,7 +56,8 @@ const (
 	pgRebuildAfter      = 10 * time.Minute // a replica that answers but makes no progress this long is rebuilt from the primary
 	pgRebuildCooldown   = time.Hour        // ... and not again within this: something else is wrong
 	pgHoldAfterElection = 2 * pgGrace      // a new cluster leader waits for the members to report before it fails anything over
-	pgReplaceEvery      = 6 * time.Hour    // a group replaces a member that a rebuild did not mend at most this often
+	pgReplaceEvery      = time.Hour        // a group replaces a member that a rebuild did not mend at most this often
+	pgReplaceWindow     = 6 * time.Hour    // a member still broken this long after its rebuild is replaced; after that it is a new problem
 	pgNodeGoneAfter     = 10 * time.Minute // a node unseen this long no longer holds a member: it is replaced
 	pgStopTimeout       = 120              // seconds Postgres gets to shut down cleanly
 	pgDataPath          = "/var/lib/postgresql/data"
