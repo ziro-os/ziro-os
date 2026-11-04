@@ -67,7 +67,8 @@ const pgProbeSQL = `select pg_is_in_recovery()::int,
   (select coalesce(sum(xact_commit), 0) from pg_stat_database),
   (select max(age(datfrozenxid)) from pg_database),
   (select failed_count from pg_stat_archiver),
-  coalesce((select extract(epoch from now() - last_archived_time)::bigint from pg_stat_archiver), -1)`
+  coalesce((select extract(epoch from now() - last_archived_time)::bigint from pg_stat_archiver), -1),
+  coalesce(extract(epoch from now() - pg_postmaster_start_time())::bigint, 0)`
 
 // parseProbe reads the row pgProbeSQL returns.
 func parseProbe(out string) (PGReport, error) {
@@ -88,12 +89,16 @@ func parseProbe(out string) (PGReport, error) {
 	if len(f) == 12 { // ... and without the archiver
 		f = append(f, "0", "-1")
 	}
-	if len(f) != 14 {
+	if len(f) == 14 { // ... and without how long the server has been up (0 = unknown)
+		f = append(f, "0")
+	}
+	if len(f) != 15 {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	failed, err3 := strconv.ParseInt(f[12], 10, 64)
 	ago, err4 := strconv.ParseInt(f[13], 10, 64)
-	if err3 != nil || err4 != nil || failed < 0 || ago < -1 {
+	up, err5 := strconv.ParseInt(f[14], 10, 64)
+	if err3 != nil || err4 != nil || err5 != nil || failed < 0 || ago < -1 || up < 0 {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	var nums [4]int64
@@ -113,7 +118,7 @@ func parseProbe(out string) (PGReport, error) {
 		return PGReport{}, fmt.Errorf("unexpected probe output %q", line)
 	}
 	return PGReport{OK: true, Recovery: f[0] == "1", LSN: f[1], Timeline: tli, Streaming: f[3] == "1", LagMs: lag, ReadOnly: f[5] == "1",
-		Received: f[6], SyncNames: f[7], Conns: nums[0], MaxConns: nums[1], Commits: nums[2], XIDAge: nums[3], ArchiveFailed: failed, ArchivedAgo: ago}, nil
+		Received: f[6], SyncNames: f[7], Conns: nums[0], MaxConns: nums[1], Commits: nums[2], XIDAge: nums[3], ArchiveFailed: failed, ArchivedAgo: ago, UpSecs: up}, nil
 }
 
 // pgProbe asks one member how it is.

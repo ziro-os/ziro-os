@@ -38,7 +38,9 @@ func pgGroupEndpoints(st *ClusterState, c *PGCluster, g *PGGroup, now time.Time)
 		switch {
 		case m.Role == pgPrimary:
 			rw = append(rw, ip)
-		case m.ready(now):
+		case m.ready(now) && pgRestarted(&m, now):
+			// A replica that took a new spec is advertised again once its new server answers: its last
+			// probe, up to 20 s old, may come from the container that is gone, and its address a new one.
 			ro = append(ro, ip)
 		}
 	}

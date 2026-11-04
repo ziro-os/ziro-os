@@ -58,6 +58,8 @@ const (
 	pgCommandTimeout    = 60 * time.Second
 	pgRebuildAfter      = 10 * time.Minute // a replica that answers but makes no progress this long is rebuilt from the primary
 	pgRebuildCooldown   = time.Hour        // ... and not again within this: something else is wrong
+	pgStartingGrace     = 30 * time.Minute // a replica whose Postgres is up but still starting (crash recovery, WAL replay) is rebuilt after this
+	pgRollGrace         = 30 * time.Minute // ... and one that restarted for a new spec is not rebuilt for this long
 	pgHoldAfterElection = 2 * pgGrace      // a new cluster leader waits for the members to report before it fails anything over
 	pgReplaceEvery      = 6 * time.Hour    // a group replaces a member that a rebuild did not mend at most this often
 	pgNodeGoneAfter     = 10 * time.Minute // a node unseen this long no longer holds a member: it is replaced
@@ -199,6 +201,9 @@ type PGProbe struct {
 	// archived (-1 = never): pg_stat_archiver.
 	ArchiveFailed int64 `json:"archive_failed,omitempty"`
 	ArchivedAgo   int64 `json:"archived_ago,omitempty"`
+	// Started is when the server process started (zero = not reported): a probe from before a restart
+	// was taken from the old server.
+	Started time.Time `json:"started,omitempty"`
 }
 
 // PGCommand is an order for one member's agent, taken from a closed list (pg_agent.go).

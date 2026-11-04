@@ -210,6 +210,9 @@ type PGReport struct {
 	MaxConns int64 `json:"max_conns,omitempty"`
 	Commits  int64 `json:"commits,omitempty"`
 	XIDAge   int64 `json:"xid_age,omitempty"`
+	// UpSecs is how long the server has been running (0 = not reported): a member that restarted for a new
+	// spec is told from the old container, which answers until the node stops it, by when its server started.
+	UpSecs int64 `json:"up_secs,omitempty"`
 	// Detail says what the node sees of a member that does not answer (container state, the entry
 	// script's last error); Busy: a base backup or rewind is running in it, so it is not stuck.
 	Detail string `json:"detail,omitempty"`
@@ -280,6 +283,9 @@ func pgIngest(st *ClusterState, nodeID string, reports []PGReport, results []PGR
 			ReadOnly: r.ReadOnly, Received: received, SyncNames: sanitizeLabel(r.SyncNames, 200), DiskPct: min(max(r.DiskPct, 0), 100),
 			Conns: max(r.Conns, 0), MaxConns: max(r.MaxConns, 0), Commits: max(r.Commits, 0), XIDAge: max(r.XIDAge, 0),
 			ArchiveFailed: max(r.ArchiveFailed, 0), ArchivedAgo: max(r.ArchivedAgo, -1)}
+		if r.UpSecs > 0 {
+			m.Probe.Started = at.Add(-time.Duration(r.UpSecs) * time.Second)
+		}
 		if r.Backup != nil && !r.Recovery {
 			if c, g, _ := pgFind(st, r.App); c != nil && c.backupsOn() {
 				if g.Backup == nil {
@@ -597,6 +603,12 @@ func pgAutoRebuild(c *PGCluster, g *PGGroup, now time.Time) {
 		wait := pgRebuildAfter
 		if m.Probe.At.IsZero() {
 			wait *= 2
+		}
+		if m.Starting {
+			wait = max(wait, pgStartingGrace) // Postgres is up and replaying WAL to a consistent state: a rebuild would throw that work away
+		}
+		if !m.RolledAt.IsZero() && now.Sub(m.RolledAt) < pgRollGrace {
+			continue // it restarted for a new spec a moment ago: crash recovery after a stop is not "no progress"
 		}
 		if m.Role == pgReplica && !m.Draining && m.Cmd == nil && !m.UnreadySince.IsZero() && now.Sub(m.UnreadySince) >= wait &&
 			(worst == nil || m.UnreadySince.Before(worst.UnreadySince)) {
@@ -1313,7 +1325,7 @@ func pgEnsureApps(st *ClusterState, c *PGCluster, now time.Time) {
 			if app == nil {
 				continue
 			}
-			if pending[m.ID] && !pgMayRoll(c, g, m, pending, urgent[m.ID], now) {
+			if pending[m.ID] && !pgMayRoll(c, g, m, pending, urgent[m.ID], now.Before(st.PGHold), now) {
 				continue
 			}
 			if upsertApp(st, *app) && pending[m.ID] {
@@ -1356,15 +1368,37 @@ func pgNoteWaiting(c *PGCluster, g *PGGroup, pending, urgent map[string]bool, no
 // pgRollTimeout is how long a member that took a new spec may take to come back before the next one goes.
 const pgRollTimeout = 10 * time.Minute
 
-// pgBack: a member that took a new spec has answered since, as what it should be.
-func pgBack(m *PGMember, now time.Time) bool {
+// pgRestarted: a member that took a new spec has been restarted since. A probe taken after the spec was set
+// can still come from the old container, which keeps answering until the node stops it (a heartbeat later,
+// then up to its stop timeout), so a server that reports when it started is believed only if that was after
+// the spec was set. One that does not report it (an agent not upgraded yet) is judged by the probe's time.
+func pgRestarted(m *PGMember, now time.Time) bool {
 	if m.RolledAt.IsZero() || now.Sub(m.RolledAt) > pgRollTimeout {
 		return true
 	}
 	if !m.Probe.At.After(m.RolledAt) {
 		return false
 	}
-	return m.Role == pgPrimary && m.fresh(now) && !m.Probe.Recovery || m.ready(now)
+	return m.Probe.Started.IsZero() || m.Probe.Started.After(m.RolledAt)
+}
+
+// pgBack: a member that took a new spec has restarted and answers as what it should be: a primary that
+// serves, a replica that streams and is within pgMaxLagBytes of the primary. "Streaming" alone is not caught
+// up, and the next replica must not go while this one still has a lot of WAL to replay.
+func pgBack(m, p *PGMember, now time.Time) bool {
+	if m.RolledAt.IsZero() || now.Sub(m.RolledAt) > pgRollTimeout {
+		return true
+	}
+	if !pgRestarted(m, now) {
+		return false
+	}
+	if m.Role == pgPrimary {
+		return m.fresh(now) && !m.Probe.Recovery
+	}
+	if !m.ready(now) {
+		return false
+	}
+	return p == nil || p == m || !p.fresh(now) || p.Probe.LSN <= m.pos() || p.Probe.LSN-m.pos() <= pgMaxLagBytes
 }
 
 // pgMayRoll decides whether a member may take a new spec now (a ziroctl upgrade changed the entry script,
@@ -1372,16 +1406,23 @@ func pgBack(m *PGMember, now time.Time) bool {
 // primary last, after a switchover to a replica that already runs the new spec. A member that is not
 // serving anyway (down, rebuilding) is not waited for. Without a replica to hand over to, the primary
 // restarts in place. pending lists the members whose app is out of date.
-func pgMayRoll(c *PGCluster, g *PGGroup, m *PGMember, pending map[string]bool, urgent bool, now time.Time) bool {
+func pgMayRoll(c *PGCluster, g *PGGroup, m *PGMember, pending map[string]bool, urgent, held bool, now time.Time) bool {
 	if c.Paused || g.Switch != nil || g.promoting() != nil {
 		return false // paused: the operator decides when members restart (pg resume)
+	}
+	if held {
+		// A new cluster leader has no probes yet: every member looks down, and a "member that is not serving
+		// anyway" restarts at once, the primary in place and outside the maintenance window. It waits until the
+		// members have reported, as a failover does.
+		return false
 	}
 	if !urgent && !pgWindowOpen(c, now) && m.fresh(now) {
 		return false // a serving member restarts in the maintenance window (one that is down takes it now)
 	}
+	prim := g.primary()
 	for i := range g.Members {
 		o := &g.Members[i]
-		if o.ID != m.ID && !pgBack(o, now) {
+		if o.ID != m.ID && !pgBack(o, prim, now) {
 			return false // another member is still coming back
 		}
 	}

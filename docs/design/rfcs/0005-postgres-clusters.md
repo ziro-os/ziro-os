@@ -154,6 +154,12 @@ Credentials are never served over the API.
   `pgSetPooler`, `pgBackupEnable`, `pgSetMaintenance`, ...) on a copy of the state to plan, and on the real state
   in one transaction to apply. A plan with any refused change applies nothing. `pg get` exports a file whose plan
   is all `=`.
+- **Restarts and reboots.** A member that took a new spec is "back" when its new server answers (the probe carries
+  the server's uptime, since the old container answers until the node stops it) and is within 16 MiB of the primary;
+  nothing rolls while a new cluster leader has no probes. A replica that is replaying WAL is rebuilt after 30 minutes
+  and not 10. Replicas keep at least the primary's `max_connections`, `max_worker_processes` and the like, read at
+  start. Before a reboot, `pg stop-local` asks each member for a fast shutdown from outside the container (not
+  `nerdctl stop`, which would stop the runtime restarting it at boot); init and `ziroctl upgrade --reboot` run it.
 - **Maintenance window.** `PGCluster.Maintenance` is a cron schedule (UTC) and a duration; `WindowUntil` opens it by
   hand. Outside it, `pgMayRoll` holds a serving member's new spec, and the group lists the waiting members.
   Failover, switchover, repairs, members that are down and restarts for a new secret (`ZIRO_PG_SECRET_EPOCH`) never

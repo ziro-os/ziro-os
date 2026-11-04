@@ -460,6 +460,13 @@ func nerdctl(ctx context.Context, args ...string) error {
 	return nil
 }
 
+// pullNeeded: an image pinned by digest that is already here cannot have changed, so pulling it only asks the
+// registry. A restart that needs nothing from the registry (a database coming back after a roll or a
+// reboot) then does not wait for it, or fail with it. Anything else is pulled, as before.
+func pullNeeded(ctx context.Context, ref string, inspect func(context.Context, string) error) bool {
+	return !strings.Contains(ref, "@sha256:") || inspect(ctx, ref) != nil
+}
+
 // reconcileContainers converges local cluster containers to desired.
 // Stale containers are removed first so a replaced replica can reuse its host port.
 func reconcileContainers(desired []Assignment) error {
@@ -507,7 +514,7 @@ func (ag *agent) reconcile(desired []Assignment) (converged bool, err error) {
 		var err error
 		if strings.HasPrefix(a.Image, "ziro.local/") { // built in the cluster: fetched over the mesh, never pulled
 			a.Image, err = fetchClusterImage(ctx, a, token, meshNet)
-		} else {
+		} else if pullNeeded(ctx, a.Image, func(ctx context.Context, ref string) error { return nerdctl(ctx, "image", "inspect", ref) }) {
 			err = nerdctl(ctx, "pull", "-q", a.Image)
 		}
 		cancel()

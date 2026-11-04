@@ -151,11 +151,11 @@ func TestPGRollDoesNotRestartASwitchoverRightAfterAnAbort(t *testing.T) {
 	p := g.primary()
 	pending := map[string]bool{p.ID: true}
 	g.Notes = map[string]time.Time{pgSwitchAbortedKey: w.now}
-	if pgMayRoll(c, g, p, pending, false, w.now) || g.Switch != nil {
+	if pgMayRoll(c, g, p, pending, false, false, w.now) || g.Switch != nil {
 		t.Fatalf("a switchover was just given up: the primary is not fenced again at once (switch %+v)", g.Switch)
 	}
 	w.settle(int(pgSwitchRetryAfter/(5*time.Second)) + 2)
-	if pgMayRoll(c, g, g.primary(), pending, false, w.now) || g.Switch == nil {
+	if pgMayRoll(c, g, g.primary(), pending, false, false, w.now) || g.Switch == nil {
 		t.Fatalf("after the wait the roll hands over to a replica again (switch %+v)", g.Switch)
 	}
 }
