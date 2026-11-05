@@ -271,6 +271,11 @@ rejoin() {
 	fi
 }
 
+# Where a new data directory is copied from. A replica added with --from takes its first copy from the member it
+# names; a rebuild always copies the primary, whatever this container was created with: the environment is fixed
+# when the container is created, and the controller cannot change it for the restart that a rebuild causes.
+copy_from="${ZIRO_PG_FROM:-$rw_host}"
+
 # A rebuild was requested (ziroctl pg reinit): throw this data directory away and take a new base
 # backup. Only a replica does; a member that is the primary now ignores the request.
 if [ -f "$PGDATA/ziro-reinit" ]; then
@@ -278,6 +283,7 @@ if [ -f "$PGDATA/ziro-reinit" ]; then
 	if [ "$role" = replica ]; then
 		log "rebuild requested: discarding this data directory"
 		rm -f "$PGDATA/PG_VERSION"
+		copy_from="$rw_host"
 	else
 		log "rebuild requested, but this member is the primary: ignored"
 	fi
@@ -313,6 +319,7 @@ if [ "$starts" -gt "${ZIRO_PG_MAX_STARTS:-4}" ] && [ "$role" = replica ] && [ -f
 		fi
 		log "$((starts - 1)) starts in a row did not run healthy: taking a new base backup"
 		rm -f "$PGDATA/PG_VERSION"
+		copy_from="$rw_host"
 		starts=1
 	else
 		log "$((starts - 1)) starts in a row did not run healthy, but no primary answers: keeping the data directory"
@@ -331,7 +338,7 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
 		fi
 		init_primary
 	else
-		basebackup "${ZIRO_PG_FROM:-$rw_host}"
+		basebackup "$copy_from"
 		as_pg touch "$PGDATA/standby.signal"
 	fi
 fi
