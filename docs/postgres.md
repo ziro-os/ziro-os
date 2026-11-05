@@ -181,7 +181,7 @@ is an alert in the category `database` and is listed in `ziroctl pg status`.
   group has not replaced one in the last hour (the group replaces one member at a time). A member that has to wait
   for its turn raises an alert that says what it waits for and is not rebuilt in the meantime. A member that is the
   only replica is replaced all the same. More than six hours after its rebuild a failure is a new problem and is
-  rebuilt again, from the primary even if the member was added with `--from`.
+  rebuilt again.
 - **A primary left read-only** by an aborted switchover is made writable again.
 - **The synchronous standby list** is sent to every new primary after a promotion, even when it is empty, so commits
   never wait for replicas that are not there.
@@ -240,7 +240,10 @@ does not match, or `it answers but is not a primary`), not only that there is no
 never run healthy takes a new copy of the primary, the first at once and then after 1, 2, 3 ... minutes (at most 10)
 and says so, instead of copying the primary over and over. `pg add-replica --from m2` copies from another replica
 to spare the primary: the primary creates the new member's replication slot before the copy, so the WAL since then
-is kept, and the new member streams from the primary once it is copied.
+is kept, and the new member streams from the primary once it is copied. That source is for the first copy only: every
+rebuild (`pg reinit`, the automatic one, and the new copy of a member whose starts never run healthy) copies the
+primary, whatever the member was added with. The container's environment is fixed when it is created, so the entry
+script decides this itself and a rebuild does not wait for the member's configuration to roll first.
 
 A start that is cut short never leaves a half-copied data directory in use: a marker next to the data directory is
 set before a base backup or rewind and removed when it finishes, and a replica that has started four times without

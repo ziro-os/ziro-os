@@ -7,6 +7,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# retry [-n TRIES] [-d SECONDS] COMMAND...: run COMMAND until it succeeds, up to TRIES times (default 3), waiting
+# SECONDS (default 15) between tries. Fetching Go modules goes through the network, and a stream error from
+# proxy.golang.org is not worth a failed release: the apk step further down retries the same way.
+retry() {
+    local tries=3 delay=15 attempt=1
+    while [ "${1:-}" = -n ] || [ "${1:-}" = -d ]; do
+        case "$1" in -n) tries=$2 ;; -d) delay=$2 ;; esac
+        shift 2
+    done
+    until "$@"; do
+        if [ "$attempt" -ge "$tries" ]; then
+            echo "FATAL: '$*' failed after $tries attempts" >&2
+            return 1
+        fi
+        echo "'$1' failed (attempt $attempt/$tries); retrying in ${delay}s..." >&2
+        attempt=$((attempt + 1))
+        sleep "$delay"
+    done
+}
+
+# Modules come from the Go proxy; when it answers with an error (a stream error, a 5xx) the module is fetched
+# from its origin instead. The checksum database and go.sum still verify what arrives, and -mod=readonly keeps
+# the builds from changing go.mod. A GOPROXY set by the caller is respected.
+export GOPROXY="${GOPROXY:-https://proxy.golang.org|direct}"
+
 # Architecture normalization
 RAW_ARCH="${1:-$(uname -m)}"
 case "$RAW_ARCH" in
@@ -180,7 +205,7 @@ mkdir -p "$REPO_ROOT/bin"
 ZIROCTL_BIN="$REPO_ROOT/bin/ziroctl-$TARGET_ARCH"
 (
     cd "$REPO_ROOT/tools/ziroctl"
-    CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$ZIROCTL_BIN" .
+    retry env CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$ZIROCTL_BIN" .
 )
 # /bin/<tool> links to /usr/bin/<tool>: one copy for `ziroctl update` to replace.
 for root in "$ROOTFS_MINIMAL" "$ROOTFS_FULL"; do
@@ -191,7 +216,7 @@ done
 ZIROPKG_BIN="$REPO_ROOT/bin/ziropkg-$TARGET_ARCH"
 (
     cd "$REPO_ROOT/tools/ziropkg"
-    CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$ZIROPKG_BIN" .
+    retry env CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$ZIROPKG_BIN" .
 )
 for root in "$ROOTFS_MINIMAL" "$ROOTFS_FULL"; do
     cp "$ZIROPKG_BIN" "$root/usr/bin/ziropkg"
@@ -203,7 +228,7 @@ done
 ZIROCD_BIN="$REPO_ROOT/bin/zirocd-linux-$GOARCH"
 (
     cd "$REPO_ROOT/tools/zirocd"
-    CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath \
+    retry env CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath \
         -ldflags="-s -w -X main.Version=$(cat "$REPO_ROOT/VERSION")" -o "$ZIROCD_BIN" .
 )
 cp "$ZIROCD_BIN" "$ROOTFS_FULL/usr/bin/zirocd"
@@ -515,7 +540,7 @@ SH_SHUTDOWN
 CNI_DHCP_BIN="$REPO_ROOT/bin/cni-dhcp-$TARGET_ARCH"
 (
     cd "$REPO_ROOT/packages/cni-dhcp"
-    CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -mod=readonly -trimpath \
+    retry env CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -mod=readonly -trimpath \
         -ldflags="-s -w -X github.com/containernetworking/plugins/pkg/utils/buildversion.BuildVersion=v1.9.1-ziro.1" \
         -o "$CNI_DHCP_BIN" github.com/containernetworking/plugins/plugins/ipam/dhcp
 )

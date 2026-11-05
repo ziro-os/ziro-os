@@ -313,6 +313,20 @@ grep -q "2 copies before did not help: waiting 2s before copying the primary aga
 ok "repeated copies of a member that never runs healthy are spaced out and counted"
 set_rw $ip2
 
+# 12e. a rebuild copies the primary even when the container was created with --from another member: the
+# environment is fixed at creation, so the controller cannot take it away for the restart a rebuild causes
+stop_clean m6
+touch "$work/m6/data/pgdata/ziro-reinit"
+before=$(wc -l <"$work/m6/log")
+FROM=m1.pgtest start m6 127.0.0.16 replica
+wait_for "m6 to be rebuilt" ready m6
+wait_for "m6 to stream" streaming m6
+tail -n +"$((before + 1))" "$work/m6/log" >"$work/m6/rebuild.log"
+grep -q "rebuild requested: discarding this data directory" "$work/m6/rebuild.log" || fail "the rebuild was not logged"
+grep -q "taking a base backup from rw.pgtest" "$work/m6/rebuild.log" || fail "the rebuild did not copy the primary: $(grep 'base backup' "$work/m6/rebuild.log")"
+grep -q "taking a base backup from m1.pgtest" "$work/m6/rebuild.log" && fail "the rebuild copied the --from member"
+ok "a rebuild copies the primary even when the member was added with --from"
+
 # 13. the lease watchdog: a primary whose lease ended stops acknowledging commits, and starts again when renewed
 printf 'grant=1\nttl=22\nepoch=1\nfence=1\n' >"$work/m2/cfg/lease"
 echo "$(($(date +%s) + 60)) 1" >"$work/m2/cfg/lease-until"
