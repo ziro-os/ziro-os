@@ -103,17 +103,27 @@ func TestPGReplacesTheOnlyReplicaThatARebuildDidNotMend(t *testing.T) {
 }
 
 func TestPGAutoRebuildCopiesFromThePrimary(t *testing.T) {
-	w := newPGWorld(t, 3)
-	w.create(pgCreateOpts{Replicas: 2})
+	w := newPGWorld(t, 4)
+	w.create(pgCreateOpts{Replicas: 1})
 	w.settle(8)
-	m := w.member("main", "m3")
-	m.From = "m2" // it was added with --from m2
-	w.stalled[w.app("main", "m3")] = true
+	// A replica added with --from m2 has it in its very first spec (ZIRO_PG_FROM), as a real one does: changing
+	// From on a member that is already running would change its spec and roll it, which the rebuild then waits
+	// out (pgRollGrace), and the test would be about that instead.
+	id, err := pgAddReplica(w.st, "db", "", "", "m2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.settle(10)
+	m := w.member("main", id)
+	if m == nil || m.From != "m2" || !m.RolledAt.IsZero() || !m.ready(w.now) {
+		t.Fatalf("the replica added with --from m2 is not running as added: %+v (%s)", m, w.events("main"))
+	}
+	w.stalled[w.app("main", id)] = true
 	w.advance(12 * time.Minute)
-	if w.pg[w.app("main", "m3")].reinits != 1 {
+	if w.pg[w.app("main", id)].reinits != 1 {
 		t.Fatalf("not rebuilt: %s", w.events("main"))
 	}
-	if got := w.member("main", "m3").From; got != "" {
+	if got := w.member("main", id).From; got != "" {
 		t.Fatalf("the rebuild still copies from %q, which may be the problem", got)
 	}
 }
