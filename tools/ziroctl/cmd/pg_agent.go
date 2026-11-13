@@ -380,6 +380,20 @@ func newPGAgent() *pgAgent {
 
 // probeAll probes the member containers this node should run.
 func (p *pgAgent) probeAll(ctx context.Context, desired []Assignment, now time.Time) {
+	if containerdSick() {
+		// Every probe is a nerdctl exec (plus, for a member that does not answer, more calls to find out
+		// why): not one more connection to a containerd that is not accepting them. The last good probes
+		// keep their age, which is how the master judges them, exactly as when a probe fails.
+		p.mu.Lock()
+		for _, a := range desired {
+			if cur, ok := p.reports[a.App]; ok && a.PG {
+				cur.detail = "the container runtime is not answering and is being recovered; probes resume when it does"
+				p.reports[a.App] = cur
+			}
+		}
+		p.mu.Unlock()
+		return
+	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, pgProbeParallel)
 	for _, a := range desired {

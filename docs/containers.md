@@ -122,6 +122,49 @@ entrypoint, environment, labels, ports, binds and mounts, networks and aliases, 
 privileged, capabilities, DNS, tmpfs, sysctls) and ignores the rest, such as health checks and devices. The
 design is RFC 0006 (`docs/design/rfcs`).
 
+## Container runtime health
+
+containerd is what runs every container, so Ziro OS watches it for being **stuck**, not only for being gone. A
+stuck containerd is alive but serves nobody; the usual sign is
+
+```text
+docker ps
+FATA[0000] connection error: ... dial unix /run/containerd/containerd.sock: connect: resource temporarily unavailable
+```
+
+That error (`EAGAIN`) means containerd is listening but its accept queue is full: it is **running, not accepting**.
+A containerd that is not running gives "connection refused" or "no such file". `ziroctl doctor` tells them apart:
+
+| State | Meaning | What Ziro OS does |
+| --- | --- | --- |
+| ok | answers a `Version` request | nothing |
+| starting | started in the last minute | waits |
+| not accepting connections | listening, accept queue full | restarts it after 3 checks 7 s apart |
+| not answering requests | accepts connections, never answers | restarts it after 3 checks 7 s apart |
+| not running | no process | ziro-init starts it (backoff 1 s to 60 s) |
+
+**What a restart does.** `ziroctl service heal` (run by ziro-init every 30 s) checks containerd with a real request.
+A stuck one is first asked to stop (`SIGTERM`), then told to dump every goroutine's stack into
+`/var/log/containerd.log` (`SIGQUIT`), then killed; ziro-init starts it again at once. **Running containers keep
+running**: each has its own shim process, and the new containerd re-attaches to them. A restart is limited to three
+an hour and spaced further apart each time, so a daemon that wedges again and again is reported by `doctor` rather
+than restarted in a loop. `ziroctl doctor --fix` restarts a stuck containerd at once, and a cluster node does the
+same by itself and reports `ContainerdDown` until it answers.
+
+**Evidence.** Before each restart the state is saved under `/var/log/ziro/containerd-incidents/<time>/` (the last
+ten, root only): `summary.txt` (state, uptime, open files, and the cause when the descriptor limit was reached),
+`proc-limits`, `fds.txt` (descriptors by kind), `system.txt` (memory, I/O and CPU pressure), `socket-queue.txt`
+and the end of containerd's log. No environment or process memory is read. `ziroctl doctor` shows how many
+restarts happened in the last 24 h and why.
+
+**Limits.** ziro-init raises the open-file limit to 1,048,576 (or `fs.nr_open` if lower) for everything it starts.
+Without it, daemons run with the kernel default of 1024, and containerd stops accepting connections when its
+descriptors run out. `doctor` reports containerd's open files against its limit; a host upgraded in place keeps the
+old limit until it reboots.
+
+**Load.** While containerd is stuck, the container health runner, the Postgres probes and the cluster agent's
+container listing stand down instead of adding connections, and resume when it answers.
+
 ## The docker command
 
 `docker` is a small wrapper around nerdctl, so Docker-style commands work. It changes only what tools that manage a

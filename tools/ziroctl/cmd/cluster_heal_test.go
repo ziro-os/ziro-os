@@ -344,7 +344,7 @@ func TestNodeHealerPolicy(t *testing.T) {
 	up, restarts, pct, prunes := false, 0, 91, 0
 	h := &nodeHealer{
 		containerdUp:      func() bool { return up },
-		restartContainerd: func() error { restarts++; return nil },
+		restartContainerd: func() (string, error) { restarts++; return "restarted containerd", nil },
 		diskPercent:       func() (int, bool) { return pct, true },
 		prune:             func() error { prunes++; pct = 70; return nil },
 	}
@@ -391,6 +391,29 @@ func TestNodeHealerPolicy(t *testing.T) {
 	conds, _ = h.check(now.Add(3*time.Hour), "policy: nft failed")
 	if !slices.Equal(conds, []string{CondDiskPressure, CondMeshError}) {
 		t.Fatalf("conditions: %v", conds)
+	}
+}
+
+// The node healer says what it did: a restart that did not happen (containerd was only loading, or the
+// recovery was held back) is never reported as "restarted containerd".
+func TestNodeHealerReportsWhatItReallyDid(t *testing.T) {
+	now := time.Now()
+	act, err := "", error(nil)
+	h := &nodeHealer{
+		containerdUp:      func() bool { return false },
+		restartContainerd: func() (string, error) { return act, err },
+		diskPercent:       func() (int, bool) { return 10, true },
+	}
+	if _, did := h.check(now, ""); len(did) != 0 {
+		t.Fatalf("nothing was done, nothing is claimed: %v", did)
+	}
+	act, err = "restarted containerd (it was hung: it accepts connections but does not answer requests)", nil
+	if _, did := h.check(now.Add(time.Hour), ""); len(did) != 1 || !strings.Contains(did[0], "was hung") {
+		t.Fatalf("the cause is reported: %v", did)
+	}
+	act, err = "", errors.New("it was already restarted 3 times in the last hour")
+	if _, did := h.check(now.Add(2*time.Hour), ""); len(did) != 1 || !strings.Contains(did[0], "restart containerd failed: it was already restarted 3 times") {
+		t.Fatalf("a held recovery is reported as such: %v", did)
 	}
 }
 

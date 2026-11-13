@@ -394,6 +394,8 @@ func printHeal(fixes []ServiceFix) {
 	for _, f := range fixes {
 		if f.Error != "" {
 			fmt.Printf("[heal] %s: %s\n", f.Name, f.Error)
+		} else if f.Action != "" {
+			fmt.Printf("[heal] %s\n", f.Action)
 		} else {
 			fmt.Printf("[heal] started %s\n", f.Name)
 		}
@@ -746,8 +748,9 @@ var oneShotServices = map[string]bool{"firewall": true, "cloud-init": true, "wir
 
 // ServiceFix is one service healServices found down and what it did about it.
 type ServiceFix struct {
-	Name  string `json:"name"`
-	Error string `json:"error,omitempty"` // empty: restarted
+	Name   string `json:"name"`
+	Error  string `json:"error,omitempty"`  // empty: restarted
+	Action string `json:"action,omitempty"` // what was done, when "started <name>" is not the whole story
 }
 
 const healCooldown = 5 * time.Minute
@@ -764,6 +767,15 @@ func healServices(force bool) []ServiceFix {
 	healMu.Lock()
 	defer healMu.Unlock()
 	var out []ServiceFix
+	// A containerd that is running but wedged is not "down" to the loop below (it has a process), and
+	// ziro-init only restarts a daemon that exits. It has its own policy (confirmation, a rate limit).
+	if act, err := ensureContainerd(false); act != "" || err != nil {
+		fix := ServiceFix{Name: "containerd", Action: act}
+		if err != nil {
+			fix.Error = err.Error()
+		}
+		out = append(out, fix)
+	}
 	for _, svc := range listAllServices() {
 		if !svc.Enabled || svc.Status == "RUNNING" || oneShotServices[svc.Name] {
 			continue
@@ -813,6 +825,12 @@ func restartDown(name string) error {
 		return err
 	}
 	if getServicePID(def) > 0 {
+		if name == "containerd" {
+			// Running is not working: a wedged containerd is restarted (doctor --fix and the node
+			// healer end up here), and a refusal to is an error, never a silent "ok".
+			_, err := ensureContainerd(true)
+			return err
+		}
 		return nil
 	}
 	// A deliberate (re)start: restartSupervised's stop dropped a marker that would otherwise hold

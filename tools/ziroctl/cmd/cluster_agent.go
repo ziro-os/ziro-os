@@ -76,6 +76,9 @@ func (c *containerList) get(maxAge time.Duration) (map[string]bool, int, error) 
 	if c.cluster != nil && time.Since(c.at) <= maxAge {
 		return c.cluster, c.running, nil
 	}
+	if containerdSick() { // not one more connection to a daemon that is not accepting them
+		return nil, 0, errContainerdSick
+	}
 	cluster, running, err := listNodeContainers()
 	if err != nil {
 		return nil, 0, err

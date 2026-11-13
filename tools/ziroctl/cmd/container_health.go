@@ -193,6 +193,9 @@ func serveContainerHealth(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case now := <-tick.C:
+			if containerdSick() { // each tick would add connections to a daemon that is not accepting them
+				continue
+			}
 			if now.Sub(lastCollect) >= leaseCollectEvery {
 				collectLeases(ctx, c)
 				lastCollect = now

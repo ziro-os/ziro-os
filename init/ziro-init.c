@@ -25,6 +25,9 @@
 #include <time.h>
 #include <limits.h>
 #include <sys/sysinfo.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -877,6 +880,43 @@ static void mount_data_disks(void) {
     }
 }
 
+/* The kernel starts init with 1024 open files (hard limit 4096), and every daemon init spawns
+ * inherits that: /etc/security/limits.conf is PAM's and never reaches them. containerd holds
+ * descriptors for every client connection, shim, log and event stream, so at the default it stops
+ * accepting connections (accept() fails with EMFILE, its queue fills and clients get EAGAIN, "resource
+ * temporarily unavailable"). Raised once here, for everything init starts, up to what the kernel
+ * allows (fs.nr_open). */
+#define NOFILE_WANTED 1048576UL
+static void raise_nofile_limit(void) {
+    unsigned long want = NOFILE_WANTED;
+    FILE *f = fopen("/proc/sys/fs/nr_open", "r");
+    if (f) {
+        unsigned long v = 0;
+        if (fscanf(f, "%lu", &v) == 1 && v >= 1024 && v < want) want = v;
+        fclose(f);
+    }
+    struct rlimit rl = {want, want};
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        printf("[init] could not raise the open-file limit to %lu: %s\n", want, strerror(errno));
+        return;
+    }
+    printf("[init] open-file limit: %lu\n", want);
+}
+
+/* True when something accepts connections on the unix socket. access() would also say yes for a
+ * stale socket file or a daemon that listens and never accepts (connect() then fails with EAGAIN). */
+static int unix_socket_accepts(const char *path) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return 0;
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    strncpy(sa.sun_path, path, sizeof(sa.sun_path) - 1);
+    int ok = connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0;
+    close(fd);
+    return ok;
+}
+
 static void start_containerd(void) {
     if (access("/usr/bin/containerd", X_OK) != 0 && access("/bin/containerd", X_OK) != 0) {
         printf("[init] containerd not found; skipping container engine startup\n");
@@ -908,14 +948,17 @@ static void start_containerd(void) {
         write_pidfile("/run/containerd/containerd.pid", pid);
         printf("[init] containerd spawned (PID: %d)\n", pid);
 
-        // Quick check for socket readiness (up to 3 seconds)
+        // Quick check for readiness (up to 3 seconds): it has to accept a connection, not just own a socket file
+        int ready = 0;
         for (int i = 0; i < 30; i++) {
-            if (access("/run/containerd/containerd.sock", F_OK) == 0) {
-                printf("[init] containerd socket ready: /run/containerd/containerd.sock\n");
+            if (unix_socket_accepts("/run/containerd/containerd.sock")) {
+                printf("[init] containerd socket ready: /run/containerd/containerd.sock (%d ms)\n", i * 100);
+                ready = 1;
                 break;
             }
             usleep(100000); // 100ms
         }
+        if (!ready) printf("[init] containerd is not accepting connections yet; ziroctl service heal watches it\n");
     }
 }
 
@@ -1385,7 +1428,7 @@ static void restart_due_services(void) {
 /*
  * Retry tick: a service that failed before any process existed (missing config, network not
  * ready) never exits, so the supervision above can't see it. Every 15s for the first minutes of
- * boot, then every 60s, 'ziroctl service heal' starts what is enabled and down. Not waited for
+ * boot, then every 30s, 'ziroctl service heal' starts what is enabled and down. Not waited for
  * here: the loop reaps it like any other child.
  */
 static time_t heal_next = 0;
@@ -1400,7 +1443,7 @@ static void heal_tick(void) {
         heal_pid = 0;
     }
     if (now < heal_next || access("/usr/bin/ziroctl", X_OK) != 0) return;
-    heal_next = now + (heal_runs++ < 8 ? 15 : 60);
+    heal_next = now + (heal_runs++ < 8 ? 15 : 30);
     pid_t p = fork();
     if (p == 0) {
         char *argv[] = {"ziroctl", "service", "heal", NULL};
@@ -1654,6 +1697,7 @@ int main(int argc, char *argv[]) {
     init_hostname();
     init_network();
     init_memory_and_io();
+    raise_nofile_limit();
     mount_data_disks();
     apply_firewall_early();
     start_containerd();

@@ -238,14 +238,8 @@ func runDoctor() []doctorCheck {
 	_, cgErr := os.Stat("/sys/fs/cgroup/cgroup.controllers")
 	check("cgroup v2", cgErr == nil, "/sys/fs/cgroup", false)
 
-	// 5. containerd answers on its socket
-	c := doctorCheck{Name: "containerd responds", Fix: "start containerd", fix: func() error { return restartDown("containerd") }}
-	if err := containerdResponds(); err == nil {
-		c.Passed, c.Details = true, containerdSocket
-	} else {
-		c.Details = err.Error()
-	}
-	checks = append(checks, c)
+	// 5. containerd answers requests (not just a socket that exists)
+	checks = append(checks, containerdChecks()...)
 
 	// 6. OCI runc binary
 	_, runcErr1 := exec.LookPath("runc")
@@ -278,15 +272,6 @@ func runDoctor() []doctorCheck {
 }
 
 const containerdSocket = "/run/containerd/containerd.sock"
-
-// containerdResponds dials containerd's socket (the node agent's health probe too).
-func containerdResponds() error {
-	conn, err := net.DialTimeout("unix", containerdSocket, 2*time.Second)
-	if err != nil {
-		return err
-	}
-	return conn.Close()
-}
 
 func printDoctor(checks []doctorCheck) {
 	st := detectStyle(os.Stdout)

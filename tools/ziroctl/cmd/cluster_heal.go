@@ -205,7 +205,7 @@ const (
 // effects are injectable so the policy is testable.
 type nodeHealer struct {
 	containerdUp      func() bool
-	restartContainerd func() error
+	restartContainerd func() (string, error) // what it did ("": nothing to do), or why not
 	diskPercent       func() (int, bool)
 	prune             func() error
 
@@ -217,7 +217,7 @@ type nodeHealer struct {
 func newNodeHealer() *nodeHealer {
 	return &nodeHealer{
 		containerdUp:      func() bool { return containerdResponds() == nil },
-		restartContainerd: func() error { return restartDown("containerd") },
+		restartContainerd: restartContainerd,
 		diskPercent:       hostDiskPercent,
 		prune:             pruneHostDisk,
 	}
@@ -232,10 +232,10 @@ func (h *nodeHealer) check(now time.Time, meshErr string) (conds, did []string) 
 	if !h.containerdUp() {
 		if now.Sub(h.lastRestart) >= healRestartCooldown {
 			h.lastRestart = now
-			if err := h.restartContainerd(); err != nil {
+			if act, err := h.restartContainerd(); err != nil {
 				did = append(did, "restart containerd failed: "+err.Error())
-			} else {
-				did = append(did, "restarted containerd")
+			} else if act != "" {
+				did = append(did, act)
 			}
 		}
 		conds = append(conds, CondContainerdDown) // until a later pass sees it answer
@@ -619,4 +619,16 @@ func agentDoctorCheck(now time.Time) (doctorCheck, bool) {
 		c.Passed, c.Details = true, fmt.Sprintf("last heartbeat %s ago", now.Sub(last).Round(time.Second))
 	}
 	return c, true
+}
+
+// restartContainerd starts containerd when it is down and restarts it when it is wedged, and says
+// which. It returns "" when it found nothing to do (it started by itself, or is still loading).
+func restartContainerd() (string, error) {
+	if pid, _ := containerdProc(); pid > 0 {
+		return ensureContainerd(true)
+	}
+	if err := restartDown("containerd"); err != nil {
+		return "", err
+	}
+	return "started containerd", nil
 }
