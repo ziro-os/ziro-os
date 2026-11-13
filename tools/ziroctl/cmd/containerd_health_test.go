@@ -439,6 +439,9 @@ func TestIncidentBundlesAreSavedPrunedAndListed(t *testing.T) {
 // The reported bug end to end: a containerd process that is alive and listening but not accepting is
 // restarted by the heal pass and by doctor --fix's path, where it used to be reported as running.
 func TestHealRestartsALiveButWedgedContainerd(t *testing.T) {
+	if os.Geteuid() != 0 { // loadServiceDef trusts only root-owned service definitions
+		t.Skip("needs root: a service definition must be root-owned")
+	}
 	dir := t.TempDir()
 	old := map[string]any{"servicesDir": servicesDir, "stopMarkerDir": stopMarkerDir, "sock": containerdSock, "pidfile": containerdPIDFile,
 		"state": ctrdStateFile, "rec": ctrdRecoveryFile, "lock": ctrdLockFile, "inc": ctrdIncidentDir, "probes": ctrdProbes, "gap": ctrdProbeGap,
