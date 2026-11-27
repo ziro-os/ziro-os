@@ -220,7 +220,8 @@ what tools that manage a Docker host trip over:
   `--format json` and Go templates such as `--format '{{.Server.Version}}'`. The server reports Docker Engine
   **24.0.0**: that is the API compatibility level of the lightweight [Docker API socket](#docker-api-socket)
   (API 1.43), not an installed Docker Engine. Clients that need a current engine (Docker 29 CLI, API 1.52, attach,
-  builds, `--privileged` helpers) use the [Docker Engine module](#docker-engine-module) instead. The real runtime (nerdctl, containerd, runc) is listed under `Components`.
+  builds, `--privileged` helpers) use the [Docker Engine module](#docker-engine-module) instead. The real runtime
+  (nerdctl, containerd, runc) is listed under `Components`.
 - `docker network create --attachable` ignores the flag (every nerdctl network is attachable), and
   `docker compose pull --ignore-buildable` and `docker compose up --wait` drop the flag nerdctl does not know.
   `up --wait` waits for health checks (see below).
