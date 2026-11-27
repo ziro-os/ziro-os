@@ -1,8 +1,8 @@
 NAME="Ziro-OS"
-VERSION="1.0.42"
+VERSION="1.0.43"
 ID=ziro-os
 ID_LIKE=alpine
-PRETTY_NAME="Ziro-OS 1.0.42"
+PRETTY_NAME="Ziro-OS 1.0.43"
 HOME_URL="https://github.com/ziro-os/ziro-os"
-BUILD_DATE="2026-11-13T04:56:24Z"
+BUILD_DATE="2026-11-27T07:35:14Z"
 ARCH="arm64"
