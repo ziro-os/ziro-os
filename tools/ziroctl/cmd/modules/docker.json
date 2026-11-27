@@ -87,7 +87,7 @@
     {
       "path": "/etc/docker/daemon.json",
       "mode": "0644",
-      "content": "{\n  \"containerd\": \"/run/containerd/containerd.sock\",\n  \"data-root\": \"/var/lib/docker\",\n  \"exec-opts\": [\n    \"native.cgroupdriver=cgroupfs\"\n  ],\n  \"group\": \"docker\",\n  \"features\": {\n    \"containerd-snapshotter\": true\n  },\n  \"live-restore\": true,\n  \"userland-proxy\": false,\n  \"iptables\": true,\n  \"ip6tables\": true,\n  \"log-driver\": \"local\",\n  \"log-opts\": {\n    \"max-size\": \"20m\",\n    \"max-file\": \"5\"\n  },\n  \"init-path\": \"/var/lib/ziro/plugins/docker/bin/docker-init\",\n  \"userland-proxy-path\": \"/var/lib/ziro/plugins/docker/bin/docker-proxy\",\n  \"max-concurrent-downloads\": 6,\n  \"shutdown-timeout\": 30\n}\n"
+      "content": "{\n  \"containerd\": \"/run/containerd/containerd.sock\",\n  \"data-root\": \"/var/lib/docker\",\n  \"exec-opts\": [\n    \"native.cgroupdriver=cgroupfs\"\n  ],\n  \"group\": \"docker\",\n  \"features\": {\n    \"containerd-snapshotter\": true\n  },\n  \"live-restore\": true,\n  \"userland-proxy\": false,\n  \"iptables\": true,\n  \"ip6tables\": true,\n  \"log-driver\": \"local\",\n  \"log-opts\": {\n    \"max-size\": \"20m\",\n    \"max-file\": \"5\"\n  },\n  \"init-path\": \"/var/lib/ziro/plugins/docker/bin/docker-init\",\n  \"userland-proxy-path\": \"/var/lib/ziro/plugins/docker/bin/docker-proxy\",\n  \"max-concurrent-downloads\": 6,\n  \"shutdown-timeout\": 30,\n  \"ip-forward-no-drop\": true,\n  \"default-address-pools\": [\n    {\n      \"base\": \"172.28.0.0/14\",\n      \"size\": 24\n    }\n  ]\n}\n"
     }
   ],
   "prepare": [

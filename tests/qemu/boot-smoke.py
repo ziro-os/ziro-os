@@ -293,6 +293,10 @@ def docker_engine_checks(con, check):
           "srw-rw----" in out and re.search(r"^\d+\.\d+\.\d+", out.strip().split("\n")[-1]) is not None, out)
     rc, out = con.run("ziroctl docker-api enable 2>&1 | tail -1", timeout=60)
     check("docker-api enable is refused while the engine owns the socket", "docker module" in out, out)
+    rc, out = con.run("iptables -S FORWARD | head -1; docker network create dke-net >/dev/null && "
+                      "docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' dke-net; docker network rm dke-net >/dev/null", timeout=120)
+    check("Docker keeps the FORWARD policy at ACCEPT and allocates networks outside Ziro's ranges",
+          "-P FORWARD ACCEPT" in out and re.search(r"^172\.(28|29|30|31)\.", out.strip().split("\n")[-1]) is not None, out)
     rc, out = con.run("docker run --rm alpine echo engine-ok 2>&1 | tail -1", timeout=300)
     check("docker run (attach and wait work)", out.strip() == "engine-ok", out)
     rc, out = con.run("mount | grep -c binfmt_misc", timeout=30)

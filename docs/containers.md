@@ -107,7 +107,11 @@ unix:///var/run/docker.sock ... no such file or directory`: that is the missing 
   turns it off and `ziroctl docker-api enable` refuses while the module is installed.
 - **Same containerd, separate namespace.** Docker keeps its images and containers in containerd's `moby` namespace,
   so `docker ps` does not list containers started by `ziroctl container` or `nerdctl`, and the other way round.
-  Images use the containerd image store (overlayfs snapshotter).
+  Images use the containerd image store (overlayfs snapshotter). **nerdctl stays installed**: `ziroctl container`,
+  `compose`, apps, stacks, `deploy`, sandboxes, cluster workloads and Postgres all run through nerdctl in the
+  `default` namespace, and the `docker` command falls back to it when the module is disabled. So there are two
+  separate sets of containers on one host. `ziroctl system df` and `system prune`, and the container count in
+  metrics, cover the `default` namespace only; clean Docker's with `docker system prune`.
 - **The `docker` command** becomes the real CLI while the module is enabled and goes back to the nerdctl wrapper
   when it is disabled. `docker-compose` runs the Compose plugin.
 - **Multi-architecture.** The kernel carries `binfmt_misc` and ziro-init mounts it at boot, so
@@ -115,9 +119,14 @@ unix:///var/run/docker.sock ... no such file or directory`: that is the missing 
   QEMU emulators, and `docker buildx build --platform linux/amd64,linux/arm64` works.
 - **Defaults** (`/etc/docker/daemon.json`, yours to edit; local changes survive upgrades): `live-restore` (containers
   keep running while dockerd or containerd restarts), the `local` log driver with rotation (20 MB x 5), the
-  userland proxy off, `cgroupfs` driver (cgroup v2, no systemd), iptables and ip6tables managed by Docker. Data is in
-  `/var/lib/docker`; put it on a data disk on busy hosts. To also block privilege gain inside containers add
-  `"no-new-privileges": true`, which breaks images that need setuid programs such as `sudo` and `ping`.
+  userland proxy off, `cgroupfs` driver (cgroup v2, no systemd), iptables and ip6tables managed by Docker.
+  `ip-forward-no-drop` keeps the FORWARD policy at accept, which sandboxes, cluster pods and the mesh rely on, and
+  user-defined networks come from 172.28.0.0/14 (/24 each), clear of the ranges Ziro uses (`ziro-br0` 172.20.0.0/16,
+  mesh 10.200.0.0/16, pods 10.201.0.0/16, sandboxes 10.250.0.0/16, zirocd 100.64.0.0/10). Ports published with `-p`
+  are DNAT-ed, which is forwarded traffic: the input rules of `ziroctl firewall` do not apply, so publish only what
+  should be reachable, or bind to an address (`-p 127.0.0.1:8080:80`). Data is in `/var/lib/docker`; put it on a
+  data disk on busy hosts. To also block privilege gain inside containers add `"no-new-privileges": true`, which
+  breaks images that need setuid programs such as `sudo` and `ping`.
 - **Security.** Membership of the `docker` group is root on the host: a member can start a privileged container with
   `/` mounted. Add only accounts you would give root (`addgroup runner docker`). Containers keep Docker's default
   seccomp profile and capability set. The module is opt-in, so the base image does not grow, and the engine is not

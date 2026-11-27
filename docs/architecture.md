@@ -214,6 +214,11 @@ Ziro OS uses standard OCI components:
   The socket `/run/docker.sock` is group `docker` (root equivalent), never TCP, and is exclusive: the lightweight
   `ziroctl docker-api` translator refuses to run next to it ([RFC 0006](design/rfcs/0006-docker-api-socket.md)).
   The kernel asserts `binfmt_misc` and ziro-init mounts it so QEMU user emulation can be registered by containers.
+  nerdctl stays in the base image: everything Ziro manages (containers, compose, apps, deploy, sandboxes, cluster pods,
+  Postgres) calls it in containerd's `default` namespace, so the engine (`moby`) and Ziro's workloads are separate
+  tenants of one containerd, and `module disable docker` falls back to the nerdctl wrapper. The module keeps Docker
+  off Ziro's address ranges (`default-address-pools`) and keeps the FORWARD policy at accept
+  (`ip-forward-no-drop`).
   Known limitation: dockerd runs in its own cgroup tree outside the service cgroup of the module, so the module sets
   no memory limit for containers; limit them per container or with `--cgroup-parent` when it matters.
 

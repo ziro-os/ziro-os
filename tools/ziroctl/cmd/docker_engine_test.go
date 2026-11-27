@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,6 +95,29 @@ func TestDockerModuleDaemonJSON(t *testing.T) {
 	}
 	if d["group"] != "docker" || d["live-restore"] != true || d["userland-proxy"] != false {
 		t.Errorf("hardening/reliability defaults missing: %v", d)
+	}
+	// Docker must not drop forwarded traffic (sandboxes, cluster pods and the mesh forward through the host with the
+	// FORWARD policy at accept) and must not take an address range Ziro uses: ziro-br0 172.20.0.0/16, the cluster mesh
+	// 10.200.0.0/16 and pods 10.201.0.0/16, sandboxes 10.250.0.0/16, zirocd 100.64.0.0/10.
+	if d["ip-forward-no-drop"] != true {
+		t.Error("ip-forward-no-drop must be true: Docker's FORWARD DROP would break sandbox, pod and mesh forwarding")
+	}
+	pools, _ := d["default-address-pools"].([]any)
+	if len(pools) == 0 {
+		t.Fatal("default-address-pools missing: Docker's defaults include 172.20.0.0/16 (ziro-br0)")
+	}
+	for _, p := range pools {
+		base := p.(map[string]any)["base"].(string)
+		_, pool, err := net.ParseCIDR(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, used := range []string{"172.20.0.0/16", "10.200.0.0/16", "10.201.0.0/16", "10.250.0.0/16", "100.64.0.0/10"} {
+			_, u, _ := net.ParseCIDR(used)
+			if pool.Contains(u.IP) || u.Contains(pool.IP) {
+				t.Errorf("pool %s overlaps %s, a range Ziro uses", base, used)
+			}
+		}
 	}
 	if opts, _ := d["exec-opts"].([]any); len(opts) != 1 || opts[0] != "native.cgroupdriver=cgroupfs" {
 		t.Errorf("no systemd on Ziro OS, the cgroupfs driver is required: %v", d["exec-opts"])
