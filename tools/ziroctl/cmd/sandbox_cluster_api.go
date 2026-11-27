@@ -176,6 +176,20 @@ func (v *sandboxClusterView) forwardTo(w http.ResponseWriter, r *http.Request, n
 	proxy.ServeHTTP(w, r)
 }
 
+// relayNodeReply returns a node's buffered answer to the API caller. A node speaks JSON; anything else is
+// refused, and the type is stated with nosniff so a browser never renders a relayed body as a page (Go would
+// otherwise sniff a missing Content-Type, and an HTML-looking body would be served as text/html).
+func relayNodeReply(w http.ResponseWriter, code int, out []byte) {
+	if !json.Valid(out) {
+		apiError(w, http.StatusBadGateway, "the node's answer is not JSON")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	_, _ = w.Write(out)
+}
+
 // call sends one buffered request to a node (fan-out and create).
 func (v *sandboxClusterView) call(r *http.Request, n *ClusterNode, method, path string, body []byte) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(r.Context(), method, "http://"+sandboxMeshAddr(n)+path, bytes.NewReader(body))
@@ -275,8 +289,7 @@ func (v *sandboxClusterView) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	w.WriteHeader(code)
-	_, _ = w.Write(out)
+	relayNodeReply(w, code, out)
 }
 
 // nodesWithWarm asks every sandbox node, in parallel and briefly, for its warm pools and returns
@@ -482,8 +495,7 @@ func (v *sandboxClusterView) forSandbox(w http.ResponseWriter, r *http.Request, 
 				return
 			}
 		}
-		w.WriteHeader(code)
-		_, _ = w.Write(out)
+		relayNodeReply(w, code, out)
 	case strings.HasPrefix(sub, "previews/") && r.Method == http.MethodDelete:
 		rec := &statusCapture{ResponseWriter: w}
 		v.forwardTo(rec, r, n)

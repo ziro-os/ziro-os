@@ -47,3 +47,28 @@ ignore:
           to one of these files must be published under MPL-2.0 (community/CONTRIBUTING.md, Dependencies).
         expires: 2027-11-03T00:00:00.000Z
         created: 2026-11-03T00:00:00.000Z
+  # Snyk Code findings reviewed on 2026-11-27. Rule ids are Snyk Code's (<language>/<rule>); the path limits each entry.
+  javascript/DOMXSS:
+    - 'tools/ziroctl/cmd/ui/app.js':
+        reason: >-
+          False positive: the toast text is set with textContent (never parsed as HTML), and element
+          children are added with insertAdjacentText, so an error message cannot inject markup.
+        expires: 2027-05-27T00:00:00.000Z
+        created: 2026-11-27T00:00:00.000Z
+  go/Ssrf:
+    - 'tools/ziroctl/cmd/sandbox.go':
+        reason: >-
+          False positive: the image name only selects a snapshot already listed by the host's own image store
+          (findSnapshot compares it to that list and a fixed pattern) or passes the image policy. Requests to
+          other nodes go to mesh addresses taken from cluster state, never from request input; the image is only
+          a URL-encoded query value there.
+        expires: 2027-05-27T00:00:00.000Z
+        created: 2026-11-27T00:00:00.000Z
+  go/XSS:
+    - 'tools/ziroctl/cmd/sandbox_cluster_api.go':
+        reason: >-
+          Node replies are relayed by relayNodeReply: the body must be valid JSON, the type is application/json
+          and X-Content-Type-Options is nosniff, so a browser never renders it as a page. Nodes are cluster peers
+          authenticated with the mesh token.
+        expires: 2027-05-27T00:00:00.000Z
+        created: 2026-11-27T00:00:00.000Z
