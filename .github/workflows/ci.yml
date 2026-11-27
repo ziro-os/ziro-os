@@ -117,7 +117,11 @@ jobs:
         run: sh tests/release/test-release-scripts.sh
 
       - name: Test installer bootstrap transport
-        run: python3 tests/security/test-userdata-transport.py
+        run: |
+          curl --version | head -1
+          openssl version
+          python3 --version
+          python3 tests/security/test-userdata-transport.py
 
       - name: Test patched DHCP packet parser
         run: |

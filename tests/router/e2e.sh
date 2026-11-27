@@ -40,13 +40,26 @@ docker network create --internal --subnet 172.31.2.0/24 "$p-lanB" >/dev/null
 docker run -d --name "$p-router" --network "$p-pub" --ip 172.30.0.10 -v "$work:/w" \
 	-e ZIRO_E2E_LISTEN=0.0.0.0:7443 -e ZIRO_E2E_ADVERTISE=172.30.0.10:7443 -e ZIRO_E2E_RELAY=172.30.0.10 -e ZIRO_E2E_MOON=172.30.0.20 \
 	-e ZIRO_E2E_OUT=/w/shared $img /w/router.test -test.run TestRouterServeE2E -test.v >/dev/null
-nat() { # name pubIP lan lanIP
+# miniupnpd (the port-mapping gateway on natB) drives netfilter through legacy iptables (Alpine 3.22's build) or
+# through nf_tables (its nftables build, Alpine 3.23+). Newer runner kernels ship no legacy ip_tables, so there the
+# gateway runs the nftables build; on a kernel that has both, the legacy path is kept.
+if docker run --rm --cap-add NET_ADMIN $img sh -c 'apk add -q --no-cache iptables-legacy >/dev/null 2>&1 && iptables-legacy -t nat -L >/dev/null 2>&1 && iptables-legacy -L >/dev/null 2>&1'; then
+	upnp=legacy
+	gwimg=$img
+	gwpkgs="iptables conntrack-tools miniupnpd"
+else
+	upnp=nft
+	gwimg=alpine:3.24
+	gwpkgs="iptables conntrack-tools miniupnpd-nftables nftables"
+fi
+echo "  port-mapping gateway backend: $upnp"
+nat() { # name pubIP lan lanIP [image packages]
 	docker run -d --name "$p-$1" --network "$p-pub" --ip "$2" --cap-add NET_ADMIN \
-		--sysctl net.ipv4.ip_forward=1 $img sh -c 'apk add -q --no-cache iptables conntrack-tools miniupnpd >/dev/null && sleep infinity' >/dev/null
+		--sysctl net.ipv4.ip_forward=1 "${5:-$img}" sh -c "apk add -q --no-cache ${6:-iptables conntrack-tools miniupnpd} >/dev/null && sleep infinity" >/dev/null
 	docker network connect --ip "$4" "$p-$3" "$p-$1"
 }
 nat natA 172.30.0.11 lanA 172.31.1.2
-nat natB 172.30.0.12 lanB 172.31.2.2
+nat natB 172.30.0.12 lanB 172.31.2.2 "$gwimg" "$gwpkgs"
 dev() { # name lan ip gw
 	docker run -d --name "$p-$1" --network "$p-pub" --cap-add NET_ADMIN --device /dev/net/tun -v "$work:/w" \
 		--sysctl net.ipv4.ip_forward=1 --sysctl net.ipv6.conf.all.forwarding=1 \
@@ -224,17 +237,50 @@ desc="direct path through the hard NAT, on a port found by probing (40000-40031)
 check wait_path "direct 172.30.0.12:400[0-3]" 60
 echo "  path: $(path_to_web)"
 
-echo "== port mapping against a real gateway (miniupnpd: PCP, NAT-PMP, UPnP IGD)"
-# miniupnpd maps only for a public WAN address; legacy iptables chains for its netfilter backend.
-docker exec "$p-natB" sh -c 'apk add -q --no-cache iptables-legacy >/dev/null 2>&1; ip addr add 11.22.33.44/32 dev eth0
+echo "== port mapping against a real gateway (miniupnpd: PCP, NAT-PMP, UPnP IGD) [$upnp backend]"
+# miniupnpd maps only for a public WAN address.
+docker exec "$p-natB" ip addr add 11.22.33.44/32 dev eth0
+upnp_extra=""
+if [ "$upnp" = legacy ]; then
+	# The legacy backend appends to these iptables chains.
+	docker exec "$p-natB" sh -c 'apk add -q --no-cache iptables-legacy >/dev/null 2>&1
 	iptables-legacy -t nat -N MINIUPNPD; iptables-legacy -t nat -A PREROUTING -i eth0 -j MINIUPNPD
 	iptables-legacy -t nat -N MINIUPNPD-POSTROUTING; iptables-legacy -t nat -A POSTROUTING -o eth0 -j MINIUPNPD-POSTROUTING
-	iptables-legacy -N MINIUPNPD; iptables-legacy -A FORWARD -i eth0 ! -o eth0 -j MINIUPNPD
-	printf "%s\n" ext_ifname=eth0 ext_ip=11.22.33.44 listening_ip=eth1 enable_natpmp=yes enable_upnp=yes secure_mode=yes \
-		uuid=3d3cec3a-8cf0-11e0-98ee-001a6bd2d07b "allow 1024-65535 172.31.2.0/24 1024-65535" "deny 0-65535 0.0.0.0/0 0-65535" > /etc/miniupnpd/t.conf
-	miniupnpd -f /etc/miniupnpd/t.conf'
+	iptables-legacy -N MINIUPNPD; iptables-legacy -A FORWARD -i eth0 ! -o eth0 -j MINIUPNPD'
+else
+	# The nftables backend fills these chains; they hook with policy accept so natB's forwarding is not changed.
+	docker exec -i "$p-natB" nft -f - <<NFT
+table ip miniupnpd {
+	chain miniupnpd { }
+	chain prerouting_miniupnpd { }
+	chain postrouting_miniupnpd { }
+	chain forward { type filter hook forward priority 0; policy accept; iifname "eth0" oifname != "eth0" jump miniupnpd; }
+	chain prerouting { type nat hook prerouting priority -100; policy accept; iifname "eth0" jump prerouting_miniupnpd; }
+	chain postrouting { type nat hook postrouting priority 100; policy accept; oifname "eth0" jump postrouting_miniupnpd; }
+}
+NFT
+	upnp_extra="upnp_table_name=miniupnpd
+upnp_nat_table_name=miniupnpd
+upnp_nftables_family_split=yes"
+fi
+docker exec -i "$p-natB" sh -c 'cat > /etc/miniupnpd/t.conf' <<CONF
+ext_ifname=eth0
+ext_ip=11.22.33.44
+listening_ip=eth1
+enable_natpmp=yes
+enable_upnp=yes
+secure_mode=yes
+uuid=3d3cec3a-8cf0-11e0-98ee-001a6bd2d07b
+allow 1024-65535 172.31.2.0/24 1024-65535
+deny 0-65535 0.0.0.0/0 0-65535
+$upnp_extra
+CONF
+docker exec -d "$p-natB" sh -c 'miniupnpd -d -f /etc/miniupnpd/t.conf >/tmp/miniupnpd.log 2>&1'
+sleep 1
+docker exec "$p-natB" pidof miniupnpd >/dev/null 2>&1 || { echo "  miniupnpd is not running:"; docker exec "$p-natB" cat /tmp/miniupnpd.log 2>&1 | tail -15 | sed 's/^/    /'; }
 desc="web maps its WireGuard port on the gateway"
 check sh -c "for i in \$(seq 45); do docker exec $p-web /w/zirocd netcheck --json | grep -q '\"mapped\": \"11.22.33.44:' && exit 0; sleep 1; done; exit 1"
+[ $fail = 0 ] || { echo "  miniupnpd log and rules:"; docker exec "$p-natB" sh -c 'tail -20 /tmp/miniupnpd.log; nft list ruleset 2>&1 | tail -40' 2>&1 | sed 's/^/    /'; }
 docker exec "$p-web" /w/zirocd netcheck | grep -E "Port mapping|NAT:" | sed 's/^/  /'
 docker exec "$p-client" /w/zirocd netcheck || true
 echo "== memory"
