@@ -3,7 +3,7 @@ module github.com/ziro-os/ziroctl
 go 1.27.3
 
 require (
-	github.com/containernetworking/cni v1.3.1
+	github.com/containernetworking/cni v1.3.0
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/google/go-tpm v0.9.8
 	github.com/hashicorp/go-hclog v1.6.3
@@ -38,8 +38,6 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
-	go.opentelemetry.io/otel v1.29.0 // indirect
-	go.opentelemetry.io/otel/trace v1.29.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee // indirect
