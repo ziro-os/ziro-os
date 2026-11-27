@@ -14,6 +14,7 @@ modules for everything else. New here? Read [getting started](getting-started.md
 ## Run workloads
 
 - [Containers, Compose and cron](containers.md): `ziroctl container`, `compose`, scheduled jobs.
+- [CI runners](ci-runners.md): a Docker host for GitHub Actions and other CI (the `docker` module), setup-qemu and buildx.
 - [Sandboxes](sandbox.md): isolated gVisor sandboxes for untrusted code and AI agents (`ziroctl sandbox`, opt-in
   module).
 - [Apps](apps.md): one-command databases and services from signed catalogs.

@@ -1,5 +1,10 @@
 #!/bin/sh
-# Compatibility wrapper for docker-compose -> ziroctl compose
+# Compatibility wrapper for docker-compose. With the `docker` module (Docker Engine) it is the Compose plugin of
+# the real docker CLI; otherwise ziroctl compose (nerdctl compose).
+REAL=/var/lib/ziro/plugins/docker/bin/docker
+if [ -x "$REAL" ]; then
+    exec "$REAL" compose "$@"
+fi
 if [ -x /usr/bin/ziroctl ]; then
     exec /usr/bin/ziroctl compose "$@"
 elif [ -x /bin/ziroctl ]; then

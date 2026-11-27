@@ -468,7 +468,7 @@ static void init_devices(void) {
         // Network adapters
         "e1000", "e1000e", "igb", "r8169", "vmxnet3",
         // Filesystems
-        "ext4", "vfat", "isofs", "overlay",
+        "ext4", "vfat", "isofs", "overlay", "binfmt_misc",
         // Container & Virtual Networking / Netfilter
         "bridge", "br_netfilter", "veth", "tap", "tun", "wireguard",
         "nf_tables", "nfnetlink", "nft_nat", "nft_compat",
@@ -593,6 +593,17 @@ static void write_file(const char *path, const char *value) {
     if (fd < 0) return;
     if (write(fd, value, strlen(value)) < 0) { /* best effort */ }
     close(fd);
+}
+
+/* binfmt_misc lets the kernel run foreign-architecture binaries through a registered interpreter (qemu-user).
+ * Docker's setup-qemu-action, buildx multi-platform builds and `docker run --platform` register handlers by
+ * writing to /proc/sys/fs/binfmt_misc/register, which only exists once the filesystem is mounted. Best effort: a
+ * kernel without it (or already mounted) just logs nothing and containers fall back to native-only. */
+static void init_binfmt_misc(void) {
+    safe_mkdir("/proc/sys/fs/binfmt_misc", 0755);
+    if (mount("binfmt_misc", "/proc/sys/fs/binfmt_misc", "binfmt_misc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL) == 0) {
+        printf("[init] mounted binfmt_misc at /proc/sys/fs/binfmt_misc\n");
+    }
 }
 
 static void init_cgroups(void) {
@@ -1694,6 +1705,7 @@ int main(int argc, char *argv[]) {
     printf("[init] starting Ziro OS (%s)...\n", is_installed_system() ? "installed" : "live");
 
     init_cgroups();
+    init_binfmt_misc();
     init_hostname();
     init_network();
     init_memory_and_io();

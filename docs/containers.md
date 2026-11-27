@@ -21,9 +21,11 @@ flowchart LR
   N --> CNI[CNI bridge + portmap] --> F[host firewall]
 ```
 
-- **No Docker daemon.** `ziroctl container` drives containerd through `nerdctl`, or falls back to `ctr`. Each
-  container is a runc process in its own cgroup. Nothing long-running is added beyond containerd. Tools that need
-  the Docker socket can use the opt-in [Docker API](#docker-api-socket). The `docker` command is nerdctl with
+- **No Docker daemon by default.** `ziroctl container` drives containerd through `nerdctl`, or falls back to `ctr`.
+  Each container is a runc process in its own cgroup. Nothing long-running is added beyond containerd. Tools that
+  need a real Docker host (CI runners, `docker/setup-qemu-action`, buildx, Compose, Coolify) enable the
+  [Docker Engine module](#docker-engine-module); tools that only need a few socket calls can use the lightweight
+  [Docker API](#docker-api-socket). Without the module the `docker` command is nerdctl with
   [Docker-compatible version output](#the-docker-command).
 - **Short image names** resolve like Docker: `nginx` becomes `docker.io/library/nginx:latest`, and
   `redis/redis-stack` becomes `docker.io/redis/redis-stack:latest`.
@@ -84,10 +86,53 @@ ziroctl cron remove 3
 - **Modules** add their own jobs, tagged `# ziro-module:<name>`, and remove them when disabled. Don't edit those
   lines by hand.
 
+## Docker Engine module
+
+For CI runners (GitHub Actions, GitLab), `docker/setup-qemu-action`, `docker buildx`, `docker compose`, Coolify and
+anything else that expects a real Docker host, enable the `docker` module. It installs the official Docker Engine
+release (dockerd, the docker CLI, docker-proxy, docker-init; Compose and Buildx come as Alpine packages) and runs it
+on the host's own containerd and runc:
+
+```bash
+ziroctl module enable docker
+docker version           # Client and Server, a real engine
+docker run --rm hello-world
+```
+
+Without the module, a client that finds no `/var/run/docker.sock` fails with `failed to connect to the docker API at
+unix:///var/run/docker.sock ... no such file or directory`: that is the missing daemon, not a broken path.
+
+- **One socket.** dockerd listens on `/run/docker.sock` (linked at `/var/run/docker.sock`), group `docker`, mode
+  0660, and never on TCP. The lightweight [Docker API](#docker-api-socket) uses the same path, so enabling the module
+  turns it off and `ziroctl docker-api enable` refuses while the module is installed.
+- **Same containerd, separate namespace.** Docker keeps its images and containers in containerd's `moby` namespace,
+  so `docker ps` does not list containers started by `ziroctl container` or `nerdctl`, and the other way round.
+  Images use the containerd image store (overlayfs snapshotter).
+- **The `docker` command** becomes the real CLI while the module is enabled and goes back to the nerdctl wrapper
+  when it is disabled. `docker-compose` runs the Compose plugin.
+- **Multi-architecture.** The kernel carries `binfmt_misc` and ziro-init mounts it at boot, so
+  `docker run --privileged tonistiigi/binfmt --install all` (what `docker/setup-qemu-action` runs) can register
+  QEMU emulators, and `docker buildx build --platform linux/amd64,linux/arm64` works.
+- **Defaults** (`/etc/docker/daemon.json`, yours to edit; local changes survive upgrades): `live-restore` (containers
+  keep running while dockerd or containerd restarts), the `local` log driver with rotation (20 MB x 5), the
+  userland proxy off, `cgroupfs` driver (cgroup v2, no systemd), iptables and ip6tables managed by Docker. Data is in
+  `/var/lib/docker`; put it on a data disk on busy hosts. To also block privilege gain inside containers add
+  `"no-new-privileges": true`, which breaks images that need setuid programs such as `sudo` and `ping`.
+- **Security.** Membership of the `docker` group is root on the host: a member can start a privileged container with
+  `/` mounted. Add only accounts you would give root (`addgroup runner docker`). Containers keep Docker's default
+  seccomp profile and capability set. The module is opt-in, so the base image does not grow, and the engine is not
+  available to apps, stacks, sandboxes or cluster replicas.
+- **Upgrades.** `ziroctl update` raises the pinned Docker release with the module manifest; `ziroctl module upgrade
+  docker` applies it. `ziroctl module disable docker` stops dockerd (containers keep running because of
+  `live-restore`; stop them first if you do not want that) and `--purge` deletes `/var/lib/docker`.
+
+See [CI runners](ci-runners.md) for a self-hosted GitHub Actions runner on Ziro OS.
+
 ## Docker API socket
 
-Some tools that manage a Docker host (Coolify's proxy, Traefik's Docker provider) talk to `/var/run/docker.sock`.
-Ziro OS has no Docker daemon, so the socket is off. An administrator can turn on a small translation layer that
+This is the lightweight alternative to the [Docker Engine module](#docker-engine-module): no second runtime, but only
+part of the API. Some tools that manage a Docker host (Coolify's proxy, Traefik's Docker provider) talk to
+`/var/run/docker.sock`. Without the module the socket is off. An administrator can turn on a small translation layer that
 serves part of the Docker Engine API on `/run/docker.sock` (linked at `/var/run/docker.sock`) and runs the
 matching `nerdctl` commands:
 
@@ -167,13 +212,15 @@ container listing stand down instead of adding connections, and resume when it a
 
 ## The docker command
 
-`docker` is a small wrapper around nerdctl, so Docker-style commands work. It changes only what tools that manage a
-Docker host trip over:
+Without the [Docker Engine module](#docker-engine-module), `docker` is a small wrapper around nerdctl, so
+Docker-style commands work. (With the module it is the real Docker CLI and none of this applies.) It changes only
+what tools that manage a Docker host trip over:
 
 - `docker version`, `docker --version` and `docker compose version` print Docker-shaped output, including
   `--format json` and Go templates such as `--format '{{.Server.Version}}'`. The server reports Docker Engine
-  **24.0.0**: that is the API compatibility level of the [Docker API socket](#docker-api-socket) (API 1.43), not an
-  installed Docker Engine. The real runtime (nerdctl, containerd, runc) is listed under `Components`.
+  **24.0.0**: that is the API compatibility level of the lightweight [Docker API socket](#docker-api-socket)
+  (API 1.43), not an installed Docker Engine. Clients that need a current engine (Docker 29 CLI, API 1.52, attach,
+  builds, `--privileged` helpers) use the [Docker Engine module](#docker-engine-module) instead. The real runtime (nerdctl, containerd, runc) is listed under `Components`.
 - `docker network create --attachable` ignores the flag (every nerdctl network is attachable), and
   `docker compose pull --ignore-buildable` and `docker compose up --wait` drop the flag nerdctl does not know.
   `up --wait` waits for health checks (see below).

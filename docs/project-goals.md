@@ -30,6 +30,6 @@ The current build centers on a Linux kernel, BusyBox and musl userland, `ziro-in
 See the [architecture](architecture.md) and [build guide](building.md) for implementation details.
 
 Further work includes an immutable installed root, clearer module and package interfaces, broader Docker and
-Podman compatibility, cloud and edge validation, and stronger update and rollback workflows. These are directions
+Podman compatibility (a real Docker Engine is available as the opt-in `docker` module), cloud and edge validation, and stronger update and rollback workflows. These are directions
 for contributors, not commitments that the features are complete. The current upgrade behavior and limitations
 are documented in the [upgrade guide](upgrade.md).

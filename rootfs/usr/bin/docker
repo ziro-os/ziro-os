@@ -4,6 +4,12 @@
 # Coolify parse (version, ps/inspect fields, real network names), rewrites the Docker-only flags nerdctl
 # rejects (--attachable, compose up --no-start/--wait, compose pull --ignore-*, run -d --rm,
 # --network-alias) and then runs nerdctl. Everything else goes to nerdctl untouched.
+# With the `docker` module (Docker Engine, `ziroctl module enable docker`) this is the real docker CLI talking to
+# the real daemon; the nerdctl translation below is only for hosts without the engine.
+REAL=/var/lib/ziro/plugins/docker/bin/docker
+if [ -x "$REAL" ]; then
+    exec "$REAL" "$@"
+fi
 case "$1" in
 version | --version | -v | compose | network | run | create | ps | inspect | container)
     exec /usr/bin/ziroctl docker-compat "$@"
