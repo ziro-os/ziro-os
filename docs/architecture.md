@@ -35,7 +35,9 @@ flowchart TB
   kernel flavors and supported build architectures are documented in the [build guide](building.md).
 - **Runtime and networking:** `containerd` manages images and tasks, `runc` executes OCI containers, and CNI
   plugins provide container networking. `ziroctl` exposes system and container operations; `nerdctl` provides
-  Docker-style commands on the full host. This does not imply complete Docker Engine or Podman compatibility.
+  Docker-style commands on the full host. This does not imply complete Docker Engine or Podman compatibility. Hosts
+  that need the real thing (CI runners, buildx, Compose, `docker/setup-qemu-action`) enable the opt-in `docker` module,
+  which runs the official Docker Engine on the same containerd and runc (see the decision below).
 - **Storage and extensions:** The host uses Linux filesystems and containerd snapshotters. Networking, storage,
   logging, and security integrations are packaged as opt-in modules (see below).
 - **Modules:** a module is a declarative JSON manifest (packages, sha256-pinned artifacts, config files, generated
@@ -171,7 +173,7 @@ Ziro OS uses standard OCI components:
   `firewall`.
 - **`ziroctl`:** the management CLI for containers and apps, networking, security, clusters and upgrades.
   `ziroctl compose` is `nerdctl compose` behind a security preflight. A `docker-compose` wrapper forwards to it; no
-  Docker Compose binary ships.
+  Docker Compose binary ships in the base image (the `docker` module adds the Compose plugin).
 - **Sandboxes** (opt-in `sandbox` module, [RFC 0004](design/rfcs/0004-sandboxes.md)): untrusted code runs under
   gVisor (`runsc`, systrap platform, or its KVM platform with `runtime: gvisor-kvm` where `/dev/kvm` exists).
   - **Runtime.** nerdctl starts gVisor through the runc shim (`--runtime` is a wrapper that sets runsc's flags), so
@@ -201,6 +203,24 @@ Ziro OS uses standard OCI components:
     nodes, and forwards each request to the owning node's mesh sandbox API (`:7446`, cluster token). Any node's SSH
     gateway relays a token for another node's sandbox after that node checks it, and preview routes point at the
     owning node over the mesh.
+
+- **Docker Engine (opt-in `docker` module).** Decision: a real Docker Engine is an optional module, not part of the
+  base image and not a growth of the nerdctl translation layer. Reasons: CI runners, buildx, Compose and
+  `docker/setup-qemu-action` need the full Engine API (attach, wait, build, hijacked streams, privileged helpers),
+  which a translator cannot track as Docker releases; the base image keeps its 300 MB budget because the module
+  downloads on enable; and the Engine adds no second container runtime, because dockerd uses the host's containerd
+  (namespace `moby`) and runc. The binaries are the official static release, pinned per architecture by sha256 in
+  the module manifest (`tools/ziroctl/cmd/modules/docker.json`), so a Docker upgrade is a reviewed manifest change.
+  The socket `/run/docker.sock` is group `docker` (root equivalent), never TCP, and is exclusive: the lightweight
+  `ziroctl docker-api` translator refuses to run next to it ([RFC 0006](design/rfcs/0006-docker-api-socket.md)).
+  The kernel asserts `binfmt_misc` and ziro-init mounts it so QEMU user emulation can be registered by containers.
+  nerdctl stays in the base image: everything Ziro manages (containers, compose, apps, deploy, sandboxes, cluster pods,
+  Postgres) calls it in containerd's `default` namespace, so the engine (`moby`) and Ziro's workloads are separate
+  tenants of one containerd, and `module disable docker` falls back to the nerdctl wrapper. The module keeps Docker
+  off Ziro's address ranges (`default-address-pools`) and keeps the FORWARD policy at accept
+  (`ip-forward-no-drop`).
+  Known limitation: dockerd runs in its own cgroup tree outside the service cgroup of the module, so the module sets
+  no memory limit for containers; limit them per container or with `--cgroup-parent` when it matters.
 
 ## 4. Multi-architecture support matrix
 

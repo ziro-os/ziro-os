@@ -42,6 +42,14 @@ const (
 	dockerService    = "dockerd"
 )
 
+// dockerEngineBin is the dockerd the `docker` module installs. When it is there, a real Docker Engine owns
+// /run/docker.sock and this translator must stay off it: both listen on the same path.
+var dockerEngineBin = "/var/lib/ziro/plugins/docker/bin/dockerd"
+
+func dockerEngineInstalled() bool { return fileExists(dockerEngineBin) }
+
+var errDockerEngineActive = errors.New("the docker module (Docker Engine) owns " + dockerSock + "; run `ziroctl module disable docker` before using the lightweight Docker API")
+
 // dockerEventPoll is how often the event stream looks at the containers.
 var dockerEventPoll = 2 * time.Second
 
@@ -808,6 +816,9 @@ var dockerAPIServeCmd = &cobra.Command{
 // dockerAPIEnable turns the socket service on and starts it; dockerAPIDisable undoes it. The CLI and the
 // REST route share them; each audits in its own way.
 func dockerAPIEnable() error {
+	if dockerEngineInstalled() {
+		return errDockerEngineActive
+	}
 	if err := enableService(dockerService); err != nil {
 		return err
 	}
@@ -817,6 +828,9 @@ func dockerAPIEnable() error {
 func dockerAPIDisable() error {
 	_ = stopService(dockerService)
 	err := disableService(dockerService)
+	if dockerEngineInstalled() {
+		return err // the socket now belongs to Docker Engine: leave it
+	}
 	_ = os.Remove(dockerSock)
 	_ = os.Remove(dockerSockLink)
 	return err

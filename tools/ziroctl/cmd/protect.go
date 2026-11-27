@@ -103,7 +103,7 @@ func (g GuardConfig) validate() error {
 
 // Interfaces whose traffic the guard never limits: loopback, the WireGuard mesh (authenticated
 // peers) and container bridges/veths (a container probing host ports must not ban itself).
-var guardSkipIfaces = []string{"ziro0", "ziro-br0", "veth*", "nerdctl*", "cni*", "br-*"}
+var guardSkipIfaces = []string{"ziro0", "ziro-br0", "docker0", "veth*", "nerdctl*", "cni*", "br-*"}
 
 func nftSeconds(d string) int {
 	v, _ := time.ParseDuration(d)

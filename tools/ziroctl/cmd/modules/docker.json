@@ -1,0 +1,170 @@
+{
+  "name": "docker",
+  "version": "1.0",
+  "description": "Docker Engine 29.10.1 (dockerd, docker CLI) on the host's containerd and runc: the full Docker API on /var/run/docker.sock for CI runners (GitHub Actions, GitLab), buildx, Compose, Coolify and any Docker client",
+  "packages": [
+    "docker-cli-buildx",
+    "docker-cli-compose"
+  ],
+  "min_memory_mb": 1024,
+  "artifacts": [
+    {
+      "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.10.1.tgz",
+      "sha256": "061642059fa7f2ed9b2f04a327a951cff4249585cf04b2661c2a6539197c9962",
+      "extract": "docker/docker",
+      "path": "/var/lib/ziro/plugins/docker/bin/docker",
+      "mode": "0755",
+      "arch": "x86_64"
+    },
+    {
+      "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.10.1.tgz",
+      "sha256": "a38c8a9ef6d17bce07499bfd3a3688542274769dc3b4f75c06ea2705fe65053e",
+      "extract": "docker/docker",
+      "path": "/var/lib/ziro/plugins/docker/bin/docker",
+      "mode": "0755",
+      "arch": "aarch64"
+    },
+    {
+      "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.10.1.tgz",
+      "sha256": "061642059fa7f2ed9b2f04a327a951cff4249585cf04b2661c2a6539197c9962",
+      "extract": "docker/dockerd",
+      "path": "/var/lib/ziro/plugins/docker/bin/dockerd",
+      "mode": "0755",
+      "arch": "x86_64"
+    },
+    {
+      "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.10.1.tgz",
+      "sha256": "a38c8a9ef6d17bce07499bfd3a3688542274769dc3b4f75c06ea2705fe65053e",
+      "extract": "docker/dockerd",
+      "path": "/var/lib/ziro/plugins/docker/bin/dockerd",
+      "mode": "0755",
+      "arch": "aarch64"
+    },
+    {
+      "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.10.1.tgz",
+      "sha256": "061642059fa7f2ed9b2f04a327a951cff4249585cf04b2661c2a6539197c9962",
+      "extract": "docker/docker-proxy",
+      "path": "/var/lib/ziro/plugins/docker/bin/docker-proxy",
+      "mode": "0755",
+      "arch": "x86_64"
+    },
+    {
+      "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.10.1.tgz",
+      "sha256": "a38c8a9ef6d17bce07499bfd3a3688542274769dc3b4f75c06ea2705fe65053e",
+      "extract": "docker/docker-proxy",
+      "path": "/var/lib/ziro/plugins/docker/bin/docker-proxy",
+      "mode": "0755",
+      "arch": "aarch64"
+    },
+    {
+      "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.10.1.tgz",
+      "sha256": "061642059fa7f2ed9b2f04a327a951cff4249585cf04b2661c2a6539197c9962",
+      "extract": "docker/docker-init",
+      "path": "/var/lib/ziro/plugins/docker/bin/docker-init",
+      "mode": "0755",
+      "arch": "x86_64"
+    },
+    {
+      "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.10.1.tgz",
+      "sha256": "a38c8a9ef6d17bce07499bfd3a3688542274769dc3b4f75c06ea2705fe65053e",
+      "extract": "docker/docker-init",
+      "path": "/var/lib/ziro/plugins/docker/bin/docker-init",
+      "mode": "0755",
+      "arch": "aarch64"
+    }
+  ],
+  "dirs": [
+    {
+      "path": "/var/lib/docker",
+      "mode": "0710"
+    },
+    {
+      "path": "/etc/docker",
+      "mode": "0755"
+    }
+  ],
+  "files": [
+    {
+      "path": "/etc/docker/daemon.json",
+      "mode": "0644",
+      "content": "{\n  \"containerd\": \"/run/containerd/containerd.sock\",\n  \"data-root\": \"/var/lib/docker\",\n  \"exec-opts\": [\n    \"native.cgroupdriver=cgroupfs\"\n  ],\n  \"group\": \"docker\",\n  \"features\": {\n    \"containerd-snapshotter\": true\n  },\n  \"live-restore\": true,\n  \"userland-proxy\": false,\n  \"iptables\": true,\n  \"ip6tables\": true,\n  \"log-driver\": \"local\",\n  \"log-opts\": {\n    \"max-size\": \"20m\",\n    \"max-file\": \"5\"\n  },\n  \"init-path\": \"/var/lib/ziro/plugins/docker/bin/docker-init\",\n  \"userland-proxy-path\": \"/var/lib/ziro/plugins/docker/bin/docker-proxy\",\n  \"max-concurrent-downloads\": 6,\n  \"shutdown-timeout\": 30,\n  \"ip-forward-no-drop\": true,\n  \"default-address-pools\": [\n    {\n      \"base\": \"172.28.0.0/14\",\n      \"size\": 24\n    }\n  ]\n}\n"
+    }
+  ],
+  "prepare": [
+    {
+      "exec": "/bin/sh",
+      "args": [
+        "-c",
+        "/usr/bin/ziroctl docker-api disable >/dev/null 2>&1 || true"
+      ]
+    },
+    {
+      "exec": "/bin/sh",
+      "args": [
+        "-c",
+        "grep -q '^docker:' /etc/group || echo 'docker:x:998:' >> /etc/group"
+      ]
+    },
+    {
+      "exec": "/bin/ln",
+      "args": [
+        "-sfn",
+        "/var/lib/ziro/plugins/docker/bin/dockerd",
+        "/usr/bin/dockerd"
+      ]
+    },
+    {
+      "exec": "/bin/ln",
+      "args": [
+        "-sfn",
+        "/var/lib/ziro/plugins/docker/bin/docker-init",
+        "/usr/bin/docker-init"
+      ]
+    },
+    {
+      "exec": "/bin/ln",
+      "args": [
+        "-sfn",
+        "/var/lib/ziro/plugins/docker/bin/docker-proxy",
+        "/usr/bin/docker-proxy"
+      ]
+    },
+    {
+      "exec": "/bin/sh",
+      "args": [
+        "-c",
+        "[ \"$(readlink -f /var/run)\" = \"$(readlink -f /run)\" ] || ln -sfn /run/docker.sock /var/run/docker.sock"
+      ]
+    }
+  ],
+  "services": [
+    {
+      "name": "docker-engine",
+      "description": "Docker Engine (dockerd) on the host's containerd; socket /run/docker.sock, group docker",
+      "exec": "/var/lib/ziro/plugins/docker/bin/dockerd",
+      "args": "--config-file /etc/docker/daemon.json --host unix:///run/docker.sock --pidfile /run/docker.pid",
+      "pidfile": "/run/ziro-docker-engine.pid",
+      "logfile": "/var/log/docker-engine.log"
+    }
+  ],
+  "health": {
+    "exec": "/bin/sh",
+    "args": [
+      "-c",
+      "i=0; while [ $i -lt 60 ]; do /var/lib/ziro/plugins/docker/bin/docker -H unix:///run/docker.sock version 2>/dev/null && exit 0; i=$((i+1)); sleep 1; done; echo 'dockerd did not answer in 60 s; see /var/log/docker-engine.log'; exit 1"
+    ],
+    "timeout": "90s",
+    "expect": "Engine:"
+  },
+  "stop": [
+    {
+      "exec": "/bin/rm",
+      "args": [
+        "-f",
+        "/usr/bin/dockerd",
+        "/usr/bin/docker-init",
+        "/usr/bin/docker-proxy"
+      ]
+    }
+  ]
+}

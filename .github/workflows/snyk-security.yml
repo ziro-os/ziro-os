@@ -62,11 +62,11 @@ jobs:
 
       - name: Snyk Open Source test
         continue-on-error: true
-        run: snyk test --all-projects
+        run: snyk test --all-projects --policy-path="$GITHUB_WORKSPACE"
 
       - name: Snyk Open Source monitor
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: snyk monitor --all-projects
+        run: snyk monitor --all-projects --policy-path="$GITHUB_WORKSPACE"
 
       # -------------------------
       # Infrastructure as Code

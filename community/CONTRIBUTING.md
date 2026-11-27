@@ -24,7 +24,8 @@ and CLI conventions, extension points, and the security model. Larger changes ne
 ### Prerequisites
 
 - **Go 1.27.3 or later** for `ziroctl`, `ziropkg`, `zirocd` and the SDK.
-- **Docker 24.0 or later** with Buildx, for rootfs extraction and the container base image.
+- **Docker 24.0 or later** (current Docker Engine 29 recommended) with Buildx, for rootfs extraction and the
+  container base image.
 - **GCC, Clang or `musl-gcc`** to compile the `ziro-init` PID 1 supervisor.
 - **QEMU** (`qemu-system-x86_64` or `qemu-system-aarch64`) for boot and cluster tests.
 - **xorriso, mtools and dosfstools** (optional) to build the bootable hybrid ISO.

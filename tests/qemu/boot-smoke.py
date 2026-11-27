@@ -284,6 +284,35 @@ def coolify_build_checks(con, check):
     con.run("nerdctl rm -f hlp buildx_buildkit_default >/dev/null 2>&1", timeout=120)
 
 
+def docker_engine_checks(con, check):
+    """The `docker` module (real Docker Engine on the host's containerd): the setup-qemu-action path end to end."""
+    rc, out = con.run("ziroctl module enable docker 2>&1 | tail -3", timeout=900)
+    check("docker module enables (engine answers within the health check)", "Module docker enabled" in out, out, limit=-600)
+    rc, out = con.run("ls -lL /var/run/docker.sock; docker version --format '{{.Server.Version}}' 2>&1", timeout=60)
+    check("docker.sock exists (group docker) and docker version reports a real Server",
+          "srw-rw----" in out and re.search(r"^\d+\.\d+\.\d+", out.strip().split("\n")[-1]) is not None, out)
+    rc, out = con.run("ziroctl docker-api enable 2>&1 | tail -1", timeout=60)
+    check("docker-api enable is refused while the engine owns the socket", "docker module" in out, out)
+    rc, out = con.run("iptables -S FORWARD | head -1; docker network create dke-net >/dev/null && "
+                      "docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' dke-net; docker network rm dke-net >/dev/null", timeout=120)
+    check("Docker keeps the FORWARD policy at ACCEPT and allocates networks outside Ziro's ranges",
+          "-P FORWARD ACCEPT" in out and re.search(r"^172\.(28|29|30|31)\.", out.strip().split("\n")[-1]) is not None, out)
+    rc, out = con.run("docker run --rm alpine echo engine-ok 2>&1 | tail -1", timeout=300)
+    check("docker run (attach and wait work)", out.strip() == "engine-ok", out)
+    rc, out = con.run("mount | grep -c binfmt_misc", timeout=30)
+    check("binfmt_misc is mounted by init", out.strip().split("\n")[-1] != "0", out)
+    rc, out = con.run("docker run --rm --privileged tonistiigi/binfmt --install all 2>&1 | tail -5; ls /proc/sys/fs/binfmt_misc | head -20", timeout=600)
+    check("setup-qemu-action step: tonistiigi/binfmt --install all registers emulators", "qemu-" in out, out, limit=-600)
+    rc, out = con.run("docker buildx version 2>&1 | head -1; docker compose version 2>&1 | head -1", timeout=60)
+    check("docker buildx and compose plugins are available", "buildx" in out and "Compose" in out, out)
+    rc, out = con.run("docker run -d --name dke-live alpine sleep 3600 >/dev/null; ziroctl service restart docker-engine 2>&1 | tail -1; sleep 5; "
+                      "docker inspect -f '{{.State.Running}}' dke-live", timeout=120)
+    check("live-restore: a container keeps running across a dockerd restart", out.strip().split("\n")[-1] == "true", out)
+    con.run("docker rm -f dke-live >/dev/null 2>&1", timeout=60)
+    rc, out = con.run("ziroctl module disable docker 2>&1 | tail -1; docker version 2>&1 | head -3", timeout=120)
+    check("disabling the module restores the nerdctl docker wrapper (version names nerdctl)", "nerdctl" in out.lower(), out)
+
+
 def docker_api_checks(con, check):
     """The opt-in Docker Engine API socket (RFC 0006), and the docker commands Coolify's validation runs."""
     sock = "curl -s --unix-socket /var/run/docker.sock"
@@ -690,6 +719,7 @@ def main():
     ap.add_argument("--nft-accel", action="store_true", help="also test the SYN proxy and the flow offload table against the kernel")
     ap.add_argument("--backup", action="store_true", help="also test backup, verify, restore and retention from a host without /var/backups/ziro")
     ap.add_argument("--docker-api", action="store_true", help="also test the Docker API socket and Coolify's docker commands")
+    ap.add_argument("--docker-engine", action="store_true", help="also test the docker module (real Docker Engine, setup-qemu, buildx; downloads ~120 MB)")
     ap.add_argument("--coolify-build", action="store_true", help="also run Coolify's helper image and build an image through docker compose build (downloads ~300 MB; the VM needs ZIRO_SMOKE_MEM=4096)")
     ap.add_argument("--apps", action="store_true",
                     help="also test the official catalogs: s3-ziro backups, apps deploy postgres/valkey, a one-node mysql-cluster (~1.5 GB of images, 4 GB VM)")
@@ -1153,6 +1183,8 @@ def main():
             nft_accel_checks(con, check)
         if args.backup:
             backup_checks(con, check)
+        if args.docker_engine and not args.no_pull:
+            docker_engine_checks(con, check)
         if args.docker_api and not args.no_pull:
             docker_api_checks(con, check)
         if args.coolify_build and not args.no_pull:

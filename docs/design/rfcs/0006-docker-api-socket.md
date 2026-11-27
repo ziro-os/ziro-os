@@ -68,7 +68,9 @@ the implementation lands, with the supported subset listed.
 
 ## Alternatives
 
-- **Run a real Docker or Podman engine.** Full compatibility, but it adds a second runtime next to containerd, a
+- **Run a real Docker or Podman engine.** Since shipped as the opt-in `docker` module (see
+  `docs/architecture.md`), for hosts that need full compatibility; this RFC's translator stays the lightweight
+  option. Full compatibility, but it adds a second runtime next to containerd, a
   larger base image (the 300 MB gate) and a second set of defaults to harden.
 - **Podman's API socket.** Fewer routes to write, but it brings Podman as a second engine with its own storage.
 - **Bind containerd's socket to the Docker path.** Not compatible: containerd speaks gRPC, not the Docker HTTP API.

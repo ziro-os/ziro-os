@@ -371,3 +371,18 @@ func TestSandboxFanoutSkipsUnreachableNode(t *testing.T) {
 		t.Errorf("the list waited %v", d)
 	}
 }
+
+// A node's answer is relayed as JSON with nosniff; a body that is not JSON (an HTML page, say) is never passed on.
+func TestRelayNodeReply(t *testing.T) {
+	rec := httptest.NewRecorder()
+	relayNodeReply(rec, http.StatusCreated, []byte(`{"id":"sb-1"}`))
+	if rec.Code != http.StatusCreated || rec.Header().Get("Content-Type") != "application/json" ||
+		rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Body.String() != `{"id":"sb-1"}` {
+		t.Fatalf("json reply: %d %v %q", rec.Code, rec.Header(), rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	relayNodeReply(rec, http.StatusOK, []byte("<script>alert(1)</script>"))
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "<script>") {
+		t.Fatalf("html reply was relayed: %d %q", rec.Code, rec.Body.String())
+	}
+}

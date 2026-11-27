@@ -18,3 +18,4 @@ nft_compat
 nft_chain_nat
 nft_masq
 wireguard
+binfmt_misc
